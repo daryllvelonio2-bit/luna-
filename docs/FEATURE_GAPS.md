@@ -25,12 +25,12 @@ nothing calls it, or the call site is a stub. `absent` = nothing to improve.
 |---|-----------|-------------------------------|-----------|---------|------|
 | 1 | Config file + precedence | `shiina_cli/config.py:2070` `load_config()`; documented keys in `cli-config.yaml.example:1`; `shiina config set <section.key>` (`cli-config.yaml.example:3`) | **absent** — no config file, no keys, no merged settings object. Every path/model/timeout is a literal at its use site: `crates/harness-memory/src/engine.rs:20`, `crates/harness-notes/src/engine.rs:21`, `crates/harness-providers/src/auth.rs:60`, `crates/harness-providers/src/discovery.rs:35`, `crates/harness-cli/src/main.rs:28` (`default_value = "openai"`). Format ruling for Luna: **YAML at `~/.luna/config.yaml`** — `serde_yaml` is already a workspace dependency (`Cargo.toml:28`), `toml` is not | rebuild | §2.1 |
 | 2 | Filesystem + shell tools | `tools/file_tools.py:1089` `read_file`, `:1111` `write_file`, `:905` `patch_tool`, `:990` `search_tool`; `tools/terminal_tool.py:1311` `terminal` | **absent** — the registry never receives anything but memory/notes/evolver tools: `crates/harness-cli/src/commands/chat.rs:44-57`. No fs or shell crate exists; the only `Tool` impls reachable from the binary are the 10 memory/notes/evolver tools (`crates/harness-core/src/traits.rs:100` is the trait; the adapters in `harness-mcp`/`harness-plugins` are registered nowhere) | rebuild | §2.2 |
-| 3 | HITL approval for mutations | `tools/write_approval.py:166` `evaluate_gate`, `:73` `stage_write`; `tools/approval_human_wait.py:108` `human_wait_window`; `acp_adapter/permissions.py:77` `await_permission` | **partial, dead** — `AgentConfig.require_hitl_for_mutation` declared at `crates/harness-core/src/agent.rs:12`, defaults `true` at `:20`, read nowhere else in the workspace (only set `false` in `crates/harness-core/tests/agent_guardrail_test.rs:165`); `HarnessError::ApprovalRejected` at `crates/harness-core/src/error.rs:65` has no producer | rebuild | §2.3 |
+| 3 | HITL approval for mutations | `tools/write_approval.py:166` `evaluate_gate`, `:73` `stage_write`; `tools/approval_human_wait.py:108` `human_wait_window`; `acp_adapter/permissions.py:77` `await_permission` | **partial, dead** — `AgentConfig.require_hitl_for_mutation` declared at `crates/harness-core/src/agent.rs:12`, defaults `true` at `:20`, read nowhere else in the workspace (only set `false` in `crates/harness-core/tests/agent_guardrail_test.rs:165`); `HarnessError::ApprovalRejected` at `crates/harness-core/src/error.rs:66` has no producer | rebuild | §2.3 |
 | 4 | Session persistence + context compaction | `shiina_state.py:441` `SessionDB`; `agent/conversation_compression.py:3681` `compress_context`; `shiina_state_compression.py:70` `SessionCompressionMixin`; `shiina_state_rewind.py:45` `SessionRewindMixin` | **absent** — `run_task` builds a fresh `Vec::new()` per call (`crates/harness-core/src/agent.rs:89`) and the REPL re-enters it per input line (`crates/harness-cli/src/commands/chat.rs:88`); nothing is written anywhere; no token estimate, no compaction, no session id | rebuild | §2.4 |
 | 5 | MCP servers from config | `tools/mcp_tool.py:307` `MCPServerTask`; `tools/mcp_tool_config.py:168` `_resolve_stdio_command`; 30+ server recipes under `optional-mcps/`; `mcp_serve.py:264` `EventBridge` (Shiina as a server) | **partial, unwired** — `crates/harness-mcp/src/stdio.rs:21` `spawn` and `:100` `initialize` are implemented, `crates/harness-cli/Cargo.toml:23` depends on `harness-mcp`, and `crates/harness-cli/src` has **0 refs** to it. No config, no CLI command, no SSE transport | improve (wire it) | §2.5 |
 | 6 | Declarative markdown skills | `tools/skills_tool.py:653` `skills_list`, `:668` `skill_view`; `tools/skill_manager_tool.py:854` `skill_manage`; `agent/skill_preprocessing.py:89` `preprocess_skill_content`; 14 categories under `skills/` | **partial, unwired** — `crates/harness-plugins/src/skills.rs:29` `load_skills_from_dir` (+`:81` `SkillToolAdapter`) parse frontmatter, but `harness-cli/src` has **0 refs**; no skills dir is ever resolved | improve | §3.1 |
 | 7 | Semantic (vector) memory retrieval | `agent/memory_manager.py:283` `MemoryManager`; `tools/memory_tool.py:172` `memory(action=…)`; file store `~/.shiina/memories/MEMORY.md` | **partial, dead** — `memory_embeddings` table is created (`crates/harness-memory/schema.sql:15`) and never written or read; `retrieve()` is `LIKE`-only (`crates/harness-memory/src/engine.rs:58`); `ModelProvider::embed` (`crates/harness-core/src/traits.rs:34`, impl `crates/harness-providers/src/client.rs:355`) has 0 callers | improve | §3.2 |
-| 8 | Streaming output in the REPL | `gateway/stream_dispatch.py:21` `GatewayEventDispatcher`; `tui_gateway/render.py:35` `make_stream_renderer` | **partial, unwired** — `ModelProvider::stream` implemented at `crates/harness-providers/src/client.rs:266` (SSE + usage), but the agent loop calls `complete` (`crates/harness-core/src/agent.rs:133`) and the REPL prints one blob after the await (`crates/harness-cli/src/commands/chat.rs:88-91`). No `reasoning_content` parsing (`crates/harness-providers/src/client.rs:240` reads `content` only) — the harness model under test hides its thinking there (`docs/AGENT_RULES.md:30`) | rebuild | §3.3 |
+| 8 | Streaming output in the REPL | `gateway/stream_dispatch.py:21` `GatewayEventDispatcher`; `tui_gateway/render.py:35` `make_stream_renderer` | **partial, unwired** — `ModelProvider::stream` implemented at `crates/harness-providers/src/client.rs:266` (SSE + usage), but the agent loop calls `complete` (`crates/harness-core/src/agent.rs:133`) and the REPL prints one blob after the await (`crates/harness-cli/src/commands/chat.rs:88-91`). No `reasoning_content` parsing (`crates/harness-providers/src/client.rs:240` reads `content` only) — the harness model under test hides its thinking there (`docs/AGENT_RULES.md:41`) | rebuild | §3.3 |
 | 9 | Web search / fetch / browser tools | `tools/web_tools.py:268` `web_search_tool`; `tools/browser_tool.py:460-580` `browser_navigate`/`browser_snapshot`/`browser_click`/… | **absent** — no HTTP tool of any kind; `reqwest` appears only inside `harness-providers` | rebuild | §3.4 |
 | 10 | Cron / scheduled jobs | `cron/scheduler_tick.py:7` `tick`; `cron/jobs.py:1749` `create_job`; `cron/scheduler.py` (delivery queue, incidents, prompt-injection block at `:332`) | **absent** | rebuild (defer) | §3.5 |
 | 11 | Messaging gateway (Telegram etc.) | `gateway/` (120 modules), `shiina_state_telegram.py:98` `SessionTelegramTopicsMixin`, `shiina_cli/telegram_managed_bot.py` | **absent** — CLI-only, no gateway crate | drop for now | — |
@@ -41,7 +41,7 @@ nothing calls it, or the call site is a stub. `absent` = nothing to improve.
 | 16 | Session rewind / undo | `shiina_state_rewind.py:45` `SessionRewindMixin`, `:21` `RewindOutcome` | **absent** — and nothing to rewind until §2.4 lands | defer (blocked by §2.4) | — |
 | 17 | Credential hardening (OS keyring) | `shiina_cli/vault.py:213` `vault_command` (encrypted, origin-bound) | **insecure** — API keys are plaintext in `~/.luna/credentials.json` (`crates/harness-providers/src/auth.rs:33` stores `api_key: String`, `:89` writes it verbatim); `keyring` is declared in `Cargo.toml:40` and unused | improve (security) | §3.10 |
 | 18 | Self-evolution restart loop | equivalent concept, different shape (`cron` + gateway restart supervision) | **partial, unreachable** — the supervisor rebuilds only on child exit code 42 (`crates/harness-cli/src/commands/supervisor.rs:34`), and nothing in the workspace can produce it (`grep -rn "exit(42)\|process::exit" crates` → 0 hits); patches are whole-file writes with no diff (`crates/harness-evolver/src/engine.rs:100`, `:142`) against a sandbox that copies the tree and runs `cargo test` (`crates/harness-evolver/src/sandbox.rs:19`) | improve | §3.11 |
-| 19 | Provider resilience (429/5xx retry) | `agent/rate_limit_tracker.py` | **absent** — a 429 is converted straight into `HarnessError::RateLimited` (`crates/harness-providers/src/client.rs:206`), no retry/backoff; NIM is documented as rate-limited (`docs/AGENT_RULES.md:35`) | improve | §3.12 |
+| 19 | Provider resilience (429/5xx retry) | `agent/rate_limit_tracker.py` | **absent** — a 429 is converted straight into `HarnessError::RateLimited` (`crates/harness-providers/src/client.rs:206`), no retry/backoff; NIM is documented as rate-limited (`docs/AGENT_RULES.md:46`) | improve | §3.12 |
 | 20 | CLI surface: sessions/memory/mcp/skills/doctor | `shiina_cli/main.py` top-level subcommands, dashboard in `shiina_cli/main_dashboard.py` | **5 subcommands only** — `chat`, `auth`, `models`, `voice`, `supervisor` (`crates/harness-cli/src/main.rs:25-55`); no way to inspect memory, notes, sessions, tools or config; `luna --help` is not verified by any test | rebuild | §3.13 |
 
 ### Code-bar defects observed while reading (not capabilities, but blocking quality)
@@ -178,7 +178,7 @@ User-visible behaviour
   dependency, `Cargo.toml:44`). No tty (stdin not a terminal) means deny, unless
   `tools.approval = "allow"` or `--yes` was passed.
 - Denial is a normal tool result the model can react to: `ToolResult::error(call_id, "approval denied")`,
-  and `HarnessError::ApprovalRejected` (`crates/harness-core/src/error.rs:65`) finally has a producer for
+  and `HarnessError::ApprovalRejected` (`crates/harness-core/src/error.rs:66`) finally has a producer for
   the non-interactive path.
 - No answer within `tools.approval_timeout_secs` (default 120) counts as deny.
 - The decision and the tool call are logged (tracing) with the tool name and target, never with file
@@ -349,7 +349,7 @@ when the row is taken.
   `tui_gateway/render.py:35`. Acceptance: a PTY chat turn shows output before the response completes
   (capture two `term_read` snapshots with a growing line); a reasoning-model turn whose `content` is null
   but `reasoning_content` is present still renders something and reports the empty-content case
-  (`docs/AGENT_RULES.md:30`); no ANSI garbage in redirected stdout.
+  (`docs/AGENT_RULES.md:43`); no ANSI garbage in redirected stdout.
 - **§3.4 Web search / fetch tool** (luna-dev-1). Behaviour: `web_search(query, limit)` and
   `web_fetch(url)` with a configurable backend and a bounded response size, timeouts, and private-address
   refusal (a personal harness must not be an SSRF proxy). Shiina reference: `tools/web_tools.py:268`.
@@ -453,7 +453,10 @@ queued specs above are the detail): **t_40de5ef3** (reasoning-aware turns — §
 (credential safety — §3.10), **t_2a4b4808** (model/provider resolution from config — the CLI half of §2.1),
 **t_0a789e15** (make the workspace compile again), **t_7c2387f4** (luna-qa: build + live NIM + realterm).
 
-Build state — verified, not assumed: `cargo check --workspace --message-format short` on this checkout at
+Build state — **STALE, fixed since** (`t_0a789e15`, commit `7188aa0`, merged at `3456b9d`; re-verified at
+`639c38e` with `cargo check -p harness-cli` → `Finished`, exit 0). The paragraph below is the state this
+inventory was written against, kept because its diagnosis was handed to that card; the 24 errors it
+describes are gone from `main`. Recorded as written: `cargo check --workspace --message-format short` at
 `1fc995d` exits `101` with `error: could not compile \`harness-cli\` (bin "luna") due to 24 previous errors`
 (plus 14 warnings). Every library crate type-checks; only the binary fails. The 24 split as
 **20 × E0599** (`no method named \`register\` found for struct \`Arc<DefaultToolRegistry>\`` — the
@@ -462,7 +465,8 @@ Build state — verified, not assumed: `cargo check --workspace --message-format
 the macro), and **1 × E0432** (`voice.rs:2` — `async_trait` is a workspace dependency at `Cargo.toml:29`
 but is not declared in `crates/harness-cli/Cargo.toml`). The full diagnosis was handed to **t_0a789e15**,
 the card in flight for this. Every test plan above assumes that card's green build, and no test plan here
-claims a passing run that this card did not execute.
+claims a passing run that this card did not execute. **Update (roadmap pass, `639c38e`):** that card has
+landed, so the assumption is satisfied — the build is green.
 
 
 Verification used for this doc

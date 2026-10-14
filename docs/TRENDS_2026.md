@@ -59,7 +59,7 @@ work lands — no new crate is proposed anywhere in this table.
 
 | # | Trend | What changed in 2026 | What it implies for this harness | Cost | Crate |
 |---|-------|----------------------|----------------------------------|------|-------|
-| 1 | Prefix caching is the default, not an option | Anthropic: "automatic caching", 5-minute default TTL or 1-hour at 2× write price, cached reads at 0.1× input (`docs.claude.com/en/docs/build-with-claude/prompt-caching`, provider docs). OpenAI: "Prompt caching is enabled by default for supported OpenAI models", "discounted up to 90%", plus a Prompt Cache Diagnostics tool (`platform.openai.com/docs/guides/prompt-caching`, provider docs). MCP's 2026-07-28 changelog now asks *servers* for the same discipline: they "SHOULD return tools from `tools/list` in a deterministic order to enable client-side caching and improve LLM prompt cache hit rates" (`modelcontextprotocol.io/specification/2026-07-28/changelog`, spec). NIM reports `cached_tokens` (measurement §6) | Make the request prefix byte-stable and *record* the cache hit: sort tool definitions, stop rebuilding the system message per turn with retrieved memories, parse `prompt_tokens_details` (never read in the non-streaming path, `crates/harness-providers/src/client.rs:222-264`; the streaming path reads only three fields, `:329-340`; absent from `TokenUsage` at `crates/harness-core/src/types.rs:109-114`) | **S** | harness-core, harness-providers, harness-telemetry |
+| 1 | Prefix caching is the default, not an option | Anthropic: "automatic caching", 5-minute default TTL or 1-hour at 2× write price, cached reads at 0.1× input (`docs.claude.com/en/docs/build-with-claude/prompt-caching`, provider docs). OpenAI: "Prompt caching is enabled by default for supported OpenAI models", "discounted up to 90%", plus a Prompt Cache Diagnostics tool (`platform.openai.com/docs/guides/prompt-caching`, provider docs). MCP's 2026-07-28 changelog now asks *servers* for the same discipline: they "SHOULD return tools from `tools/list` in a deterministic order to enable client-side caching and improve LLM prompt cache hit rates" (`modelcontextprotocol.io/specification/2026-07-28/changelog`, spec). NIM reports `cached_tokens` (measurement §6) | Make the request prefix byte-stable and *record* the cache hit: sort tool definitions, stop rebuilding the system message per turn with retrieved memories, parse `prompt_tokens_details` (never read in the non-streaming path, `crates/harness-providers/src/client.rs:222-264`; the streaming path reads only three fields, `:329-343`; absent from `TokenUsage` at `crates/harness-core/src/types.rs:109-114`) | **S** | harness-core, harness-providers, harness-telemetry |
 | 2 | Reasoning is a first-class, tunable channel | OpenAI: `reasoning.effort` none→max, `reasoning.mode` standard/pro, persisted reasoning via `previous_response_id` + `reasoning.context: all_turns`, items opaque (`platform.openai.com/docs/guides/reasoning`). Anthropic: `output_config.effort` with five levels low/medium/high/xhigh/max — top-level effort needs no beta header, per-message effort is in beta; the docs call it "a behavioural signal, not a strict token budget" (that phrase and the claim that per-message effort "preserves the prompt cache" are quoted verbatim by several secondary write-ups; this pass extracted only the page head, so treat both phrasings as vendor-doc wording not re-verified character-for-character here) (`platform.claude.com/docs/en/build-with-claude/effort`, provider docs). Task budgets beta `task-budgets-2026-03-13`: `task_budget` takes `type`/`total`/optional `remaining`, and "API responses do not include a remaining-budget field… To track spend client-side, sum token usage across the requests in your loop" (`.../task-budgets`). OpenAI: `reasoning.effort` `none|minimal|low|medium|high|xhigh|max`, `reasoning.mode` `standard|pro`, `reasoning.context` `auto|current_turn|all_turns` (GPT-5.6 defaults to `all_turns`), persisted reasoning via `previous_response_id` or replayed `encrypted_content`, and reasoning items "remain opaque, and the API does not return their reasoning text" (`platform.openai.com/docs/guides/reasoning` + the `openai-python` `Reasoning` typed dict). NIM: `reasoning_content` returned, `reasoning_effort: "low"` accepted (HTTP 200), the documented thinking-budget field `nvext.max_thinking_tokens` returns HTTP 500 when hosted (measurement §6) | Keep reasoning inside the turn (interleaved thinking needs prior thinking blocks handed back), show it without mixing it into the answer, and expose effort/budget as config — with provider differences as data, never `if provider == …` in the loop | **M** | harness-providers, harness-core |
 | 3 | Context management moved server-side | Anthropic context editing (beta) clears tool results (`clear_tool_uses_20250919`) and thinking blocks (`clear_thinking_20251015`) with `trigger`/`keep`/`clear_at_least`, and warns that clearing invalidates the cached prefix — "clear enough tokens to make the cache invalidation worthwhile" (`.../context-editing`). Server-side compaction is described as "generally preferred" over client-side summarising in the same doc | Session storage must keep raw tool results addressable and replaceable by placeholders, and compaction must preserve the stable prefix; a summary that rewrites the head of the transcript costs more than it saves | **M** | harness-core (+ sessions spec §2.4 in FEATURE_GAPS) |
 | 4 | Tool definitions are a context cost with an accuracy cliff | Anthropic tool search: a five-server setup "can consume ~55k tokens in definitions before Claude does any work"; on-demand loading "typically reduces this by over 85 percent"; selection accuracy "degrades once you exceed 30–50 available tools" (`.../tool-search-tool`). OpenAI `tool_search`, gpt-5.4+ only (`platform.openai.com/docs/guides/function-calling`) | MCP wiring (card `t_16a223b8`) is about to register every server's tools flatly. Keep definitions out of the request until asked for, and ship the meta-tools in the harness so it works on NIM too | **M** | harness-core, harness-mcp |
@@ -279,6 +279,14 @@ forbids and which collides with every other worker. Observed with a read-only qu
 re-files them with project linkage, or the worker runs
 `git worktree add .worktrees/<task-id> -b wt/<task-id>` before touching a file.
 
+**Update (roadmap pass `t_37ec9e28`, `main 639c38e`, 2026-10-15 07:46):** the defect is not limited to
+these four cards. Twelve open cards carry the same broken row (`workspace_kind=worktree`,
+`project_id` NULL, `workspace_path` = the shared checkout): dev-1 `t_d75d32db` `t_6e419516`
+`t_aed83347` `t_fc182dc9` `t_448d659f` `t_75ed9224`, dev-2 `t_d79b9293` `t_24375a7e` `t_29ea5d7c`
+`t_22f8ed85` `t_cfd6facc`, qa `t_83845462`. One worker recovered by hand — `t_d79b9293` was dispatched
+at 07:43 and cut `.worktrees/t_d79b9293` on `wt/t_d79b9293` itself — but that is improvisation, not a
+board fix. The full list and the query that produces it are in `docs/ROADMAP.md` §0 (B2) and §3.
+
 ---
 
 ## 5. The kill list
@@ -303,7 +311,8 @@ Stated as decisions, because the useful output of a research pass is usually wha
 ## 6. Verification: commands run in this pass, and what they returned
 
 Run on this machine (Linux, kernel `7.2.4-arch1-2`) on 2026-10-15, against checkout `319bf38` of
-this repo. Anything not verified is listed at the end rather than phrased as though it had been.
+this repo. Re-read for `docs/ROADMAP.md` at `639c38e`: the code facts below still hold, and `bwrap`
+is still `/usr/bin/bwrap` 0.12.0. Anything not verified is listed at the end rather than phrased as though it had been.
 
 Code facts (read with the exact lines, not inferred):
 
@@ -313,7 +322,7 @@ Code facts (read with the exact lines, not inferred):
   a code reading; the cost consequence is what the card measures.
 - `crates/harness-providers/src/client.rs`: `complete()` (`:222-264`) parses `choices[0].message` and
   never touches `usage`; `stream()` requests usage (`"stream_options": { "include_usage": true }`,
-  `:284`) and reads exactly `prompt_tokens`, `completion_tokens`, `total_tokens` (`:329-340`).
+  `:284`) and reads exactly `prompt_tokens`, `completion_tokens`, `total_tokens` (`:329-343`).
   `grep -rn cached_tokens crates` → no matches.
 - `crates/harness-core/src/types.rs:109-114`: `TokenUsage { prompt_tokens, completion_tokens,
   total_tokens }` — no cache field.
@@ -395,6 +404,12 @@ Board state — read-only query against `~/.shiina/kanban/boards/luna-harness/ka
 
 That is the §4 workspace defect and the §4 gate list, observed rather than asserted. Open cards at
 the time of writing: 10 for luna-dev-1, 9 for luna-dev-2 (the reason §4 stops filing).
+
+**Update (roadmap pass `t_37ec9e28`, `main 639c38e`, 2026-10-15 07:46), re-read from the same DB:**
+`t_2a4b4808` and `t_40de5ef3` are `ready` now, not `todo`; the edge list above omitted
+`t_448d659f→t_75ed9224`; `t_8935ed8a` has landed (`e5ae82c`, merged `639c38e`) and `t_d79b9293` was
+claimed at 07:43; one card was added (`t_26fb21a1`, evolver, dev-1). Open cards are now dev-1 11,
+dev-2 8, qa 3, audit 1, scout 1 = 24, and the conflict matrix for all of them is `docs/ROADMAP.md` §3.
 
 Not verified in this pass, and labelled as such wherever it appears:
 
