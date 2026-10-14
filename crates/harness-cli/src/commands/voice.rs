@@ -4,7 +4,7 @@ use colored::Colorize;
 use futures_util::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{Agent, AgentConfig, DefaultToolRegistry, HarnessError};
+use harness_core::{Agent, AgentConfig, DefaultToolRegistry, HarnessError, ToolRegistry};
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
