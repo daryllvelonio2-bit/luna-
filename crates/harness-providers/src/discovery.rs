@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use chrono::{DateTime, Duration, Utc};
@@ -7,9 +7,11 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use harness_core::config::ProviderOverride;
 use harness_core::HarnessError;
 use crate::auth::CredentialManager;
-use crate::catalog::{find_provider, AuthHeaderFormat};
+use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
+use crate::client::build_http_client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCacheEntry {
@@ -25,11 +27,16 @@ pub struct ModelsCache {
 pub struct ModelDiscovery {
     cache_path: PathBuf,
     ttl: Duration,
-    http_client: reqwest::Client,
+    /// Resolved `providers.<id>.*` config, applied when a provider's models endpoint is fetched.
+    overrides: BTreeMap<String, ProviderOverride>,
 }
 
 impl ModelDiscovery {
-    pub fn new(cache_path: Option<PathBuf>, ttl_hours: i64) -> Self {
+    pub fn new(
+        cache_path: Option<PathBuf>,
+        ttl_hours: i64,
+        overrides: BTreeMap<String, ProviderOverride>,
+    ) -> Self {
         let path = cache_path.unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".luna").join("models_cache.json")
@@ -38,7 +45,7 @@ impl ModelDiscovery {
         Self {
             cache_path: path,
             ttl: Duration::hours(ttl_hours),
-            http_client: reqwest::Client::builder().build().unwrap(),
+            overrides,
         }
     }
 
@@ -96,9 +103,9 @@ impl ModelDiscovery {
         provider_id: &str,
         cred_manager: &CredentialManager,
     ) -> Result<Vec<String>, HarnessError> {
-        let descriptor = find_provider(provider_id).ok_or_else(|| {
-            HarnessError::ConfigurationError(format!("Unknown provider ID: {}", provider_id))
-        })?;
+        let descriptor = resolve_descriptor(provider_id, self.overrides.get(provider_id))?;
+        // Per-provider timeout, so a hanging `/models` call cannot outlive the config value.
+        let http_client = build_http_client(descriptor.timeout_secs)?;
 
         let secret = cred_manager.acquire_credential(provider_id).await?;
         let api_key = secret.expose_secret();
@@ -128,8 +135,7 @@ impl ModelDiscovery {
             AuthHeaderFormat::None => {}
         }
 
-        let resp = self
-            .http_client
+        let resp = http_client
             .get(&url)
             .headers(headers)
             .send()

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -6,7 +7,11 @@ use crate::error::HarnessError;
 use crate::traits::*;
 use crate::types::*;
 
-#[derive(Debug, Clone)]
+/// Agent-loop tunables. Deserialized from the `agent:` section of `~/.luna/config.yaml`
+/// (see `crate::config`), which is why the defaults below are the single source of truth for the
+/// config file's `agent.*` defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     pub max_consecutive_failures: usize,
     pub require_hitl_for_mutation: bool,

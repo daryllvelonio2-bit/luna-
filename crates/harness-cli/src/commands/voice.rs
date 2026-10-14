@@ -4,7 +4,7 @@ use colored::Colorize;
 use futures_util::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{Agent, AgentConfig, DefaultToolRegistry, HarnessError};
+use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError};
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
@@ -56,27 +56,28 @@ impl TextToSpeech for DefaultTextToSpeech {
 }
 
 pub async fn run_voice_loop(
-    provider_id: String,
-    model: Option<String>,
+    config: Config,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
 ) -> Result<(), HarnessError> {
+    let provider_id = config.model.provider.clone();
+
     println!("{}", "==================================================".cyan());
     println!("{}", "   Luna Hands-Free Voice Interface (\"Luna\")        ".bold().cyan());
     println!("{}", "==================================================".cyan());
     println!("Wake word: {}\nListening on microphone...", "Luna".green().bold());
 
     let provider = Arc::new(GenericProviderClient::new(
-        provider_id,
-        None,
-        model.unwrap_or_else(|| "gpt-4o".to_string()),
+        provider_id.clone(),
+        config.model.default.clone(),
         cred_manager,
         discovery,
-    ));
+        config.providers.get(&provider_id),
+    )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(None)?);
-    let notes = Arc::new(SqliteNotesEngine::new(None)?);
-    let evolver = Arc::new(CodebaseEvolver::new(std::env::current_dir().unwrap_or_default()));
+    let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+    let evolver = Arc::new(CodebaseEvolver::new(config.paths.workspace_root.clone()));
     let registry = Arc::new(DefaultToolRegistry::new());
 
     registry.register(Arc::new(SaveMemoryTool::new(memory.clone()))).await?;
@@ -96,7 +97,7 @@ pub async fn run_voice_loop(
         notes,
         evolver,
         registry,
-        AgentConfig::default(),
+        config.agent.clone(),
     ));
 
     let session = VoiceSession::new(
