@@ -3,7 +3,7 @@ use std::sync::Arc;
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError};
+use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
