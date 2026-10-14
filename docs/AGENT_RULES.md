@@ -20,6 +20,11 @@ assigned by the dispatcher; you never pick your own lane.
   dependencies are warm in that dir; the **first debug/test build after a checkout is cold and can
   take ~10 minutes** (bundled sqlite + audio + tls). Prefer `cargo build -p <crate>` for the inner
   loop over `cargo build --workspace`, and run the workspace-wide test only at the end of a card.
+- **Builds are limited to two parallel jobs each** (`CARGO_BUILD_JOBS=2`). This machine is 7.6 GB with
+  an 8-core CPU and up to five workers; unbounded rustc parallelism (`zbus`, `rustls`, `reqwest` at
+  ~500 MB each) pushed the box into swap and made the dispatcher refuse to spawn anyone. Do not raise
+  it, and do not run a build in the background while another one is running in your own card — one
+  build at a time per worker.
 - Build: `cargo build --release` from the repo root → binary at `target/release/luna`.
 - Inner loop: `cargo build -p harness-providers` (or whichever crate the card touches).
 - Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets -- -D warnings`.
@@ -97,7 +102,8 @@ assigned by the dispatcher; you never pick your own lane.
 - **Route by lane, and keep each developer's queue at five open cards.** Specifications past that
   go into the docs (FEATURE_GAPS.md / TRENDS_2026.md) and get filed when a slot frees. A backlog of
   twenty specs filed before the binary compiles is a wish list, not a plan: each developer drains one
-  card at a time.
+  card at a time. The cap is about *speculative specs* — an evidence-backed defect (audit finding with
+  `file:line` and a repro) is filed when it is found, because that is what makes the queue honest.
 - **Config is YAML:** `~/.luna/config.yaml`, loaded with `serde_yaml` (already a workspace
   dependency; `toml` is not). Any new tunable goes there with a documented default — not a literal,
   not a new env var.
