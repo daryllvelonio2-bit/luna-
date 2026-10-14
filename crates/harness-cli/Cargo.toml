@@ -1,0 +1,32 @@
+[package]
+name = "harness-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "luna"
+path = "src/main.rs"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-providers = { workspace = true }
+harness-memory = { workspace = true }
+harness-notes = { workspace = true }
+harness-evolver = { workspace = true }
+harness-plugins = { workspace = true }
+harness-mcp = { workspace = true }
+harness-voice = { workspace = true }
+harness-telemetry = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+colored = { workspace = true }
+dialoguer = { workspace = true }
+indicatif = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }

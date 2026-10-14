@@ -1,0 +1,142 @@
+use std::sync::Arc;
+use async_trait::async_trait;
+use futures_util::stream::BoxStream;
+use tokio_util::sync::CancellationToken;
+
+use crate::error::HarnessError;
+use crate::types::*;
+
+#[async_trait]
+pub trait ModelProvider: Send + Sync {
+    /// Unique provider identifier (e.g., "openai", "anthropic", "gemini", "ollama")
+    fn provider_id(&self) -> &str;
+
+    /// Dynamically query available models from the provider endpoint
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError>;
+
+    /// Non-streaming completion call
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError>;
+
+    /// Token-by-token streaming completion
+    async fn stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError>;
+
+    /// Vector embeddings for memory indexing
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError>;
+}
+
+#[async_trait]
+pub trait MemoryEngine: Send + Sync {
+    /// Retrieve semantically and relationally relevant memories
+    async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError>;
+
+    /// Save a new memory record, resolving contradictions and superseding previous matches
+    async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError>;
+
+    /// Update an existing memory, superseding the original
+    async fn update(&self, id: &str, updated: &MemoryRecord) -> Result<(), HarnessError>;
+
+    /// Deactivate a memory record
+    async fn forget(&self, id: &str) -> Result<(), HarnessError>;
+
+    /// Register a 1-5 word note pointer memory record
+    async fn add_note_pointer(&self, note_id: &str, pointer: &str) -> Result<(), HarnessError>;
+
+    /// Render memories into a system prompt block
+    fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String;
+}
+
+#[async_trait]
+pub trait NotesEngine: Send + Sync {
+    /// Save a new large note/document and distill 1-5 word summary pointer
+    async fn save_note(
+        &self,
+        title: &str,
+        content: &str,
+        tags: &[String],
+    ) -> Result<Note, HarnessError>;
+
+    /// Search notes using FTS5 full-text search
+    async fn search_notes(&self, query: &str, limit: usize) -> Result<Vec<Note>, HarnessError>;
+
+    /// Retrieve full verbatim content of a note
+    async fn read_note(&self, id: &str) -> Result<Note, HarnessError>;
+
+    /// Update note content and re-distill pointer
+    async fn update_note(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<Note, HarnessError>;
+}
+
+#[async_trait]
+pub trait EvolverEngine: Send + Sync {
+    /// Inspect the harness repository source tree
+    async fn inspect_source(&self, path: &str) -> Result<String, HarnessError>;
+
+    /// Propose a code patch and generate a patch ID
+    async fn propose_patch(&self, description: &str, diff: &str) -> Result<String, HarnessError>;
+
+    /// Run `cargo check` and `cargo test` on patch in an isolated build sandbox
+    async fn test_patch_sandbox(&self, patch_id: &str) -> Result<bool, HarnessError>;
+
+    /// Apply an approved and tested patch to the working repository
+    async fn apply_patch(&self, patch_id: &str) -> Result<(), HarnessError>;
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// Unique name of the tool
+    fn name(&self) -> &str;
+
+    /// Description presented to LLM
+    fn description(&self) -> &str;
+
+    /// JSON schema for tool arguments
+    fn parameters(&self) -> serde_json::Value;
+
+    /// Execute the tool with given arguments
+    async fn execute(
+        &self,
+        call_id: &str,
+        arguments: &serde_json::Value,
+        cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError>;
+
+    /// Generate tool definition schema
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            parameters: self.parameters(),
+        }
+    }
+}
+
+#[async_trait]
+pub trait ToolRegistry: Send + Sync {
+    /// Register a new tool
+    async fn register(&self, tool: Arc<dyn Tool>) -> Result<(), HarnessError>;
+
+    /// List all registered tool definitions
+    async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError>;
+
+    /// Dispatch a tool call
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError>;
+}

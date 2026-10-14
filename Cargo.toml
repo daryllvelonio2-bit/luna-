@@ -1,0 +1,65 @@
+[workspace]
+members = [
+    "crates/harness-core",
+    "crates/harness-providers",
+    "crates/harness-mcp",
+    "crates/harness-plugins",
+    "crates/harness-memory",
+    "crates/harness-notes",
+    "crates/harness-evolver",
+    "crates/harness-voice",
+    "crates/harness-telemetry",
+    "crates/harness-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Luna Harness Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/luna-ai/rust-agent-harness"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "io", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+async-trait = "0.1"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
+rusqlite = { version = "0.31", features = ["bundled", "vtab"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.8", features = ["v4"] }
+keyring = "2.1"
+secrecy = { version = "0.8", features = ["serde"] }
+rand = "0.8"
+clap = { version = "4.5", features = ["derive", "env"] }
+dialoguer = "0.11"
+indicatif = "0.17"
+colored = "2.1"
+cpal = "0.15"
+rodio = "0.18"
+hound = "3.5"
+tempfile = "3.10"
+similar = "2.5"
+walkdir = "2.5"
+pulldown-cmark = "0.10"
+url = "2.5"
+
+# Internal crate dependencies
+harness-core = { path = "crates/harness-core" }
+harness-providers = { path = "crates/harness-providers" }
+harness-mcp = { path = "crates/harness-mcp" }
+harness-plugins = { path = "crates/harness-plugins" }
+harness-memory = { path = "crates/harness-memory" }
+harness-notes = { path = "crates/harness-notes" }
+harness-evolver = { path = "crates/harness-evolver" }
+harness-voice = { path = "crates/harness-voice" }
+harness-telemetry = { path = "crates/harness-telemetry" }
