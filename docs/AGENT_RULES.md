@@ -80,6 +80,16 @@ assigned by the dispatcher; you never pick your own lane.
 - `luna-dev-1` / `luna-dev-2` implement. `luna-audit` audits (read-only on code, files findings),
   `luna-scout` specs features, `luna-qa` tests real user flows and picks up unowned supporting
   work. Never do another lane's job: if the right fix belongs to another lane, file a card for it.
+- **File cards with a real workspace.** A card for code work needs `--workspace worktree --project
+  luna-harness` (kanban tool: `workspace_kind="worktree"`, `project="luna-harness"`). `scratch`
+  hands the worker a tmp dir that is deleted at completion, so nothing it writes can ever be
+  merged — unrecoverable, not untidy. Read-only lanes (audit) may use `dir:<repo>`.
+- **Before filing a card, list the board** (`shiina kanban --board luna-harness list`) and fold your
+  findings into an existing card for the same work instead of filing a second one. Duplicates cost a
+  worker a whole run.
+- **Config is YAML:** `~/.luna/config.yaml`, loaded with `serde_yaml` (already a workspace
+  dependency; `toml` is not). Any new tunable goes there with a documented default — not a literal,
+  not a new env var.
 - Every finding needs `file:line`, the exact reproducing command, and observed-vs-expected.
 - Before completing a card: `cargo test` for the crates you touched, plus the real command you ran
   to verify the feature. Put both in the handoff.
