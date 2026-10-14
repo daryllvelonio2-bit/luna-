@@ -82,6 +82,13 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             auth_header_format: AuthHeaderFormat::Bearer,
         },
+        ProviderDescriptor {
+            id: "nvidia".to_string(),
+            display_name: "NVIDIA NIM".to_string(),
+            default_base_url: "https://integrate.api.nvidia.com/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            auth_header_format: AuthHeaderFormat::Bearer,
+        },
     ]
 }
 
