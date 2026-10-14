@@ -21,32 +21,38 @@ impl SqliteMemoryEngine {
         });
 
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| {
+                HarnessError::MemoryError(format!(
+                    "Failed to create memory db directory '{}': {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
         }
 
         let conn = Connection::open(&db_path).map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        let engine = Self {
+        // Schema is applied to the owned connection before it is shared behind the mutex: the
+        // constructors are reachable from async callers (`chat.rs`, `voice.rs`), and taking a
+        // tokio lock there would panic inside the runtime.
+        Self::init_schema(&conn)?;
+
+        Ok(Self {
             db_path,
             conn: Arc::new(Mutex::new(conn)),
-        };
-
-        engine.init_schema_sync()?;
-        Ok(engine)
+        })
     }
 
     pub fn in_memory() -> Result<Self, HarnessError> {
         let conn = Connection::open_in_memory().map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        let engine = Self {
+        Self::init_schema(&conn)?;
+        Ok(Self {
             db_path: PathBuf::from(":memory:"),
             conn: Arc::new(Mutex::new(conn)),
-        };
-        engine.init_schema_sync()?;
-        Ok(engine)
+        })
     }
 
-    fn init_schema_sync(&self) -> Result<(), HarnessError> {
+    fn init_schema(conn: &Connection) -> Result<(), HarnessError> {
         let schema_sql = include_str!("../schema.sql");
-        let conn = self.conn.blocking_lock();
         conn.execute_batch(schema_sql)
             .map_err(|e| HarnessError::MemoryError(format!("Schema initialization failed: {}", e)))?;
         Ok(())
@@ -170,7 +176,10 @@ impl MemoryEngine for SqliteMemoryEngine {
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         let conn = self.conn.lock().await;
 
-        // Auto-supersede conflicting active memories with matching subject & predicate
+        // Auto-supersede conflicting active memories with matching subject & predicate.
+        // The conflict set is collected before the insert so the new row is never its own
+        // predecessor; the insert then has to land first because `superseded_by` is a foreign
+        // key onto `memories(id)` (bundled SQLite enables foreign keys by default).
         let mut check_stmt = conn
             .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -180,15 +189,6 @@ impl MemoryEngine for SqliteMemoryEngine {
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?
             .filter_map(Result::ok)
             .collect();
-
-        for old_id in old_ids {
-            debug!("Superseding prior memory '{}' with new memory '{}'", old_id, record.id);
-            conn.execute(
-                "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
-                params![record.id, Utc::now().to_rfc3339(), old_id],
-            )
-            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        }
 
         conn.execute(
             "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
@@ -209,6 +209,15 @@ impl MemoryEngine for SqliteMemoryEngine {
         )
         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
+        for old_id in old_ids {
+            debug!("Superseding prior memory '{}' with new memory '{}'", old_id, record.id);
+            conn.execute(
+                "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
+                params![record.id, Utc::now().to_rfc3339(), old_id],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        }
+
         info!("Saved memory '{}' [{}: {} -> {}]", record.id, record.category, record.subject, record.object);
         Ok(())
     }
@@ -216,12 +225,8 @@ impl MemoryEngine for SqliteMemoryEngine {
     async fn update(&self, id: &str, updated: &MemoryRecord) -> Result<(), HarnessError> {
         let conn = self.conn.lock().await;
 
-        conn.execute(
-            "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
-            params![updated.id, Utc::now().to_rfc3339(), id],
-        )
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-
+        // Same foreign-key ordering as `save`: the replacement row must exist before the row it
+        // supersedes can point at it.
         conn.execute(
             "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -238,6 +243,12 @@ impl MemoryEngine for SqliteMemoryEngine {
                 if updated.is_active { 1 } else { 0 },
                 updated.superseded_by,
             ],
+        )
+        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        conn.execute(
+            "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
+            params![updated.id, Utc::now().to_rfc3339(), id],
         )
         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
