@@ -23,7 +23,7 @@ nothing calls it, or the call site is a stub. `absent` = nothing to improve.
 
 | # | Capability | What Shiina does (entry point) | Luna today | Verdict | Spec |
 |---|-----------|-------------------------------|-----------|---------|------|
-| 1 | Config file + precedence | `shiina_cli/config.py:2070` `load_config()`; documented keys in `cli-config.yaml.example:1`; `shiina config set <section.key>` (`cli-config.yaml.example:3`) | **absent** — no config file, no keys, no merged settings object. Every path/model/timeout is a literal at its use site: `crates/harness-memory/src/engine.rs:20`, `crates/harness-notes/src/engine.rs:21`, `crates/harness-providers/src/auth.rs:60`, `crates/harness-providers/src/discovery.rs:35`, `crates/harness-cli/src/main.rs:28` (`default_value = "openai"`) | rebuild | §2.1 |
+| 1 | Config file + precedence | `shiina_cli/config.py:2070` `load_config()`; documented keys in `cli-config.yaml.example:1`; `shiina config set <section.key>` (`cli-config.yaml.example:3`) | **absent** — no config file, no keys, no merged settings object. Every path/model/timeout is a literal at its use site: `crates/harness-memory/src/engine.rs:20`, `crates/harness-notes/src/engine.rs:21`, `crates/harness-providers/src/auth.rs:60`, `crates/harness-providers/src/discovery.rs:35`, `crates/harness-cli/src/main.rs:28` (`default_value = "openai"`). Format ruling for Luna: **YAML at `~/.luna/config.yaml`** — `serde_yaml` is already a workspace dependency (`Cargo.toml:28`), `toml` is not | rebuild | §2.1 |
 | 2 | Filesystem + shell tools | `tools/file_tools.py:1089` `read_file`, `:1111` `write_file`, `:905` `patch_tool`, `:990` `search_tool`; `tools/terminal_tool.py:1311` `terminal` | **absent** — the registry never receives anything but memory/notes/evolver tools: `crates/harness-cli/src/commands/chat.rs:44-57`. No fs or shell crate exists; the only `Tool` impls reachable from the binary are the 10 memory/notes/evolver tools (`crates/harness-core/src/traits.rs:100` is the trait; the adapters in `harness-mcp`/`harness-plugins` are registered nowhere) | rebuild | §2.2 |
 | 3 | HITL approval for mutations | `tools/write_approval.py:166` `evaluate_gate`, `:73` `stage_write`; `tools/approval_human_wait.py:108` `human_wait_window`; `acp_adapter/permissions.py:77` `await_permission` | **partial, dead** — `AgentConfig.require_hitl_for_mutation` declared at `crates/harness-core/src/agent.rs:12`, defaults `true` at `:20`, read nowhere else in the workspace (only set `false` in `crates/harness-core/tests/agent_guardrail_test.rs:165`); `HarnessError::ApprovalRejected` at `crates/harness-core/src/error.rs:65` has no producer | rebuild | §2.3 |
 | 4 | Session persistence + context compaction | `shiina_state.py:441` `SessionDB`; `agent/conversation_compression.py:3681` `compress_context`; `shiina_state_compression.py:70` `SessionCompressionMixin`; `shiina_state_rewind.py:45` `SessionRewindMixin` | **absent** — `run_task` builds a fresh `Vec::new()` per call (`crates/harness-core/src/agent.rs:89`) and the REPL re-enters it per input line (`crates/harness-cli/src/commands/chat.rs:88`); nothing is written anywhere; no token estimate, no compaction, no session id | rebuild | §2.4 |
@@ -60,12 +60,14 @@ nothing calls it, or the call site is a stub. `absent` = nothing to improve.
 Each spec is startable as written: behaviour, config keys, acceptance criteria that can be asserted,
 a test plan with the real command that exercises it, and the owning lane.
 
-### §2.1 Config file, precedence, and a `luna config` command
+### §2.1 Config file (`~/.luna/config.yaml`), precedence, and a `luna config` command
 Lane: **luna-dev-1** (providers / CLI / agent core). Priority: highest — every other spec below adds
 config keys, and there is nowhere to put them today.
 
 User-visible behaviour
-- `luna` reads `~/.luna/config.toml` (path overridable by `LUNA_CONFIG`); missing file is not an error.
+- `luna` reads `~/.luna/config.yaml` — **YAML**, because `serde_yaml` is already a workspace dependency
+  (`Cargo.toml:28`) and `toml` is not; the path is overridable by `LUNA_CONFIG`, and a missing file is not
+  an error.
 - Precedence, lowest to highest: built-in defaults → config file → `LUNA_*` environment variables →
   CLI flags. The resolved value and which layer produced it are both printable.
 - `luna config get <dotted.key> [--show-source]` prints the value; `luna config list` prints every
@@ -86,19 +88,20 @@ Config keys (v1)
 - `paths.workspace_root` (default process cwd — the scope every filesystem tool in §2.2 is confined to)
 
 Implementation shape (deliberately small)
-One module, `config` in `harness-core`, loading `toml` into a `Config` struct with `serde` defaults, and
+One module, `config` in `harness-core`, deserialising that YAML with `serde_yaml` into a `Config` struct
+with `serde` defaults, and
 one `resolve` function implementing the precedence order. Engines keep their `new(Option<PathBuf>)`
 signatures; the CLI passes resolved values in instead of letting each engine guess `~/.luna/…`. No new
 crate, no trait, no plugin layer.
 
 Acceptance criteria (testable)
-1. With no `~/.luna/config.toml` present, `luna config get paths.memory_db` prints `$HOME/.luna/memory.db`.
+1. With no `~/.luna/config.yaml` present, `luna config get paths.memory_db` prints `$HOME/.luna/memory.db`.
 2. With `LUNA_MODEL_DEFAULT=x` in the environment and `model.default = "y"` in the file,
    `luna config get model.default --show-source` prints `x` and source `env`.
 3. `luna config get model.nope` exits non-zero and its stderr names `model.default`.
 4. `luna chat --help` shows the default provider from config, not a hardcoded literal (the
    `default_value` at `crates/harness-cli/src/main.rs:28` is gone).
-5. A malformed TOML file fails fast with the parse error and line number; it does not silently fall back.
+5. A malformed YAML file fails fast with the parse error and line number; it does not silently fall back.
 
 Test plan
 - Unit (`harness-core`, module tests): precedence matrix — file beats default, env beats file, flag beats
@@ -209,7 +212,8 @@ Test plan
   handoff.
 
 ### §2.4 Session persistence and bounded context (compaction)
-Lane: **luna-dev-1**. Priority: high — without it the harness is a stateless one-shot: `run_task` throws
+Lane: **luna-dev-2** (filed to dev-1 by this spec, reassigned by the lead — session storage is not dev-1's
+lane). Priority: high — without it the harness is a stateless one-shot: `run_task` throws
 its own transcript away every call (`crates/harness-core/src/agent.rs:89`) and the REPL sends only the
 current line (`crates/harness-cli/src/commands/chat.rs:88`). Multi-turn work, and everything downstream
 that assumes a transcript (rewind, titles, search), is impossible until this lands.
@@ -411,4 +415,64 @@ when the row is taken.
   is unverified. Acceptance: either implement per-shape adapters or mark each catalog entry with the
   transport it actually supports and refuse a mismatch with a clear message instead of a 400 from the
   provider.
+
+---
+
+## 4. Cards filed from this inventory
+
+All five top capabilities now have a card on the `luna-harness` board. Two of them already had cards when
+this inventory was written, and those pre-existing cards win: the spec below was folded into them by
+comment instead of creating a second card that would decide the same question twice.
+
+| Capability | Card | Lane | Prio | Note |
+|---|---|---|---|---|
+| §2.1 Config file + precedence | **t_5c1eca76** | luna-dev-1 | 95 | Filed from this spec; the tool-created original (t_f3507eb9) had no project worktree anchor and was archived by the lead, as was the older t_3240b75d. Format ruling: YAML at `~/.luna/config.yaml`. |
+| §2.3 HITL approval gate | **t_c4f9c07d** | luna-dev-1 | 92 | Filed from this spec; the tool-created original (t_5cea6d69) was archived for the same workspace defect. |
+| §2.2 Filesystem + shell tools | **t_c6cf04fa** | luna-dev-1 | 88 | Filed from this spec. First two attempts (t_cb3c0d83, t_ef20415a) were archived by the lead: `kanban_create` accepts `workspace_kind="worktree"` but leaves `project_id` null, so the worktree has no anchor. |
+| §2.4 Session persistence + compaction | **t_73ce9054** | luna-dev-2 | 85 | Filed from this spec, and deliberately reassigned by the lead to luna-dev-2 (session storage is not dev-1's lane and dev-1's queue was eight deep). Only the lane in the §2.4 header below is stale; the spec is unchanged. |
+| §2.5 MCP servers from config | **t_16a223b8** (pre-existing) | luna-dev-2 | 80 | Already on the board with the same scope; this spec's acceptance criteria and config keys were added as a comment instead of a duplicate card. |
+
+Two filing lessons for the next scout, now also in `docs/AGENT_RULES.md` §6: `kanban_create` can take
+30-90 s on this board, so an apparent timeout must be followed by a board listing rather than a retry
+(four of my cards were double-filed that way and had to be archived); and `workspace_kind="worktree"`
+must be paired with `project="luna-harness"`, or the worker gets an unanchored worktree.
+
+Pace rules adopted after the lead's review of this batch (they apply to every remaining spec in §3):
+queue cap of five open cards per developer, and route by lane — **luna-dev-1** is the busy lane
+(agent loop, CLI, providers) and already had six open cards including the compile fix, so nothing else
+from §3 goes there until something lands; **luna-dev-2** owns memory, notes, MCP, plugins, evolver, voice,
+telemetry **and storage**, which is where §2.4 was moved. Specs whose work straddles the two lanes must be
+split, or name the lane they must not be filed to. §3 therefore stays in the doc as the backlog: the next
+card is filed when a card of mine lands, not when a spec is finished.
+
+Archived by the lead, listed here so the trail is complete: **t_f3507eb9**, **t_5cea6d69**, **t_cb3c0d83**,
+**t_ef20415a**, **t_bd2527dc**, **t_cb21a910**, **t_3240b75d**.
+
+Pre-existing board cards this inventory corroborates rather than duplicates (no card filed for them; the
+queued specs above are the detail): **t_40de5ef3** (reasoning-aware turns — §3.3), **t_2ccd2241**
+(credential safety — §3.10), **t_2a4b4808** (model/provider resolution from config — the CLI half of §2.1),
+**t_0a789e15** (make the workspace compile again), **t_7c2387f4** (luna-qa: build + live NIM + realterm).
+
+Build state — verified, not assumed: `cargo check --workspace --message-format short` on this checkout at
+`1fc995d` exits `101` with `error: could not compile \`harness-cli\` (bin "luna") due to 24 previous errors`
+(plus 14 warnings). Every library crate type-checks; only the binary fails. The 24 split as
+**20 × E0599** (`no method named \`register\` found for struct \`Arc<DefaultToolRegistry>\`` — the
+`ToolRegistry` trait is not in scope at `crates/harness-cli/src/commands/chat.rs:44-57` and
+`voice.rs:82-91`), **3 × E0195** (`voice.rs:24`, `:37`, `:46` — the `#[async_trait]` impls compiled without
+the macro), and **1 × E0432** (`voice.rs:2` — `async_trait` is a workspace dependency at `Cargo.toml:29`
+but is not declared in `crates/harness-cli/Cargo.toml`). The full diagnosis was handed to **t_0a789e15**,
+the card in flight for this. Every test plan above assumes that card's green build, and no test plan here
+claims a passing run that this card did not execute.
+
+
+Verification used for this doc
+- Shiina side: `grep -n` over the read-only checkout for every symbol cited; the reads are current as of
+  this run (Shiina `main`).
+- Luna side: every file cited under `crates/` was read in full in this run, plus
+  `grep -rn <symbol> crates/harness-cli/src` for the "0 refs" claims (`harness_plugins`: 0,
+  `harness_mcp`: 0, `harness_voice`: 1, `harness_telemetry`: 1) and
+  `grep -rn "exit(42)\|process::exit" crates` → 0 hits for §3.11.
+- Board state: read directly from `~/.shiina/kanban/boards/luna-harness/kanban.db` (task ids, statuses,
+  workspace kind/path, project id, priorities) rather than from the cards' prose.
+
 
