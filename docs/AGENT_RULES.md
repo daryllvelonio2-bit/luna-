@@ -107,6 +107,9 @@ assigned by the dispatcher; you never pick your own lane.
 - **Config is YAML:** `~/.luna/config.yaml`, loaded with `serde_yaml` (already a workspace
   dependency; `toml` is not). Any new tunable goes there with a documented default — not a literal,
   not a new env var.
+- **Priority policy,** highest first: blockers (the binary does not build) → evidence-backed defects
+  in shipped code → false README claims → prerequisites of already-queued work → new features. If a
+  spec is a capability that does not exist yet, it ranks below anything that is currently wrong.
 - Every finding needs `file:line`, the exact reproducing command, and observed-vs-expected.
 - Before completing a card: `cargo test` for the crates you touched, plus the real command you ran
   to verify the feature. Put both in the handoff.
