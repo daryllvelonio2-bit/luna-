@@ -86,7 +86,8 @@ assigned by the dispatcher; you never pick your own lane.
   merged — unrecoverable, not untidy. Read-only lanes (audit) may use `dir:<repo>`.
 - **Before filing a card, list the board** (`shiina kanban --board luna-harness list`) and fold your
   findings into an existing card for the same work instead of filing a second one. Duplicates cost a
-  worker a whole run.
+  worker a whole run. A `kanban_create` call can take 30–90s here; if it looks like it timed out,
+  list the board before retrying rather than double-filing.
 - **Config is YAML:** `~/.luna/config.yaml`, loaded with `serde_yaml` (already a workspace
   dependency; `toml` is not). Any new tunable goes there with a documented default — not a literal,
   not a new env var.
