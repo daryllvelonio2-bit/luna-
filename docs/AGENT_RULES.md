@@ -94,6 +94,10 @@ assigned by the dispatcher; you never pick your own lane.
   findings into an existing card for the same work instead of filing a second one. Duplicates cost a
   worker a whole run. A `kanban_create` call can take 30–90s here; if it looks like it timed out,
   list the board before retrying rather than double-filing.
+- **Route by lane, and keep each developer's queue at five open cards.** Specifications past that
+  go into the docs (FEATURE_GAPS.md / TRENDS_2026.md) and get filed when a slot frees. A backlog of
+  twenty specs filed before the binary compiles is a wish list, not a plan: each developer drains one
+  card at a time.
 - **Config is YAML:** `~/.luna/config.yaml`, loaded with `serde_yaml` (already a workspace
   dependency; `toml` is not). Any new tunable goes there with a documented default — not a literal,
   not a new env var.
