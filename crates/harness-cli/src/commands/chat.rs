@@ -13,6 +13,8 @@ use harness_notes::{
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
+use super::approval::{approval_settings, build_approver};
+
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
 pub async fn run_interactive_chat(
@@ -28,6 +30,14 @@ pub async fn run_interactive_chat(
     println!("{}", "==================================================".cyan());
     println!("Provider: {}", provider_id.green());
     println!("Model:    {}", model.green());
+    println!(
+        "Approval: {}",
+        match config.tools.approval {
+            harness_core::ApprovalMode::Ask => "ask before every mutating tool call",
+            harness_core::ApprovalMode::Allow => "allow — mutating tools run without asking",
+            harness_core::ApprovalMode::Deny => "deny — mutating tools never run",
+        }
+    );
     println!("Type 'exit' or 'quit' to terminate session.\n");
 
     let provider = Arc::new(GenericProviderClient::new(
@@ -67,7 +77,8 @@ pub async fn run_interactive_chat(
         evolver,
         registry,
         config.agent.clone(),
-    );
+    )
+    .with_approval(build_approver(&config), approval_settings(&config));
 
     let cancel_token = CancellationToken::new();
 
@@ -76,7 +87,13 @@ pub async fn run_interactive_chat(
         io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
+        let read = io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
+        // EOF (piped or redirected stdin): without this the loop would spin on empty input
+        // forever instead of ending the session.
+        if read == 0 {
+            println!("Goodbye!");
+            break;
+        }
         let query = input.trim();
 
         if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {

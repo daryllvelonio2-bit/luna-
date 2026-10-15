@@ -38,6 +38,9 @@ enum Commands {
         /// Model id; without it, `model.default` from the config file
         #[arg(short, long)]
         model: Option<String>,
+        /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
+        #[arg(long)]
+        yes: bool,
     },
     /// Manage multi-provider credentials and key rotation
     Auth {
@@ -57,6 +60,9 @@ enum Commands {
         /// Model id; without it, `model.default` from the config file
         #[arg(short, long)]
         model: Option<String>,
+        /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
+        #[arg(long)]
+        yes: bool,
     },
     /// Run agent supervised with auto-rebuild and restart
     Supervisor {
@@ -85,12 +91,18 @@ async fn main() -> Result<(), HarnessError> {
 
     // CLI flags are the highest-precedence layer.
     match &cli.command {
-        Some(Commands::Chat { provider, model }) | Some(Commands::Voice { provider, model }) => {
+        Some(Commands::Chat { provider, model, yes })
+        | Some(Commands::Voice { provider, model, yes }) => {
             if let Some(provider) = provider {
                 layers.flags.insert("model.provider".to_string(), provider.clone());
             }
             if let Some(model) = model {
                 layers.flags.insert("model.default".to_string(), model.clone());
+            }
+            // `--yes` is the flag layer of `tools.approval`, so the effective mode is the same
+            // value the gate reads and `luna config get` reports.
+            if *yes {
+                layers.flags.insert("tools.approval".to_string(), "allow".to_string());
             }
         }
         Some(Commands::Models { subcommand }) => {

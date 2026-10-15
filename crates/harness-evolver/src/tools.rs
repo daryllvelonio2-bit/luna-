@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{EvolverEngine, HarnessError, Tool, ToolResult};
+use harness_core::{EvolverEngine, HarnessError, Tool, ToolPreview, ToolResult};
 
 pub struct InspectSourceTool {
     engine: Arc<dyn EvolverEngine>,
@@ -141,6 +141,19 @@ impl Tool for ApplyUpdateTool {
             },
             "required": ["patch_id"]
         })
+    }
+
+    /// Writes into the repository: gated by the approval prompt when
+    /// `agent.require_hitl_for_mutation` is on.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The staged patch's target file and unified diff, so the human approves the change they can
+    /// actually read rather than a patch id.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        let patch_id = args.get("patch_id").and_then(|p| p.as_str())?;
+        self.engine.preview_patch(patch_id).await
     }
 
     async fn execute(

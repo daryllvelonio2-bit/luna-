@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
 use crate::agent::AgentConfig;
+use crate::approval::{ApprovalMode, DEFAULT_APPROVAL_TIMEOUT_SECS};
 use crate::error::HarnessError;
 
 /// Environment variable that relocates the config file.
@@ -51,6 +52,7 @@ pub struct Config {
     pub paths: PathsSettings,
     pub providers: BTreeMap<String, ProviderOverride>,
     pub agent: AgentConfig,
+    pub tools: ToolsSettings,
     pub telemetry: TelemetrySettings,
 }
 
@@ -106,6 +108,33 @@ pub struct ProviderOverride {
     pub base_url: Option<String>,
     pub models_endpoint: Option<String>,
     pub timeout_secs: Option<u64>,
+}
+
+/// Tool-run settings.
+///
+/// `approval*` and `mutating_overrides` are the human-in-the-loop gate's knobs: they decide
+/// *whether* a mutating call runs. They are deliberately separate from the sandbox's reach
+/// (`paths.workspace_root`, and the sandbox mode a later card adds) — a one-keypress prompt is not
+/// a boundary, and a boundary is not a human decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsSettings {
+    /// `ask` (prompt, the default) | `allow` (never prompt) | `deny` (never run a mutation).
+    pub approval: ApprovalMode,
+    /// No answer within this window counts as a denial.
+    pub approval_timeout_secs: u64,
+    /// Tool names the gate must treat as mutating even when the tool says otherwise.
+    pub mutating_overrides: Vec<String>,
+}
+
+impl Default for ToolsSettings {
+    fn default() -> Self {
+        Self {
+            approval: ApprovalMode::Ask,
+            approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+            mutating_overrides: Vec::new(),
+        }
+    }
 }
 
 /// Tracing/telemetry settings.
