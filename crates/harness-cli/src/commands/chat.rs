@@ -294,9 +294,6 @@ pub async fn run_interactive_chat(
         ));
     }
 
-    println!("Provider: {}", current_provider.cyan());
-    println!("Model:    {}", current_model.cyan());
-
     let provider = Arc::new(GenericProviderClient::new(
         current_provider.clone(),
         current_model.clone(),
@@ -308,13 +305,6 @@ pub async fn run_interactive_chat(
     // Every turn is appended to this session; a resumed one replays its recent transcript.
     let store = Arc::new(open_store(&config)?);
     let session_id = resolve_session(store.as_ref(), selection).await?;
-    let session_name = store.get(&session_id).await?.name;
-    if session_name.is_empty() {
-        println!("Session:  {}", session_id.green());
-    } else {
-        println!("Session:  {} ({})", session_name.green(), session_id);
-    }
-    println!("Resume:   luna --session {}\n", session_id);
 
     // The compaction call is a plain model call: one provider, one model, resolved from
     // `agent.compaction_provider` / `agent.compaction_model` (both default to the session's).
