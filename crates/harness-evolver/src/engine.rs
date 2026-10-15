@@ -1,70 +1,577 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info};
 
-use harness_core::{unified_diff, EvolverEngine, HarnessError, ToolPreview};
-use crate::sandbox::BuildSandbox;
+use harness_core::{
+    prompts, Agent, AgentConfig, DefaultToolRegistry, EvolverEngine, HarnessError,
+    MemoryEngine, MemoryRecord, ModelProvider, Note, NotesEngine, ToolPreview, ToolRegistry,
+};
+use harness_core::tools::{
+    PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, WriteFileTool,
+};
+
+use crate::pty::run_in_pty;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "details")]
+pub enum JobStatus {
+    Queued,
+    Running,
+    FailedTest { error: String },
+    ReadyForReenactment { binary_path: String },
+    Verified,
+    FailedVerification { reason: String },
+    ScheduledUpdate { binary_path: String },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StagedPatch {
+pub struct JobRecord {
     pub id: String,
-    pub description: String,
-    pub target_file: String,
-    pub original_content: String,
-    pub patched_content: String,
+    pub task: String,
+    pub evidence: Option<String>,
+    pub branch: String,
+    pub worktree_dir: String,
+    pub status: JobStatus,
     pub created_at: DateTime<Utc>,
-    pub is_verified: bool,
+    pub updated_at: DateTime<Utc>,
+    pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingUpdate {
+    pub job_id: String,
+    pub task: String,
+    pub branch: String,
+    pub worktree_dir: String,
+    pub binary_path: String,
+    pub staged_at: DateTime<Utc>,
 }
 
 pub struct CodebaseEvolver {
     repo_root: PathBuf,
-    sandbox: BuildSandbox,
-    staged_patches: RwLock<HashMap<String, StagedPatch>>,
+    jobs_dir: PathBuf,
+    provider: RwLock<Option<Arc<dyn ModelProvider>>>,
+    jobs: RwLock<HashMap<String, JobRecord>>,
 }
 
 impl CodebaseEvolver {
-    pub fn new(repo_root: PathBuf) -> Self {
+    pub fn new(repo_root: PathBuf, jobs_dir: PathBuf) -> Self {
+        let _ = fs::create_dir_all(&jobs_dir);
         Self {
-            sandbox: BuildSandbox::new(repo_root.clone()),
             repo_root,
-            staged_patches: RwLock::new(HashMap::new()),
+            jobs_dir,
+            provider: RwLock::new(None),
+            jobs: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn stage_file_patch(
-        &self,
-        description: &str,
-        target_file: &str,
-        patched_content: &str,
-    ) -> Result<String, HarnessError> {
-        let full_path = self.repo_root.join(target_file);
-        let original_content = if full_path.exists() {
-            fs::read_to_string(&full_path).map_err(|e| HarnessError::Io(e.to_string()))?
-        } else {
-            String::new()
-        };
-
-        let patch_id = format!("patch_{}", uuid::Uuid::new_v4());
-        let patch = StagedPatch {
-            id: patch_id.clone(),
-            description: description.to_string(),
-            target_file: target_file.to_string(),
-            original_content,
-            patched_content: patched_content.to_string(),
-            created_at: Utc::now(),
-            is_verified: false,
-        };
-
-        let mut map = self.staged_patches.write().await;
-        map.insert(patch_id.clone(), patch);
-        info!("Staged patch proposal '{}': {}", patch_id, description);
-        Ok(patch_id)
+    pub fn with_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
+        self.provider = RwLock::new(Some(provider));
+        self
     }
+
+    pub async fn set_provider(&self, provider: Arc<dyn ModelProvider>) {
+        let mut p = self.provider.write().await;
+        *p = Some(provider);
+    }
+
+    pub async fn delegate_improvement(
+        &self,
+        task: &str,
+        evidence: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        let provider = self.provider.read().await.clone().ok_or_else(|| {
+            HarnessError::EvolverError(
+                "No model provider configured for engineer subagent".to_string(),
+            )
+        })?;
+
+        let uuid = uuid::Uuid::new_v4().simple().to_string();
+        let job_id = format!("job_{}", &uuid[..8]);
+        let branch = format!("eng/{}", job_id);
+        let worktree_dir = self.repo_root.join(".worktrees").join(format!("eng_{}", job_id));
+
+        let record = JobRecord {
+            id: job_id.clone(),
+            task: task.to_string(),
+            evidence: evidence.map(|s| s.to_string()),
+            branch: branch.clone(),
+            worktree_dir: worktree_dir.to_string_lossy().to_string(),
+            status: JobStatus::Queued,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            logs: vec![format!("Job {} created for task: {}", job_id, task)],
+        };
+
+        self.save_job(&record).await?;
+        self.jobs.write().await.insert(job_id.clone(), record);
+
+        // Spawn background task
+        let repo_root = self.repo_root.clone();
+        let jobs_dir = self.jobs_dir.clone();
+        let task_str = task.to_string();
+        let evidence_opt = evidence.map(|s| s.to_string());
+        let j_id = job_id.clone();
+        let b_name = branch.clone();
+        let wt_path = worktree_dir.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = run_engineer_job(
+                repo_root,
+                jobs_dir,
+                provider,
+                j_id.clone(),
+                b_name,
+                wt_path,
+                task_str,
+                evidence_opt,
+            )
+            .await
+            {
+                error!("Engineer job {} failed with error: {}", j_id, e);
+            }
+        });
+
+        Ok(job_id)
+    }
+
+    pub async fn check_job(&self, job_id: &str) -> Result<JobRecord, HarnessError> {
+        let path = self.jobs_dir.join(format!("{}.json", job_id));
+        if path.exists() {
+            let data = fs::read_to_string(&path)
+                .map_err(|e| HarnessError::Io(format!("Failed to read job file: {}", e)))?;
+            let record: JobRecord = serde_json::from_str(&data)
+                .map_err(|e| HarnessError::EvolverError(format!("Failed to parse job JSON: {}", e)))?;
+            Ok(record)
+        } else {
+            let jobs = self.jobs.read().await;
+            jobs.get(job_id)
+                .cloned()
+                .ok_or_else(|| HarnessError::EvolverError(format!("Job '{}' not found", job_id)))
+        }
+    }
+
+    pub async fn list_jobs(&self) -> Result<Vec<JobRecord>, HarnessError> {
+        let mut list = Vec::new();
+        if self.jobs_dir.exists() {
+            for entry in fs::read_dir(&self.jobs_dir)
+                .map_err(|e| HarnessError::Io(format!("Failed to read jobs dir: {}", e)))?
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json")
+                    && path.file_name().and_then(|s| s.to_str()) != Some("pending_update.json")
+                {
+                    if let Ok(data) = fs::read_to_string(&path) {
+                        if let Ok(record) = serde_json::from_str::<JobRecord>(&data) {
+                            list.push(record);
+                        }
+                    }
+                }
+            }
+        }
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(list)
+    }
+
+    pub async fn verify_and_stage(
+        &self,
+        job_id: &str,
+        scenario_input: Option<&str>,
+        absent_pattern: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        let mut job = self.check_job(job_id).await?;
+        let binary_path = match &job.status {
+            JobStatus::ReadyForReenactment { binary_path } => PathBuf::from(binary_path),
+            JobStatus::ScheduledUpdate { binary_path } => PathBuf::from(binary_path),
+            other => {
+                return Err(HarnessError::EvolverError(format!(
+                    "Job '{}' is not ready for re-enactment (status: {:?})",
+                    job_id, other
+                )))
+            }
+        };
+
+        if !binary_path.exists() {
+            return Err(HarnessError::EvolverError(format!(
+                "Worktree binary does not exist at {}",
+                binary_path.display()
+            )));
+        }
+
+        let wt_dir = PathBuf::from(&job.worktree_dir);
+
+        // Run scenario in PTY
+        let (code, output) = run_in_pty(
+            &binary_path,
+            &[],
+            &wt_dir,
+            scenario_input,
+            Duration::from_secs(45),
+        )?;
+
+        // Differential verification: exit code 0 and absent pattern not in output
+        if code != 0 {
+            let reason = format!("PTY execution failed with exit code {}:\n{}", code, output);
+            job.status = JobStatus::FailedVerification {
+                reason: reason.clone(),
+            };
+            job.updated_at = Utc::now();
+            job.logs.push(format!("Verification failed: {}", reason));
+            let _ = self.save_job(&job).await;
+            // Clean up worktree on failure
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force", &job.worktree_dir])
+                .current_dir(&self.repo_root)
+                .output();
+            return Err(HarnessError::EvolverError(reason));
+        }
+
+        if let Some(pattern) = absent_pattern {
+            if output.contains(pattern) {
+                let reason = format!(
+                    "Regression check failed: forbidden pattern '{}' found in output:\n{}",
+                    pattern, output
+                );
+                job.status = JobStatus::FailedVerification {
+                    reason: reason.clone(),
+                };
+                job.updated_at = Utc::now();
+                job.logs.push(format!("Verification failed: {}", reason));
+                let _ = self.save_job(&job).await;
+                let _ = Command::new("git")
+                    .args(["worktree", "remove", "--force", &job.worktree_dir])
+                    .current_dir(&self.repo_root)
+                    .output();
+                return Err(HarnessError::EvolverError(reason));
+            }
+        }
+
+        // Verification passed! Stage pending update
+        job.status = JobStatus::ScheduledUpdate {
+            binary_path: binary_path.to_string_lossy().to_string(),
+        };
+        job.updated_at = Utc::now();
+        job.logs.push("PTY scenario verification passed. Staged pending update.".to_string());
+        self.save_job(&job).await?;
+
+        let pending = PendingUpdate {
+            job_id: job.id.clone(),
+            task: job.task.clone(),
+            branch: job.branch.clone(),
+            worktree_dir: job.worktree_dir.clone(),
+            binary_path: binary_path.to_string_lossy().to_string(),
+            staged_at: Utc::now(),
+        };
+
+        let pending_json = serde_json::to_string_pretty(&pending)
+            .map_err(|e| HarnessError::EvolverError(e.to_string()))?;
+        fs::write(self.jobs_dir.join("pending_update.json"), pending_json)
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+        Ok(format!(
+            "Job '{}' successfully verified! Update is scheduled to apply on next launch.",
+            job_id
+        ))
+    }
+
+    pub fn get_pending_update(&self) -> Option<PendingUpdate> {
+        let path = self.jobs_dir.join("pending_update.json");
+        if path.exists() {
+            let data = fs::read_to_string(path).ok()?;
+            serde_json::from_str(&data).ok()
+        } else {
+            None
+        }
+    }
+
+    async fn save_job(&self, job: &JobRecord) -> Result<(), HarnessError> {
+        let _ = fs::create_dir_all(&self.jobs_dir);
+        let path = self.jobs_dir.join(format!("{}.json", job.id));
+        let data = serde_json::to_string_pretty(job)
+            .map_err(|e| HarnessError::EvolverError(e.to_string()))?;
+        fs::write(path, data).map_err(|e| HarnessError::Io(e.to_string()))?;
+        Ok(())
+    }
+}
+
+async fn run_engineer_job(
+    repo_root: PathBuf,
+    jobs_dir: PathBuf,
+    provider: Arc<dyn ModelProvider>,
+    job_id: String,
+    branch: String,
+    worktree_dir: PathBuf,
+    task: String,
+    evidence: Option<String>,
+) -> Result<(), HarnessError> {
+    let job_file = jobs_dir.join(format!("{}.json", job_id));
+    let mut record: JobRecord = {
+        let data = fs::read_to_string(&job_file)
+            .map_err(|e| HarnessError::Io(format!("Failed to read job file: {}", e)))?;
+        serde_json::from_str(&data)
+            .map_err(|e| HarnessError::EvolverError(format!("Failed to parse job JSON: {}", e)))?
+    };
+
+    record.status = JobStatus::Running;
+    record.updated_at = Utc::now();
+    record.logs.push(format!("Creating git worktree at {} on branch {}", worktree_dir.display(), branch));
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+
+    // 1. Create worktree
+    let wt_parent = worktree_dir.parent().unwrap_or(&repo_root);
+    let _ = fs::create_dir_all(wt_parent);
+
+    let add_res = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            &worktree_dir.to_string_lossy(),
+            "main",
+        ])
+        .current_dir(&repo_root)
+        .output();
+
+    match add_res {
+        Ok(out) if out.status.success() => {
+            record.logs.push("Git worktree created successfully.".to_string());
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            record.status = JobStatus::FailedTest {
+                error: format!("git worktree add failed: {}", err),
+            };
+            record.updated_at = Utc::now();
+            let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            return Err(HarnessError::EvolverError(err));
+        }
+        Err(e) => {
+            record.status = JobStatus::FailedTest {
+                error: format!("Failed to run git: {}", e),
+            };
+            record.updated_at = Utc::now();
+            let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            return Err(HarnessError::Io(e.to_string()));
+        }
+    }
+
+    // 2. Setup tools for engineer agent
+    let read_cache = ReadCache::new();
+    let registry = Arc::new(DefaultToolRegistry::new());
+    registry
+        .register(Arc::new(ReadFileTool::new(
+            worktree_dir.clone(),
+            100_000,
+            read_cache.clone(),
+        )))
+        .await?;
+    registry
+        .register(Arc::new(WriteFileTool::new(
+            worktree_dir.clone(),
+            read_cache.clone(),
+        )))
+        .await?;
+    registry
+        .register(Arc::new(PatchTool::new(
+            worktree_dir.clone(),
+            read_cache.clone(),
+        )))
+        .await?;
+    registry
+        .register(Arc::new(SearchFilesTool::new(worktree_dir.clone())))
+        .await?;
+    registry
+        .register(Arc::new(TerminalTool::new(
+            worktree_dir.clone(),
+            180,
+            50_000,
+        )))
+        .await?;
+
+    let agent_config = AgentConfig {
+        require_hitl_for_mutation: false,
+        system_prompt_prefix: Some(prompts::section(prompts::ENGINEER_SYSTEM_PROMPT).unwrap_or_default()),
+        ..Default::default()
+    };
+
+    let engineer_agent = Agent::new(
+        Arc::new(provider),
+        Arc::new(NoopMemory),
+        Arc::new(NoopNotes),
+        Arc::new(NoopEvolver),
+        registry,
+        agent_config,
+    );
+
+    // Initial prompt
+    let user_prompt = format!(
+        "Task to implement in Luna harness codebase:\n{}\n\nEvidence and reproduction context:\n{}\n\nInspect code, make surgical modifications, and run `cargo test --workspace` via the terminal tool to verify. Report your conclusion when done.",
+        task,
+        evidence.as_deref().unwrap_or("None provided")
+    );
+
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let turn_res = engineer_agent.run_turn(&user_prompt, cancel_token).await;
+
+    match turn_res {
+        Ok(outcome) => {
+            record.logs.push(format!("Engineer finished turn: {}", outcome.reply));
+        }
+        Err(e) => {
+            record.logs.push(format!("Engineer turn error: {}", e));
+        }
+    }
+
+    // 3. Dual-gate Gate 1: cargo test --workspace inside worktree
+    record.logs.push("Running `cargo test --workspace` verification gate...".to_string());
+    let test_res = Command::new("cargo")
+        .args(["test", "--workspace"])
+        .current_dir(&worktree_dir)
+        .output();
+
+    let tests_passed = match test_res {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            record.status = JobStatus::FailedTest {
+                error: format!("cargo test failed:\n{}\n{}", stdout, stderr),
+            };
+            false
+        }
+        Err(e) => {
+            record.status = JobStatus::FailedTest {
+                error: format!("Failed to spawn cargo test: {}", e),
+            };
+            false
+        }
+    };
+
+    if !tests_passed {
+        record.updated_at = Utc::now();
+        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        // Clean up worktree
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
+            .current_dir(&repo_root)
+            .output();
+        return Ok(());
+    }
+
+    record.logs.push("Gate 1 passed: `cargo test --workspace` clean.".to_string());
+
+    // Build release binary
+    record.logs.push("Compiling release binary in worktree...".to_string());
+    let build_res = Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&worktree_dir)
+        .output();
+
+    let build_ok = match build_res {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            record.status = JobStatus::FailedTest {
+                error: format!("cargo build --release failed:\n{}", stderr),
+            };
+            false
+        }
+        Err(e) => {
+            record.status = JobStatus::FailedTest {
+                error: format!("Failed to spawn cargo build: {}", e),
+            };
+            false
+        }
+    };
+
+    if !build_ok {
+        record.updated_at = Utc::now();
+        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
+            .current_dir(&repo_root)
+            .output();
+        return Ok(());
+    }
+
+    let binary_path = worktree_dir.join("target/release/luna");
+    record.status = JobStatus::ReadyForReenactment {
+        binary_path: binary_path.to_string_lossy().to_string(),
+    };
+    record.updated_at = Utc::now();
+    record.logs.push(format!(
+        "Worktree binary built at {}. Ready for scenario re-enactment.",
+        binary_path.display()
+    ));
+
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    Ok(())
+}
+
+/// Applies a pending update: merges git branch, swaps binary, cleans worktree and branch.
+pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Option<String>, HarnessError> {
+    let pending_file = jobs_dir.join("pending_update.json");
+    if !pending_file.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read_to_string(&pending_file)
+        .map_err(|e| HarnessError::Io(format!("Failed to read pending update file: {}", e)))?;
+    let pending: PendingUpdate = serde_json::from_str(&data)
+        .map_err(|e| HarnessError::EvolverError(format!("Failed to parse pending update: {}", e)))?;
+
+    info!("Applying pending update for job {}", pending.job_id);
+
+    // 1. Merge branch into main
+    let merge_out = Command::new("git")
+        .args(["merge", "--no-edit", &pending.branch])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| HarnessError::Io(format!("Failed to execute git merge: {}", e)))?;
+
+    if !merge_out.status.success() {
+        let err = String::from_utf8_lossy(&merge_out.stderr).to_string();
+        return Err(HarnessError::EvolverError(format!(
+            "Failed to merge branch {} into main: {}",
+            pending.branch, err
+        )));
+    }
+
+    // 2. Replace release binary
+    let target_binary = repo_root.join("target/release/luna");
+    let src_binary = PathBuf::from(&pending.binary_path);
+    if src_binary.exists() {
+        let _ = fs::copy(&src_binary, &target_binary);
+    }
+
+    // 3. Clean up worktree and branch
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", &pending.worktree_dir])
+        .current_dir(repo_root)
+        .output();
+
+    let _ = Command::new("git")
+        .args(["branch", "-D", &pending.branch])
+        .current_dir(repo_root)
+        .output();
+
+    // 4. Delete pending update marker
+    let _ = fs::remove_file(&pending_file);
+
+    Ok(Some(format!(
+        "Successfully applied improvement from job '{}': {}",
+        pending.job_id, pending.task
+    )))
 }
 
 #[async_trait]
@@ -96,79 +603,86 @@ impl EvolverEngine for CodebaseEvolver {
         }
     }
 
-    async fn propose_patch(&self, description: &str, diff_or_content: &str) -> Result<String, HarnessError> {
-        // Accepts json payload or content
-        let (file, content) = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(diff_or_content) {
-            let f = json_val.get("file").and_then(|f| f.as_str()).unwrap_or("").to_string();
-            let c = json_val.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-            (f, c)
-        } else {
-            ("crates/harness-core/src/lib.rs".to_string(), diff_or_content.to_string())
-        };
-
-        self.stage_file_patch(description, &file, &content).await
+    async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
+        Err(HarnessError::EvolverError("propose_patch is deprecated; use delegate_improvement".to_string()))
     }
 
-    async fn test_patch_sandbox(&self, patch_id: &str) -> Result<bool, HarnessError> {
-        let patch = {
-            let map = self.staged_patches.read().await;
-            map.get(patch_id).cloned().ok_or_else(|| {
-                HarnessError::EvolverError(format!("Staged patch '{}' not found", patch_id))
-            })?
-        };
-
-        info!("Testing patch '{}' in sandbox", patch_id);
-        let res = self
-            .sandbox
-            .verify_patch(&patch.target_file, &patch.patched_content)
-            .await;
-
-        match res {
-            Ok(_) => {
-                let mut map = self.staged_patches.write().await;
-                if let Some(p) = map.get_mut(patch_id) {
-                    p.is_verified = true;
-                }
-                Ok(true)
-            }
-            Err(e) => {
-                warn!("Patch '{}' failed sandbox verification: {}", patch_id, e);
-                Err(e)
-            }
-        }
+    async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, HarnessError> {
+        Err(HarnessError::EvolverError("test_patch_sandbox is deprecated; use delegate_improvement".to_string()))
     }
 
-    async fn apply_patch(&self, patch_id: &str) -> Result<(), HarnessError> {
-        let patch = {
-            let map = self.staged_patches.read().await;
-            map.get(patch_id).cloned().ok_or_else(|| {
-                HarnessError::EvolverError(format!("Staged patch '{}' not found", patch_id))
-            })?
-        };
+    async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::EvolverError("apply_patch is deprecated; use delegate_improvement".to_string()))
+    }
 
-        let target_path = self.repo_root.join(&patch.target_file);
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| HarnessError::Io(e.to_string()))?;
-        }
+    async fn preview_patch(&self, _patch_id: &str) -> Option<ToolPreview> {
+        None
+    }
+}
 
-        fs::write(&target_path, &patch.patched_content).map_err(|e| HarnessError::Io(e.to_string()))?;
-        info!("Applied patch '{}' to {}", patch_id, target_path.display());
+// Minimal no-op engines for the ephemeral engineer subagent
+#[derive(Clone)]
+struct NoopMemory;
+
+#[async_trait]
+impl MemoryEngine for NoopMemory {
+    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
         Ok(())
     }
+    async fn update(&self, _id: &str, _updated: &MemoryRecord) -> Result<(), HarnessError> {
+        Ok(())
+    }
+    async fn forget(&self, _id: &str) -> Result<(), HarnessError> {
+        Ok(())
+    }
+    async fn add_note_pointer(&self, _note_id: &str, _pointer: &str) -> Result<(), HarnessError> {
+        Ok(())
+    }
+    fn format_as_system_prompt(&self, _memories: &[MemoryRecord]) -> String {
+        String::new()
+    }
+}
 
-    /// The review material for the approval gate: which file, and the unified diff of staged
-    /// content against the file on disk right now.
-    async fn preview_patch(&self, patch_id: &str) -> Option<ToolPreview> {
-        let patch = {
-            let map = self.staged_patches.read().await;
-            map.get(patch_id).cloned()?
-        };
-        let on_disk = fs::read_to_string(self.repo_root.join(&patch.target_file)).ok();
-        let old = on_disk.as_deref().unwrap_or(&patch.original_content);
+#[derive(Clone)]
+struct NoopNotes;
 
-        Some(ToolPreview {
-            target: Some(patch.target_file.clone()),
-            diff: Some(unified_diff(old, &patch.patched_content, &patch.target_file)),
-        })
+#[async_trait]
+impl NotesEngine for NoopNotes {
+    async fn save_note(&self, _title: &str, _content: &str, _tags: &[String]) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+    }
+    async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+    }
+    async fn update_note(&self, _id: &str, _t: Option<&str>, _c: Option<&str>, _tags: Option<&[String]>) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+    }
+    async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
+        Ok(false)
+    }
+}
+
+#[derive(Clone)]
+struct NoopEvolver;
+
+#[async_trait]
+impl EvolverEngine for NoopEvolver {
+    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
+        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+    }
+    async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
+        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+    }
+    async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, HarnessError> {
+        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+    }
+    async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
     }
 }

@@ -102,7 +102,8 @@ pub fn wrap_rows(text: &str, width: usize) -> Vec<String> {
 
 /// The dimmed rendering of reasoning text as transcript rows.
 pub fn reasoning_rows(text: &str, width: usize) -> Vec<String> {
-    wrap_rows(text, width)
+    let wrap_width = width.saturating_sub(4).max(20);
+    wrap_rows(text, wrap_width)
         .into_iter()
         .map(|row| format!("  {}", row.dimmed()))
         .collect()

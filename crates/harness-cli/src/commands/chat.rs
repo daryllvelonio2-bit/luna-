@@ -10,12 +10,15 @@ use harness_core::{
     Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
     ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
 };
-use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
+use harness_evolver::{
+    apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
+    InspectSourceTool, ListImprovementJobsTool, VerifyAndStageUpdateTool,
+};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
 };
 use harness_notes::{
-    ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
+    DeleteNoteTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
 };
 use harness_providers::{
     get_default_model, get_provider_catalog, get_context_window, CredentialManager, GenericProviderClient,
@@ -115,8 +118,6 @@ struct Activity {
 struct LiveRegion {
     /// Reasoning accumulated for the current block and not yet settled into the transcript.
     reasoning: String,
-    /// Reasoning rows already copied into the transcript, so a redraw does not repeat them.
-    settled_rows: usize,
     /// The running tool, if any.
     activity: Option<Activity>,
     /// Rows currently on screen, so the next frame can erase exactly this many.
@@ -173,23 +174,16 @@ impl ChatUi {
     /// transcript, so the block reads in order once a tool call or the reply follows it.
     fn finish_reasoning(&self) {
         let rows = {
-            let live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap();
             if live.reasoning.is_empty() {
                 return;
             }
-            reasoning_rows(&live.reasoning, get_terminal_width())
+            let text = std::mem::take(&mut live.reasoning);
+            reasoning_rows(&text, get_terminal_width())
         };
-        let unsettled = {
-            let mut live = self.live.lock().unwrap();
-            let start = live.settled_rows.min(rows.len());
-            let remaining = rows[start..].to_vec();
-            live.reasoning.clear();
-            live.settled_rows = 0;
-            remaining
-        };
-        if !unsettled.is_empty() {
+        if !rows.is_empty() {
             self.begin_block(OutputBlockKind::Thinking);
-            self.emit_above(&unsettled.join("\n"));
+            self.emit_above(&rows.join("\n"));
         }
     }
 
@@ -210,18 +204,7 @@ impl ChatUi {
 
     /// Erase the live region and the composer box cleanly, e.g. before an approval prompt.
     fn clear_live_and_box(&self) {
-        if !self.is_attended {
-            return;
-        }
-        self.erase_box();
-        let previous = {
-            let mut live = self.live.lock().unwrap();
-            let prev = live.rows.len();
-            live.rows.clear();
-            live.activity = None;
-            prev
-        };
-        self.erase_live(previous);
+        self.clear_box_on_exit();
     }
 
     fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
@@ -291,6 +274,22 @@ impl ChatUi {
         }
     }
 
+    /// Erase the four composer rows plus any live region rows, leaving the cursor at the top row
+    /// where the live region started.
+    fn erase_live_and_box(&self, previous_live_rows: usize) {
+        if !self.is_attended {
+            return;
+        }
+        let total = previous_live_rows + 4;
+        print!("\x1b[1B");
+        for i in 0..total {
+            print!("\r\x1b[2K");
+            if i + 1 < total {
+                print!("\x1b[1A");
+            }
+        }
+    }
+
     /// Write transcript text above the live region and the composer.
     fn emit_above(&self, text: &str) {
         if !self.is_attended {
@@ -299,14 +298,13 @@ impl ChatUi {
         }
         let buf = self.input_buf.lock().unwrap();
         let width = get_terminal_width();
-        self.erase_box();
         let previous = {
             let mut live = self.live.lock().unwrap();
             let prev = live.rows.len();
             live.rows.clear();
             prev
         };
-        self.erase_live(previous);
+        self.erase_live_and_box(previous);
         println!("{}", text);
         self.draw_box(width, &buf);
     }
@@ -322,44 +320,37 @@ impl ChatUi {
         }
         let buf = self.input_buf.lock().unwrap();
         let width = get_terminal_width();
-        self.erase_box();
         let previous = {
             let mut live = self.live.lock().unwrap();
-            let previous = live.rows.len();
+            let prev = live.rows.len();
             live.rows = rows.clone();
-            previous
+            prev
         };
-        self.erase_live(previous);
+        self.erase_live_and_box(previous);
         for row in &rows {
             println!("{}", row);
         }
         self.draw_box(width, &buf);
     }
 
-    /// Advance the live region one frame: settle reasoning rows that have scrolled past the tail
-    /// into the transcript, refresh the elapsed time, and step the spinner.
+    /// Advance the live region one frame: refresh the elapsed time, step the spinner, and show
+    /// the tail of the streaming reasoning.
     fn animate_tick(&self) {
         if !self.is_attended {
             return;
         }
         let width = get_terminal_width();
 
-        let (settled, rows) = {
+        let rows = {
             let mut live = self.live.lock().unwrap();
             let all = if live.reasoning.is_empty() {
                 Vec::new()
             } else {
                 reasoning_rows(&live.reasoning, width)
             };
-            let keep = all.len().saturating_sub(LIVE_REASONING_ROWS);
-            let settled = if keep > live.settled_rows {
-                all[live.settled_rows..keep].to_vec()
-            } else {
-                Vec::new()
-            };
-            live.settled_rows = live.settled_rows.max(keep);
+            let start = all.len().saturating_sub(LIVE_REASONING_ROWS);
+            let mut rows = all[start..].to_vec();
 
-            let mut rows = all[keep..].to_vec();
             if let Some(activity) = &mut live.activity {
                 activity.frame = activity.frame.wrapping_add(1);
                 rows.push(activity_line(
@@ -368,43 +359,14 @@ impl ChatUi {
                     activity.started.elapsed(),
                 ));
             }
-            (settled, rows)
+            rows
         };
 
         if rows.is_empty() && self.live.lock().unwrap().rows.is_empty() {
             return;
         }
 
-        if !settled.is_empty() {
-            self.begin_block(OutputBlockKind::Thinking);
-            self.emit_above(&settled.join("\n"));
-        }
         self.set_live(rows);
-    }
-
-    /// Erase the four composer rows, leaving the cursor on the row that held the status line —
-    /// i.e. the first row below the live region.
-    fn erase_box(&self) {
-        let has_status = self.status.lock().unwrap().is_some();
-        if has_status {
-            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-        } else {
-            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-        }
-    }
-
-    /// Erase `height` rows ending just above the cursor, leaving the cursor on the first of them.
-    fn erase_live(&self, height: usize) {
-        if height == 0 {
-            return;
-        }
-        print!("\x1b[1A");
-        for index in 0..height {
-            print!("\r\x1b[2K");
-            if index + 1 < height {
-                print!("\x1b[1A");
-            }
-        }
     }
 
     /// Draw the composer: status line, divider, prompt row, divider.
@@ -477,12 +439,14 @@ impl ChatUi {
         if !self.is_attended {
             return;
         }
-        let has_status = self.status.lock().unwrap().is_some();
-        if has_status {
-            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-        } else {
-            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-        }
+        let previous = {
+            let mut live = self.live.lock().unwrap();
+            let prev = live.rows.len();
+            live.rows.clear();
+            live.activity = None;
+            prev
+        };
+        self.erase_live_and_box(previous);
         let _ = io::stdout().flush();
     }
 }
@@ -567,7 +531,13 @@ pub async fn run_interactive_chat(
 
     let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
-    let evolver = Arc::new(CodebaseEvolver::new(config.paths.workspace_root.clone()));
+    let evolver = Arc::new(
+        CodebaseEvolver::new(
+            config.paths.workspace_root.clone(),
+            config.paths.jobs_dir.clone(),
+        )
+        .with_provider(provider.clone()),
+    );
 
     let registry = Arc::new(DefaultToolRegistry::new());
 
@@ -581,11 +551,24 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await?;
     registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
+    registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
 
     // Register self-improvement evolver tools
     registry.register(Arc::new(InspectSourceTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone()))).await?;
+
+    // Register skills from skills_dir
+    let _ = std::fs::create_dir_all(&config.paths.skills_dir);
+    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
+        for skill in skills {
+            registry
+                .register(Arc::new(harness_plugins::SkillToolAdapter::new(skill)))
+                .await?;
+        }
+    }
 
     // Register core filesystem and shell tools (§2.2)
     let read_cache = harness_core::tools::ReadCache::new();
@@ -610,7 +593,7 @@ pub async fn run_interactive_chat(
         provider,
         memory,
         notes,
-        evolver,
+        evolver.clone(),
         registry,
         config.agent.clone(),
     )
@@ -705,6 +688,42 @@ pub async fn run_interactive_chat(
             }
         }
         return Ok(());
+    }
+
+    // Check for pending self-improvement update before clearing the screen
+    if is_attended {
+        if let Some(pending) = evolver.get_pending_update() {
+            print!(
+                "An improved version of Luna is ready (job {}: {}). Apply now? [Y/n] ",
+                pending.job_id, pending.task
+            );
+            let _ = io::stdout().flush();
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer).is_ok() {
+                let trimmed = answer.trim();
+                if trimmed.is_empty()
+                    || trimmed.eq_ignore_ascii_case("y")
+                    || trimmed.eq_ignore_ascii_case("yes")
+                {
+                    match apply_update_at_startup(
+                        &config.paths.workspace_root,
+                        &config.paths.jobs_dir,
+                    ) {
+                        Ok(Some(msg)) => {
+                            println!("{}", msg.green());
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("{} Failed to apply update: {}", "✖".red(), e);
+                            std::thread::sleep(std::time::Duration::from_millis(1200));
+                        }
+                    }
+                } else {
+                    println!("Update deferred.");
+                }
+            }
+        }
     }
 
     // Start from a clean screen: launching the REPL shouldn't leave whatever the shell was
