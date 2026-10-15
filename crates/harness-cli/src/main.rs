@@ -168,7 +168,18 @@ async fn main() -> Result<(), HarnessError> {
 
     let mut config: Config = config::resolve(&layers)?.into_config();
 
-    init_telemetry(cli.json || config.telemetry.json, &config.telemetry.level);
+    let is_interactive_chat = match &cli.command {
+        None | Some(Commands::Chat { .. }) => dialoguer::console::Term::stdout().features().is_attended(),
+        _ => false,
+    };
+
+    let log_level = if is_interactive_chat && std::env::var("RUST_LOG").is_err() && !cli.json {
+        "harness=warn,harness_cli=warn"
+    } else {
+        &config.telemetry.level
+    };
+
+    init_telemetry(cli.json || config.telemetry.json, log_level);
 
     // The credential manager's own error (unreadable/corrupt store) must reach the user: the
     // corrupt-store defect this merge fixes is exactly a `CredentialManager::new` that used to

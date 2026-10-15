@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
 use crate::error::HarnessError;
@@ -34,7 +34,7 @@ impl Default for AgentConfig {
             max_consecutive_failures: 5,
             require_hitl_for_mutation: true,
             system_prompt_prefix: None,
-            compact_at_tokens: 60_000,
+            compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,
             compaction_provider: None,
@@ -254,7 +254,7 @@ where
         };
 
         // Tool name and target only: never file contents, never the argument blob.
-        info!(
+        debug!(
             tool = %request.tool,
             target = %request.target.as_deref().unwrap_or("-"),
             "mutating tool call needs approval"
@@ -529,7 +529,7 @@ where
             return Ok(None);
         }
 
-        info!(
+        debug!(
             "Transcript estimate {} tokens exceeds agent.compact_at_tokens = {}; compacting",
             estimate.tokens, self.config.compact_at_tokens
         );
@@ -546,7 +546,7 @@ where
                 Err(failure) => {
                     // Non-fatal by design: the transcript is unchanged, the turn runs on the full
                     // history, and this turn makes no second attempt.
-                    warn!("Compaction failed, continuing on the full transcript: {}", failure);
+                    debug!("Compaction failed, continuing on the full transcript: {}", failure);
                     return Ok(None);
                 }
             };

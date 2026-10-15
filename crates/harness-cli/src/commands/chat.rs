@@ -418,16 +418,16 @@ pub async fn run_interactive_chat(
                                 compaction.turns, compaction.session_id
                             ).dimmed().to_string());
                         }
-                        ui.print_above(&format!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply));
+                        ui.print_above(&format!("{}\n{}", "Luna >".bold().green(), outcome.reply));
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
-                        ui.print_above(&format!("{}\n", "✖ Cancelled".red()));
+                        ui.print_above(&format!("{}", "✖ Cancelled".red()));
                     }
                     Ok(Err(e)) => {
-                        ui.print_above(&format!("\n{} Error: {}\n", "✖".red().bold(), e));
+                        ui.print_above(&format!("{} Error: {}", "✖".red().bold(), e));
                     }
                     Err(join_err) => {
-                        ui.print_above(&format!("\n{} Task join error: {}\n", "✖".red().bold(), join_err));
+                        ui.print_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
                     }
                 }
                 first_turn = false;
