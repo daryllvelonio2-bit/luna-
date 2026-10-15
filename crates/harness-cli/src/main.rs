@@ -5,11 +5,13 @@ use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_telemetry::init_telemetry;
 
 mod commands;
+mod eval;
 use commands::auth::{handle_auth_command, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::models::{handle_models_command, ModelsCommand};
 use commands::supervisor::run_supervisor_loop;
 use commands::voice::run_voice_loop;
+use eval::command::{handle_eval_command, EvalCommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "luna", author = "Luna AI", version = "0.1.0", about = "Autonomous AI Agent Harness in Rust")]
@@ -52,6 +54,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run the scripted end-to-end scenario suite (offline fake provider, or live NIM)
+    Eval {
+        #[command(subcommand)]
+        subcommand: EvalCommand,
+    },
 }
 
 #[tokio::main]
@@ -77,6 +84,9 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Supervisor { args }) => {
             run_supervisor_loop(args).await?;
+        }
+        Some(Commands::Eval { subcommand }) => {
+            handle_eval_command(subcommand, cred_manager, discovery).await?;
         }
         None => {
             // Default to chat if no subcommand specified

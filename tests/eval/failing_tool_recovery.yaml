@@ -1,0 +1,26 @@
+# A failing tool must not end the turn: the loop feeds the error back and keeps going, and one later
+# successful call must reset the failure counter.
+case: failing-tool-recovery
+prompt: Call eval_fail, then call eval_echo with the text recovered, then summarise what happened.
+tools:
+  - eval_fail
+  - eval_echo
+script:
+  - tool_calls:
+      - name: eval_fail
+        arguments: { message: "simulated eval failure" }
+  - tool_calls:
+      - name: eval_echo
+        arguments: { text: "recovered" }
+  - answer: eval_fail reported a simulated failure, then eval_echo returned recovered.
+expect:
+  tool_calls:
+    - name: eval_fail
+      arguments_contain: { message: "simulated eval failure" }
+      error: true
+    - name: eval_echo
+      arguments_contain: { text: "recovered" }
+      error: false
+  final_answer_contains:
+    - "recovered"
+  files: []

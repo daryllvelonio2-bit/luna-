@@ -1,0 +1,23 @@
+# Denied-approval turn: the tool call must surface as an error to the model, the tool must not run,
+# and nothing may reach the filesystem.
+case: denied-approval
+prompt: Write the text must-not-land into the file blocked.txt.
+tools:
+  - eval_write_file
+approval:
+  deny:
+    - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "blocked.txt", content: "must-not-land" }
+  - answer: I could not write blocked.txt because approval was denied.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      error: true
+  final_answer_contains:
+    - "denied"
+  files:
+    - path: blocked.txt
+      exists: false
