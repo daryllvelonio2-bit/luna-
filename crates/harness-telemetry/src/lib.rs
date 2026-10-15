@@ -47,9 +47,12 @@ impl TokenTracker {
     }
 }
 
-pub fn init_telemetry(json_format: bool) {
+/// Initialize tracing. `env_filter` is the resolved `telemetry.level` config value (a
+/// `tracing_subscriber::EnvFilter` directive string); `RUST_LOG` still wins when it is set,
+/// because that is the ecosystem-wide env layer.
+pub fn init_telemetry(json_format: bool, env_filter: &str) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("harness=info,harness_cli=info"));
+        .unwrap_or_else(|_| EnvFilter::new(env_filter));
 
     if json_format {
         tracing_subscriber::registry()

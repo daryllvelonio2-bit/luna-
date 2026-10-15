@@ -6,19 +6,31 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 use harness_core::{
-    CompletionOptions, HarnessError, Message, ModelProvider, Role, StreamEvent, TokenUsage,
-    ToolCall, ToolDefinition,
+    config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider, Role,
+    StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::auth::CredentialManager;
-use crate::catalog::{find_provider, AuthHeaderFormat};
+use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
 use crate::discovery::ModelDiscovery;
+
+/// A `reqwest` client for one provider, with the per-provider timeout the config resolved
+/// (`providers.<id>.timeout_secs`, default `catalog::DEFAULT_TIMEOUT_SECS`).
+pub(crate) fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|error| {
+            HarnessError::ConfigurationError(format!("failed to build the HTTP client: {}", error))
+        })
+}
 
 pub struct GenericProviderClient {
     provider_id: String,
     base_url: String,
+    auth_format: AuthHeaderFormat,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
     http_client: reqwest::Client,
@@ -26,32 +38,33 @@ pub struct GenericProviderClient {
 }
 
 impl GenericProviderClient {
+    /// `overrides` is the resolved `providers.<id>.*` config; the catalog supplies whatever the
+    /// user left unset. An unknown provider id is an error rather than a fallback to another
+    /// vendor's endpoint — see `catalog::resolve_descriptor`.
     pub fn new(
         provider_id: impl Into<String>,
-        base_url: Option<String>,
         default_model: impl Into<String>,
         cred_manager: Arc<CredentialManager>,
         discovery: Arc<ModelDiscovery>,
-    ) -> Self {
+        overrides: Option<&ProviderOverride>,
+    ) -> Result<Self, HarnessError> {
         let p_id = provider_id.into();
-        let default_url = find_provider(&p_id)
-            .map(|p| p.default_base_url)
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let descriptor = resolve_descriptor(&p_id, overrides)?;
 
-        Self {
+        Ok(Self {
             provider_id: p_id,
-            base_url: base_url.unwrap_or(default_url),
+            base_url: descriptor.default_base_url,
+            auth_format: descriptor.auth_header_format,
             cred_manager,
             discovery,
-            http_client: reqwest::Client::builder().build().unwrap(),
+            http_client: build_http_client(descriptor.timeout_secs)?,
             default_model: default_model.into(),
-        }
+        })
     }
 
     /// Builds the auth headers for one request and returns the secret that was used, so a failing
     /// request can tell the [`CredentialManager`] *which* credential to retire.
     async fn build_auth_headers(&self) -> Result<(HeaderMap, Option<String>, SecretString), HarnessError> {
-        let descriptor = find_provider(&self.provider_id);
         let secret = self.cred_manager.acquire_credential(&self.provider_id).await?;
         let api_key = secret.expose_secret().to_string();
 
@@ -59,11 +72,7 @@ impl GenericProviderClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let mut query_param = None;
 
-        let auth_format = descriptor
-            .map(|d| d.auth_header_format)
-            .unwrap_or(AuthHeaderFormat::Bearer);
-
-        match auth_format {
+        match self.auth_format.clone() {
             AuthHeaderFormat::Bearer => {
                 headers.insert(
                     AUTHORIZATION,

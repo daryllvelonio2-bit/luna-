@@ -9,25 +9,29 @@ use harness_providers::{CredentialManager, ModelDiscovery};
 pub enum ModelsCommand {
     /// List dynamically discovered models for a provider
     List {
-        #[arg(short, long, default_value = "openai")]
-        provider: String,
+        /// Provider id; without it, `model.provider` from the config file
+        #[arg(short, long)]
+        provider: Option<String>,
         #[arg(short, long)]
         refresh: bool,
     },
     /// Force refresh dynamic model discovery cache
     Refresh {
-        #[arg(short, long, default_value = "openai")]
-        provider: String,
+        /// Provider id; without it, `model.provider` from the config file
+        #[arg(short, long)]
+        provider: Option<String>,
     },
 }
 
 pub async fn handle_models_command(
     cmd: ModelsCommand,
+    default_provider: &str,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
 ) -> Result<(), HarnessError> {
     match cmd {
         ModelsCommand::List { provider, refresh } => {
+            let provider = provider.unwrap_or_else(|| default_provider.to_string());
             println!("Querying models for provider '{}'...", provider.cyan());
             match discovery.get_models(&provider, &cred_manager, refresh).await {
                 Ok(models) => {
@@ -42,6 +46,7 @@ pub async fn handle_models_command(
             }
         }
         ModelsCommand::Refresh { provider } => {
+            let provider = provider.unwrap_or_else(|| default_provider.to_string());
             println!("Force-refreshing model catalog for '{}'...", provider.cyan());
             match discovery.get_models(&provider, &cred_manager, true).await {
                 Ok(models) => {

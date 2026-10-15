@@ -6,9 +6,11 @@
 //! revoked or rate-limited key stayed selected forever. These tests cover both halves: the manager
 //! primitive, and the client reporting a 401/429 back to it.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use harness_core::config::ProviderOverride;
 use harness_core::{CompletionOptions, Message, ModelProvider};
 use harness_providers::{
     CredentialManager, GenericProviderClient, ModelDiscovery, RotationStrategy,
@@ -60,13 +62,23 @@ async fn stub_provider(status_line: &'static str) -> (String, JoinHandle<String>
 }
 
 fn client_for(base_url: String, mgr: &Arc<CredentialManager>, dir: &tempfile::TempDir) -> GenericProviderClient {
+    // The base URL is a `providers.<id>.*` config override now, not a constructor argument.
+    let overrides = ProviderOverride {
+        base_url: Some(base_url),
+        ..Default::default()
+    };
     GenericProviderClient::new(
         "openai",
-        Some(base_url),
         "gpt-4o",
         mgr.clone(),
-        Arc::new(ModelDiscovery::new(Some(dir.path().join("models_cache.json")), 1)),
+        Arc::new(ModelDiscovery::new(
+            Some(dir.path().join("models_cache.json")),
+            1,
+            BTreeMap::new(),
+        )),
+        Some(&overrides),
     )
+    .expect("a known provider with a valid base URL builds a client")
 }
 
 #[tokio::test]

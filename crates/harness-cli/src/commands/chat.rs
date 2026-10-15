@@ -3,7 +3,7 @@ use std::sync::Arc;
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{Agent, AgentConfig, DefaultToolRegistry, HarnessError, ToolRegistry};
+use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
@@ -13,30 +13,34 @@ use harness_notes::{
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
+/// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
+/// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
 pub async fn run_interactive_chat(
-    provider_id: String,
-    model: Option<String>,
+    config: Config,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
 ) -> Result<(), HarnessError> {
+    let provider_id = config.model.provider.clone();
+    let model = config.model.default.clone();
+
     println!("{}", "==================================================".cyan());
     println!("{}", "   Luna Autonomous AI Agent Harness (Interactive)  ".bold().cyan());
     println!("{}", "==================================================".cyan());
     println!("Provider: {}", provider_id.green());
-    println!("Model:    {}", model.as_deref().unwrap_or("default").green());
+    println!("Model:    {}", model.green());
     println!("Type 'exit' or 'quit' to terminate session.\n");
 
     let provider = Arc::new(GenericProviderClient::new(
         provider_id.clone(),
-        None,
-        model.unwrap_or_else(|| "gpt-4o".to_string()),
+        model,
         cred_manager.clone(),
         discovery.clone(),
-    ));
+        config.providers.get(&provider_id),
+    )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(None)?);
-    let notes = Arc::new(SqliteNotesEngine::new(None)?);
-    let evolver = Arc::new(CodebaseEvolver::new(std::env::current_dir().unwrap_or_default()));
+    let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+    let evolver = Arc::new(CodebaseEvolver::new(config.paths.workspace_root.clone()));
 
     let registry = Arc::new(DefaultToolRegistry::new());
 
@@ -62,7 +66,7 @@ pub async fn run_interactive_chat(
         notes,
         evolver,
         registry,
-        AgentConfig::default(),
+        config.agent.clone(),
     );
 
     let cancel_token = CancellationToken::new();

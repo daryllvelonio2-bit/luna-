@@ -10,9 +10,13 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
