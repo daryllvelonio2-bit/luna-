@@ -37,8 +37,18 @@ fn get_terminal_width() -> usize {
 }
 
 #[derive(Clone)]
+struct ChatStatus {
+    session_id: String,
+    provider: String,
+    model: String,
+    context_used: u32,
+    context_max: u32,
+}
+
+#[derive(Clone)]
 struct ChatUi {
     input_buf: Arc<Mutex<String>>,
+    status: Arc<Mutex<Option<ChatStatus>>>,
     is_attended: bool,
 }
 
@@ -46,7 +56,84 @@ impl ChatUi {
     fn new(is_attended: bool) -> Self {
         Self {
             input_buf: Arc::new(Mutex::new(String::new())),
+            status: Arc::new(Mutex::new(None)),
             is_attended,
+        }
+    }
+
+    fn set_status(&self, session_id: &str, provider: &str, model: &str, context_used: u32, context_max: u32) {
+        let mut status = self.status.lock().unwrap();
+        *status = Some(ChatStatus {
+            session_id: session_id.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            context_used,
+            context_max,
+        });
+    }
+
+    fn set_model(&self, provider: &str, model: &str, context_used: u32, context_max: u32) {
+        let mut status = self.status.lock().unwrap();
+        if let Some(ref mut s) = *status {
+            s.provider = provider.to_string();
+            s.model = model.to_string();
+            s.context_used = context_used;
+            s.context_max = context_max;
+        }
+    }
+
+    fn update_status(&self, context_used: u32, context_max: u32) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.context_used = context_used;
+                s.context_max = context_max;
+            }
+        }
+        self.redraw_status_line();
+    }
+
+    fn format_status_line(&self, width: usize) -> Option<String> {
+        let status = self.status.lock().unwrap();
+        let s = status.as_ref()?;
+
+        let left = format!("ctx: {}/{}", s.context_used, s.context_max);
+        let center = format!("session: {}", s.session_id);
+        let right = format!("{}/{}", s.provider, s.model);
+
+        let left_len = left.chars().count();
+        let center_len = center.chars().count();
+        let right_len = right.chars().count();
+        let total_used = left_len + center_len + right_len;
+
+        if total_used + 4 > width {
+            let available = width.saturating_sub(left_len + right_len + 4);
+            let center_truncated = if center_len > available {
+                format!("{}…", &center[..available.saturating_sub(1)])
+            } else {
+                center
+            };
+            let spaces_left = (width.saturating_sub(left_len + center_truncated.chars().count() + right_len)) / 2;
+            let spaces_right = width.saturating_sub(left_len + center_truncated.chars().count() + right_len + spaces_left);
+            Some(format!(
+                "{}{}{}{}{}",
+                left.dimmed(),
+                " ".repeat(spaces_left),
+                center_truncated.dimmed(),
+                " ".repeat(spaces_right),
+                right.dimmed()
+            ))
+        } else {
+            let spaces_left = (width - total_used) / 2;
+            let spaces_right = width - total_used - spaces_left;
+            Some(format!(
+                "{}{}{}{}{}",
+                left.dimmed(),
+                " ".repeat(spaces_left),
+                center.dimmed(),
+                " ".repeat(spaces_right),
+                right.dimmed()
+            ))
         }
     }
 
@@ -59,8 +146,18 @@ impl ChatUi {
         let width = get_terminal_width();
         let divider = "─".repeat(width).dimmed().to_string();
 
-        print!("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K");
+        let has_status = self.status.lock().unwrap().is_some();
+        if has_status {
+            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+        } else {
+            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+        }
+
         println!("{}", text);
+
+        if let Some(status_str) = self.format_status_line(width) {
+            println!("{}", status_str);
+        }
         println!("{}", divider);
         println!();
         println!("{}", divider);
@@ -85,6 +182,9 @@ impl ChatUi {
         }
         let width = get_terminal_width();
         let divider = "─".repeat(width).dimmed().to_string();
+        if let Some(status_str) = self.format_status_line(width) {
+            println!("{}", status_str);
+        }
         println!("{}", divider);
         println!();
         println!("{}", divider);
@@ -92,64 +192,27 @@ impl ChatUi {
         let _ = io::stdout().flush();
     }
 
-    fn clear_box_on_exit(&self) {
-        if self.is_attended {
-            print!("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K");
-            let _ = io::stdout().flush();
-        }
-    }
-
-    /// Draw the status bar: left = context used/max, center = session name, right = model
-    fn draw_status_bar(&self, session_id: &str, provider: &str, model: &str, context_used: u32, context_max: u32) {
+    fn redraw_status_line(&self) {
         if !self.is_attended {
             return;
         }
         let width = get_terminal_width();
-        if width < 40 {
-            return; // Too narrow for status bar
+        if let Some(status_str) = self.format_status_line(width) {
+            let buf = self.input_buf.lock().unwrap();
+            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}{}", status_str, "User > ".bold().yellow(), *buf);
+            let _ = io::stdout().flush();
         }
+    }
 
-        let left = format!("ctx: {}/{}", context_used, context_max);
-        let center = format!("session: {}", session_id);
-        let right = format!("{}/{}", provider, model);
-
-        // Calculate spacing
-        let left_len = left.chars().count();
-        let center_len = center.chars().count();
-        let right_len = right.chars().count();
-        let total_used = left_len + center_len + right_len;
-
-        if total_used + 4 > width {
-            // Truncate center if needed
-            let available = width.saturating_sub(left_len + right_len + 4);
-            let center_truncated = if center_len > available {
-                format!("{}…", &center[..available.saturating_sub(1)])
-            } else {
-                center
-            };
-            let spaces_left = (width.saturating_sub(left_len + center_truncated.chars().count() + right_len)) / 2;
-            let spaces_right = width - left_len - center_truncated.chars().count() - right_len - spaces_left;
-            let status = format!(
-                "{}{}{}{}{}",
-                left,
-                " ".repeat(spaces_left),
-                center_truncated,
-                " ".repeat(spaces_right),
-                right
-            );
-            print!("\r\x1b[7m{}\x1b[0m", status);
+    fn clear_box_on_exit(&self) {
+        if !self.is_attended {
+            return;
+        }
+        let has_status = self.status.lock().unwrap().is_some();
+        if has_status {
+            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
         } else {
-            let spaces_left = (width - total_used) / 2;
-            let spaces_right = width - total_used - spaces_left;
-            let status = format!(
-                "{}{}{}{}{}",
-                left,
-                " ".repeat(spaces_left),
-                center,
-                " ".repeat(spaces_right),
-                right
-            );
-            print!("\r\x1b[7m{}\x1b[0m", status);
+            print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
         }
         let _ = io::stdout().flush();
     }
@@ -412,11 +475,9 @@ pub async fn run_interactive_chat(
         return Ok(());
     }
 
-    ui.draw_initial_box();
-
-    // Draw initial status bar
     let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-    ui.draw_status_bar(&session_id, &current_provider, &current_model, 0, context_max);
+    ui.set_status(&session_id, &current_provider, &current_model, 0, context_max);
+    ui.draw_initial_box();
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
     std::thread::spawn(move || {
@@ -590,7 +651,7 @@ pub async fn run_interactive_chat(
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
+                        ui.update_status(context_used, context_max);
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.print_above(&format!("{}", "✖ Cancelled".red()));
@@ -598,7 +659,7 @@ pub async fn run_interactive_chat(
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
+                        ui.update_status(context_used, context_max);
                     }
                     Ok(Err(e)) => {
                         ui.print_above(&format!("{} Error: {}", "✖".red().bold(), e));
@@ -606,7 +667,7 @@ pub async fn run_interactive_chat(
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
+                        ui.update_status(context_used, context_max);
                     }
                     Err(join_err) => {
                         ui.print_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
@@ -614,7 +675,7 @@ pub async fn run_interactive_chat(
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
+                        ui.update_status(context_used, context_max);
                     }
                 }
                 first_turn = false;
@@ -945,6 +1006,8 @@ async fn handle_model_switch(
     *current_provider = chosen_provider.clone();
     *current_model = chosen_model.clone();
 
+    let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
+    ui.set_model(&chosen_provider, &chosen_model, 0, context_max);
     ui.draw_initial_box();
 
     let effort_label = chosen_effort
