@@ -7,7 +7,7 @@ use harness_core::tools::{
     register_core_tools, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool,
     WriteFileTool,
 };
-use harness_core::{Config, DefaultToolRegistry, Tool, ToolRegistry};
+use harness_core::{Config, DefaultToolRegistry, HarnessError, Tool, ToolRegistry};
 
 #[tokio::test]
 async fn test_escape_refusal() {
@@ -188,6 +188,76 @@ async fn test_search_files() {
     assert!(!res.is_error);
     assert!(res.content.contains("src_a.rs"));
     assert!(!res.content.contains("src_b.txt"), "Should filter by glob *.rs");
+}
+
+/// A search must not read arbitrarily large files: the workspace root is often the user's
+/// home directory, where an archive or media file dwarfs the pattern being looked for.
+#[tokio::test]
+async fn test_search_files_skips_oversized_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    tokio::fs::write(root.join("small.rs"), "needle").await.unwrap();
+    // ~3.5 MB of matching text: larger than the scan ceiling, so it is skipped outright.
+    tokio::fs::write(root.join("big.rs"), "needle\n".repeat(512 * 1024)).await.unwrap();
+
+    let res = SearchFilesTool::new(root.clone())
+        .execute("call_big", &json!({ "pattern": "needle" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(res.content.contains("small.rs"));
+    assert!(
+        !res.content.contains("big.rs"),
+        "files above the scan ceiling must be skipped, not read into memory"
+    );
+}
+
+/// A cancelled search must abort rather than finish the walk, otherwise cancelling a turn
+/// leaves the scan running in the background.
+#[tokio::test]
+async fn test_search_files_honours_cancellation() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    tokio::fs::write(root.join("a.txt"), "needle").await.unwrap();
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let err = SearchFilesTool::new(root)
+        .execute("call_cancelled", &json!({ "pattern": "needle" }), &cancel)
+        .await
+        .expect_err("a cancelled search must abort instead of scanning");
+
+    assert!(matches!(err, HarnessError::Cancelled));
+}
+
+/// The count mode reports a per-file total, and the content and file-list modes stay
+/// independent of it.
+#[tokio::test]
+async fn test_search_files_output_modes() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    tokio::fs::write(root.join("two.txt"), "needle\nneedle\n").await.unwrap();
+    tokio::fs::write(root.join("one.txt"), "needle\n").await.unwrap();
+    let searcher = SearchFilesTool::new(root.clone());
+
+    let counts = searcher
+        .execute("c1", &json!({ "pattern": "needle", "output_mode": "count" }), &cancel)
+        .await
+        .unwrap();
+    assert!(counts.content.contains("two.txt: 2 matches"), "got: {}", counts.content);
+    assert!(counts.content.contains("one.txt: 1 matches"), "got: {}", counts.content);
+
+    let files = searcher
+        .execute("c2", &json!({ "pattern": "needle", "output_mode": "files_only" }), &cancel)
+        .await
+        .unwrap();
+    assert!(files.content.contains("two.txt") && files.content.contains("one.txt"));
+    assert!(!files.content.contains("matches"), "files_only must not emit counts");
 }
 
 #[tokio::test]

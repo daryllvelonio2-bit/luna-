@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::{Key, Term};
@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use harness_core::{
     Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
-    ReasoningEffort, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
+    ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
@@ -25,6 +25,52 @@ use harness_providers::{
 use super::approval::{approval_settings, build_approver, render_approval_box, ChatApprover};
 use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
+
+/// Holds the terminal in raw mode for the whole interactive session, restoring the original
+/// settings when dropped.
+///
+/// `console`'s key reader only switches raw mode on for the duration of a single read, so
+/// between keystrokes the tty sits in canonical mode and the *kernel* echoes what is typed.
+/// A pasted or fast-typed burst is echoed before the app can read it, and the echo wraps onto
+/// extra rows that the single-row composer redraw cannot erase — the screen fills with copies
+/// of the input. Owning raw mode for the session keeps echoing where it belongs: in the UI.
+struct RawTerminal {
+    fd: libc::c_int,
+    original: libc::termios,
+}
+
+impl RawTerminal {
+    /// Returns `None` when stdin is not a terminal, or when termios is unavailable.
+    fn acquire() -> Option<Self> {
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+        let fd = libc::STDIN_FILENO;
+        let mut current = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(fd, current.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let original = unsafe { current.assume_init() };
+        let mut raw = original;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        // Keep output post-processing so `\n` still returns the carriage, and keep ISIG so
+        // Ctrl-C stays a signal — the CLI routes it into the key channel itself.
+        raw.c_oflag = original.c_oflag;
+        raw.c_lflag |= libc::ISIG;
+        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &raw) } != 0 {
+            return None;
+        }
+        Some(Self { fd, original })
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.original);
+        }
+    }
+}
 
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
@@ -209,7 +255,7 @@ impl ChatUi {
         let up = if has_status { 3 } else { 2 };
         print!("\x1b[{}A\r\x1b[2K", up);
         print!("{}", text);
-        print!("\x1b[{}B\r{}{}", up, PROMPT.bold().yellow(), *buf);
+        print!("\x1b[{}B\r{}", up, self.prompt_row(&buf));
         let _ = io::stdout().flush();
         *self.pending_tool.lock().unwrap() = false;
     }
@@ -243,8 +289,29 @@ impl ChatUi {
         println!("{}", divider);
         println!();
         println!("{}", divider);
-        print!("\x1b[2A\r{}{}", PROMPT.bold().yellow(), *buf);
+        print!("\x1b[2A\r{}", self.prompt_row(&buf));
         let _ = io::stdout().flush();
+    }
+
+    /// The tail of the composer buffer that fits on one terminal row, prefixed with `…` when
+    /// the front is scrolled off. Without this the rendered line wraps onto a second physical
+    /// row while every redraw clears only one — each keystroke then repaints the line and the
+    /// screen fills with copies of the input.
+    fn visible_input(&self, buf: &str) -> String {
+        let room = get_terminal_width()
+            .saturating_sub(PROMPT.chars().count())
+            .saturating_sub(1);
+        let len = buf.chars().count();
+        if len <= room {
+            return buf.to_string();
+        }
+        let keep = room.saturating_sub(1);
+        format!("…{}", buf.chars().skip(len - keep).collect::<String>())
+    }
+
+    /// The composer row: prompt plus the visible tail of the buffer.
+    fn prompt_row(&self, buf: &str) -> String {
+        format!("{}{}", PROMPT.bold().yellow(), self.visible_input(buf))
     }
 
     fn redraw_input_line(&self) {
@@ -252,7 +319,7 @@ impl ChatUi {
             return;
         }
         let buf = self.input_buf.lock().unwrap();
-        print!("\r\x1b[K{}{}", PROMPT.bold().yellow(), *buf);
+        print!("\r\x1b[K{}", self.prompt_row(&buf));
         let _ = io::stdout().flush();
     }
 
@@ -281,7 +348,7 @@ impl ChatUi {
         let width = get_terminal_width();
         if let Some(status_str) = self.format_status_line(width) {
             let buf = self.input_buf.lock().unwrap();
-            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}{}", status_str, PROMPT.bold().yellow(), *buf);
+            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}", status_str, self.prompt_row(&buf));
             let _ = io::stdout().flush();
         }
     }
@@ -548,11 +615,67 @@ pub async fn run_interactive_chat(
     // returned above and `clear_screen` no-ops on a piped stdout anyway.
     crate::commands::clear_screen();
 
+    // Print the stored transcript before the box so a resumed session reopens with its history
+    // on screen — without it a continuation is indistinguishable from a fresh session until the
+    // first reply lands.
+    let replayed = store
+        .replay(&session_id, config.session.resume_max_messages)
+        .await?;
+    if replayed.replayed > 0 {
+        let width = get_terminal_width();
+        if replayed.truncated() {
+            println!(
+                "{}\n",
+                format!(
+                    "… {} earlier messages not shown (last {} resumed)",
+                    replayed.total - replayed.replayed,
+                    replayed.replayed
+                )
+                .dimmed()
+            );
+        }
+        for stored in &replayed.history {
+            let content = stored.message.content.as_deref().unwrap_or_default();
+            match stored.message.role {
+                Role::User => println!("{}", right_aligned_user_message(content, width)),
+                Role::Assistant if !content.trim().is_empty() => {
+                    println!("{}\n{}", LUNA_LABEL.bold().green(), content)
+                }
+                // Tool traffic and compaction summaries are noise when the transcript is read
+                // back: the user cares what was said, not which calls produced it.
+                Role::Assistant | Role::Tool | Role::System => {}
+            }
+        }
+        println!();
+    }
+
     let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-    ui.set_status(&current_model, 0, context_max);
+    // Seed the bar from the real transcript, not 0: a resumed session already carries history, and
+    // reporting "0 used" made the continuation look like a fresh start.
+    let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    ui.set_status(&current_model, context_used, context_max);
     ui.draw_initial_box();
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
+
+    // Raw mode belongs to the session, not to each read — see `RawTerminal`. Held here so the
+    // guard drops (and the terminal is restored) when this function returns on any exit path.
+    let _raw_terminal = RawTerminal::acquire();
+
+    // Ctrl-C stays a signal because raw mode is entered with ISIG left on. Left to its default
+    // action it would kill the process before the quit path runs and the resume hint never
+    // prints; funnelling the signal into the key channel gives it the same path as `exit`.
+    {
+        let key_tx = key_tx.clone();
+        tokio::spawn(async move {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                if key_tx.send(Key::CtrlC).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     std::thread::spawn(move || {
         let term = Term::stdout();
         loop {
@@ -570,7 +693,6 @@ pub async fn run_interactive_chat(
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut current_cancel = CancellationToken::new();
     let mut active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>> = None;
-    let mut first_turn = true;
 
     loop {
         tokio::select! {
@@ -724,16 +846,6 @@ pub async fn run_interactive_chat(
                 active_turn = None;
                 match turn_res {
                     Ok(Ok(outcome)) => {
-                        if first_turn {
-                            if let Some(replay) = &outcome.replayed {
-                                if replay.replayed < replay.total {
-                                    ui.print_above(&format!(
-                                        "resumed {}: replaying {} of {} messages",
-                                        replay.session_id, replay.replayed, replay.total
-                                    ).dimmed().to_string());
-                                }
-                            }
-                        }
                         if let Some(compaction) = &outcome.compaction {
                             ui.print_above(&format!(
                                 "compacted {} turns into 1 summary (session {})",
@@ -779,7 +891,6 @@ pub async fn run_interactive_chat(
                         ui.update_status(context_used, context_max);
                     }
                 }
-                first_turn = false;
 
                 if let Some(next_query) = queue.pop_front() {
                     current_cancel = CancellationToken::new();
@@ -795,8 +906,15 @@ pub async fn run_interactive_chat(
     }
 
     clear_on_exit();
-    // The screen is wiped on exit, so leave behind just the one line that gets the user back in.
-    println!("Resume: luna --session {}", session_id);
+    // The screen is wiped on exit, so leave behind just the line that gets the user back in.
+    // Both id and name are shown: the name is what the user recognises, the id is the
+    // unambiguous handle, and `--session` accepts either.
+    let session_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
+    if session_name.is_empty() {
+        println!("Resume: luna --session {}", session_id);
+    } else {
+        println!("Resume: luna --session {}    (name: {})", session_id, session_name);
+    }
     Ok(())
 }
 
@@ -1253,7 +1371,10 @@ async fn handle_model_switch(
     // The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
     // that stale box so the status bar is drawn once, showing the model now in use.
     let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
-    ui.set_model(&chosen_model, 0, context_max);
+    // Switching models does not touch the transcript, so keep the real usage rather than resetting
+    // the bar to 0.
+    let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    ui.set_model(&chosen_model, context_used, context_max);
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 
@@ -1428,126 +1549,204 @@ async fn prompt_approval_box(
     }
 }
 
+/// Longest a tool argument may render before it is ellipsised, so one call stays on one line.
+const MAX_TOOL_ARG_CHARS: usize = 68;
+
+/// Longest a tool result summary line may render before it is ellipsised.
+const MAX_TOOL_RESULT_CHARS: usize = 120;
+
+/// A result this short is printed in full; anything longer collapses to its first line plus
+/// a line count so a large tool payload cannot flood the transcript.
+const MAX_INLINE_RESULT_LINES: usize = 3;
+
+/// Render a tool call as one transcript line that names the tool *and* the operation it is
+/// performing. A search spells out its mode (`search_files(content)`) so the reader never has
+/// to guess whether a scan went over file contents or file names.
 fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
     let bullet = "•".cyan();
+    // Absent and empty are the same thing to a reader: a model that sends `"path": ""` means
+    // "no path given", not "a path called nothing".
+    let text = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let number = |key: &str| arguments.get(key).and_then(|v| v.as_u64());
+    let suffix = |detail: String| format!(" {}", detail.dimmed());
+    let quoted = |value: &str| format!("\"{}\"", truncate_visible(value, MAX_TOOL_ARG_CHARS)).cyan();
 
     match name {
-        "shell" | "terminal" | "bash" => {
-            if let Some(cmd) = arguments.get("command").and_then(|c| c.as_str()) {
-                let first_line = cmd.lines().next().unwrap_or(cmd).trim();
-                let display_cmd = if first_line.len() > 80 {
-                    format!("{}…", &first_line[..77])
-                } else {
-                    first_line.to_string()
-                };
-                if let Some(workdir) = arguments.get("workdir").and_then(|w| w.as_str()) {
-                    return format!(
-                        "{} {} {} {}",
-                        bullet,
-                        "$".bold().cyan(),
-                        display_cmd.bold(),
-                        format!("(in {})", workdir).dimmed()
-                    );
-                }
-                return format!("{} {} {}", bullet, "$".bold().cyan(), display_cmd.bold());
+        "terminal" | "shell" | "bash" => {
+            if let Some(command) = text("command") {
+                let first_line = command.lines().next().unwrap_or(command).trim();
+                let cwd = text("workdir")
+                    .map(|w| suffix(format!("in {}", w)))
+                    .unwrap_or_default();
+                return format!(
+                    "{} {} {}{}",
+                    bullet,
+                    "$".bold().cyan(),
+                    truncate_visible(first_line, MAX_TOOL_ARG_CHARS).bold(),
+                    cwd
+                );
             }
         }
-        "read_file" | "cat" => {
-            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
-                let range = match (
-                    arguments.get("offset").and_then(|o| o.as_u64()),
-                    arguments.get("limit").and_then(|l| l.as_u64()),
-                ) {
+        "read_file" => {
+            if let Some(path) = text("path") {
+                let range = match (number("offset"), number("limit")) {
                     (Some(offset), Some(limit)) => {
-                        format!(" (lines {}-{})", offset, offset + limit.saturating_sub(1))
+                        suffix(format!("lines {}-{}", offset, offset + limit.saturating_sub(1)))
                     }
-                    (Some(offset), None) => format!(" (from line {})", offset),
+                    (Some(offset), None) => suffix(format!("from line {}", offset)),
+                    (None, Some(limit)) => suffix(format!("first {} lines", limit)),
                     _ => String::new(),
                 };
-                return format!("{} {} {}{}", bullet, "read".bold(), path.cyan(), range.dimmed());
+                return format!("{} {} {}{}", bullet, "read".bold(), path.cyan(), range);
             }
         }
         "write_file" => {
-            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
-                let lines_count = arguments
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c.lines().count())
-                    .unwrap_or(0);
+            if let Some(path) = text("path") {
+                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
-                    "{} {} {} {}",
+                    "{} {} {}{}",
                     bullet,
                     "write".bold(),
                     path.cyan(),
-                    format!("({} lines)", lines_count).dimmed()
+                    suffix(format!("{} lines", lines))
                 );
             }
         }
         "patch" => {
-            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
-                return format!("{} {} {}", bullet, "patch".bold(), path.cyan());
+            if let Some(path) = text("path") {
+                let every = match arguments.get("replace_all").and_then(|v| v.as_bool()) {
+                    Some(true) => suffix("all occurrences".to_string()),
+                    _ => String::new(),
+                };
+                return format!("{} {} {}{}", bullet, "patch".bold(), path.cyan(), every);
             }
         }
-        "search_files" | "grep" => {
-            let pattern = arguments.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
-            let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            let target = arguments.get("target").and_then(|t| t.as_str()).unwrap_or("content");
-            if target == "files" {
-                return format!("{} {} \"{}\" in {}", bullet, "find files".bold(), pattern.cyan(), path.dimmed());
-            } else {
-                return format!("{} {} \"{}\" in {}", bullet, "search".bold(), pattern.cyan(), path.dimmed());
+        "search_files" => {
+            let pattern = text("pattern").unwrap_or("");
+            let path = text("path").unwrap_or(".");
+            let mode = text("output_mode").unwrap_or("content");
+            let include = text("file_glob")
+                // `*` filters nothing, so it carries no information for the reader.
+                .filter(|glob| *glob != "*")
+                .map(|g| suffix(format!("matching {}", g)))
+                .unwrap_or_default();
+            return format!(
+                "{} {} {} {} {}{}",
+                bullet,
+                format!("search_files({})", mode).bold(),
+                quoted(pattern),
+                "in".dimmed(),
+                path.cyan(),
+                include
+            );
+        }
+        "save_memory" => {
+            let subject = text("subject").unwrap_or("?");
+            let predicate = text("predicate").unwrap_or("?");
+            let object = text("object").unwrap_or("?");
+            return format!(
+                "{} {} {}{}{}",
+                bullet,
+                "save_memory".bold(),
+                format!("{}.{}", subject, predicate).cyan(),
+                " = ".dimmed(),
+                quoted(object)
+            );
+        }
+        "update_memory" => {
+            if let Some(id) = text("memory_id") {
+                return format!("{} {} {}", bullet, "update_memory".bold(), id.cyan());
             }
         }
-        "web_search" => {
-            if let Some(query) = arguments.get("query").and_then(|q| q.as_str()) {
-                return format!("{} {} \"{}\"", bullet, "web_search".bold(), query.cyan());
+        "forget_memory" => {
+            if let Some(id) = text("memory_id") {
+                return format!("{} {} {}", bullet, "forget_memory".bold(), id.cyan());
             }
         }
-        "web_extract" => {
-            if let Some(urls) = arguments.get("urls").and_then(|u| u.as_array()) {
-                let joined = urls.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>().join(", ");
-                return format!("{} {} {}", bullet, "fetch".bold(), joined.cyan());
+        "save_note" => {
+            let title = text("title").unwrap_or("");
+            let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
+            return format!(
+                "{} {} {}{}",
+                bullet,
+                "save_note".bold(),
+                quoted(title),
+                suffix(format!("{} lines", lines))
+            );
+        }
+        "search_notes" => {
+            let query = text("query").unwrap_or("");
+            let limit = number("limit")
+                .map(|l| suffix(format!("limit {}", l)))
+                .unwrap_or_default();
+            return format!("{} {} {}{}", bullet, "search_notes".bold(), quoted(query), limit);
+        }
+        "read_note" | "update_note" => {
+            if let Some(id) = text("id") {
+                return format!("{} {} {}", bullet, name.bold(), id.cyan());
+            }
+        }
+        "inspect_harness_source" => {
+            if let Some(path) = text("path") {
+                return format!("{} {} {}", bullet, name.bold(), path.cyan());
+            }
+        }
+        "propose_harness_patch" => {
+            if let Some(path) = text("target_file") {
+                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
+                return format!(
+                    "{} {} {}{}",
+                    bullet,
+                    name.bold(),
+                    path.cyan(),
+                    suffix(format!("{} lines", lines))
+                );
+            }
+        }
+        "apply_harness_update" => {
+            if let Some(id) = text("patch_id") {
+                return format!("{} {} {}", bullet, name.bold(), id.cyan());
             }
         }
         _ => {}
     }
 
-    // Clean up display name (e.g. mcp__server__tool -> server/tool)
-    let display_name = if let Some(stripped) = name.strip_prefix("mcp__") {
-        stripped.replace("__", "/")
-    } else {
-        name.to_string()
+    // MCP tools arrive as `mcp__server__tool`.
+    let display_name = match name.strip_prefix("mcp__") {
+        Some(stripped) => stripped.replace("__", "/"),
+        None => name.to_string(),
     };
 
-    // Generic fallback: clean arg pairs skipping nulls and empties
-    let args_str = if let Some(obj) = arguments.as_object() {
-        let parts: Vec<String> = obj
-            .iter()
-            .filter(|(_, v)| !v.is_null())
-            .map(|(k, v)| {
-                let val_str = match v {
-                    serde_json::Value::String(s) => {
-                        let trimmed = s.lines().next().unwrap_or(s);
-                        if trimmed.len() > 50 {
-                            format!("\"{}…\"", &trimmed[..47])
-                        } else {
-                            format!("\"{}\"", trimmed)
+    // Fallback: `tool arg=value`, skipping nulls so unset optionals stay invisible.
+    let args_str = match arguments.as_object() {
+        Some(object) => {
+            let parts: Vec<String> = object
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| {
+                    let value = match v {
+                        serde_json::Value::String(s) => {
+                            let first_line = s.lines().next().unwrap_or(s);
+                            format!("\"{}\"", truncate_visible(first_line, MAX_TOOL_ARG_CHARS))
                         }
-                    }
-                    other => other.to_string(),
-                };
-                format!("{}={}", k, val_str)
-            })
-            .collect();
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", parts.join(" "))
+                        other => other.to_string(),
+                    };
+                    format!("{}={}", k, value)
+                })
+                .collect();
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", parts.join(" "))
+            }
         }
-    } else if arguments.is_null() || arguments == &serde_json::json!({}) {
-        String::new()
-    } else {
-        format!(" {}", arguments)
+        None if arguments.is_null() => String::new(),
+        None => format!(" {}", arguments),
     };
 
     format!("{} {}{}", bullet, display_name.bold(), args_str.dimmed())
@@ -1557,12 +1756,11 @@ fn format_tool_result(is_error: bool, output: &str) -> String {
     let trimmed = output.trim();
     if is_error {
         let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-        let display = if first_line.len() > 120 {
-            format!("{}…", &first_line[..117])
-        } else {
-            first_line.to_string()
-        };
-        return format!("  {} {}", "✖".red(), display.red());
+        return format!(
+            "  {} {}",
+            "✖".red(),
+            truncate_visible(first_line, MAX_TOOL_RESULT_CHARS).red()
+        );
     }
 
     if trimmed.is_empty() {
@@ -1571,15 +1769,14 @@ fn format_tool_result(is_error: bool, output: &str) -> String {
 
     let line_count = trimmed.lines().count();
     if line_count == 1 {
-        let display = if trimmed.len() > 120 {
-            format!("{}…", &trimmed[..117])
-        } else {
-            trimmed.to_string()
-        };
-        return format!("  {} {}", "✓".green(), display.dimmed());
+        return format!(
+            "  {} {}",
+            "✓".green(),
+            truncate_visible(trimmed, MAX_TOOL_RESULT_CHARS).dimmed()
+        );
     }
 
-    if line_count <= 3 && trimmed.len() <= 160 {
+    if line_count <= MAX_INLINE_RESULT_LINES && trimmed.len() <= MAX_TOOL_RESULT_CHARS {
         let mut out = String::new();
         for (i, line) in trimmed.lines().enumerate() {
             if i == 0 {
@@ -1592,15 +1789,117 @@ fn format_tool_result(is_error: bool, output: &str) -> String {
     }
 
     let first = trimmed.lines().next().unwrap_or("").trim();
-    let display_first = if first.len() > 80 {
-        format!("{}…", &first[..77])
-    } else {
-        first.to_string()
-    };
     format!(
         "  {} {} {}",
         "✓".green(),
-        display_first.dimmed(),
+        truncate_visible(first, MAX_TOOL_ARG_CHARS).dimmed(),
         format!("(+{} lines)", line_count - 1).dimmed()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn call(name: &str, arguments: serde_json::Value) -> String {
+        format_tool_call(name, &arguments)
+    }
+
+    #[test]
+    fn terminal_call_shows_the_command_and_directory() {
+        let line = call("terminal", json!({ "command": "cargo test\n--all", "workdir": "/repo" }));
+        assert!(line.contains("cargo test"), "got: {}", line);
+        assert!(line.contains("in /repo"), "got: {}", line);
+        assert!(!line.contains("--all"), "only the first command line is shown");
+    }
+
+    #[test]
+    fn read_call_shows_the_line_range() {
+        assert!(call("read_file", json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }))
+            .contains("lines 10-29"));
+        assert!(call("read_file", json!({ "path": "src/lib.rs" })).contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn write_call_shows_the_payload_size() {
+        let line = call("write_file", json!({ "path": "a.rs", "content": "one\ntwo\nthree" }));
+        assert!(line.contains("3 lines"), "got: {}", line);
+    }
+
+    #[test]
+    fn patch_call_flags_replace_all() {
+        let one = call("patch", json!({ "path": "a.rs", "old_string": "x", "new_string": "y" }));
+        assert!(!one.contains("all occurrences"), "got: {}", one);
+
+        let all = call(
+            "patch",
+            json!({ "path": "a.rs", "old_string": "x", "new_string": "y", "replace_all": true }),
+        );
+        assert!(all.contains("all occurrences"), "got: {}", all);
+    }
+
+    /// The reader must be able to tell which search mode ran, and empty optionals must not
+    /// render as blank gaps.
+    #[test]
+    fn search_call_names_the_mode_and_defaults_the_path() {
+        let content = call("search_files", json!({ "pattern": "needle", "path": "", "file_glob": "*" }));
+        assert!(content.contains("search_files(content)"), "got: {}", content);
+        assert!(content.contains("\"needle\""), "got: {}", content);
+        assert!(content.contains("in ."), "an empty path renders as the workspace root");
+        assert!(!content.contains("matching"), "a `*` glob filters nothing and is hidden");
+
+        let files = call("search_files", json!({ "pattern": "needle", "output_mode": "files_only" }));
+        assert!(files.contains("search_files(files_only)"), "got: {}", files);
+
+        let scoped = call("search_files", json!({ "pattern": "needle", "file_glob": "*.rs" }));
+        assert!(scoped.contains("matching *.rs"), "got: {}", scoped);
+    }
+
+    #[test]
+    fn memory_and_note_calls_show_their_subject() {
+        let memory = call(
+            "save_memory",
+            json!({ "subject": "user", "predicate": "editor", "object": "neovim" }),
+        );
+        assert!(memory.contains("user.editor"), "got: {}", memory);
+        assert!(memory.contains("neovim"), "got: {}", memory);
+
+        assert!(call("search_notes", json!({ "query": "budget", "limit": 5 })).contains("limit 5"));
+        assert!(call("read_note", json!({ "id": "note_123" })).contains("note_123"));
+    }
+
+    #[test]
+    fn unknown_and_mcp_tools_fall_back_to_named_arguments() {
+        let mcp = call("mcp__filesystem__read", json!({ "path": "/etc/hosts", "missing": null }));
+        assert!(mcp.contains("filesystem/read"), "got: {}", mcp);
+        assert!(mcp.contains("path=\"/etc/hosts\""), "got: {}", mcp);
+        assert!(!mcp.contains("missing"), "null arguments are hidden");
+    }
+
+    #[test]
+    fn long_arguments_are_clipped_to_one_line() {
+        let line = call("terminal", json!({ "command": "x".repeat(500) }));
+        assert!(
+            line.chars().count() < 500,
+            "a long command must not wrap the transcript: {} chars",
+            line.chars().count()
+        );
+        assert!(line.contains('…'));
+    }
+
+    #[test]
+    fn long_results_collapse_to_a_line_count() {
+        let output = (0..40).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let rendered = format_tool_result(false, &output);
+        assert!(rendered.contains("line 0"), "got: {}", rendered);
+        assert!(rendered.contains("(+39 lines)"), "got: {}", rendered);
+    }
+
+    #[test]
+    fn errors_report_the_first_line() {
+        let rendered = format_tool_result(true, "boom: file not found\nmore detail");
+        assert!(rendered.contains("boom: file not found"), "got: {}", rendered);
+        assert!(!rendered.contains("more detail"), "got: {}", rendered);
+    }
 }

@@ -50,6 +50,7 @@ hound = "3.5"
 tempfile = "3.10"
 similar = "2.5"
 walkdir = "2.5"
+libc = "0.2"
 pulldown-cmark = "0.10"
 url = "2.5"
 

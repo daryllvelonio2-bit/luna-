@@ -463,6 +463,32 @@ impl SearchFilesTool {
     }
 }
 
+/// Files above this size are skipped rather than scanned. A search reads whole files into
+/// memory to match them, so a multi-gigabyte binary (archive, blend, disk image) inside the
+/// tree would stall the scan for minutes and blow up memory.
+const MAX_SCANNED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Hard ceiling on files visited by one search. The workspace root is often the user's home
+/// directory, and an unbounded walk there never terminates in usable time — the agent loop
+/// sits waiting and the CLI looks hung.
+const MAX_SCANNED_FILES: usize = 20_000;
+
+/// How many files are visited between cancellation checks, so a cancelled search stops
+/// promptly without paying for an atomic load on every file.
+const CANCEL_CHECK_INTERVAL: usize = 256;
+
+/// Matches collected per search before searching stops early.
+const MAX_MATCHING_LINES: usize = 200;
+
+/// Result of one blocking scan: matching lines, matching files, per-file counts, and whether
+/// the walk stopped early on the file ceiling.
+struct ScanOutcome {
+    matching_lines: Vec<String>,
+    matching_files: Vec<String>,
+    file_counts: Vec<(String, usize)>,
+    truncated: bool,
+}
+
 #[async_trait]
 impl Tool for SearchFilesTool {
     fn name(&self) -> &str {
@@ -470,7 +496,10 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents or find files by name inside the workspace."
+        "Search file contents inside the workspace for a literal text pattern and report the \
+         matching lines ('content'), the matching file paths ('files_only'), or per-file match \
+         counts ('count'). This matches literal substrings only — it is not a regex engine and \
+         cannot find files by name; use the terminal tool for that."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -498,7 +527,7 @@ impl Tool for SearchFilesTool {
         &self,
         call_id: &str,
         args: &serde_json::Value,
-        _cancel_token: &CancellationToken,
+        cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
         let pattern = match args.get("pattern").and_then(|p| p.as_str()) {
             Some(p) => p,
@@ -520,67 +549,130 @@ impl Tool for SearchFilesTool {
             ));
         }
 
-        let mut matching_lines = Vec::new();
-        let mut matching_files = Vec::new();
-        let mut file_counts: Vec<(String, usize)> = Vec::new();
+        // The walk and the file reads are blocking syscalls. Running them on the async
+        // executor parks a worker thread for the whole scan, which is what froze the
+        // interactive loop on large trees — so the scan owns a blocking thread instead.
+        let root = self.workspace_root.clone();
+        let pattern = pattern.to_string();
+        let file_glob = file_glob.map(|g| g.to_string());
+        let scan_mode = output_mode.to_string();
+        let cancel = cancel_token.clone();
 
-        for entry in walkdir::WalkDir::new(&resolved)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                name != ".git" && name != "target" && name != "node_modules"
-            })
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
+        let scan = tokio::task::spawn_blocking(move || {
+            scan_files(&root, &resolved, &pattern, file_glob.as_deref(), &scan_mode, &cancel)
+        })
+        .await
+        .map_err(|e| HarnessError::Io(format!("search task failed: {}", e)))??;
 
-            let path = entry.path();
-            if let Some(glob) = file_glob {
-                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let ext_filter = glob.trim_start_matches('*').trim_start_matches('.');
-                if !fname.ends_with(ext_filter) {
-                    continue;
-                }
-            }
-
-            let rel_path = path
-                .strip_prefix(&self.workspace_root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let mut matches_in_file = 0;
-                for (idx, line) in content.lines().enumerate() {
-                    if line.contains(pattern) {
-                        matches_in_file += 1;
-                        if matching_lines.len() < 200 {
-                            matching_lines.push(format!("{}:{}: {}", rel_path, idx + 1, line));
-                        }
-                    }
-                }
-
-                if matches_in_file > 0 {
-                    matching_files.push(rel_path.clone());
-                    file_counts.push((rel_path, matches_in_file));
-                }
-            }
-        }
-
-        let output = match output_mode {
-            "files_only" => matching_files.join("\n"),
+        let mut output = match output_mode {
+            "files_only" => scan.matching_files.join("\n"),
             "count" => {
                 let mut out = String::new();
-                for (f, count) in file_counts {
-                    out.push_str(&format!("{}: {} matches\n", f, count));
+                for (file, count) in &scan.file_counts {
+                    out.push_str(&format!("{}: {} matches\n", file, count));
                 }
                 out
             }
-            _ => matching_lines.join("\n"),
+            _ => scan.matching_lines.join("\n"),
         };
+
+        if scan.truncated {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "[search stopped after {} files; narrow 'path' or set 'file_glob']",
+                MAX_SCANNED_FILES
+            ));
+        }
 
         Ok(ToolResult::success(call_id, output))
     }
+}
+
+/// Walk `resolved` and match `pattern` against every text file, bailing out on cancellation,
+/// on oversized files, and on the visited-file ceiling.
+fn scan_files(
+    workspace_root: &Path,
+    resolved: &Path,
+    pattern: &str,
+    file_glob: Option<&str>,
+    output_mode: &str,
+    cancel: &CancellationToken,
+) -> Result<ScanOutcome, HarnessError> {
+    let mut outcome = ScanOutcome {
+        matching_lines: Vec::new(),
+        matching_files: Vec::new(),
+        file_counts: Vec::new(),
+        truncated: false,
+    };
+    // Per-file counts are only rendered in 'count' mode; 'content' and 'files_only' never
+    // read them, so the map stays empty there.
+    let needs_counts = output_mode == "count";
+
+    for (visited, entry) in walkdir::WalkDir::new(resolved)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".git" && name != "target" && name != "node_modules"
+        })
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .enumerate()
+    {
+        if visited % CANCEL_CHECK_INTERVAL == 0 && cancel.is_cancelled() {
+            return Err(HarnessError::Cancelled);
+        }
+        if visited >= MAX_SCANNED_FILES {
+            outcome.truncated = true;
+            break;
+        }
+        if outcome.matching_lines.len() >= MAX_MATCHING_LINES {
+            break;
+        }
+
+        let path = entry.path();
+
+        if let Some(glob) = file_glob {
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let ext_filter = glob.trim_start_matches('*').trim_start_matches('.');
+            if !fname.ends_with(ext_filter) {
+                continue;
+            }
+        }
+
+        if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_SCANNED_FILE_BYTES {
+            continue;
+        }
+
+        let rel_path = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        // Non-UTF-8 files are binary for our purposes; skipping them is the intent.
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let mut matches_in_file = 0;
+            for (idx, line) in content.lines().enumerate() {
+                if line.contains(pattern) {
+                    matches_in_file += 1;
+                    if outcome.matching_lines.len() < MAX_MATCHING_LINES {
+                        outcome
+                            .matching_lines
+                            .push(format!("{}:{}: {}", rel_path, idx + 1, line));
+                    }
+                }
+            }
+
+            if matches_in_file > 0 {
+                outcome.matching_files.push(rel_path.clone());
+                if needs_counts {
+                    outcome.file_counts.push((rel_path, matches_in_file));
+                }
+            }
+        }
+    }
+
+    Ok(outcome)
 }

@@ -1051,6 +1051,7 @@ dependencies = [
  "harness-telemetry",
  "harness-voice",
  "indicatif",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
