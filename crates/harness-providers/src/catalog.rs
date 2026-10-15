@@ -262,3 +262,27 @@ pub fn resolve_descriptor(
 
     Ok(descriptor)
 }
+
+/// Returns the conventional default model for a given provider.
+pub fn get_default_model(provider: &str) -> &'static str {
+    match provider.to_lowercase().as_str() {
+        "nvidia" => "deepseek-ai/deepseek-v4.1-flash",
+        "deepseek" => "deepseek-chat",
+        "anthropic" => "claude-3-5-sonnet-20241022",
+        "gemini" => "gemini-1.5-pro",
+        "groq" => "llama-3.3-70b-versatile",
+        "ollama" => "llama3.2",
+        "openrouter" => "anthropic/claude-3.5-sonnet",
+        "together" => "meta-llama/Llama-3-70b-chat-hf",
+        "mistral" => "mistral-large-latest",
+        "xai" => "grok-2-latest",
+        "zai" => "glm-4-plus",
+        "alibaba" => "qwen-plus",
+        "moonshot" => "moonshot-v1-8k",
+        "minimax" => "abab6.5s-chat",
+        "huggingface" => "meta-llama/Llama-3.1-70B-Instruct",
+        "copilot" => "gpt-4o",
+        "openai" => "gpt-4o",
+        _ => "default",
+    }
+}

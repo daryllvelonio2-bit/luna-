@@ -111,6 +111,15 @@ pub async fn run_interactive_chat(
     let provider_id = config.model.provider.clone();
     let model = config.model.default.clone();
 
+    if provider_id.is_empty() {
+        return Err(HarnessError::ConfigurationError(
+            "No LLM provider configured or loaded with credentials. Run 'luna auth' to register a credential or specify '--provider <name>'.".to_string(),
+        ));
+    }
+
+    println!("Provider: {}", provider_id.cyan());
+    println!("Model:    {}", model.cyan());
+
     let provider = Arc::new(GenericProviderClient::new(
         provider_id.clone(),
         model.clone(),

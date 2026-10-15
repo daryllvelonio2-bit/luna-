@@ -68,8 +68,8 @@ pub struct ModelSettings {
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            provider: "openai".to_string(),
-            default: "gpt-4o".to_string(),
+            provider: String::new(),
+            default: String::new(),
         }
     }
 }

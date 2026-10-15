@@ -62,8 +62,8 @@ fn defaults_match_the_previous_literals() {
         std::env::current_dir().unwrap()
     );
 
-    assert_eq!(config.model.provider, "openai");
-    assert_eq!(config.model.default, "gpt-4o");
+    assert_eq!(config.model.provider, "");
+    assert_eq!(config.model.default, "");
 
     assert_eq!(config.agent, AgentConfig::default());
     assert_eq!(config.agent.max_consecutive_failures, 5);

@@ -428,6 +428,30 @@ impl CredentialManager {
         }
         Ok(reset_count)
     }
+
+    /// Returns provider IDs that have registered credentials, sorted with active keys first.
+    pub async fn get_loaded_providers(&self) -> Vec<String> {
+        let state = self.state.read().await;
+        let mut list: Vec<(String, u64, bool)> = state
+            .providers
+            .iter()
+            .filter(|(_, p)| !p.credentials.is_empty())
+            .map(|(id, p)| {
+                let total_used: u64 = p.credentials.iter().map(|c| c.usage_count).sum();
+                let has_active = p.credentials.iter().any(|c| !c.is_temporarily_disabled);
+                (id.clone(), total_used, has_active)
+            })
+            .collect();
+
+        // Sort active first, then most used
+        list.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)));
+        list.into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    /// Returns the primary loaded provider from the credential pool, if any.
+    pub async fn get_default_loaded_provider(&self) -> Option<String> {
+        self.get_loaded_providers().await.into_iter().next()
+    }
 }
 
 #[cfg(test)]

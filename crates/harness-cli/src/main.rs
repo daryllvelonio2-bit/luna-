@@ -166,7 +166,7 @@ async fn main() -> Result<(), HarnessError> {
         }
     }
 
-    let config: Config = config::resolve(&layers)?.into_config();
+    let mut config: Config = config::resolve(&layers)?.into_config();
 
     init_telemetry(cli.json || config.telemetry.json, &config.telemetry.level);
 
@@ -179,6 +179,19 @@ async fn main() -> Result<(), HarnessError> {
         MODEL_CACHE_TTL_HOURS,
         config.providers.clone(),
     ));
+
+    // If no provider was explicitly requested, always use the loaded provider as default for that session.
+    if config.model.provider.is_empty() {
+        if let Some(loaded_provider) = cred_manager.get_default_loaded_provider().await {
+            config.model.provider = loaded_provider;
+        }
+    }
+
+    // Resolve default model for the effective provider if not explicitly set.
+    if config.model.default.is_empty() && !config.model.provider.is_empty() {
+        config.model.default =
+            harness_providers::get_default_model(&config.model.provider).to_string();
+    }
 
     match cli.command {
         Some(Commands::Chat {
