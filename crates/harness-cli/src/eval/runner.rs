@@ -177,6 +177,14 @@ where
 
     let json = serde_json::to_string_pretty(&report)
         .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+    // A `--report <dir>/file.json` path may name directories that do not exist yet;
+    // create them rather than failing the whole run after every case already passed.
+    if let Some(parent) = opts.report_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| HarnessError::Io(format!("{}: {}", parent.display(), e)))?;
+        }
+    }
     std::fs::write(&opts.report_path, json)
         .map_err(|e| HarnessError::Io(format!("{}: {}", opts.report_path.display(), e)))?;
 
