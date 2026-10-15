@@ -73,10 +73,38 @@ pub struct CompactionNotice {
     pub turns: usize,
 }
 
+/// Tool execution info recorded during a turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// Events emitted during agent execution loop for live observing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentEvent {
+    Thinking(String),
+    ToolExecuting {
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecuted {
+        name: String,
+        output: String,
+        is_error: bool,
+    },
+}
+
+pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;
+
 /// Everything a turn produced: the reply, plus what the console should say about persistence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {
     pub reply: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<TurnToolCall>,
     /// `Some` whenever the run is bound to a session.
     pub replayed: Option<ReplayNotice>,
     /// `Some` only on a turn that actually compacted.
@@ -101,6 +129,7 @@ where
     approval: ApprovalSettings,
     compaction: Option<CompactionSetup>,
     session: Option<SessionBinding>,
+    observer: Option<AgentObserver>,
 }
 
 /// What the gate decided for one call.
@@ -140,7 +169,14 @@ where
             approval: ApprovalSettings::default(),
             compaction: None,
             session: None,
+            observer: None,
         }
+    }
+
+    /// Attach an event observer for live thinking and tool-call rendering.
+    pub fn with_observer(mut self, observer: Arc<dyn Fn(AgentEvent) + Send + Sync>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Who answers the approval prompt, and the gate's timeout / override list.
@@ -278,9 +314,11 @@ where
         self.append(&user_message, false).await?;
 
         let mut consecutive_failures = 0;
+        let mut executed_tools = Vec::new();
+        let mut last_reasoning = None;
         let tools = self.registry.list_tools().await?;
 
-        info!("Starting agent task loop for query: '{}'", user_input);
+        debug!("Starting agent task loop for query: '{}'", user_input);
 
         // Unbounded task loop: runs as long as productive progress is made
         loop {
@@ -295,12 +333,21 @@ where
                 .complete(&messages, &tools, &CompletionOptions::default())
                 .await?;
 
+            if let Some(ref r) = response.reasoning {
+                last_reasoning = Some(r.clone());
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::Thinking(r.clone()));
+                }
+            }
+
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
-                info!("Task successfully completed without further tool calls");
+                debug!("Task successfully completed without further tool calls");
                 self.append(&response, false).await?;
                 return Ok(TurnOutcome {
                     reply: response.content.unwrap_or_default(),
+                    reasoning: last_reasoning,
+                    tool_calls: executed_tools,
                     replayed: replay_notice,
                     compaction,
                 });
@@ -316,7 +363,13 @@ where
                     return Err(HarnessError::Cancelled);
                 }
 
-                info!("Executing tool: '{}' (call id: {})", tool_call.name, tool_call.id);
+                debug!("Executing tool: '{}' (call id: {})", tool_call.name, tool_call.id);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ToolExecuting {
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                    });
+                }
                 // The gate first: a mutating call is put to the human before it runs, and a
                 // denial comes back as an ordinary tool result the model can react to.
                 let outcome: Result<ToolResult, HarnessError> = match self.gate_decision(&tool_call).await {
@@ -342,6 +395,21 @@ where
                         ToolResult::error(&tool_call.id, e.to_string())
                     }
                 };
+
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ToolExecuted {
+                        name: tool_call.name.clone(),
+                        output: execution_result.content.clone(),
+                        is_error: execution_result.is_error,
+                    });
+                }
+
+                executed_tools.push(TurnToolCall {
+                    name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                    output: execution_result.content.clone(),
+                    is_error: execution_result.is_error,
+                });
 
                 // Track consecutive non-working calls (failure thrashing guardrail)
                 if execution_result.is_error {

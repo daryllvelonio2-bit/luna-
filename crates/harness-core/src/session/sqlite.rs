@@ -176,6 +176,7 @@ fn raw_to_stored(raw: RawRow) -> Result<StoredMessage, HarnessError> {
         message: Message {
             role: text_to_role(&raw.role)?,
             content: raw.content,
+            reasoning: None,
             tool_calls,
             tool_result,
             usage,

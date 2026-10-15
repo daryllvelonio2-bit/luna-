@@ -8,8 +8,8 @@ pub mod traits;
 pub mod types;
 
 pub use agent::{
-    Agent, AgentConfig, CompactionNotice, CompactionSetup, ReplayNotice, SessionBinding,
-    TurnOutcome,
+    Agent, AgentConfig, AgentEvent, AgentObserver, CompactionNotice, CompactionSetup, ReplayNotice,
+    SessionBinding, TurnOutcome, TurnToolCall,
 };
 pub use approval::{
     unified_diff, AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings,

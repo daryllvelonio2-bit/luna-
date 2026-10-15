@@ -29,6 +29,12 @@ fn print_input_divider() {
     println!("{}", "─".repeat(width).dimmed());
 }
 
+/// Wipe the terminal on session exit, so only the shell prompt remains.
+/// Cosmetic: a failure to write is ignored on purpose (see `commands::clear_screen`).
+fn clear_on_exit() {
+    crate::commands::clear_screen();
+}
+
 pub async fn run_interactive_chat(
     config: Config,
     cred_manager: Arc<CredentialManager>,
@@ -37,21 +43,6 @@ pub async fn run_interactive_chat(
 ) -> Result<(), HarnessError> {
     let provider_id = config.model.provider.clone();
     let model = config.model.default.clone();
-
-    println!("{}", "==================================================".cyan());
-    println!("{}", "   Luna Autonomous AI Agent Harness (Interactive)  ".bold().cyan());
-    println!("{}", "==================================================".cyan());
-    println!("Provider: {}", provider_id.green());
-    println!("Model:    {}", model.green());
-    println!(
-        "Approval: {}",
-        match config.tools.approval {
-            harness_core::ApprovalMode::Ask => "ask before every mutating tool call",
-            harness_core::ApprovalMode::Allow => "allow — mutating tools run without asking",
-            harness_core::ApprovalMode::Deny => "deny — mutating tools never run",
-        }
-    );
-    println!("Type 'exit' or 'quit' to terminate session.\n");
 
     let provider = Arc::new(GenericProviderClient::new(
         provider_id.clone(),
@@ -139,7 +130,59 @@ pub async fn run_interactive_chat(
         store: store.clone(),
         session_id: session_id.clone(),
         resume_max_messages: config.session.resume_max_messages,
-    });
+    })
+    .with_observer(Arc::new(|event| match event {
+        harness_core::AgentEvent::Thinking(text) => {
+            println!("{}", "Thinking:".bold().dimmed());
+            for line in text.lines() {
+                println!("  {}", line.dimmed());
+            }
+            println!();
+        }
+        harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+            let args_preview = if arguments.is_null() || arguments == serde_json::json!({}) {
+                String::new()
+            } else if let Some(obj) = arguments.as_object() {
+                let parts: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| {
+                        let val_str = match v {
+                            serde_json::Value::String(s) => {
+                                if s.len() > 60 {
+                                    format!("\"{}…\"", &s[..57])
+                                } else {
+                                    format!("\"{}\"", s)
+                                }
+                            }
+                            other => other.to_string(),
+                        };
+                        format!("{}={}", k, val_str)
+                    })
+                    .collect();
+                parts.join(" ")
+            } else {
+                arguments.to_string()
+            };
+            println!("{} {} {}", "•".cyan(), name.bold(), args_preview.dimmed());
+        }
+        harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
+            let trimmed = output.trim();
+            let preview = if trimmed.lines().count() > 3 || trimmed.len() > 160 {
+                let first = trimmed.lines().next().unwrap_or("").trim();
+                format!("{} ({} lines)", first, trimmed.lines().count())
+            } else if trimmed.is_empty() {
+                "done".to_string()
+            } else {
+                trimmed.to_string()
+            };
+
+            if is_error {
+                println!("  {} {}", "✖".red(), preview.red());
+            } else {
+                println!("  {} {}", "✓".green(), preview.dimmed());
+            }
+        }
+    }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
     }
@@ -157,13 +200,13 @@ pub async fn run_interactive_chat(
         // EOF (piped or redirected stdin): without this the loop would spin on empty input
         // forever instead of ending the session.
         if read == 0 {
-            println!("Goodbye!");
+            clear_on_exit();
             break;
         }
         let query = input.trim();
 
         if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
-            println!("Goodbye!");
+            clear_on_exit();
             break;
         }
 
@@ -173,7 +216,6 @@ pub async fn run_interactive_chat(
 
         print_input_divider();
 
-        println!("{}", "Luna is thinking...".dimmed());
         match agent.run_turn(query, cancel_token.child_token()).await {
             Ok(outcome) => {
                 // The replay line belongs to the resume, not to every turn: print it once.
@@ -222,5 +264,6 @@ pub async fn run_interactive_chat(
         first_turn = false;
     }
 
+    clear_on_exit();
     Ok(())
 }

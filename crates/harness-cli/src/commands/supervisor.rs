@@ -6,6 +6,7 @@ use tracing::{error, info};
 use harness_core::HarnessError;
 
 pub async fn run_supervisor_loop(args: Vec<String>) -> Result<(), HarnessError> {
+    crate::commands::clear_screen();
     println!("{}", "==================================================".cyan());
     println!("{}", "        Luna Process Lifecycle Supervisor         ".bold().cyan());
     println!("{}", "==================================================".cyan());

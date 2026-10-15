@@ -274,7 +274,28 @@ impl ModelProvider for GenericProviderClient {
             message: "Choice has no message".to_string(),
         })?;
 
-        let content = msg_val.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
+        let mut reasoning = msg_val
+            .get("reasoning_content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        let mut content = msg_val.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
+
+        if reasoning.is_none() {
+            if let Some(c) = &content {
+                if let Some(start) = c.find("<think>") {
+                    if let Some(end) = c.find("</think>") {
+                        let think_text = c[start + 7..end].trim().to_string();
+                        let rest = format!("{}{}", &c[..start], &c[end + 8..]).trim().to_string();
+                        if !think_text.is_empty() {
+                            reasoning = Some(think_text);
+                        }
+                        content = if rest.is_empty() { None } else { Some(rest) };
+                    }
+                }
+            }
+        }
 
         let mut tool_calls = Vec::new();
         if let Some(tc_array) = msg_val.get("tool_calls").and_then(|tc| tc.as_array()) {
@@ -313,6 +334,7 @@ impl ModelProvider for GenericProviderClient {
         Ok(Message {
             role: Role::Assistant,
             content,
+            reasoning,
             tool_calls,
             tool_result: None,
             usage,

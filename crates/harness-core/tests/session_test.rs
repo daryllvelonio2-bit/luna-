@@ -297,7 +297,8 @@ fn history(turns: usize) -> Vec<StoredMessage> {
                 message: Message {
                     role,
                     content: Some(body),
-                    tool_calls: Vec::new(),
+                    reasoning: None,
+                    tool_calls: vec![],
                     tool_result: None,
                     usage: None,
                 },

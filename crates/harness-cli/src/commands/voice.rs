@@ -64,6 +64,7 @@ pub async fn run_voice_loop(
 ) -> Result<(), HarnessError> {
     let provider_id = config.model.provider.clone();
 
+    crate::commands::clear_screen();
     println!("{}", "==================================================".cyan());
     println!("{}", "   Luna Hands-Free Voice Interface (\"Luna\")        ".bold().cyan());
     println!("{}", "==================================================".cyan());

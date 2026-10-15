@@ -53,6 +53,8 @@ pub struct ToolDefinition {
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
@@ -71,6 +73,7 @@ impl Message {
         Self {
             role: Role::System,
             content: Some(content.into()),
+            reasoning: None,
             tool_calls: vec![],
             tool_result: None,
             usage: None,
@@ -81,6 +84,7 @@ impl Message {
         Self {
             role: Role::User,
             content: Some(content.into()),
+            reasoning: None,
             tool_calls: vec![],
             tool_result: None,
             usage: None,
@@ -91,6 +95,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: Some(content.into()),
+            reasoning: None,
             tool_calls: vec![],
             tool_result: None,
             usage: None,
@@ -101,6 +106,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: None,
+            reasoning: None,
             tool_calls,
             tool_result: None,
             usage: None,
@@ -111,6 +117,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: Some(result.content.clone()),
+            reasoning: None,
             tool_calls: vec![],
             tool_result: Some(result),
             usage: None,
