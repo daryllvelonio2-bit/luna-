@@ -36,6 +36,19 @@ fn get_terminal_width() -> usize {
         .unwrap_or(80)
 }
 
+/// Truncate `text` to at most `max` visible characters, marking the cut with an ellipsis.
+fn truncate_visible(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut truncated: String = text.chars().take(max - 1).collect();
+    truncated.push('…');
+    truncated
+}
+
 #[derive(Clone)]
 struct ChatStatus {
     model: String,
@@ -47,6 +60,9 @@ struct ChatStatus {
 struct ChatUi {
     input_buf: Arc<Mutex<String>>,
     status: Arc<Mutex<Option<ChatStatus>>>,
+    /// True while the most recently printed log line is an in-progress tool call, so the finished
+    /// result can replace that same line instead of appending a second one.
+    pending_tool: Arc<Mutex<bool>>,
     is_attended: bool,
 }
 
@@ -55,6 +71,7 @@ impl ChatUi {
         Self {
             input_buf: Arc::new(Mutex::new(String::new())),
             status: Arc::new(Mutex::new(None)),
+            pending_tool: Arc::new(Mutex::new(false)),
             is_attended,
         }
     }
@@ -127,6 +144,47 @@ impl ChatUi {
     }
 
     fn print_above(&self, text: &str) {
+        self.emit_above(text);
+        *self.pending_tool.lock().unwrap() = false;
+    }
+
+    /// Like [`Self::print_above`], but the line is remembered as an in-progress tool call so
+    /// [`Self::print_tool_finished`] can turn it into the normal-colour result line.
+    fn print_tool_running(&self, text: &str) {
+        self.emit_above(text);
+        *self.pending_tool.lock().unwrap() = true;
+    }
+
+    /// Rewrite the in-progress tool line with the finished result. Falls back to a fresh line when
+    /// there is no pending tool (e.g. an approval prompt scrolled the pending line out of place).
+    fn print_tool_finished(&self, text: &str) {
+        if !self.is_attended {
+            println!("{}", text);
+            return;
+        }
+        if !*self.pending_tool.lock().unwrap() {
+            self.print_above(text);
+            return;
+        }
+
+        let buf = self.input_buf.lock().unwrap();
+        let has_status = self.status.lock().unwrap().is_some();
+        // The pending tool line sits directly above the box: status line + top divider (and the
+        // input line itself) separate it from the cursor.
+        let up = if has_status { 3 } else { 2 };
+        print!("\x1b[{}A\r\x1b[2K", up);
+        print!("{}", text);
+        print!("\x1b[{}B\r{}{}", up, "User > ".bold().yellow(), *buf);
+        let _ = io::stdout().flush();
+        *self.pending_tool.lock().unwrap() = false;
+    }
+
+    /// Forget a pending tool line, e.g. before a direct `println!` shifts the layout.
+    fn clear_pending_tool(&self) {
+        *self.pending_tool.lock().unwrap() = false;
+    }
+
+    fn emit_above(&self, text: &str) {
         if !self.is_attended {
             println!("{}", text);
             return;
@@ -336,6 +394,16 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OutputBlockKind {
+        None,
+        Thinking,
+        Tool,
+    }
+
+    let last_block = Arc::new(Mutex::new(OutputBlockKind::None));
+    let last_block_obs = last_block.clone();
+
     let mut agent = Agent::new(
         provider,
         memory,
@@ -352,6 +420,13 @@ pub async fn run_interactive_chat(
     })
     .with_observer(Arc::new(move |event| match event {
         harness_core::AgentEvent::Thinking(text) => {
+            let mut lb = last_block_obs.lock().unwrap();
+            if *lb == OutputBlockKind::Tool {
+                ui_obs.print_above("");
+            }
+            *lb = OutputBlockKind::Thinking;
+            drop(lb);
+
             let mut out = String::new();
             for line in text.lines() {
                 let trimmed = line.trim_end();
@@ -365,6 +440,13 @@ pub async fn run_interactive_chat(
             }
         }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+            let mut lb = last_block_obs.lock().unwrap();
+            if *lb == OutputBlockKind::Thinking {
+                ui_obs.print_above("");
+            }
+            *lb = OutputBlockKind::Tool;
+            drop(lb);
+
             ui_obs.print_above(&format_tool_call(&name, &arguments));
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
@@ -525,7 +607,7 @@ pub async fn run_interactive_chat(
                             || query.eq_ignore_ascii_case("/models")
                             || query.eq_ignore_ascii_case("/provider")
                         {
-                            ui.clear_box_on_exit();
+                            ui.redraw_input_line();
                             if let Err(e) = handle_model_switch(
                                 Some(&mut key_rx),
                                 &ui,
@@ -536,7 +618,6 @@ pub async fn run_interactive_chat(
                                 &mut current_provider,
                                 &mut current_model,
                             ).await {
-                                ui.draw_initial_box();
                                 ui.print_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
                             }
                             continue;
@@ -545,14 +626,13 @@ pub async fn run_interactive_chat(
                         if query.starts_with("/reasoning") {
                             let arg = query.strip_prefix("/reasoning").unwrap().trim();
                             let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                            ui.clear_box_on_exit();
+                            ui.redraw_input_line();
                             if let Err(e) = handle_reasoning_switch(
                                 Some(&mut key_rx),
                                 &ui,
                                 &agent,
                                 arg_opt,
                             ).await {
-                                ui.draw_initial_box();
                                 ui.print_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
                             }
                             continue;
@@ -580,6 +660,7 @@ pub async fn run_interactive_chat(
                         if active_turn.is_some() {
                             queue.push_back(query);
                         } else {
+                            *last_block.lock().unwrap() = OutputBlockKind::None;
                             current_cancel = CancellationToken::new();
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
@@ -629,6 +710,10 @@ pub async fn run_interactive_chat(
                                 "compacted {} turns into 1 summary (session {})",
                                 compaction.turns, compaction.session_id
                             ).dimmed().to_string());
+                        }
+                        let lb = *last_block.lock().unwrap();
+                        if lb != OutputBlockKind::None && !outcome.reply.is_empty() {
+                            ui.print_above("");
                         }
                         ui.print_above(&format!("{}\n{}", "Luna >".bold().green(), outcome.reply));
                         
@@ -683,30 +768,63 @@ pub async fn run_interactive_chat(
 
 async fn select_from_rx(
     key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    ui: &ChatUi,
     prompt: &str,
     items: &[String],
     default_idx: usize,
+    is_chained: bool,
+    leave_open: bool,
 ) -> Option<usize> {
     if items.is_empty() {
         return None;
     }
 
-    let mut selected = default_idx.min(items.len() - 1);
-    let page_size = 7.min(items.len());
+    let mut filter = String::new();
 
-    let render = |selected: usize| {
-        let term_width = get_terminal_width().saturating_sub(4).max(30);
-        let half = page_size / 2;
-        let start = if selected > half {
-            (selected - half).min(items.len() - page_size)
+    let get_filtered = |filter: &str| -> Vec<(usize, &String)> {
+        if filter.is_empty() {
+            items.iter().enumerate().collect()
         } else {
-            0
-        };
-        let end = (start + page_size).min(items.len());
+            let filter_lower = filter.to_lowercase();
+            items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.to_lowercase().contains(&filter_lower))
+                .collect()
+        }
+    };
 
-        let mut output = String::new();
-        let total_pages = (items.len() + page_size - 1) / page_size;
-        let current_page = (selected / page_size) + 1;
+    let initial_filtered = get_filtered(&filter);
+    let mut selected_filtered_idx = initial_filtered
+        .iter()
+        .position(|(orig_idx, _)| *orig_idx == default_idx)
+        .unwrap_or(0);
+
+    const PAGE_SIZE: usize = 7;
+    const MENU_HEIGHT: usize = PAGE_SIZE + 1; // 1 header + 7 items
+
+    let render_menu_lines = |selected: usize, filter: &str| -> Vec<String> {
+        let term_width = get_terminal_width().saturating_sub(4).max(30);
+        let filtered = get_filtered(filter);
+
+        let mut lines = Vec::with_capacity(MENU_HEIGHT);
+
+        let total_pages = if filtered.is_empty() {
+            1
+        } else {
+            (filtered.len() + PAGE_SIZE - 1) / PAGE_SIZE
+        };
+        let current_page = if filtered.is_empty() {
+            1
+        } else {
+            (selected / PAGE_SIZE) + 1
+        };
+
+        let filter_display = if filter.is_empty() {
+            String::new()
+        } else {
+            format!(" [search: \"{}\"]", filter)
+        };
 
         let page_indicator = if total_pages > 1 {
             format!(" ({}/{})", current_page, total_pages)
@@ -714,88 +832,179 @@ async fn select_from_rx(
             String::new()
         };
 
-        let raw_header = format!("{}:{}", prompt, page_indicator);
+        let raw_header = format!("{}{}:{}", prompt, filter_display, page_indicator);
         let header = if raw_header.len() > term_width {
             format!("{}…", &raw_header[..term_width.saturating_sub(1)])
         } else {
             raw_header
         };
+        lines.push(format!("\r\x1b[2K{}", header.bold().cyan()));
 
-        output.push_str(&format!("\r\x1b[2K{}\n", header.bold().cyan()));
-
-        for idx in start..end {
-            let item = &items[idx];
-            let item_width = term_width.saturating_sub(4);
-            let display_item = if item.len() > item_width {
-                format!("{}…", &item[..item_width.saturating_sub(1)])
+        if filtered.is_empty() {
+            lines.push(format!("\r\x1b[2K  {}", "(no matching items)".dimmed()));
+            for _ in 1..PAGE_SIZE {
+                lines.push("\r\x1b[2K".to_string());
+            }
+        } else {
+            let half = PAGE_SIZE / 2;
+            let start = if selected > half && filtered.len() > PAGE_SIZE {
+                (selected - half).min(filtered.len() - PAGE_SIZE)
             } else {
-                item.clone()
+                0
             };
+            let end = (start + PAGE_SIZE).min(filtered.len());
 
-            if idx == selected {
-                output.push_str(&format!("\r\x1b[2K  {} {}\n", "❯".cyan().bold(), display_item.bold()));
-            } else {
-                output.push_str(&format!("\r\x1b[2K    {}\n", display_item.dimmed()));
+            for idx in start..end {
+                let (_, item) = filtered[idx];
+                let item_width = term_width.saturating_sub(6);
+                let display_item = if item.len() > item_width {
+                    format!("{}…", &item[..item_width.saturating_sub(1)])
+                } else {
+                    item.clone()
+                };
+
+                if idx == selected {
+                    lines.push(format!(
+                        "\r\x1b[2K  {} {}",
+                        "❯".cyan().bold(),
+                        display_item.bold()
+                    ));
+                } else {
+                    lines.push(format!(
+                        "\r\x1b[2K    {}",
+                        display_item.dimmed()
+                    ));
+                }
+            }
+
+            let rendered = end - start;
+            for _ in rendered..PAGE_SIZE {
+                lines.push("\r\x1b[2K".to_string());
             }
         }
-        (output, end - start + 1)
+
+        lines
     };
 
-    let (initial_text, mut line_count) = render(selected);
-    print!("{}", initial_text);
-    let _ = io::stdout().flush();
+    let width = get_terminal_width();
+    let divider = "─".repeat(width).dimmed().to_string();
+
+    if ui.is_attended {
+        if is_chained {
+            // Menu is already open above the box! Just overwrite the MENU_HEIGHT rows
+            print!("\r\x1b[{}A", MENU_HEIGHT + 2);
+            let initial_lines = render_menu_lines(selected_filtered_idx, &filter);
+            for line in &initial_lines {
+                println!("{}", line);
+            }
+            print!("\x1b[2B\r{}", "User > ".bold().yellow());
+            let _ = io::stdout().flush();
+        } else {
+            // Smoothly open MENU_HEIGHT lines above the status bar
+            let has_status = ui.status.lock().unwrap().is_some();
+            if has_status {
+                print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+            } else {
+                print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+            }
+
+            let initial_lines = render_menu_lines(selected_filtered_idx, &filter);
+            for line in &initial_lines {
+                println!("{}", line);
+            }
+
+            if let Some(status_str) = ui.format_status_line(width) {
+                println!("{}", status_str);
+            }
+            println!("{}", divider);
+            println!();
+            println!("{}", divider);
+            print!("\x1b[2A\r{}", "User > ".bold().yellow());
+            let _ = io::stdout().flush();
+        }
+    } else {
+        println!("{}:", prompt);
+        for (i, item) in items.iter().enumerate() {
+            println!("  {}. {}", i + 1, item);
+        }
+    }
+
+    let mut result = None;
 
     while let Some(key) = key_rx.recv().await {
+        let filtered = get_filtered(&filter);
+
         match key {
             Key::ArrowUp => {
-                if selected > 0 {
-                    selected -= 1;
-                } else {
-                    selected = items.len() - 1;
+                if !filtered.is_empty() {
+                    if selected_filtered_idx > 0 {
+                        selected_filtered_idx -= 1;
+                    } else {
+                        selected_filtered_idx = filtered.len() - 1;
+                    }
                 }
             }
             Key::ArrowDown => {
-                if selected + 1 < items.len() {
-                    selected += 1;
-                } else {
-                    selected = 0;
+                if !filtered.is_empty() {
+                    if selected_filtered_idx + 1 < filtered.len() {
+                        selected_filtered_idx += 1;
+                    } else {
+                        selected_filtered_idx = 0;
+                    }
                 }
+            }
+            Key::Backspace => {
+                if !filter.is_empty() {
+                    filter.pop();
+                    selected_filtered_idx = 0;
+                }
+            }
+            Key::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
+                filter.push(c);
+                selected_filtered_idx = 0;
             }
             Key::Enter => {
-                print!("\r\x1b[{}A", line_count);
-                for _ in 0..line_count {
-                    print!("\r\x1b[2K\x1b[1B");
+                if !filtered.is_empty() && selected_filtered_idx < filtered.len() {
+                    result = Some(filtered[selected_filtered_idx].0);
                 }
-                print!("\r\x1b[{}A", line_count);
-                let _ = io::stdout().flush();
-                return Some(selected);
+                break;
             }
-            Key::Escape | Key::Char('q') | Key::CtrlC => {
-                print!("\r\x1b[{}A", line_count);
-                for _ in 0..line_count {
-                    print!("\r\x1b[2K\x1b[1B");
+            Key::Escape | Key::CtrlC => {
+                if !filter.is_empty() {
+                    filter.clear();
+                    selected_filtered_idx = 0;
+                } else {
+                    result = None;
+                    break;
                 }
-                print!("\r\x1b[{}A", line_count);
-                let _ = io::stdout().flush();
-                return None;
             }
             _ => continue,
         }
 
-        // Cleanly erase the previous menu rows before drawing new ones
-        print!("\r\x1b[{}A", line_count);
-        for _ in 0..line_count {
-            print!("\r\x1b[2K\x1b[1B");
+        if ui.is_attended {
+            // Distance from User > to top of menu is MENU_HEIGHT + 2 lines
+            print!("\r\x1b[{}A", MENU_HEIGHT + 2);
+            let updated_lines = render_menu_lines(selected_filtered_idx, &filter);
+            for line in &updated_lines {
+                println!("{}", line);
+            }
+            // Move cursor back down to User >
+            print!("\x1b[2B\r{}", "User > ".bold().yellow());
+            let _ = io::stdout().flush();
         }
-        print!("\r\x1b[{}A", line_count);
-
-        let (new_text, new_count) = render(selected);
-        print!("{}", new_text);
-        line_count = new_count;
-        let _ = io::stdout().flush();
     }
 
-    None
+    if ui.is_attended && (!leave_open || result.is_none()) {
+        // Erase menu rows and box rows, then redraw box in its original position
+        print!("\r\x1b[{}A", MENU_HEIGHT + 2);
+        for _ in 0..(MENU_HEIGHT + 4) {
+            print!("\r\x1b[2K\x1b[1B");
+        }
+        print!("\r\x1b[{}A", MENU_HEIGHT + 4);
+        ui.draw_initial_box();
+    }
+
+    result
 }
 
 async fn input_from_rx(
@@ -878,10 +1087,9 @@ async fn handle_model_switch(
 
     let sel = if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
-        match select_from_rx(rx, "Select Provider", &items, default_idx).await {
+        match select_from_rx(rx, ui, "Select Provider", &items, default_idx, false, true).await {
             Some(i) => i,
             None => {
-                ui.draw_initial_box();
                 return Ok(());
             }
         }
@@ -892,7 +1100,6 @@ async fn handle_model_switch(
     let chosen_provider = catalog[sel].id.clone();
 
     // Fetch models for chosen provider
-    println!("{}", format!("Fetching models for '{}'...", chosen_provider).dimmed());
     let mut models = if chosen_provider == "antigravity" || chosen_provider == "agy" {
         vec![
             "gemini-3.8-flash".to_string(),
@@ -922,10 +1129,9 @@ async fn handle_model_switch(
 
     let model_sel = if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
-        match select_from_rx(rx, &format!("Select Model for '{}'", chosen_provider), &model_items, default_model_idx).await {
+        match select_from_rx(rx, ui, &format!("Select Model [{}]", chosen_provider), &model_items, default_model_idx, true, true).await {
             Some(i) => i,
             None => {
-                ui.draw_initial_box();
                 return Ok(());
             }
         }
@@ -940,7 +1146,6 @@ async fn handle_model_switch(
         match input_from_rx(rx, "Enter custom model name").await {
             Some(name) => name,
             None => {
-                ui.draw_initial_box();
                 return Ok(());
             }
         }
@@ -949,7 +1154,6 @@ async fn handle_model_switch(
     };
 
     if chosen_model.is_empty() {
-        ui.draw_initial_box();
         return Ok(());
     }
 
@@ -979,10 +1183,9 @@ async fn handle_model_switch(
 
     let reasoning_sel = if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
-        match select_from_rx(rx, "Select Reasoning Effort", &reasoning_items, default_reasoning_idx).await {
+        match select_from_rx(rx, ui, "Select Reasoning Effort", &reasoning_items, default_reasoning_idx, true, false).await {
             Some(i) => i,
             None => {
-                ui.draw_initial_box();
                 return Ok(());
             }
         }
@@ -1116,10 +1319,9 @@ async fn handle_reasoning_switch(
 
         if let Some(ref mut rx) = key_rx {
             while rx.try_recv().is_ok() {}
-            match select_from_rx(rx, "Select Reasoning Effort", &reasoning_items, default_idx).await {
+            match select_from_rx(rx, ui, "Select Reasoning Effort", &reasoning_items, default_idx, false, false).await {
                 Some(i) => reasoning_options[i].1,
                 None => {
-                    ui.draw_initial_box();
                     return Ok(());
                 }
             }
