@@ -354,7 +354,7 @@ impl ModelProvider for GenericProviderClient {
                 })?;
 
                 if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-                    if let Some(choice) = choices.get(0) {
+                    if let Some(choice) = choices.first() {
                         if let Some(delta) = choice.get("delta") {
                             if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
                                 return Ok(StreamEvent::ContentDelta(text.to_string()));
