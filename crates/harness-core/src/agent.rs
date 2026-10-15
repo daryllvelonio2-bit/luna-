@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
 use crate::error::HarnessError;
 use crate::traits::*;
 use crate::types::*;
@@ -42,6 +43,16 @@ where
     evolver: Arc<E>,
     registry: Arc<R>,
     config: AgentConfig,
+    approver: Arc<dyn Approver>,
+    approval: ApprovalSettings,
+}
+
+/// What the gate decided for one call.
+enum GateOutcome {
+    /// Run it — possibly with the arguments the human edited.
+    Run(Option<serde_json::Value>),
+    /// Do not run it. The string is the reason, which goes into the tool result and the log.
+    Denied(String),
 }
 
 impl<P, M, N, E, R> Agent<P, M, N, E, R>
@@ -67,7 +78,18 @@ where
             evolver,
             registry,
             config,
+            // Fail closed: an agent that was never given an approver denies mutating calls rather
+            // than running them ungated. The CLI injects the real one from `tools.approval`.
+            approver: Arc::new(DenyAll),
+            approval: ApprovalSettings::default(),
         }
+    }
+
+    /// Who answers the approval prompt, and the gate's timeout / override list.
+    pub fn with_approval(mut self, approver: Arc<dyn Approver>, approval: ApprovalSettings) -> Self {
+        self.approver = approver;
+        self.approval = approval;
+        self
     }
 
     pub fn memory(&self) -> &Arc<M> {
@@ -84,6 +106,67 @@ where
 
     pub fn registry(&self) -> &Arc<R> {
         &self.registry
+    }
+
+    /// Whether this call must be put to the human: the flag is on *and* the tool mutates (or
+    /// `tools.mutating_overrides` names it).
+    async fn needs_approval(&self, name: &str) -> bool {
+        if !self.config.require_hitl_for_mutation {
+            return false;
+        }
+        if self.approval.mutating_overrides.iter().any(|tool| tool == name) {
+            return true;
+        }
+        match self.registry.is_mutating(name).await {
+            Ok(mutating) => mutating,
+            Err(error) => {
+                // Fail closed: a registry that cannot answer is not permission to write.
+                warn!(
+                    "Cannot tell whether tool '{}' mutates ({}): treating it as mutating",
+                    name, error
+                );
+                true
+            }
+        }
+    }
+
+    /// Put a mutating call to the approver, inside `tools.approval_timeout_secs`. Every outcome
+    /// other than Run is a denial, including "nobody answered".
+    async fn gate_decision(&self, call: &ToolCall) -> GateOutcome {
+        if !self.needs_approval(&call.name).await {
+            return GateOutcome::Run(None);
+        }
+
+        let preview = self.registry.preview(call).await.unwrap_or_default();
+        let request = ApprovalRequest {
+            tool: call.name.clone(),
+            call_id: call.id.clone(),
+            target: preview.target,
+            diff: preview.diff,
+            arguments: call.arguments.clone(),
+        };
+
+        // Tool name and target only: never file contents, never the argument blob.
+        info!(
+            tool = %request.tool,
+            target = %request.target.as_deref().unwrap_or("-"),
+            "mutating tool call needs approval"
+        );
+
+        let timeout = self.approval.timeout;
+        match tokio::time::timeout(timeout, self.approver.approve(&request)).await {
+            Ok(Ok(ApprovalDecision::Run)) => GateOutcome::Run(None),
+            Ok(Ok(ApprovalDecision::RunWithArguments(arguments))) => {
+                GateOutcome::Run(Some(arguments))
+            }
+            Ok(Ok(ApprovalDecision::Deny)) => GateOutcome::Denied("denied at the prompt".to_string()),
+            Ok(Err(HarnessError::ApprovalRejected(reason))) => GateOutcome::Denied(reason),
+            Ok(Err(error)) => GateOutcome::Denied(error.to_string()),
+            Err(_elapsed) => GateOutcome::Denied(format!(
+                "no answer within {}s",
+                timeout.as_secs()
+            )),
+        }
     }
 
     pub async fn run_task(
@@ -156,7 +239,25 @@ where
                 }
 
                 info!("Executing tool: '{}' (call id: {})", tool_call.name, tool_call.id);
-                let execution_result = match self.registry.execute(&tool_call, &cancel_token).await {
+                // The gate first: a mutating call is put to the human before it runs, and a
+                // denial comes back as an ordinary tool result the model can react to.
+                let outcome: Result<ToolResult, HarnessError> = match self.gate_decision(&tool_call).await {
+                    GateOutcome::Denied(reason) => {
+                        warn!(tool = %tool_call.name, "approval denied: {}", reason);
+                        Ok(ToolResult::error(
+                            &tool_call.id,
+                            format!("approval denied: {reason}"),
+                        ))
+                    }
+                    GateOutcome::Run(edited) => {
+                        let call = ToolCall {
+                            arguments: edited.unwrap_or_else(|| tool_call.arguments.clone()),
+                            ..tool_call.clone()
+                        };
+                        self.registry.execute(&call, &cancel_token).await
+                    }
+                };
+                let execution_result = match outcome {
                     Ok(res) => res,
                     Err(e) => {
                         error!("Tool execution error for '{}': {}", tool_call.name, e);

@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, Tool, ToolResult};
+use harness_core::{HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, Tool, ToolPreview, ToolResult};
 
 pub struct SaveMemoryTool {
     engine: Arc<dyn MemoryEngine>,
@@ -41,6 +41,24 @@ impl Tool for SaveMemoryTool {
                 "confidence": { "type": "number", "description": "Confidence score from 0.0 to 1.0 (default 1.0)" }
             },
             "required": ["subject", "predicate", "object", "category"]
+        })
+    }
+
+    /// Writes a durable memory record: gated by the approval prompt when
+    /// `agent.require_hitl_for_mutation` is on.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The subject/predicate the call would record.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: Some(format!(
+                "{}: {}",
+                args.get("subject").and_then(|s| s.as_str()).unwrap_or("?"),
+                args.get("predicate").and_then(|p| p.as_str()).unwrap_or("?")
+            )),
+            diff: None,
         })
     }
 
@@ -133,6 +151,19 @@ impl Tool for UpdateMemoryTool {
         })
     }
 
+    /// Supersedes an existing memory record: gated like `save_memory`.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The id of the record the call would supersede.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: args.get("memory_id").and_then(|i| i.as_str()).map(str::to_string),
+            diff: None,
+        })
+    }
+
     async fn execute(
         &self,
         call_id: &str,
@@ -210,6 +241,19 @@ impl Tool for ForgetMemoryTool {
                 "memory_id": { "type": "string", "description": "ID of memory record to deactivate" }
             },
             "required": ["memory_id"]
+        })
+    }
+
+    /// Deactivates an existing memory record: gated like `save_memory`.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The id of the record the call would deactivate.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: args.get("memory_id").and_then(|i| i.as_str()).map(str::to_string),
+            diff: None,
         })
     }
 

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{HarnessError, NotesEngine, Tool, ToolResult};
+use harness_core::{HarnessError, NotesEngine, Tool, ToolPreview, ToolResult};
 
 pub struct SaveNoteTool {
     engine: Arc<dyn NotesEngine>,
@@ -38,6 +38,20 @@ impl Tool for SaveNoteTool {
                 }
             },
             "required": ["title", "content"]
+        })
+    }
+
+    /// Creates a persistent note: gated by the approval prompt when
+    /// `agent.require_hitl_for_mutation` is on.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The title of the note the call would create.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: args.get("title").and_then(|t| t.as_str()).map(str::to_string),
+            diff: None,
         })
     }
 
@@ -190,6 +204,19 @@ impl Tool for UpdateNoteTool {
                 "content": { "type": "string", "description": "New content body (optional)" }
             },
             "required": ["id"]
+        })
+    }
+
+    /// Overwrites an existing note: gated like `save_note`.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The id of the note the call would overwrite.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: args.get("id").and_then(|i| i.as_str()).map(str::to_string),
+            diff: None,
         })
     }
 

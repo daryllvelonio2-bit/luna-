@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use harness_core::{EvolverEngine, HarnessError};
+use harness_core::{unified_diff, EvolverEngine, HarnessError, ToolPreview};
 use crate::sandbox::BuildSandbox;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,5 +154,21 @@ impl EvolverEngine for CodebaseEvolver {
         fs::write(&target_path, &patch.patched_content).map_err(|e| HarnessError::Io(e.to_string()))?;
         info!("Applied patch '{}' to {}", patch_id, target_path.display());
         Ok(())
+    }
+
+    /// The review material for the approval gate: which file, and the unified diff of staged
+    /// content against the file on disk right now.
+    async fn preview_patch(&self, patch_id: &str) -> Option<ToolPreview> {
+        let patch = {
+            let map = self.staged_patches.read().await;
+            map.get(patch_id).cloned()?
+        };
+        let on_disk = fs::read_to_string(self.repo_root.join(&patch.target_file)).ok();
+        let old = on_disk.as_deref().unwrap_or(&patch.original_content);
+
+        Some(ToolPreview {
+            target: Some(patch.target_file.clone()),
+            diff: Some(unified_diff(old, &patch.patched_content, &patch.target_file)),
+        })
     }
 }

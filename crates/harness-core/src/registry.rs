@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::ToolPreview;
 use crate::error::HarnessError;
 use crate::traits::{Tool, ToolRegistry};
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
@@ -32,6 +33,27 @@ impl ToolRegistry for DefaultToolRegistry {
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError> {
         let map = self.tools.read().await;
         Ok(map.values().map(|t| t.definition()).collect())
+    }
+
+    /// An unknown tool is an error rather than `false`: the gate fails closed on it, and
+    /// `execute` will report `ToolNotFound` a moment later anyway.
+    async fn is_mutating(&self, name: &str) -> Result<bool, HarnessError> {
+        let map = self.tools.read().await;
+        match map.get(name) {
+            Some(tool) => Ok(tool.is_mutating()),
+            None => Err(HarnessError::ToolNotFound(name.to_string())),
+        }
+    }
+
+    async fn preview(&self, call: &ToolCall) -> Option<ToolPreview> {
+        let tool = {
+            let map = self.tools.read().await;
+            map.get(&call.name).cloned()
+        };
+        match tool {
+            Some(tool) => tool.preview(&call.arguments).await,
+            None => None,
+        }
     }
 
     async fn execute(

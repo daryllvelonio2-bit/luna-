@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::ToolPreview;
 use crate::error::HarnessError;
 use crate::types::*;
 
@@ -94,6 +95,13 @@ pub trait EvolverEngine: Send + Sync {
 
     /// Apply an approved and tested patch to the working repository
     async fn apply_patch(&self, patch_id: &str) -> Result<(), HarnessError>;
+
+    /// What a human should see before [`Self::apply_patch`] runs: the target file and a unified
+    /// diff of the staged content against what is on disk. `None` when there is nothing to show —
+    /// the gate then still prompts, with the tool name alone.
+    async fn preview_patch(&self, _patch_id: &str) -> Option<ToolPreview> {
+        None
+    }
 }
 
 #[async_trait]
@@ -115,6 +123,22 @@ pub trait Tool: Send + Sync {
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError>;
 
+    /// Whether running this tool can change the machine or the repository — write a file, run a
+    /// command, apply a patch, mutate stored state. Read-only tools must not override this.
+    /// The default is `false` so a read tool needs no thought; **a mutating tool that forgets to
+    /// override this runs ungated**, which is why the review question for a new tool is this one.
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    /// What a human needs to see before this call runs: the path that will be written or the exact
+    /// command that will run, and for a patch-shaped call a unified diff. The default adds nothing,
+    /// and the call is still gated — the prompt then shows the tool name and the arguments on
+    /// request.
+    async fn preview(&self, _arguments: &serde_json::Value) -> Option<ToolPreview> {
+        None
+    }
+
     /// Generate tool definition schema
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -132,6 +156,15 @@ pub trait ToolRegistry: Send + Sync {
 
     /// List all registered tool definitions
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError>;
+
+    /// Whether the named tool mutates. Deliberately has no default: a registry that silently
+    /// answered "read-only" would fail open on the one check the safety gate depends on.
+    async fn is_mutating(&self, name: &str) -> Result<bool, HarnessError>;
+
+    /// [`Tool::preview`] for a call; `None` when the tool has nothing to add to the prompt.
+    async fn preview(&self, _call: &ToolCall) -> Option<ToolPreview> {
+        None
+    }
 
     /// Dispatch a tool call
     async fn execute(

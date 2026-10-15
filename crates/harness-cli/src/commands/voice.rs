@@ -17,6 +17,8 @@ use harness_voice::{
     SpeechToText, TextToSpeech, VoicePipelineConfig, VoiceSession, WakeWordDetector,
 };
 
+use super::approval::{approval_settings, build_approver};
+
 pub struct DefaultWakeWordDetector;
 
 #[async_trait]
@@ -91,14 +93,17 @@ pub async fn run_voice_loop(
     registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;
 
-    let agent = Arc::new(Agent::new(
-        provider,
-        memory,
-        notes,
-        evolver,
-        registry,
-        config.agent.clone(),
-    ));
+    let agent = Arc::new(
+        Agent::new(
+            provider,
+            memory,
+            notes,
+            evolver,
+            registry,
+            config.agent.clone(),
+        )
+        .with_approval(build_approver(&config), approval_settings(&config)),
+    );
 
     let session = VoiceSession::new(
         Arc::new(DefaultWakeWordDetector),
