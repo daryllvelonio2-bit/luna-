@@ -36,6 +36,24 @@ fn get_terminal_width() -> usize {
         .unwrap_or(80)
 }
 
+/// The composer prompt. The `User >` label is gone, so Luna's crescent marks the input line
+/// instead. U+263E LAST QUARTER MOON is a plain text glyph — terminals keep it
+/// black-and-white, unlike the colour crescent U+1F319 which renders as an emoji.
+const PROMPT: &str = "\u{263E} ";
+
+/// Luna's reply label. Kept beside [`PROMPT`] so the two sides of the transcript are edited
+/// in one place rather than hunting for scattered UI literals.
+const LUNA_LABEL: &str = "Luna";
+
+/// Right-align the user's own message so the transcript reads as a chat — the user on the
+/// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
+fn right_aligned_user_message(query: &str, width: usize) -> String {
+    // The message and its glyph are one unit, so they are bolded together.
+    let line = format!("{} {}", query, PROMPT.trim_end());
+    let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
+    format!("{}{}", " ".repeat(pad), line.bold())
+}
+
 /// Truncate `text` to at most `max` visible characters, marking the cut with an ellipsis.
 fn truncate_visible(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -47,6 +65,23 @@ fn truncate_visible(text: &str, max: usize) -> String {
     let mut truncated: String = text.chars().take(max - 1).collect();
     truncated.push('…');
     truncated
+}
+
+/// One transcript block kind, tracked so blank lines land only between differing
+/// blocks (user → thinking, thinking → tool) and never between repeats (tool → tool).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputBlockKind {
+    None,
+    User,
+    Thinking,
+    Tool,
+    Reply,
+}
+
+/// A blank line separates blocks of different kinds. Identical consecutive blocks stay
+/// adjacent, and the first block of a turn is not preceded by one.
+fn needs_separator(prev: OutputBlockKind, next: OutputBlockKind) -> bool {
+    prev != OutputBlockKind::None && prev != next
 }
 
 #[derive(Clone)]
@@ -174,7 +209,7 @@ impl ChatUi {
         let up = if has_status { 3 } else { 2 };
         print!("\x1b[{}A\r\x1b[2K", up);
         print!("{}", text);
-        print!("\x1b[{}B\r{}{}", up, "User > ".bold().yellow(), *buf);
+        print!("\x1b[{}B\r{}{}", up, PROMPT.bold().yellow(), *buf);
         let _ = io::stdout().flush();
         *self.pending_tool.lock().unwrap() = false;
     }
@@ -208,7 +243,7 @@ impl ChatUi {
         println!("{}", divider);
         println!();
         println!("{}", divider);
-        print!("\x1b[2A\r{}{}", "User > ".bold().yellow(), *buf);
+        print!("\x1b[2A\r{}{}", PROMPT.bold().yellow(), *buf);
         let _ = io::stdout().flush();
     }
 
@@ -217,13 +252,13 @@ impl ChatUi {
             return;
         }
         let buf = self.input_buf.lock().unwrap();
-        print!("\r\x1b[K{}{}", "User > ".bold().yellow(), *buf);
+        print!("\r\x1b[K{}{}", PROMPT.bold().yellow(), *buf);
         let _ = io::stdout().flush();
     }
 
     fn draw_initial_box(&self) {
         if !self.is_attended {
-            print!("{}", "User > ".bold().yellow());
+            print!("{}", PROMPT.bold().yellow());
             let _ = io::stdout().flush();
             return;
         }
@@ -235,7 +270,7 @@ impl ChatUi {
         println!("{}", divider);
         println!();
         println!("{}", divider);
-        print!("\x1b[2A\r{}", "User > ".bold().yellow());
+        print!("\x1b[2A\r{}", PROMPT.bold().yellow());
         let _ = io::stdout().flush();
     }
 
@@ -246,7 +281,7 @@ impl ChatUi {
         let width = get_terminal_width();
         if let Some(status_str) = self.format_status_line(width) {
             let buf = self.input_buf.lock().unwrap();
-            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}{}", status_str, "User > ".bold().yellow(), *buf);
+            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}{}", status_str, PROMPT.bold().yellow(), *buf);
             let _ = io::stdout().flush();
         }
     }
@@ -384,13 +419,6 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum OutputBlockKind {
-        None,
-        Thinking,
-        Tool,
-    }
-
     let last_block = Arc::new(Mutex::new(OutputBlockKind::None));
     let last_block_obs = last_block.clone();
 
@@ -411,7 +439,7 @@ pub async fn run_interactive_chat(
     .with_observer(Arc::new(move |event| match event {
         harness_core::AgentEvent::Thinking(text) => {
             let mut lb = last_block_obs.lock().unwrap();
-            if *lb == OutputBlockKind::Tool {
+            if needs_separator(*lb, OutputBlockKind::Thinking) {
                 ui_obs.print_above("");
             }
             *lb = OutputBlockKind::Thinking;
@@ -431,7 +459,7 @@ pub async fn run_interactive_chat(
         }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
             let mut lb = last_block_obs.lock().unwrap();
-            if *lb == OutputBlockKind::Thinking {
+            if needs_separator(*lb, OutputBlockKind::Tool) {
                 ui_obs.print_above("");
             }
             *lb = OutputBlockKind::Tool;
@@ -452,7 +480,7 @@ pub async fn run_interactive_chat(
     if !is_attended {
         let cancel_token = CancellationToken::new();
         loop {
-            print!("{}", "User > ".bold().yellow());
+            print!("{}", PROMPT.bold().yellow());
             io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
 
             let mut input = String::new();
@@ -505,7 +533,7 @@ pub async fn run_interactive_chat(
             };
             match res {
                 Ok(outcome) => {
-                    println!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply);
+                    println!("\n{}\n{}\n", LUNA_LABEL.bold().green(), outcome.reply);
                 }
                 Err(e) => {
                     eprintln!("\n{} Error: {}\n", "✖".red().bold(), e);
@@ -514,6 +542,11 @@ pub async fn run_interactive_chat(
         }
         return Ok(());
     }
+
+    // Start from a clean screen: launching the REPL shouldn't leave whatever the shell was
+    // showing above the input box. Attended-only by construction — the non-attended path
+    // returned above and `clear_screen` no-ops on a piped stdout anyway.
+    crate::commands::clear_screen();
 
     let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
     ui.set_status(&current_model, 0, context_max);
@@ -644,13 +677,19 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        let user_header = format!("{} {}", "User > ".bold().yellow(), query);
+                        let user_header = right_aligned_user_message(&query, get_terminal_width());
+                        {
+                            let mut lb = last_block.lock().unwrap();
+                            if needs_separator(*lb, OutputBlockKind::User) {
+                                ui.print_above("");
+                            }
+                            *lb = OutputBlockKind::User;
+                        }
                         ui.print_above(&user_header);
 
                         if active_turn.is_some() {
                             queue.push_back(query);
                         } else {
-                            *last_block.lock().unwrap() = OutputBlockKind::None;
                             current_cancel = CancellationToken::new();
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
@@ -701,11 +740,14 @@ pub async fn run_interactive_chat(
                                 compaction.turns, compaction.session_id
                             ).dimmed().to_string());
                         }
-                        let lb = *last_block.lock().unwrap();
-                        if lb != OutputBlockKind::None && !outcome.reply.is_empty() {
-                            ui.print_above("");
+                        if !outcome.reply.is_empty() {
+                            let mut lb = last_block.lock().unwrap();
+                            if needs_separator(*lb, OutputBlockKind::Reply) {
+                                ui.print_above("");
+                            }
+                            *lb = OutputBlockKind::Reply;
                         }
-                        ui.print_above(&format!("{}\n{}", "Luna >".bold().green(), outcome.reply));
+                        ui.print_above(&format!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply));
                         
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -753,6 +795,8 @@ pub async fn run_interactive_chat(
     }
 
     clear_on_exit();
+    // The screen is wiped on exit, so leave behind just the one line that gets the user back in.
+    println!("Resume: luna --session {}", session_id);
     Ok(())
 }
 
@@ -887,7 +931,7 @@ async fn select_from_rx(
             for line in &initial_lines {
                 println!("{}", line);
             }
-            print!("\x1b[2B\r{}", "User > ".bold().yellow());
+            print!("\x1b[2B\r{}", PROMPT.bold().yellow());
             let _ = io::stdout().flush();
         } else {
             // Smoothly open MENU_HEIGHT lines above the status bar
@@ -909,7 +953,7 @@ async fn select_from_rx(
             println!("{}", divider);
             println!();
             println!("{}", divider);
-            print!("\x1b[2A\r{}", "User > ".bold().yellow());
+            print!("\x1b[2A\r{}", PROMPT.bold().yellow());
             let _ = io::stdout().flush();
         }
     } else {
@@ -979,7 +1023,7 @@ async fn select_from_rx(
                 println!("{}", line);
             }
             // Move cursor back down to User >
-            print!("\x1b[2B\r{}", "User > ".bold().yellow());
+            print!("\x1b[2B\r{}", PROMPT.bold().yellow());
             let _ = io::stdout().flush();
         }
     }
@@ -1206,21 +1250,12 @@ async fn handle_model_switch(
     *current_provider = chosen_provider.clone();
     *current_model = chosen_model.clone();
 
+    // The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
+    // that stale box so the status bar is drawn once, showing the model now in use.
     let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
     ui.set_model(&chosen_model, 0, context_max);
+    ui.clear_box_on_exit();
     ui.draw_initial_box();
-
-    let effort_label = chosen_effort
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| "default".to_string());
-
-    ui.print_above(&format!(
-        "{} Switched to provider '{}', model '{}', reasoning '{}'",
-        "✔".green().bold(),
-        chosen_provider.cyan(),
-        chosen_model.cyan(),
-        effort_label.yellow()
-    ));
 
     Ok(())
 }
@@ -1321,6 +1356,8 @@ async fn handle_reasoning_switch(
     };
 
     agent.lock().await.set_reasoning_effort(chosen_effort);
+    // Same as the model switch: the picker left a box behind, so erase it before redrawing.
+    ui.clear_box_on_exit();
     ui.draw_initial_box();
 
     let effort_label = chosen_effort
