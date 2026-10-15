@@ -12,6 +12,7 @@ const PROMPTS_FILE: &str = include_str!("../prompts.md");
 /// The section names available in `prompts.md`.
 pub const SYSTEM_PROMPT: &str = "SYSTEM_PROMPT";
 pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
+pub const ENGINEER_SYSTEM_PROMPT: &str = "ENGINEER_SYSTEM_PROMPT";
 
 /// The body of the `name` section, with surrounding blank lines trimmed.
 ///
@@ -43,7 +44,11 @@ mod tests {
 
     #[test]
     fn every_declared_section_loads() {
-        for name in [SYSTEM_PROMPT, COMPACTION_INSTRUCTION] {
+        for name in [
+            SYSTEM_PROMPT,
+            COMPACTION_INSTRUCTION,
+            ENGINEER_SYSTEM_PROMPT,
+        ] {
             let body = section(name).expect("declared section is present");
             assert!(!body.is_empty(), "{name} loaded empty");
         }

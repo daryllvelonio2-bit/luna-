@@ -106,6 +106,22 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
     Ok(normalized)
 }
 
+/// The first `max_chars` bytes of `s`, never splitting a UTF-8 character.
+///
+/// `String::truncate` panics when `max_chars` lands in the middle of a multi-byte character,
+/// so it must never be used to bound model-facing output: one CJK or emoji file would turn a
+/// routine read into a panic. This walks back to the nearest char boundary instead.
+fn char_safe_cut(s: &str, max_chars: usize) -> &str {
+    if s.len() <= max_chars {
+        return s;
+    }
+    let mut end = max_chars;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 pub struct ReadFileTool {
     workspace_root: PathBuf,
     max_chars: usize,
@@ -129,7 +145,8 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file with line numbers and optional pagination. Truncates at budget."
+        "Read a text file with line numbers and optional pagination. Emits whole lines and \
+         stops at the character budget, then appends a notice naming the resume offset."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -195,14 +212,42 @@ impl Tool for ReadFileTool {
             }
         };
 
+        let total = selected_lines.len();
         let mut output = String::new();
+        let mut shown = 0usize;
+        // Whether the tail of the last emitted *line* was cut (as opposed to whole lines being
+        // omitted). Both are reported, because a cut line cannot be recovered by an offset.
+        let mut cut_line_tail = false;
+
         for (idx, line) in selected_lines.iter().enumerate() {
-            output.push_str(&format!("{}|{}\n", start + idx + 1, line));
+            let rendered = format!("{}|{}\n", start + idx + 1, line);
+            if shown == 0 && rendered.len() > self.max_chars {
+                // One line longer than the whole budget: cut it rather than return nothing,
+                // which is the worse failure. `char_safe_cut` keeps the cut on a UTF-8
+                // boundary — `String::truncate` panics on a mid-character boundary, so a
+                // CJK/emoji file used to crash the tool instead of truncating.
+                output.push_str(char_safe_cut(&rendered, self.max_chars));
+                output.push_str("…\n");
+                shown = 1;
+                cut_line_tail = true;
+                break;
+            }
+            // Emit whole lines only: a cut mid-line would leave the caller a partial line
+            // with no way to tell where it ends, and the budget is respected by stopping
+            // before the line that would overflow it.
+            if shown > 0 && output.len() + rendered.len() > self.max_chars {
+                break;
+            }
+            output.push_str(&rendered);
+            shown += 1;
         }
 
-        if output.len() > self.max_chars {
-            output.truncate(self.max_chars);
-            output.push_str("\n\n[Truncated: character limit reached]");
+        if shown < total || cut_line_tail {
+            output.push_str(&format!(
+                "[truncated at {} chars: showing {shown} of {total} lines; resume with offset={}]",
+                self.max_chars,
+                start + shown + 1
+            ));
         }
 
         Ok(ToolResult::success(call_id, output))
@@ -477,16 +522,51 @@ const MAX_SCANNED_FILES: usize = 20_000;
 /// promptly without paying for an atomic load on every file.
 const CANCEL_CHECK_INTERVAL: usize = 256;
 
-/// Matches collected per search before searching stops early.
+/// Matching lines reported in 'content' mode before searching stops early.
 const MAX_MATCHING_LINES: usize = 200;
+/// Files reported in 'files_only' mode, and per-file rows in 'count' mode, before searching
+/// stops early. Both modes report far fewer items than 'content' emits lines, so they get a
+/// larger ceiling rather than sharing the line budget.
+const MAX_MATCHING_FILES: usize = 500;
 
-/// Result of one blocking scan: matching lines, matching files, per-file counts, and whether
-/// the walk stopped early on the file ceiling.
+/// Which ceiling a scan hit. `None` means the walk finished exhaustively.
+enum ScanLimit {
+    FileCeiling,
+    LineCeiling,
+    FileListCeiling,
+}
+
+/// Result of one blocking scan: matching lines, matching files, per-file counts, and which
+/// limit stopped the walk early (if any).
 struct ScanOutcome {
     matching_lines: Vec<String>,
     matching_files: Vec<String>,
     file_counts: Vec<(String, usize)>,
-    truncated: bool,
+    /// The ceiling that stopped the walk early, or `None` when it was exhaustive.
+    limit: Option<ScanLimit>,
+}
+
+impl ScanOutcome {
+    /// The one-line notice appended to output when the walk stopped early. Each mode names its
+    /// own ceiling and says how to narrow it, so a capped result is never mistaken for a
+    /// complete one.
+    fn truncation_notice(&self) -> Option<String> {
+        let (ceiling, hint) = match self.limit.as_ref()? {
+            ScanLimit::FileCeiling => (
+                format!("{MAX_SCANNED_FILES} files"),
+                "narrow 'path' or add 'file_glob'".to_string(),
+            ),
+            ScanLimit::LineCeiling => (
+                format!("{MAX_MATCHING_LINES} matching lines"),
+                "use output_mode 'files_only' or 'count', or narrow 'path'/'file_glob'".to_string(),
+            ),
+            ScanLimit::FileListCeiling => (
+                format!("{MAX_MATCHING_FILES} files"),
+                "narrow 'path' or 'file_glob'".to_string(),
+            ),
+        };
+        Some(format!("[search stopped after {ceiling}; {hint}]"))
+    }
 }
 
 #[async_trait]
@@ -498,17 +578,24 @@ impl Tool for SearchFilesTool {
     fn description(&self) -> &str {
         "Search file contents inside the workspace for a literal text pattern and report the \
          matching lines ('content'), the matching file paths ('files_only'), or per-file match \
-         counts ('count'). This matches literal substrings only — it is not a regex engine and \
-         cannot find files by name; use the terminal tool for that."
+         counts ('count'). The pattern is a literal substring — this is not a regex engine, so \
+         shell metacharacters such as '|', '(' and '$' match themselves. Files above 2 MB are \
+         skipped, the walk stops after 20,000 files, and results are capped (see file_glob); \
+         every limit that truncates a result says so in the output."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Regex or text pattern to search for" },
+                "pattern": { "type": "string", "description": "Literal text to search for (not a regex)" },
                 "path": { "type": "string", "description": "Subdirectory to search in (default: workspace root)" },
-                "file_glob": { "type": "string", "description": "Filter files by extension or pattern (e.g. '*.rs')" },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Filter to matching files. Real glob semantics: '*' and '?'. \
+                     A bare pattern ('*.rs', '*_test.rs') matches the file name; a pattern with a \
+                     slash ('src/*.rs') matches the workspace-relative path."
+                },
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_only", "count"],
@@ -576,18 +663,61 @@ impl Tool for SearchFilesTool {
             _ => scan.matching_lines.join("\n"),
         };
 
-        if scan.truncated {
+        if let Some(notice) = scan.truncation_notice() {
             if !output.is_empty() {
                 output.push('\n');
             }
-            output.push_str(&format!(
-                "[search stopped after {} files; narrow 'path' or set 'file_glob']",
-                MAX_SCANNED_FILES
-            ));
+            output.push_str(&notice);
         }
 
         Ok(ToolResult::success(call_id, output))
     }
+}
+
+/// Whether a file passes the caller's `file_glob`.
+///
+/// The glob is matched against the file name for bare patterns (`*.rs`, `*_test.rs`) and against
+/// the workspace-relative path for patterns that contain a separator (`src/*.rs`), which is what
+/// a user writing a path-shaped pattern means. Matching is real glob semantics: `*` spans any
+/// run of characters (path separators included), `?` matches exactly one. A pattern that is a
+/// literal with no wildcard must equal the file name or path exactly — `rs` no longer matches
+/// `cars`, and `cars` no longer matches `*.rs`.
+fn glob_matches(glob: &str, fname: &str, path: &Path, workspace_root: &Path) -> bool {
+    if glob.contains('/') {
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        return glob_match(glob, &rel.to_string_lossy().replace('\\', "/"));
+    }
+    glob_match(glob, fname)
+}
+
+/// Iterative wildcard matcher over chars: `*` (any run, including separators) and `?` (exactly
+/// one). No recursion, so a pattern of many stars cannot blow the stack, and no allocation.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Backtrack anchors: where a failed `*` resumes in the pattern, and in the text.
+    let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_p = Some(pi);
+            star_t = ti;
+            pi += 1;
+        } else if let Some(sp) = star_p {
+            // Mismatch after a star: the star absorbs one more text char and we retry.
+            pi = sp + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    // Remaining pattern must be all stars.
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 /// Walk `resolved` and match `pattern` against every text file, bailing out on cancellation,
@@ -604,11 +734,20 @@ fn scan_files(
         matching_lines: Vec::new(),
         matching_files: Vec::new(),
         file_counts: Vec::new(),
-        truncated: false,
+        limit: None,
     };
     // Per-file counts are only rendered in 'count' mode; 'content' and 'files_only' never
     // read them, so the map stays empty there.
     let needs_counts = output_mode == "count";
+    // The ceiling that applies to the results this mode actually renders. 'content' is bounded
+    // by lines; the two list modes by files. Each mode checks its own ceiling and records which
+    // one stopped the walk, so the notice names the limit the caller hit.
+    let file_list_mode = output_mode != "content";
+    let result_cap = if file_list_mode {
+        MAX_MATCHING_FILES
+    } else {
+        MAX_MATCHING_LINES
+    };
 
     for (visited, entry) in walkdir::WalkDir::new(resolved)
         .into_iter()
@@ -624,19 +763,25 @@ fn scan_files(
             return Err(HarnessError::Cancelled);
         }
         if visited >= MAX_SCANNED_FILES {
-            outcome.truncated = true;
+            outcome.limit = Some(ScanLimit::FileCeiling);
             break;
         }
-        if outcome.matching_lines.len() >= MAX_MATCHING_LINES {
+        if (outcome.matching_lines.len() + outcome.matching_files.len()) >= result_cap {
+            outcome.limit = Some(if file_list_mode {
+                ScanLimit::FileListCeiling
+            } else {
+                ScanLimit::LineCeiling
+            });
             break;
         }
 
         let path = entry.path();
 
         if let Some(glob) = file_glob {
-            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let ext_filter = glob.trim_start_matches('*').trim_start_matches('.');
-            if !fname.ends_with(ext_filter) {
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !glob_matches(glob, fname, path, workspace_root) {
                 continue;
             }
         }
@@ -675,4 +820,211 @@ fn scan_files(
     }
 
     Ok(outcome)
+}
+
+/// How many entries one `list_files` call reports before it stops and says so. A listing is
+/// read by a model rather than a pager, so an unbounded one floods the transcript.
+const MAX_LISTED_ENTRIES: usize = 1_000;
+
+pub struct ListFilesTool {
+    workspace_root: PathBuf,
+}
+
+impl ListFilesTool {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self { workspace_root }
+    }
+}
+
+#[async_trait]
+impl Tool for ListFilesTool {
+    fn name(&self) -> &str {
+        "list_files"
+    }
+
+    fn description(&self) -> &str {
+        "List directory contents inside the workspace as workspace-relative paths, one per line, \
+         with directories carrying a trailing slash. Recursive; use 'path' to bound it or 'glob' \
+         to find files by name. 'glob' matches exactly as in search_files: a bare pattern \
+         ('*.rs', '*_test.rs') matches the entry name, a pattern with a slash ('src/*.rs') \
+         matches the workspace-relative path. .git, target and node_modules are skipped, and \
+         results are capped (every cap announces itself in the output)."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Directory to list (default: workspace root)" },
+                "glob": { "type": "string", "description": "Filter entries by glob: bare patterns match the entry name, slash patterns match the workspace-relative path" }
+            },
+            "required": []
+        })
+    }
+
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        let glob = args.get("glob").and_then(|g| g.as_str());
+
+        let resolved = match resolve_path(&self.workspace_root, path_str) {
+            Ok(p) => p,
+            Err(e) => return Ok(ToolResult::error(call_id, e)),
+        };
+        if !resolved.exists() {
+            return Ok(ToolResult::error(
+                call_id,
+                format!("Directory not found: {}", path_str),
+            ));
+        }
+        if !resolved.is_dir() {
+            return Ok(ToolResult::error(
+                call_id,
+                format!("Not a directory: {}", path_str),
+            ));
+        }
+
+        let root = self.workspace_root.clone();
+        let glob = glob.map(|g| g.to_string());
+        // The walk is a blocking syscall; owning a blocking thread keeps a large tree from
+        // parking an async worker, the same reason `search_files` runs its scan this way.
+        let (entries, truncated) = tokio::task::spawn_blocking(move || {
+            list_entries(&root, &resolved, glob.as_deref())
+        })
+        .await
+        .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
+
+        let mut output = entries.join("\n");
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        if truncated {
+            output.push_str(&format!(
+                "[listing stopped after {MAX_LISTED_ENTRIES} entries; narrow 'path' or add 'glob']"
+            ));
+        }
+
+        Ok(ToolResult::success(call_id, output))
+    }
+}
+
+/// Recursively list entries under `resolved`, skipping noise directories and applying the
+/// optional glob. Returns the sorted entries and whether the cap stopped the walk early.
+fn list_entries(
+    workspace_root: &Path,
+    resolved: &Path,
+    glob: Option<&str>,
+) -> (Vec<String>, bool) {
+    let mut entries: Vec<String> = Vec::new();
+    let mut truncated = false;
+
+    for entry in walkdir::WalkDir::new(resolved)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".git" && name != "target" && name != "node_modules"
+        })
+        .filter_map(Result::ok)
+    {
+        // The walk yields the root itself first; echoing it back is noise, not a listing.
+        if entry.depth() == 0 {
+            continue;
+        }
+        if entries.len() >= MAX_LISTED_ENTRIES {
+            truncated = true;
+            break;
+        }
+
+        let path = entry.path();
+        let is_dir = entry.file_type().is_dir();
+
+        if let Some(g) = glob {
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !glob_matches(g, fname, path, workspace_root) {
+                continue;
+            }
+        }
+
+        let rel = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Sorted so two listings of the same tree are identical, and a capped subset is a
+        // predictable one rather than whatever order the filesystem happened to hand back.
+        entries.push(if is_dir { format!("{rel}/") } else { rel });
+    }
+
+    entries.sort();
+    (entries, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_star_spans_any_run_including_separators() {
+        assert!(glob_match("*.rs", "agent.rs"));
+        assert!(glob_match("*.rs", "session/compaction.rs"));
+        // A bare pattern matches the file name, not the path — `src/*.rs` is the path form.
+        assert!(!glob_match("*.rs", "src/cars"));
+    }
+
+    #[test]
+    fn glob_question_matches_exactly_one_char() {
+        assert!(glob_match("a?c.txt", "abc.txt"));
+        assert!(!glob_match("a?c.txt", "ac.txt"));
+        assert!(!glob_match("a?c.txt", "abbc.txt"));
+    }
+
+    #[test]
+    fn glob_requires_exact_match_without_wildcards() {
+        // The old suffix matcher let `rs` match `cars`; a literal must now equal the text.
+        assert!(glob_match("cars", "cars"));
+        assert!(!glob_match("rs", "cars"));
+        assert!(!glob_match("cars", "vendors"));
+    }
+
+    #[test]
+    fn glob_many_stars_do_not_blow_the_stack() {
+        let pattern = "*".repeat(500) + "needle";
+        assert!(glob_match(&pattern, &("x".repeat(2000) + "needle")));
+        assert!(!glob_match(&pattern, &("x".repeat(2000) + "nope")));
+    }
+
+    #[test]
+    fn glob_empty_pattern_matches_only_empty_text() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "a"));
+        // A trailing star on an empty text still matches.
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_matches_uses_path_for_slash_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("src").join("helper_test.rs");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(&file, "x").unwrap();
+
+        // Bare pattern: matched against the file name.
+        assert!(glob_matches("*_test.rs", "helper_test.rs", &file, root));
+        // Path-shaped pattern: matched against the workspace-relative path.
+        assert!(glob_matches("src/*.rs", "helper_test.rs", &file, root));
+        assert!(glob_matches("*helper*", "helper_test.rs", &file, root));
+        assert!(!glob_matches("tests/*.rs", "helper_test.rs", &file, root));
+    }
 }

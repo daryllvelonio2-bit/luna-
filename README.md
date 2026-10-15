@@ -99,6 +99,59 @@ Dynamically query models from the provider endpoint:
 cargo run --bin luna -- models list --provider openai
 ```
 
+### 2.5 The Filesystem & Shell Tool Surface
+
+The model drives the machine through six registered tools. All of them resolve every path
+against `paths.workspace_root`, and an attempt to escape it (`..`, an absolute path outside the
+root, a symlink pointing out) is refused with an explanatory error rather than silently clamped.
+
+```text
+read_file(path, offset, limit)     read with line numbers, whole lines, bounded output
+write_file(path, content)         create or overwrite (requires read-before-write)
+patch(path, old_string, new_string, replace_all)
+                                   ambiguous edits are refused unless replace_all is set
+search_files(pattern, path, file_glob, output_mode)
+                                   literal substring search: content | files_only | count
+list_files(path, glob)            recursive listing, find files by name
+terminal(command, timeout_s, workdir)
+                                   bounded foreground shell, non-zero exit is a normal result
+```
+
+`read_file` emits whole lines and stops before the line that would overflow its budget, then
+appends a notice naming the resume offset — a cut line cannot be recovered by an offset, so it
+stops at the line boundary instead of truncating mid-line.
+
+`write_file` and `patch` refuse to touch a file whose content changed since the last `read_file`
+in the same session. A stale overwrite is data loss, so it is refused, not clobbered.
+
+**Glob semantics** (`search_files`'s `file_glob` and `list_files`'s `glob`) are real glob
+matching, shared by both tools: `*` matches any run of characters, `?` exactly one. A bare
+pattern (`*.rs`, `*_test.rs`) matches the file name; a pattern containing a slash (`src/*.rs`)
+matches the workspace-relative path. A pattern with no wildcard must equal the name or path
+exactly, so `rs` does not match `cars`.
+
+**Announced limits.** Neither tool can return an exhaustive-looking result that was silently
+cut. `search_files` skips files above 2 MB, stops after 20,000 visited files, caps results per
+output mode (200 matching lines for `content`, 500 files for `files_only` and `count`), and
+appends a notice naming whatever ceiling it hit and how to narrow it. `list_files` skips `.git`,
+`target` and `node_modules`, and caps at 1,000 entries with the same style of notice.
+
+**Configuring the surface.** `tools.enabled` (default: all six) is the single switch — `config`
+sections and env layers resolve it like every other key, so an install can drop `terminal` and
+still keep the read/write/search tools:
+
+```yaml
+tools:
+  enabled: [read_file, write_file, patch, search_files, list_files]
+  read_max_chars: 100_000
+  terminal_timeout_secs: 120
+  terminal_output_max_bytes: 50_000
+```
+
+Mutating tools (`write_file`, `patch`, `terminal`) go through the approval gate when
+`agent.require_hitl_for_mutation` is set; `read_file`, `search_files` and `list_files` are
+read-only and never prompt.
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

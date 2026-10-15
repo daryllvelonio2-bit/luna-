@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{EvolverEngine, HarnessError, Tool, ToolPreview, ToolResult};
+use harness_core::{EvolverEngine, HarnessError, Tool, ToolResult};
+use crate::engine::CodebaseEvolver;
 
 pub struct InspectSourceTool {
     engine: Arc<dyn EvolverEngine>,
@@ -49,35 +50,40 @@ impl Tool for InspectSourceTool {
     }
 }
 
-pub struct ProposePatchTool {
-    engine: Arc<dyn EvolverEngine>,
+pub struct DelegateImprovementTool {
+    evolver: Arc<CodebaseEvolver>,
 }
 
-impl ProposePatchTool {
-    pub fn new(engine: Arc<dyn EvolverEngine>) -> Self {
-        Self { engine }
+impl DelegateImprovementTool {
+    pub fn new(evolver: Arc<CodebaseEvolver>) -> Self {
+        Self { evolver }
     }
 }
 
 #[async_trait]
-impl Tool for ProposePatchTool {
+impl Tool for DelegateImprovementTool {
     fn name(&self) -> &str {
-        "propose_harness_patch"
+        "delegate_improvement"
     }
 
     fn description(&self) -> &str {
-        "Propose a code patch to the harness codebase. Stages the patch and returns a patch ID."
+        "Spawn an autonomous background engineer agent in an isolated git worktree to fix a bug, optimize performance, or improve the harness codebase."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "description": { "type": "string", "description": "Clear explanation of the fix or feature being introduced" },
-                "target_file": { "type": "string", "description": "Relative file path being modified (e.g. 'crates/harness-core/src/agent.rs')" },
-                "content": { "type": "string", "description": "New complete file content" }
+                "task": {
+                    "type": "string",
+                    "description": "Clear explanation of the bug, bottleneck, or feature to implement in the harness codebase."
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Optional reproduction context, error logs, command, or observed bottleneck."
+                }
             },
-            "required": ["description", "target_file", "content"]
+            "required": ["task"]
         })
     }
 
@@ -87,73 +93,55 @@ impl Tool for ProposePatchTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let desc = args.get("description").and_then(|d| d.as_str()).unwrap_or("");
-        let file = args.get("target_file").and_then(|f| f.as_str()).unwrap_or("");
-        let content = args.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("");
+        if task.trim().is_empty() {
+            return Ok(ToolResult::error(call_id, "task description cannot be empty"));
+        }
+        let evidence = args.get("evidence").and_then(|e| e.as_str());
 
-        let payload = json!({
-            "file": file,
-            "content": content,
-        })
-        .to_string();
-
-        match self.engine.propose_patch(desc, &payload).await {
-            Ok(patch_id) => Ok(ToolResult::success(
-                call_id,
-                json!({
-                    "status": "staged",
-                    "patch_id": patch_id,
-                    "target_file": file,
-                    "next_step": "Call apply_harness_update with this patch_id to verify in build sandbox and apply."
-                })
-                .to_string(),
-            )),
+        match self.evolver.delegate_improvement(task, evidence).await {
+            Ok(job_id) => {
+                let out = json!({
+                    "status": "queued",
+                    "job_id": job_id,
+                    "branch": format!("eng/{}", job_id),
+                    "message": "Specialized engineer agent spawned in isolated background worktree. Use `check_improvement_job` with this job_id to monitor progress, and `verify_and_stage_update` to verify with scenario PTY re-enactment."
+                });
+                Ok(ToolResult::success(call_id, out.to_string()))
+            }
             Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }
     }
 }
 
-pub struct ApplyUpdateTool {
-    engine: Arc<dyn EvolverEngine>,
+pub struct CheckImprovementTool {
+    evolver: Arc<CodebaseEvolver>,
 }
 
-impl ApplyUpdateTool {
-    pub fn new(engine: Arc<dyn EvolverEngine>) -> Self {
-        Self { engine }
+impl CheckImprovementTool {
+    pub fn new(evolver: Arc<CodebaseEvolver>) -> Self {
+        Self { evolver }
     }
 }
 
 #[async_trait]
-impl Tool for ApplyUpdateTool {
+impl Tool for CheckImprovementTool {
     fn name(&self) -> &str {
-        "apply_harness_update"
+        "check_improvement_job"
     }
 
     fn description(&self) -> &str {
-        "Verify a proposed patch in an isolated build sandbox (`cargo test`) and apply it to the working repository."
+        "Check the status, test outcomes, and logs of a background harness improvement job."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "patch_id": { "type": "string", "description": "ID of staged patch proposal" }
+                "job_id": { "type": "string", "description": "The job ID returned by delegate_improvement." }
             },
-            "required": ["patch_id"]
+            "required": ["job_id"]
         })
-    }
-
-    /// Writes into the repository: gated by the approval prompt when
-    /// `agent.require_hitl_for_mutation` is on.
-    fn is_mutating(&self) -> bool {
-        true
-    }
-
-    /// The staged patch's target file and unified diff, so the human approves the change they can
-    /// actually read rather than a patch id.
-    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
-        let patch_id = args.get("patch_id").and_then(|p| p.as_str())?;
-        self.engine.preview_patch(patch_id).await
     }
 
     async fn execute(
@@ -162,29 +150,124 @@ impl Tool for ApplyUpdateTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let patch_id = args.get("patch_id").and_then(|p| p.as_str()).unwrap_or("");
-
-        // 1. Run sandbox verification first
-        match self.engine.test_patch_sandbox(patch_id).await {
-            Ok(_) => {
-                // 2. Apply patch
-                match self.engine.apply_patch(patch_id).await {
-                    Ok(_) => Ok(ToolResult::success(
-                        call_id,
-                        json!({
-                            "status": "applied",
-                            "patch_id": patch_id,
-                            "message": "Patch verified in sandbox and applied successfully. Ready for supervisor restart."
-                        })
-                        .to_string(),
-                    )),
-                    Err(e) => Ok(ToolResult::error(call_id, format!("Failed to apply patch: {}", e))),
-                }
+        let job_id = args.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
+        match self.evolver.check_job(job_id).await {
+            Ok(job) => {
+                let out = json!({
+                    "job_id": job.id,
+                    "task": job.task,
+                    "branch": job.branch,
+                    "status": job.status,
+                    "logs": job.logs,
+                    "created_at": job.created_at.to_rfc3339(),
+                    "updated_at": job.updated_at.to_rfc3339(),
+                });
+                Ok(ToolResult::success(call_id, out.to_string()))
             }
-            Err(e) => Ok(ToolResult::error(
-                call_id,
-                format!("Sandbox verification failed. Patch not applied: {}", e),
-            )),
+            Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
+        }
+    }
+}
+
+pub struct ListImprovementJobsTool {
+    evolver: Arc<CodebaseEvolver>,
+}
+
+impl ListImprovementJobsTool {
+    pub fn new(evolver: Arc<CodebaseEvolver>) -> Self {
+        Self { evolver }
+    }
+}
+
+#[async_trait]
+impl Tool for ListImprovementJobsTool {
+    fn name(&self) -> &str {
+        "list_improvement_jobs"
+    }
+
+    fn description(&self) -> &str {
+        "List all background harness improvement jobs and their current status in the queue."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        _args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        match self.evolver.list_jobs().await {
+            Ok(jobs) => {
+                let items: Vec<serde_json::Value> = jobs
+                    .into_iter()
+                    .map(|job| {
+                        json!({
+                            "job_id": job.id,
+                            "task": job.task,
+                            "status": job.status,
+                            "branch": job.branch,
+                            "created_at": job.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                Ok(ToolResult::success(call_id, json!(items).to_string()))
+            }
+            Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
+        }
+    }
+}
+
+pub struct VerifyAndStageUpdateTool {
+    evolver: Arc<CodebaseEvolver>,
+}
+
+impl VerifyAndStageUpdateTool {
+    pub fn new(evolver: Arc<CodebaseEvolver>) -> Self {
+        Self { evolver }
+    }
+}
+
+#[async_trait]
+impl Tool for VerifyAndStageUpdateTool {
+    fn name(&self) -> &str {
+        "verify_and_stage_update"
+    }
+
+    fn description(&self) -> &str {
+        "Re-enact a scenario against the compiled worktree binary inside an isolated PTY to verify the fix and schedule the update."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "job_id": { "type": "string", "description": "ID of the completed job to verify." },
+                "scenario_input": { "type": "string", "description": "Input sequence to feed into the binary in the PTY." },
+                "absent_pattern": { "type": "string", "description": "Forbidden error or bottleneck substring that must be absent." }
+            },
+            "required": ["job_id"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let job_id = args.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
+        let scenario_input = args.get("scenario_input").and_then(|s| s.as_str());
+        let absent_pattern = args.get("absent_pattern").and_then(|p| p.as_str());
+
+        match self.evolver.verify_and_stage(job_id, scenario_input, absent_pattern).await {
+            Ok(msg) => Ok(ToolResult::success(call_id, msg)),
+            Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }
     }
 }

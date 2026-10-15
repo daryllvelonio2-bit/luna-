@@ -87,6 +87,8 @@ pub struct PathsSettings {
     /// Scope every filesystem/shell tool is confined to. Defaults to the process working
     /// directory, which is what the evolver used before this key existed.
     pub workspace_root: PathBuf,
+    pub jobs_dir: PathBuf,
+    pub skills_dir: PathBuf,
 }
 
 impl Default for PathsSettings {
@@ -99,6 +101,8 @@ impl Default for PathsSettings {
             credentials: luna.join("credentials.json"),
             models_cache: luna.join("models_cache.json"),
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            jobs_dir: luna.join("jobs"),
+            skills_dir: luna.join("skills"),
         }
     }
 }
@@ -152,6 +156,7 @@ impl Default for ToolsSettings {
                 "write_file".to_string(),
                 "patch".to_string(),
                 "search_files".to_string(),
+                "list_files".to_string(),
                 "terminal".to_string(),
             ],
         }
@@ -697,6 +702,8 @@ fn expand_paths(paths: &mut PathsSettings) {
         &mut paths.credentials,
         &mut paths.models_cache,
         &mut paths.workspace_root,
+        &mut paths.jobs_dir,
+        &mut paths.skills_dir,
     ];
     for field in fields {
         let expanded = expand_tilde(&field.to_string_lossy());

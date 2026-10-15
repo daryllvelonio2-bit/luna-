@@ -28,6 +28,10 @@ pub struct AgentConfig {
     pub compaction_model: Option<String>,
     /// Provider that serves the compaction call; `None` means the session's provider.
     pub compaction_provider: Option<String>,
+    /// Model used by the background engineer agent; `None` means the session's model.
+    pub engineer_model: Option<String>,
+    /// Provider used by the background engineer agent; `None` means the session's provider.
+    pub engineer_provider: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -40,6 +44,8 @@ impl Default for AgentConfig {
             keep_recent_turns: 8,
             compaction_model: None,
             compaction_provider: None,
+            engineer_model: None,
+            engineer_provider: None,
         }
     }
 }

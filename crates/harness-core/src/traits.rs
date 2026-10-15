@@ -46,6 +46,35 @@ pub trait ModelProvider: Send + Sync {
 }
 
 #[async_trait]
+impl ModelProvider for Arc<dyn ModelProvider> {
+    fn provider_id(&self) -> &str {
+        (**self).provider_id()
+    }
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        (**self).fetch_models().await
+    }
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        (**self).complete(messages, tools, options).await
+    }
+    async fn stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        (**self).stream(messages, tools, options).await
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        (**self).embed(texts).await
+    }
+}
+
+#[async_trait]
 pub trait MemoryEngine: Send + Sync {
     /// Retrieve semantically and relationally relevant memories
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError>;

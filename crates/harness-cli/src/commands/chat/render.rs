@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use colored::Colorize;
+use harness_core::ApprovalRequest;
 
 /// The composer prompt. The `User >` label is gone, so Luna's crescent marks the input line
 /// instead. U+263E LAST QUARTER MOON is a plain text glyph — terminals keep it

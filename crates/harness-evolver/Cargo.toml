@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 harness-core = { workspace = true }
+harness-providers = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -19,3 +20,4 @@ similar = { workspace = true }
 walkdir = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+libc = { workspace = true }

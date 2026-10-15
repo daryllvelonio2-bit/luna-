@@ -5,7 +5,10 @@ use futures_util::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
-use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
+use harness_evolver::{
+    CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, InspectSourceTool,
+    VerifyAndStageUpdateTool,
+};
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
 };
@@ -80,7 +83,13 @@ pub async fn run_voice_loop(
 
     let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
-    let evolver = Arc::new(CodebaseEvolver::new(config.paths.workspace_root.clone()));
+    let evolver = Arc::new(
+        CodebaseEvolver::new(
+            config.paths.workspace_root.clone(),
+            config.paths.jobs_dir.clone(),
+        )
+        .with_provider(provider.clone()),
+    );
     let registry = Arc::new(DefaultToolRegistry::new());
 
     registry.register(Arc::new(SaveMemoryTool::new(memory.clone()))).await?;
@@ -92,8 +101,9 @@ pub async fn run_voice_loop(
     registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(InspectSourceTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone()))).await?;
 
     // Register core filesystem and shell tools (§2.2)
     let read_cache = harness_core::tools::ReadCache::new();
