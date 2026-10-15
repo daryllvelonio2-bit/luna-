@@ -6,7 +6,7 @@ async fn test_luna_auth_rotation_strategies() {
     let temp_dir = tempfile::tempdir().unwrap();
     let cred_path = temp_dir.path().join("credentials.json");
 
-    let manager = CredentialManager::new(Some(cred_path));
+    let manager = CredentialManager::new(Some(cred_path)).unwrap();
 
     // Register 2 credentials
     manager.add_credential("openai", "key-primary", "sk-11111", true).await.unwrap();

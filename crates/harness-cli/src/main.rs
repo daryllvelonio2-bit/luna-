@@ -59,7 +59,7 @@ async fn main() -> Result<(), HarnessError> {
     let cli = Cli::parse();
     init_telemetry(cli.json);
 
-    let cred_manager = CredentialManager::new(None);
+    let cred_manager = CredentialManager::new(None)?;
     let discovery = Arc::new(ModelDiscovery::new(None, 24));
 
     match cli.command {

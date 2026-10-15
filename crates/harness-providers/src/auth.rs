@@ -1,30 +1,25 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::warn;
 
 use harness_core::HarnessError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RotationStrategy {
+    #[default]
     RoundRobin,
     FillFirst,
     Random,
     LeastUsed,
-}
-
-impl Default for RotationStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +45,9 @@ pub struct LunaAuthStorage {
     pub providers: HashMap<String, ProviderAuthState>,
 }
 
+/// File name of the credential store, under `$HOME/.luna`.
+const CREDENTIALS_FILE: &str = "credentials.json";
+
 pub struct CredentialManager {
     storage_path: PathBuf,
     state: RwLock<LunaAuthStorage>,
@@ -57,31 +55,61 @@ pub struct CredentialManager {
 }
 
 impl CredentialManager {
-    pub fn new(storage_path: Option<PathBuf>) -> Arc<Self> {
-        let path = storage_path.unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".luna").join("credentials.json")
-        });
+    /// Load the credential store, failing loudly if it exists but cannot be read.
+    ///
+    /// A corrupt store used to be `unwrap_or_default()`'d into "the user has no credentials",
+    /// and the next write persisted that emptiness over every registered key (t_24375a7e).
+    pub fn new(storage_path: Option<PathBuf>) -> Result<Arc<Self>, HarnessError> {
+        let path = match storage_path {
+            Some(path) => path,
+            None => Self::default_storage_path(std::env::var("HOME").ok())?,
+        };
 
-        let loaded = Self::load_from_disk(&path).unwrap_or_default();
-
-        Arc::new(Self {
-            storage_path: path,
-            state: RwLock::new(loaded),
+        Ok(Arc::new(Self {
+            storage_path: path.clone(),
+            state: RwLock::new(Self::load_from_disk(&path)?),
             round_robin_counter: AtomicUsize::new(0),
-        })
+        }))
     }
 
-    fn load_from_disk(path: &PathBuf) -> Result<LunaAuthStorage, HarnessError> {
+    /// `$HOME/.luna/credentials.json`. A missing `HOME` is an error rather than a `"."`
+    /// fallback, which silently relocated every credential to the current directory.
+    fn default_storage_path(home: Option<String>) -> Result<PathBuf, HarnessError> {
+        let home = home.filter(|h| !h.is_empty()).ok_or_else(|| {
+            HarnessError::ConfigurationError(format!(
+                "HOME is not set: cannot locate the credential store ($HOME/.luna/{CREDENTIALS_FILE})"
+            ))
+        })?;
+        Ok(PathBuf::from(home).join(".luna").join(CREDENTIALS_FILE))
+    }
+
+    fn load_from_disk(path: &Path) -> Result<LunaAuthStorage, HarnessError> {
         if !path.exists() {
             return Ok(LunaAuthStorage::default());
         }
-        let data = fs::read_to_string(path).map_err(|e| HarnessError::Io(e.to_string()))?;
-        serde_json::from_str(&data).map_err(|e| HarnessError::SerializationError(e.to_string()))
+        let data = fs::read_to_string(path).map_err(|e| {
+            HarnessError::Io(format!(
+                "cannot read credential store {}: {e}",
+                path.display()
+            ))
+        })?;
+        serde_json::from_str(&data).map_err(|e| {
+            HarnessError::SerializationError(format!(
+                "credential store {} is not valid JSON ({e}); refusing to start from an empty \
+                 credential set, which the next write would persist over your keys — repair the \
+                 file or move it aside",
+                path.display()
+            ))
+        })
     }
 
     pub async fn save_to_disk(&self) -> Result<(), HarnessError> {
         let state = self.state.read().await;
+        // Never overwrite a store that exists but does not read back: a truncation or hand-edit
+        // between load and write must not turn into "all your keys are gone" (t_24375a7e).
+        if self.storage_path.exists() {
+            Self::load_from_disk(&self.storage_path)?;
+        }
         if let Some(parent) = self.storage_path.parent() {
             fs::create_dir_all(parent).map_err(|e| HarnessError::Io(e.to_string()))?;
         }
@@ -312,5 +340,25 @@ impl CredentialManager {
             }
             None => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_home_is_an_error_not_a_cwd_relocation() {
+        let err = CredentialManager::default_storage_path(None).unwrap_err();
+        assert!(err.to_string().contains("HOME is not set"), "{err}");
+        // An empty HOME is the same failure, not a path under the empty string.
+        assert!(CredentialManager::default_storage_path(Some(String::new())).is_err());
+    }
+
+    #[test]
+    fn the_default_store_is_absolute_under_home() {
+        let path = CredentialManager::default_storage_path(Some("/home/tester".to_string()))
+            .expect("HOME set");
+        assert_eq!(path, PathBuf::from("/home/tester/.luna/credentials.json"));
     }
 }
