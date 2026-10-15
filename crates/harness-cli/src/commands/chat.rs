@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, Config, DefaultToolRegistry, HarnessError, ModelProvider, ReasoningEffort,
-    SessionBinding, ToolRegistry, TurnOutcome,
+    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
+    ReasoningEffort, SessionBinding, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
@@ -22,8 +22,9 @@ use harness_providers::{
     ModelDiscovery,
 };
 
-use super::approval::{approval_settings, build_approver};
+use super::approval::{approval_settings, build_approver, render_approval_box, ChatApprover};
 use super::sessions::{open_store, resolve_session, SessionSelection};
+use tokio::sync::oneshot;
 
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
@@ -213,6 +214,16 @@ pub async fn run_interactive_chat(
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();
 
+    let (approval_tx, mut approval_rx) =
+        mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<harness_core::ApprovalDecision>)>();
+
+    let approver: Arc<dyn harness_core::Approver> =
+        if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
+            Arc::new(ChatApprover::new(approval_tx))
+        } else {
+            build_approver(&config)
+        };
+
     let mut agent = Agent::new(
         provider,
         memory,
@@ -221,7 +232,7 @@ pub async fn run_interactive_chat(
         registry,
         config.agent.clone(),
     )
-    .with_approval(build_approver(&config), approval_settings(&config))
+    .with_approval(approver, approval_settings(&config))
     .with_session(SessionBinding {
         store: store.clone(),
         session_id: session_id.clone(),
@@ -370,6 +381,24 @@ pub async fn run_interactive_chat(
 
     loop {
         tokio::select! {
+            maybe_approval = approval_rx.recv() => {
+                let (request, decision_tx) = match maybe_approval {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+
+                ui.clear_box_on_exit();
+                let decision = prompt_approval_box(&mut key_rx, &request).await;
+                let target_label = request.target.as_deref().unwrap_or("-");
+                if decision == harness_core::ApprovalDecision::Run {
+                    println!("{} Approved: {} ({})", "✔".green().bold(), request.tool.bold(), target_label);
+                } else {
+                    println!("{} Cancelled: {} ({})", "✖".red().bold(), request.tool.bold(), target_label);
+                }
+                ui.draw_initial_box();
+                let _ = decision_tx.send(decision);
+            }
+
             maybe_key = key_rx.recv() => {
                 let key = match maybe_key {
                     Some(k) => k,
@@ -918,4 +947,59 @@ async fn handle_reasoning_switch(
     ));
 
     Ok(())
+}
+
+async fn prompt_approval_box(
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    request: &ApprovalRequest,
+) -> harness_core::ApprovalDecision {
+    let width = get_terminal_width().min(76).max(50);
+    let mut selected = 0; // 0 = Approve, 1 = Cancel
+
+    // Drain any leftover keys in channel
+    while key_rx.try_recv().is_ok() {}
+
+    let (initial_text, mut line_count) = render_approval_box(request, selected, width);
+    print!("{}", initial_text);
+    let _ = io::stdout().flush();
+
+    while let Some(key) = key_rx.recv().await {
+        match key {
+            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Tab | Key::BackTab => {
+                selected = 1 - selected;
+            }
+            Key::Char('y') | Key::Char('Y') | Key::Char('a') | Key::Char('A') => {
+                selected = 0;
+                break;
+            }
+            Key::Char('n') | Key::Char('N') | Key::Char('c') | Key::Char('C') | Key::Escape => {
+                selected = 1;
+                break;
+            }
+            Key::Enter => {
+                break;
+            }
+            _ => continue,
+        }
+
+        print!("\r\x1b[{}A", line_count);
+        let (new_text, new_count) = render_approval_box(request, selected, width);
+        print!("{}", new_text);
+        line_count = new_count;
+        let _ = io::stdout().flush();
+    }
+
+    // Erase the approval box from screen
+    print!("\r\x1b[{}A", line_count);
+    for _ in 0..line_count {
+        print!("\x1b[2K\x1b[1B");
+    }
+    print!("\r\x1b[{}A", line_count);
+    let _ = io::stdout().flush();
+
+    if selected == 0 {
+        harness_core::ApprovalDecision::Run
+    } else {
+        harness_core::ApprovalDecision::Deny
+    }
 }
