@@ -147,6 +147,16 @@ impl ModelDiscovery {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // Model discovery is the first call a session makes, so this is where a dead key
+            // usually shows up: retire it rather than reporting the same 401 on every run.
+            if matches!(status.as_u16(), 401 | 403 | 429) {
+                let retired = cred_manager
+                    .mark_credential_failed(provider_id, secret.expose_secret())
+                    .await;
+                if retired {
+                    warn!("Model discovery rejected the selected credential for '{}'; retired", provider_id);
+                }
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(HarnessError::AuthenticationFailed {
                 provider: provider_id.to_string(),

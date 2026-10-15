@@ -159,6 +159,13 @@ pub async fn handle_auth_command(
             let updated = cred_manager.set_priority_credential(&provider, &target).await?;
             if updated {
                 println!("{} Credential '{}' set as priority for '{}'", "✔".green(), target, provider);
+                // Honesty check: only fill_first consults is_priority, so say so instead of letting
+                // the flag sit there looking effective under round_robin/random/least_used.
+                println!(
+                    "  note: the priority key is used first only under the fill_first strategy \
+                     (luna auth strategy -p {} -s fill_first)",
+                    provider
+                );
             } else {
                 println!("{} Credential '{}' not found.", "✖".red(), target);
             }

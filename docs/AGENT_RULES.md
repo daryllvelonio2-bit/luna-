@@ -14,12 +14,16 @@ assigned by the dispatcher; you never pick your own lane.
 ## 2. Environment (already set up — do not re-invent)
 
 - Toolchain: `cargo` 1.98 / `rustc` 1.98 on PATH. No rustup needed.
-- **All five worker profiles share one target dir** (`CARGO_TARGET_DIR=/home/janelle/.luna/cargo-target`),
-  so a build that prints `Blocking waiting for file lock on build directory` is waiting on another
-  worker, not hung — let it wait, and do not override `CARGO_TARGET_DIR` per card. Release
-  dependencies are warm in that dir; the **first debug/test build after a checkout is cold and can
-  take ~10 minutes** (bundled sqlite + audio + tls). Prefer `cargo build -p <crate>` for the inner
-  loop over `cargo build --workspace`, and run the workspace-wide test only at the end of a card.
+- **Every worktree builds into its own `target/` — never share one between trees.** Cargo's dep-info
+  is written relative to each tree's own root, so two checkouts produce the *same* artifact filename
+  and one tree can be handed the other's crate: the signature is a compile error naming a type or
+  symbol that does not exist anywhere in your tree, usually in a file your card never touched. That
+  is contamination, not your bug — `cargo clean -p <crate>` (or `touch` the file) and rebuild,
+  and say so in the handoff instead of "fixing" it. The same mechanism can silently build stale code.
+  Measured on this fleet: `docs/ROADMAP.md` §0.1.
+- The first build in a fresh worktree is **cold**: expect ~10 minutes for a release build at two
+  jobs. `~/.cargo` (the dependency *sources* and registry cache) is shared and warm; only `target/`
+  is per-tree.
 - **Builds are limited to two parallel jobs each** (`CARGO_BUILD_JOBS=2`). This machine is 7.6 GB with
   an 8-core CPU and up to five workers; unbounded rustc parallelism (`zbus`, `rustls`, `reqwest` at
   ~500 MB each) pushed the box into swap and made the dispatcher refuse to spawn anyone. Do not raise

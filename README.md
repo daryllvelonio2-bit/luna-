@@ -7,7 +7,10 @@ A production-grade, extensible **Autonomous AI Agent Harness** implemented in **
 1. **Universal Model Interoperability & Luna Auth (BYOK)**:
    - Pre-configured catalog for major providers (OpenAI, Anthropic, Gemini, Groq, Ollama, DeepSeek, OpenRouter, Together, Mistral).
    - **Dynamic model auto-fetching** from provider endpoints upon credential addition with local JSON caching (`~/.luna/models_cache.json`).
-   - Interactive `luna auth` CLI credential manager supporting multiple labeled keys, active priority keys, and 4 rotation strategies (`RoundRobin`, `FillFirst`, `Random`, `LeastUsed`).
+   - Interactive `luna auth` CLI credential manager supporting multiple labeled keys, a priority
+     key that `FillFirst` uses before any other, and 4 rotation strategies (`RoundRobin`,
+     `FillFirst`, `Random`, `LeastUsed`). A key that a provider rejects (401/403) or rate-limits
+     (429) is retired for the rest of the session, so the next call fails over to another key.
 
 2. **Model-Driven Persistent Memory (No Harness Pre-Filtering)**:
    - Hybrid relational SQLite + vector embeddings schema.
@@ -85,6 +88,10 @@ cargo run --bin luna -- auth strategy --provider openai --strategy round_robin
 # List registered credentials
 cargo run --bin luna -- auth list
 ```
+`--priority` marks a key as the primary one, but only the `fill_first` strategy consults that flag
+(the other three rotate over every active key); `luna auth priority` prints the same reminder. When
+a provider answers 401/403/429 the offending key is retired for the rest of the session and the next
+call uses another key — the last remaining key is never retired.
 
 ### 2. Inspecting Available Models
 Dynamically query models from the provider endpoint:

@@ -4,7 +4,7 @@ use eventsource_stream::Eventsource;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 
 use harness_core::{
@@ -61,9 +61,11 @@ impl GenericProviderClient {
         })
     }
 
-    async fn build_auth_headers(&self) -> Result<(HeaderMap, Option<String>), HarnessError> {
+    /// Builds the auth headers for one request and returns the secret that was used, so a failing
+    /// request can tell the [`CredentialManager`] *which* credential to retire.
+    async fn build_auth_headers(&self) -> Result<(HeaderMap, Option<String>, SecretString), HarnessError> {
         let secret = self.cred_manager.acquire_credential(&self.provider_id).await?;
-        let api_key = secret.expose_secret();
+        let api_key = secret.expose_secret().to_string();
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -80,7 +82,7 @@ impl GenericProviderClient {
             AuthHeaderFormat::AnthropicApiKey => {
                 headers.insert(
                     "x-api-key",
-                    HeaderValue::from_str(api_key)
+                    HeaderValue::from_str(&api_key)
                         .map_err(|e| HarnessError::ConfigurationError(e.to_string()))?,
                 );
                 headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
@@ -91,7 +93,27 @@ impl GenericProviderClient {
             AuthHeaderFormat::None => {}
         }
 
-        Ok((headers, query_param))
+        Ok((headers, query_param, secret))
+    }
+
+    /// Report the credential that just failed so the manager retires it and the next call fails
+    /// over to another key. Only ever logged by label/provider — never the key itself.
+    async fn retire_failed_credential(&self, secret: &SecretString) {
+        let retired = self
+            .cred_manager
+            .mark_credential_failed(&self.provider_id, secret.expose_secret())
+            .await;
+        if retired {
+            warn!(
+                provider = %self.provider_id,
+                "Provider rejected the selected credential; it is retired for this process"
+            );
+        } else {
+            debug!(
+                provider = %self.provider_id,
+                "Provider rejected the selected credential, but no other key is available to fail over to"
+            );
+        }
     }
 
     fn serialize_messages(&self, messages: &[Message]) -> serde_json::Value {
@@ -176,7 +198,7 @@ impl ModelProvider for GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
-        let (headers, query_param) = self.build_auth_headers().await?;
+        let (headers, query_param, secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/chat/completions", self.base_url);
         if let Some(q) = query_param {
             url = format!("{}?{}", url, q);
@@ -212,6 +234,7 @@ impl ModelProvider for GenericProviderClient {
             })?;
 
         if resp.status().as_u16() == 429 {
+            self.retire_failed_credential(&secret).await;
             return Err(HarnessError::RateLimited {
                 provider: self.provider_id.clone(),
                 retry_after_secs: Some(30),
@@ -220,6 +243,11 @@ impl ModelProvider for GenericProviderClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it and
+            // let the next turn fail over instead of replaying it forever.
+            if matches!(status.as_u16(), 401 | 403) {
+                self.retire_failed_credential(&secret).await;
+            }
             let body_text = resp.text().await.unwrap_or_default();
             return Err(HarnessError::ProviderError {
                 provider: self.provider_id.clone(),
@@ -277,7 +305,7 @@ impl ModelProvider for GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        let (headers, query_param) = self.build_auth_headers().await?;
+        let (headers, query_param, _secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/chat/completions", self.base_url);
         if let Some(q) = query_param {
             url = format!("{}?{}", url, q);
@@ -361,7 +389,7 @@ impl ModelProvider for GenericProviderClient {
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
-        let (headers, query_param) = self.build_auth_headers().await?;
+        let (headers, query_param, _secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/embeddings", self.base_url);
         if let Some(q) = query_param {
             url = format!("{}?{}", url, q);
