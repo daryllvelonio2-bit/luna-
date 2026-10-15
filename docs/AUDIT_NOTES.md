@@ -332,3 +332,16 @@ later card `t_8935ed8a` fixed both.
   (`project_id = p_f47ecaea`, `.worktrees/<task-id>`, `branch_name = luna-harness/<task-id>-<slug>`)
   and re-read to confirm. Worth a tool-side fix: nothing in the worker-facing API can anchor a card
   after creation.
+
+## 9. Verification pass on the merge landings (t_88f7744a, main @ 2871df1)
+
+The `wt/t_83845462` merge (d74529b + the config-era adaptation c0639f2) predates the HITL gate
+(7996f61, merged cfd71d1). Its `Approval` section in `docs/EVALS.md` still says the loop "has no gate
+yet" and points at `t_c4f9c07d` as future work (docs/EVALS.md:80-82). The gate has landed, so that
+paragraph is stale in both directions — and the t_c4f9c07d handoff said the runner's wrapper "should
+be deleted" once the gate lands, which has not happened either (the runner builds `RecordingRegistry`
+with the wrapper's `approval.deny` list at `crates/harness-cli/src/eval/runner.rs:260`). Not a
+correctness defect today: offline case semantics are unchanged and the wrapper's wording deliberately
+matches `HarnessError::ApprovalRejected` (`crates/harness-cli/src/eval/tools.rs:21`). When the
+`t_83845462` handoff note is acted on, delete the wrapper and rewrite this doc paragraph in the same
+commit.
