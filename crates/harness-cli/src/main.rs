@@ -144,7 +144,7 @@ async fn main() -> Result<(), HarnessError> {
             handle_config_command(subcommand, &layers)?;
         }
         Some(Commands::Eval { subcommand }) => {
-            handle_eval_command(subcommand, cred_manager, discovery).await?;
+            handle_eval_command(subcommand, cred_manager, discovery, &config).await?;
         }
         None => {
             // Default to chat if no subcommand specified

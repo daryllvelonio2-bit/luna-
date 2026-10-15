@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Subcommand;
 
+use harness_core::config::Config;
 use harness_core::{HarnessError, TokenUsage};
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
@@ -51,6 +52,7 @@ pub async fn handle_eval_command(
     cmd: EvalCommand,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
+    config: &Config,
 ) -> Result<(), HarnessError> {
     let EvalCommand::Run {
         suite,
@@ -90,12 +92,12 @@ pub async fn handle_eval_command(
             run_suite::<GenericProviderClient, _>(&options, |_| None).await?
         } else {
             let client = Arc::new(GenericProviderClient::new(
-                provider,
-                None,
+                provider.clone(),
                 model,
                 cred_manager,
                 discovery,
-            ));
+                config.providers.get(&provider),
+            )?);
             run_suite(&options, move |_| Some(client.clone())).await?
         }
     } else {
