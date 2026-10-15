@@ -469,7 +469,7 @@ pub async fn execute_antigravity_completion(
     })?;
 
     let mut full_text = String::new();
-    let mut reasoning = None;
+    let mut thought_buf = String::new();
     let mut tool_calls = Vec::new();
     let mut usage = None;
 
@@ -495,12 +495,17 @@ pub async fn execute_antigravity_completion(
                 for cand in candidates {
                     if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                         for part in parts {
-                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            let is_thought_bool = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                            if is_thought_bool {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    thought_buf.push_str(text);
+                                }
+                            } else if let Some(thought_str) = part.get("thought").and_then(|t| t.as_str()) {
+                                thought_buf.push_str(thought_str);
+                            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                 full_text.push_str(text);
                             }
-                            if let Some(thought) = part.get("thought").and_then(|t| t.as_str()) {
-                                reasoning = Some(thought.to_string());
-                            }
+
                             if let Some(fc) = part.get("functionCall") {
                                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
                                 let args = fc.get("args").cloned().unwrap_or(json!({}));
@@ -517,6 +522,29 @@ pub async fn execute_antigravity_completion(
             }
         }
     }
+
+    // Extract inline <think> or <thought> tags if thought_buf is empty
+    if thought_buf.is_empty() {
+        for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+            if let Some(start) = full_text.find(open_tag) {
+                if let Some(end) = full_text.find(close_tag) {
+                    let think_text = full_text[start + open_tag.len()..end].trim().to_string();
+                    let rest = format!("{}{}", &full_text[..start], &full_text[end + close_tag.len()..]).trim().to_string();
+                    if !think_text.is_empty() {
+                        thought_buf = think_text;
+                    }
+                    full_text = rest;
+                    break;
+                }
+            }
+        }
+    }
+
+    let reasoning = if thought_buf.is_empty() {
+        None
+    } else {
+        Some(thought_buf)
+    };
 
     let mut res_msg = Message::assistant(full_text);
     res_msg.reasoning = reasoning;
