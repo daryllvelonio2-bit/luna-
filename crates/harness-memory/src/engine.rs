@@ -174,23 +174,34 @@ impl MemoryEngine for SqliteMemoryEngine {
     }
 
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         // Auto-supersede conflicting active memories with matching subject & predicate.
         // The conflict set is collected before the insert so the new row is never its own
         // predecessor; the insert then has to land first because `superseded_by` is a foreign
         // key onto `memories(id)` (bundled SQLite enables foreign keys by default).
-        let mut check_stmt = conn
-            .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
-            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let old_ids: Vec<String> = {
+            let mut check_stmt = tx
+                .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        let old_ids: Vec<String> = check_stmt
-            .query_map(params![record.subject, record.predicate], |row| row.get(0))
-            .map_err(|e| HarnessError::MemoryError(e.to_string()))?
-            .filter_map(Result::ok)
-            .collect();
+            let rows = check_stmt
+                .query_map(params![record.subject, record.predicate], |row| row.get(0))
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let mut ids = Vec::new();
+            for r in rows {
+                if let Ok(id) = r {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
@@ -211,23 +222,30 @@ impl MemoryEngine for SqliteMemoryEngine {
 
         for old_id in old_ids {
             debug!("Superseding prior memory '{}' with new memory '{}'", old_id, record.id);
-            conn.execute(
+            tx.execute(
                 "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
                 params![record.id, Utc::now().to_rfc3339(), old_id],
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         }
 
+        tx.commit()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
         info!("Saved memory '{}' [{}: {} -> {}]", record.id, record.category, record.subject, record.object);
         Ok(())
     }
 
     async fn update(&self, id: &str, updated: &MemoryRecord) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         // Same foreign-key ordering as `save`: the replacement row must exist before the row it
         // supersedes can point at it.
-        conn.execute(
+        tx.execute(
             "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
@@ -246,11 +264,14 @@ impl MemoryEngine for SqliteMemoryEngine {
         )
         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        conn.execute(
+        tx.execute(
             "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
             params![updated.id, Utc::now().to_rfc3339(), id],
         )
         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         info!("Updated memory '{}' -> superseded by '{}'", id, updated.id);
         Ok(())
@@ -272,7 +293,7 @@ impl MemoryEngine for SqliteMemoryEngine {
         let record = MemoryRecord {
             id: format!("mem_ptr_{}", note_id),
             subject: "note".to_string(),
-            predicate: "stored_document".to_string(),
+            predicate: format!("doc_{}", note_id),
             object: pointer.to_string(),
             raw_content: format!("Note [ID: {}]: {}", note_id, pointer),
             category: MemoryCategory::NotePointer,

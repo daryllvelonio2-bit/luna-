@@ -47,3 +47,18 @@ async fn test_memory_superseding_and_active_state() {
     assert_eq!(res2[0].id, "mem_2");
     assert_eq!(res2[0].object, "Rust");
 }
+
+#[tokio::test]
+async fn test_multiple_note_pointers_remain_active() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    engine.add_note_pointer("note_1", "Stripe Payment Gateway Spec 2026").await.unwrap();
+    engine.add_note_pointer("note_2", "Rust Harness Architecture").await.unwrap();
+
+    let res = engine.retrieve("Note [ID:", 10).await.unwrap();
+    assert_eq!(res.len(), 2, "Both note pointers must remain active");
+
+    let ids: Vec<String> = res.iter().map(|m| m.id.clone()).collect();
+    assert!(ids.contains(&"mem_ptr_note_1".to_string()));
+    assert!(ids.contains(&"mem_ptr_note_2".to_string()));
+}

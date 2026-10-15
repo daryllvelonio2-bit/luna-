@@ -19,6 +19,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 similar = { workspace = true }
 rusqlite = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

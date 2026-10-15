@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod registry;
 pub mod session;
+pub mod tools;
 pub mod traits;
 pub mod types;
 

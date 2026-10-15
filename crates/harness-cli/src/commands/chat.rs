@@ -184,6 +184,11 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;
 
+    // Register core filesystem and shell tools (§2.2)
+    let read_cache = harness_core::tools::ReadCache::new();
+    let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+    harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache).await?;
+
     let is_attended = Term::stdout().features().is_attended();
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();

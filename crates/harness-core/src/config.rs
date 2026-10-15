@@ -128,6 +128,14 @@ pub struct ToolsSettings {
     pub approval_timeout_secs: u64,
     /// Tool names the gate must treat as mutating even when the tool says otherwise.
     pub mutating_overrides: Vec<String>,
+    /// Maximum character budget for read_file before truncation.
+    pub read_max_chars: usize,
+    /// Terminal command execution timeout in seconds.
+    pub terminal_timeout_secs: u64,
+    /// Maximum output bytes captured from terminal.
+    pub terminal_output_max_bytes: usize,
+    /// Enabled tool names.
+    pub enabled: Vec<String>,
 }
 
 impl Default for ToolsSettings {
@@ -136,6 +144,16 @@ impl Default for ToolsSettings {
             approval: ApprovalMode::Ask,
             approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
             mutating_overrides: Vec::new(),
+            read_max_chars: 100_000,
+            terminal_timeout_secs: 120,
+            terminal_output_max_bytes: 50_000,
+            enabled: vec![
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "patch".to_string(),
+                "search_files".to_string(),
+                "terminal".to_string(),
+            ],
         }
     }
 }
