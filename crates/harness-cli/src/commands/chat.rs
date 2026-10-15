@@ -38,8 +38,6 @@ fn get_terminal_width() -> usize {
 
 #[derive(Clone)]
 struct ChatStatus {
-    session_id: String,
-    provider: String,
     model: String,
     context_used: u32,
     context_max: u32,
@@ -61,21 +59,18 @@ impl ChatUi {
         }
     }
 
-    fn set_status(&self, session_id: &str, provider: &str, model: &str, context_used: u32, context_max: u32) {
+    fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
         *status = Some(ChatStatus {
-            session_id: session_id.to_string(),
-            provider: provider.to_string(),
             model: model.to_string(),
             context_used,
             context_max,
         });
     }
 
-    fn set_model(&self, provider: &str, model: &str, context_used: u32, context_max: u32) {
+    fn set_model(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
         if let Some(ref mut s) = *status {
-            s.provider = provider.to_string();
             s.model = model.to_string();
             s.context_used = context_used;
             s.context_max = context_max;
@@ -93,45 +88,39 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
+    /// Status line above the input box: model name on the left, context usage on the right.
     fn format_status_line(&self, width: usize) -> Option<String> {
         let status = self.status.lock().unwrap();
         let s = status.as_ref()?;
 
-        let left = format!("ctx: {}/{}", s.context_used, s.context_max);
-        let center = format!("session: {}", s.session_id);
-        let right = format!("{}/{}", s.provider, s.model);
+        let left = s.model.clone();
+        let right = format!("ctx: {}/{}", s.context_used, s.context_max);
 
         let left_len = left.chars().count();
-        let center_len = center.chars().count();
         let right_len = right.chars().count();
-        let total_used = left_len + center_len + right_len;
 
-        if total_used + 4 > width {
-            let available = width.saturating_sub(left_len + right_len + 4);
-            let center_truncated = if center_len > available {
-                format!("{}…", &center[..available.saturating_sub(1)])
+        if left_len + right_len + 4 > width {
+            let available = width.saturating_sub(right_len + 4);
+            let left_truncated = if left_len > available {
+                let cut = available.saturating_sub(1);
+                format!("{}…", left.chars().take(cut).collect::<String>())
             } else {
-                center
+                left
             };
-            let spaces_left = (width.saturating_sub(left_len + center_truncated.chars().count() + right_len)) / 2;
-            let spaces_right = width.saturating_sub(left_len + center_truncated.chars().count() + right_len + spaces_left);
+            let left_len = left_truncated.chars().count();
+            let spaces = width.saturating_sub(left_len + right_len);
             Some(format!(
-                "{}{}{}{}{}",
-                left.dimmed(),
-                " ".repeat(spaces_left),
-                center_truncated.dimmed(),
-                " ".repeat(spaces_right),
+                "{}{}{}",
+                left_truncated.dimmed(),
+                " ".repeat(spaces),
                 right.dimmed()
             ))
         } else {
-            let spaces_left = (width - total_used) / 2;
-            let spaces_right = width - total_used - spaces_left;
+            let spaces = width - left_len - right_len;
             Some(format!(
-                "{}{}{}{}{}",
+                "{}{}{}",
                 left.dimmed(),
-                " ".repeat(spaces_left),
-                center.dimmed(),
-                " ".repeat(spaces_right),
+                " ".repeat(spaces),
                 right.dimmed()
             ))
         }
@@ -358,55 +347,23 @@ pub async fn run_interactive_chat(
     })
     .with_observer(Arc::new(move |event| match event {
         harness_core::AgentEvent::Thinking(text) => {
-            let mut out = format!("{}\n", "Thinking:".bold().dimmed());
+            let mut out = String::new();
             for line in text.lines() {
-                out.push_str(&format!("  {}\n", line.dimmed()));
+                let trimmed = line.trim_end();
+                if !trimmed.is_empty() {
+                    out.push_str(&format!("  {}\n", trimmed.dimmed()));
+                }
             }
-            ui_obs.print_above(&out);
+            let trimmed_out = out.trim_end();
+            if !trimmed_out.is_empty() {
+                ui_obs.print_above(trimmed_out);
+            }
         }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-            let args_preview = if arguments.is_null() || arguments == serde_json::json!({}) {
-                String::new()
-            } else if let Some(obj) = arguments.as_object() {
-                let parts: Vec<String> = obj
-                    .iter()
-                    .map(|(k, v)| {
-                        let val_str = match v {
-                            serde_json::Value::String(s) => {
-                                if s.len() > 60 {
-                                    format!("\"{}…\"", &s[..57])
-                                } else {
-                                    format!("\"{}\"", s)
-                                }
-                            }
-                            other => other.to_string(),
-                        };
-                        format!("{}={}", k, val_str)
-                    })
-                    .collect();
-                parts.join(" ")
-            } else {
-                arguments.to_string()
-            };
-            ui_obs.print_above(&format!("{} {} {}", "•".cyan(), name.bold(), args_preview.dimmed()));
+            ui_obs.print_above(&format_tool_call(&name, &arguments));
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
-            let trimmed = output.trim();
-            let preview = if trimmed.lines().count() > 3 || trimmed.len() > 160 {
-                let first = trimmed.lines().next().unwrap_or("").trim();
-                format!("{} ({} lines)", first, trimmed.lines().count())
-            } else if trimmed.is_empty() {
-                "done".to_string()
-            } else {
-                trimmed.to_string()
-            };
-
-            let line = if is_error {
-                format!("  {} {}", "✖".red(), preview.red())
-            } else {
-                format!("  {} {}", "✓".green(), preview.dimmed())
-            };
-            ui_obs.print_above(&line);
+            ui_obs.print_above(&format_tool_result(is_error, &output));
         }
     }));
     if let Some(setup) = compaction {
@@ -476,7 +433,7 @@ pub async fn run_interactive_chat(
     }
 
     let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
-    ui.set_status(&session_id, &current_provider, &current_model, 0, context_max);
+    ui.set_status(&current_model, 0, context_max);
     ui.draw_initial_box();
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
@@ -1007,7 +964,7 @@ async fn handle_model_switch(
     *current_model = chosen_model.clone();
 
     let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
-    ui.set_model(&chosen_provider, &chosen_model, 0, context_max);
+    ui.set_model(&chosen_model, 0, context_max);
     ui.draw_initial_box();
 
     let effort_label = chosen_effort
@@ -1153,4 +1110,181 @@ async fn prompt_approval_box(
     } else {
         harness_core::ApprovalDecision::Deny
     }
+}
+
+fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
+    let bullet = "•".cyan();
+
+    match name {
+        "shell" | "terminal" | "bash" => {
+            if let Some(cmd) = arguments.get("command").and_then(|c| c.as_str()) {
+                let first_line = cmd.lines().next().unwrap_or(cmd).trim();
+                let display_cmd = if first_line.len() > 80 {
+                    format!("{}…", &first_line[..77])
+                } else {
+                    first_line.to_string()
+                };
+                if let Some(workdir) = arguments.get("workdir").and_then(|w| w.as_str()) {
+                    return format!(
+                        "{} {} {} {}",
+                        bullet,
+                        "$".bold().cyan(),
+                        display_cmd.bold(),
+                        format!("(in {})", workdir).dimmed()
+                    );
+                }
+                return format!("{} {} {}", bullet, "$".bold().cyan(), display_cmd.bold());
+            }
+        }
+        "read_file" | "cat" => {
+            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
+                let range = match (
+                    arguments.get("offset").and_then(|o| o.as_u64()),
+                    arguments.get("limit").and_then(|l| l.as_u64()),
+                ) {
+                    (Some(offset), Some(limit)) => {
+                        format!(" (lines {}-{})", offset, offset + limit.saturating_sub(1))
+                    }
+                    (Some(offset), None) => format!(" (from line {})", offset),
+                    _ => String::new(),
+                };
+                return format!("{} {} {}{}", bullet, "read".bold(), path.cyan(), range.dimmed());
+            }
+        }
+        "write_file" => {
+            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
+                let lines_count = arguments
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                return format!(
+                    "{} {} {} {}",
+                    bullet,
+                    "write".bold(),
+                    path.cyan(),
+                    format!("({} lines)", lines_count).dimmed()
+                );
+            }
+        }
+        "patch" => {
+            if let Some(path) = arguments.get("path").and_then(|p| p.as_str()) {
+                return format!("{} {} {}", bullet, "patch".bold(), path.cyan());
+            }
+        }
+        "search_files" | "grep" => {
+            let pattern = arguments.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+            let target = arguments.get("target").and_then(|t| t.as_str()).unwrap_or("content");
+            if target == "files" {
+                return format!("{} {} \"{}\" in {}", bullet, "find files".bold(), pattern.cyan(), path.dimmed());
+            } else {
+                return format!("{} {} \"{}\" in {}", bullet, "search".bold(), pattern.cyan(), path.dimmed());
+            }
+        }
+        "web_search" => {
+            if let Some(query) = arguments.get("query").and_then(|q| q.as_str()) {
+                return format!("{} {} \"{}\"", bullet, "web_search".bold(), query.cyan());
+            }
+        }
+        "web_extract" => {
+            if let Some(urls) = arguments.get("urls").and_then(|u| u.as_array()) {
+                let joined = urls.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>().join(", ");
+                return format!("{} {} {}", bullet, "fetch".bold(), joined.cyan());
+            }
+        }
+        _ => {}
+    }
+
+    // Clean up display name (e.g. mcp__server__tool -> server/tool)
+    let display_name = if let Some(stripped) = name.strip_prefix("mcp__") {
+        stripped.replace("__", "/")
+    } else {
+        name.to_string()
+    };
+
+    // Generic fallback: clean arg pairs skipping nulls and empties
+    let args_str = if let Some(obj) = arguments.as_object() {
+        let parts: Vec<String> = obj
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| {
+                let val_str = match v {
+                    serde_json::Value::String(s) => {
+                        let trimmed = s.lines().next().unwrap_or(s);
+                        if trimmed.len() > 50 {
+                            format!("\"{}…\"", &trimmed[..47])
+                        } else {
+                            format!("\"{}\"", trimmed)
+                        }
+                    }
+                    other => other.to_string(),
+                };
+                format!("{}={}", k, val_str)
+            })
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", parts.join(" "))
+        }
+    } else if arguments.is_null() || arguments == &serde_json::json!({}) {
+        String::new()
+    } else {
+        format!(" {}", arguments)
+    };
+
+    format!("{} {}{}", bullet, display_name.bold(), args_str.dimmed())
+}
+
+fn format_tool_result(is_error: bool, output: &str) -> String {
+    let trimmed = output.trim();
+    if is_error {
+        let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+        let display = if first_line.len() > 120 {
+            format!("{}…", &first_line[..117])
+        } else {
+            first_line.to_string()
+        };
+        return format!("  {} {}", "✖".red(), display.red());
+    }
+
+    if trimmed.is_empty() {
+        return format!("  {} {}", "✓".green(), "done".dimmed());
+    }
+
+    let line_count = trimmed.lines().count();
+    if line_count == 1 {
+        let display = if trimmed.len() > 120 {
+            format!("{}…", &trimmed[..117])
+        } else {
+            trimmed.to_string()
+        };
+        return format!("  {} {}", "✓".green(), display.dimmed());
+    }
+
+    if line_count <= 3 && trimmed.len() <= 160 {
+        let mut out = String::new();
+        for (i, line) in trimmed.lines().enumerate() {
+            if i == 0 {
+                out.push_str(&format!("  {} {}\n", "✓".green(), line.dimmed()));
+            } else {
+                out.push_str(&format!("    {}\n", line.dimmed()));
+            }
+        }
+        return out.trim_end().to_string();
+    }
+
+    let first = trimmed.lines().next().unwrap_or("").trim();
+    let display_first = if first.len() > 80 {
+        format!("{}…", &first[..77])
+    } else {
+        first.to_string()
+    };
+    format!(
+        "  {} {} {}",
+        "✓".green(),
+        display_first.dimmed(),
+        format!("(+{} lines)", line_count - 1).dimmed()
+    )
 }

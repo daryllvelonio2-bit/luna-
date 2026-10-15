@@ -307,9 +307,15 @@ pub async fn execute_antigravity_completion(
                         parts.push(json!({ "text": text }));
                     }
                 }
-                for c in &msg.tool_calls {
+                for (idx, c) in msg.tool_calls.iter().enumerate() {
+                    let call_id = if c.id.is_empty() {
+                        format!("call_{}", idx)
+                    } else {
+                        c.id.clone()
+                    };
                     parts.push(json!({
                         "functionCall": {
+                            "id": call_id,
                             "name": c.name,
                             "args": c.arguments
                         }
@@ -324,12 +330,28 @@ pub async fn execute_antigravity_completion(
                 }));
             }
             Role::Tool => {
-                let tool_name = "tool";
+                let call_id = msg
+                    .tool_result
+                    .as_ref()
+                    .map(|r| r.call_id.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("call_0");
                 let result_content = msg.tool_result.as_ref().map(|r| r.content.as_str()).unwrap_or("");
+                let tool_name = messages
+                    .iter()
+                    .filter_map(|m| {
+                        m.tool_calls
+                            .iter()
+                            .find(|tc| tc.id == call_id)
+                            .map(|tc| tc.name.as_str())
+                    })
+                    .next()
+                    .unwrap_or("terminal");
                 gemini_contents.push(json!({
                     "role": "user",
                     "parts": [{
                         "functionResponse": {
+                            "id": call_id,
                             "name": tool_name,
                             "response": { "result": result_content }
                         }
