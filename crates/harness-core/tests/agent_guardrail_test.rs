@@ -47,14 +47,6 @@ impl ModelProvider for MockProvider {
         }
     }
 
-    async fn stream(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _options: &CompletionOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        unimplemented!()
-    }
 
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         Ok(vec![])
@@ -123,6 +115,9 @@ impl NotesEngine for MockNotes {
         unimplemented!()
     }
     async fn update_note(&self, _id: &str, _t: Option<&str>, _c: Option<&str>, _tags: Option<&[String]>) -> Result<Note, HarnessError> {
+        unimplemented!()
+    }
+    async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
         unimplemented!()
     }
 }

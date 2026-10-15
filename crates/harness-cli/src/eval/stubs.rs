@@ -73,6 +73,10 @@ impl NotesEngine for NoopNotes {
     ) -> Result<Note, HarnessError> {
         Err(HarnessError::NotesError(NOOP.to_string()))
     }
+
+    async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
+        Err(HarnessError::NotesError(NOOP.to_string()))
+    }
 }
 
 pub struct NoopEvolver;

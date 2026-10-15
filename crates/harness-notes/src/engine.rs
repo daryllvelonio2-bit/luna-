@@ -248,4 +248,21 @@ impl NotesEngine for SqliteNotesEngine {
             updated_at: now,
         })
     }
+
+    async fn delete_note(&self, id: &str) -> Result<bool, HarnessError> {
+        let conn = self.conn.lock().await;
+        // The `notes_ad` trigger mirrors the delete into the FTS index, so no manual
+        // `notes_fts` maintenance is needed here.
+        let affected = conn
+            .execute("DELETE FROM notes WHERE id = ?1", params![id])
+            .map_err(|e| HarnessError::NotesError(e.to_string()))?;
+
+        if affected > 0 {
+            info!("Deleted note '{}'", id);
+        } else {
+            warn!("Delete requested for unknown note '{}'", id);
+        }
+
+        Ok(affected > 0)
+    }
 }

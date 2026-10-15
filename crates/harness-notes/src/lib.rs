@@ -4,4 +4,4 @@ pub mod tools;
 
 pub use distiller::PointerDistiller;
 pub use engine::SqliteNotesEngine;
-pub use tools::{ReadNoteTool, SaveNoteTool, SearchNotesTool, UpdateNoteTool};
+pub use tools::{DeleteNoteTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, UpdateNoteTool};

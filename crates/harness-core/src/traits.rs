@@ -23,13 +23,23 @@ pub trait ModelProvider: Send + Sync {
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError>;
 
-    /// Token-by-token streaming completion
+    /// Token-by-token streaming completion.
+    ///
+    /// Defaulted to "unsupported": the agent loop falls back to [`Self::complete`] when this
+    /// returns an error before producing anything, so a provider that only implements the
+    /// buffered call still runs a turn. Implementors that *can* stream should override it —
+    /// it is what makes reasoning visible while the model is still writing it.
     async fn stream(
         &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        options: &CompletionOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError>;
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::ProviderError {
+            provider: self.provider_id().to_string(),
+            message: "streaming is not supported by this provider".to_string(),
+        })
+    }
 
     /// Vector embeddings for memory indexing
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError>;
@@ -51,6 +61,14 @@ pub trait MemoryEngine: Send + Sync {
 
     /// Register a 1-5 word note pointer memory record
     async fn add_note_pointer(&self, note_id: &str, pointer: &str) -> Result<(), HarnessError>;
+
+    /// Remove the pointer that mirrors a note, so deleting a note leaves no dangling memory.
+    ///
+    /// Defaulted: the pointer id is derived from the note id (`mem_ptr_{note_id}`), so a plain
+    /// `forget` is sufficient and implementors need not override it.
+    async fn remove_note_pointer(&self, note_id: &str) -> Result<(), HarnessError> {
+        self.forget(&format!("mem_ptr_{}", note_id)).await
+    }
 
     /// Render memories into a system prompt block
     fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String;
@@ -80,6 +98,10 @@ pub trait NotesEngine: Send + Sync {
         content: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<Note, HarnessError>;
+
+    /// Permanently delete a note. Returns `true` if a note with `id` existed and was removed,
+    /// `false` if no such note was found (which is not an error).
+    async fn delete_note(&self, id: &str) -> Result<bool, HarnessError>;
 }
 
 #[async_trait]

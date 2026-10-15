@@ -10,7 +10,7 @@ use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
 };
 use harness_notes::{
-    ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
+    DeleteNoteTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 use harness_voice::{
@@ -90,6 +90,7 @@ pub async fn run_voice_loop(
     registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await?;
     registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
+    registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(InspectSourceTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;

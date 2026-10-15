@@ -82,52 +82,45 @@ fn get_terminal_width() -> usize {
         .unwrap_or(80)
 }
 
-/// The composer prompt. The `User >` label is gone, so Luna's crescent marks the input line
-/// instead. U+263E LAST QUARTER MOON is a plain text glyph — terminals keep it
-/// black-and-white, unlike the colour crescent U+1F319 which renders as an emoji.
-const PROMPT: &str = "\u{263E} ";
+/// Interactive chat: the composer, the transcript, the live region above it, and the pickers.
+/// Everything pure — how a call, a result or a reasoning row is worded — lives in [`render`].
+mod render;
 
-/// Luna's reply label. Kept beside [`PROMPT`] so the two sides of the transcript are edited
-/// in one place rather than hunting for scattered UI literals.
-const LUNA_LABEL: &str = "Luna";
+use render::{
+    activity_line, format_tool_call, format_tool_result, needs_separator, reasoning_rows,
+    right_aligned_user_message, tool_activity_detail, wrap_rows, OutputBlockKind, LUNA_LABEL,
+    PROMPT,
+};
 
-/// Right-align the user's own message so the transcript reads as a chat — the user on the
-/// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
-fn right_aligned_user_message(query: &str, width: usize) -> String {
-    // The message and its glyph are one unit, so they are bolded together.
-    let line = format!("{} {}", query, PROMPT.trim_end());
-    let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
-    format!("{}{}", " ".repeat(pad), line.bold())
+/// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
+/// a shallow tail is what makes long reasoning stream smoothly instead of scrolling the screen.
+const LIVE_REASONING_ROWS: usize = 4;
+
+/// How often the live region advances a spinner frame and refreshes its elapsed time.
+const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// A tool call currently in flight, as far as the animation is concerned.
+#[derive(Clone)]
+struct Activity {
+    /// What the tool is doing, when the call itself does not already say it.
+    detail: Option<String>,
+    started: std::time::Instant,
+    frame: usize,
 }
 
-/// Truncate `text` to at most `max` visible characters, marking the cut with an ellipsis.
-fn truncate_visible(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut truncated: String = text.chars().take(max - 1).collect();
-    truncated.push('…');
-    truncated
-}
-
-/// One transcript block kind, tracked so blank lines land only between differing
-/// blocks (user → thinking, thinking → tool) and never between repeats (tool → tool).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OutputBlockKind {
-    None,
-    User,
-    Thinking,
-    Tool,
-    Reply,
-}
-
-/// A blank line separates blocks of different kinds. Identical consecutive blocks stay
-/// adjacent, and the first block of a turn is not preceded by one.
-fn needs_separator(prev: OutputBlockKind, next: OutputBlockKind) -> bool {
-    prev != OutputBlockKind::None && prev != next
+/// The in-place region between the transcript and the composer: the tail of the reasoning as it
+/// streams in, and the animated line for a running tool. It is rewritten rather than appended to,
+/// so a long turn does not flood the transcript with partial lines.
+#[derive(Default)]
+struct LiveRegion {
+    /// Reasoning accumulated for the current block and not yet settled into the transcript.
+    reasoning: String,
+    /// Reasoning rows already copied into the transcript, so a redraw does not repeat them.
+    settled_rows: usize,
+    /// The running tool, if any.
+    activity: Option<Activity>,
+    /// Rows currently on screen, so the next frame can erase exactly this many.
+    rows: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -141,9 +134,10 @@ struct ChatStatus {
 struct ChatUi {
     input_buf: Arc<Mutex<String>>,
     status: Arc<Mutex<Option<ChatStatus>>>,
-    /// True while the most recently printed log line is an in-progress tool call, so the finished
-    /// result can replace that same line instead of appending a second one.
-    pending_tool: Arc<Mutex<bool>>,
+    /// The in-place region above the composer: streamed reasoning and the running tool.
+    live: Arc<Mutex<LiveRegion>>,
+    /// The kind of the last transcript block, so blank lines land only between differing blocks.
+    last_block: Arc<Mutex<OutputBlockKind>>,
     is_attended: bool,
 }
 
@@ -152,9 +146,60 @@ impl ChatUi {
         Self {
             input_buf: Arc::new(Mutex::new(String::new())),
             status: Arc::new(Mutex::new(None)),
-            pending_tool: Arc::new(Mutex::new(false)),
+            live: Arc::new(Mutex::new(LiveRegion::default())),
+            last_block: Arc::new(Mutex::new(OutputBlockKind::None)),
             is_attended,
         }
+    }
+
+    /// Open a transcript block, writing the blank line that separates it from a block of a
+    /// different kind. Returns nothing to say — the separator is the whole effect.
+    fn begin_block(&self, kind: OutputBlockKind) {
+        let mut last = self.last_block.lock().unwrap();
+        if needs_separator(*last, kind) {
+            self.emit_above("");
+        }
+        *last = kind;
+    }
+
+    /// Feed one reasoning increment. It lands in the live region rather than the transcript, so
+    /// the block grows in place while the model is still writing it; the animation tick settles
+    /// rows that scroll past the tail.
+    fn push_reasoning(&self, text: &str) {
+        self.live.lock().unwrap().reasoning.push_str(text);
+    }
+
+    /// Close the reasoning block: everything still in the live region is written to the
+    /// transcript, so the block reads in order once a tool call or the reply follows it.
+    fn finish_reasoning(&self) {
+        let rows = {
+            let live = self.live.lock().unwrap();
+            if live.reasoning.is_empty() {
+                return;
+            }
+            reasoning_rows(&live.reasoning, get_terminal_width())
+        };
+        self.live.lock().unwrap().rows.clear();
+        self.begin_block(OutputBlockKind::Thinking);
+        self.emit_above(&rows.join("\n"));
+        let mut live = self.live.lock().unwrap();
+        live.reasoning.clear();
+        live.settled_rows = 0;
+    }
+
+    /// Start the animated line for a tool that is now running.
+    fn start_activity(&self, name: &str, arguments: &serde_json::Value) {
+        let mut live = self.live.lock().unwrap();
+        live.activity = Some(Activity {
+            detail: tool_activity_detail(name, arguments),
+            started: std::time::Instant::now(),
+            frame: 0,
+        });
+    }
+
+    /// Stop the animated line; the result line that follows takes its place.
+    fn stop_activity(&self) {
+        self.live.lock().unwrap().activity = None;
     }
 
     fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
@@ -224,47 +269,7 @@ impl ChatUi {
         }
     }
 
-    fn print_above(&self, text: &str) {
-        self.emit_above(text);
-        *self.pending_tool.lock().unwrap() = false;
-    }
-
-    /// Like [`Self::print_above`], but the line is remembered as an in-progress tool call so
-    /// [`Self::print_tool_finished`] can turn it into the normal-colour result line.
-    fn print_tool_running(&self, text: &str) {
-        self.emit_above(text);
-        *self.pending_tool.lock().unwrap() = true;
-    }
-
-    /// Rewrite the in-progress tool line with the finished result. Falls back to a fresh line when
-    /// there is no pending tool (e.g. an approval prompt scrolled the pending line out of place).
-    fn print_tool_finished(&self, text: &str) {
-        if !self.is_attended {
-            println!("{}", text);
-            return;
-        }
-        if !*self.pending_tool.lock().unwrap() {
-            self.print_above(text);
-            return;
-        }
-
-        let buf = self.input_buf.lock().unwrap();
-        let has_status = self.status.lock().unwrap().is_some();
-        // The pending tool line sits directly above the box: status line + top divider (and the
-        // input line itself) separate it from the cursor.
-        let up = if has_status { 3 } else { 2 };
-        print!("\x1b[{}A\r\x1b[2K", up);
-        print!("{}", text);
-        print!("\x1b[{}B\r{}", up, self.prompt_row(&buf));
-        let _ = io::stdout().flush();
-        *self.pending_tool.lock().unwrap() = false;
-    }
-
-    /// Forget a pending tool line, e.g. before a direct `println!` shifts the layout.
-    fn clear_pending_tool(&self) {
-        *self.pending_tool.lock().unwrap() = false;
-    }
-
+    /// Write transcript text above the live region and the composer.
     fn emit_above(&self, text: &str) {
         if !self.is_attended {
             println!("{}", text);
@@ -272,24 +277,122 @@ impl ChatUi {
         }
         let buf = self.input_buf.lock().unwrap();
         let width = get_terminal_width();
-        let divider = "─".repeat(width).dimmed().to_string();
+        self.erase_box();
+        let live_rows = self.live.lock().unwrap().rows.clone();
+        self.erase_live(live_rows.len());
+        println!("{}", text);
+        for row in &live_rows {
+            println!("{}", row);
+        }
+        self.draw_box(width, &buf);
+    }
 
+    /// Replace the live region with `rows`, erasing the previous frame in place. This is the only
+    /// path that draws the region, so its height can never drift from what is on screen.
+    fn set_live(&self, rows: Vec<String>) {
+        if !self.is_attended {
+            for row in &rows {
+                println!("{}", row);
+            }
+            return;
+        }
+        let buf = self.input_buf.lock().unwrap();
+        let width = get_terminal_width();
+        self.erase_box();
+        let previous = {
+            let mut live = self.live.lock().unwrap();
+            let previous = live.rows.len();
+            live.rows = rows.clone();
+            previous
+        };
+        self.erase_live(previous);
+        for row in &rows {
+            println!("{}", row);
+        }
+        self.draw_box(width, &buf);
+    }
+
+    /// Advance the live region one frame: settle reasoning rows that have scrolled past the tail
+    /// into the transcript, refresh the elapsed time, and step the spinner.
+    fn animate_tick(&self) {
+        if !self.is_attended {
+            return;
+        }
+        let width = get_terminal_width();
+
+        let (settled, rows) = {
+            let mut live = self.live.lock().unwrap();
+            let all = if live.reasoning.is_empty() {
+                Vec::new()
+            } else {
+                reasoning_rows(&live.reasoning, width)
+            };
+            let keep = all.len().saturating_sub(LIVE_REASONING_ROWS);
+            let settled = if keep > live.settled_rows {
+                all[live.settled_rows..keep].to_vec()
+            } else {
+                Vec::new()
+            };
+            live.settled_rows = live.settled_rows.max(keep);
+
+            let mut rows = all[keep..].to_vec();
+            if let Some(activity) = &mut live.activity {
+                activity.frame = activity.frame.wrapping_add(1);
+                rows.push(activity_line(
+                    activity.frame,
+                    activity.detail.as_deref(),
+                    activity.started.elapsed(),
+                ));
+            }
+            (settled, rows)
+        };
+
+        if rows.is_empty() && self.live.lock().unwrap().rows.is_empty() {
+            return;
+        }
+
+        if !settled.is_empty() {
+            self.begin_block(OutputBlockKind::Thinking);
+            self.emit_above(&settled.join("\n"));
+        }
+        self.set_live(rows);
+    }
+
+    /// Erase the four composer rows, leaving the cursor on the row that held the status line —
+    /// i.e. the first row below the live region.
+    fn erase_box(&self) {
         let has_status = self.status.lock().unwrap().is_some();
         if has_status {
             print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
         } else {
             print!("\x1b[1B\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
         }
+    }
 
-        println!("{}", text);
+    /// Erase `height` rows ending just above the cursor, leaving the cursor on the first of them.
+    fn erase_live(&self, height: usize) {
+        if height == 0 {
+            return;
+        }
+        print!("\x1b[1A");
+        for index in 0..height {
+            print!("\r\x1b[2K");
+            if index + 1 < height {
+                print!("\x1b[1A");
+            }
+        }
+    }
 
+    /// Draw the composer: status line, divider, prompt row, divider.
+    fn draw_box(&self, width: usize, buf: &str) {
+        let divider = "─".repeat(width).dimmed().to_string();
         if let Some(status_str) = self.format_status_line(width) {
             println!("{}", status_str);
         }
         println!("{}", divider);
         println!();
         println!("{}", divider);
-        print!("\x1b[2A\r{}", self.prompt_row(&buf));
+        print!("\x1b[2A\r{}", self.prompt_row(buf));
         let _ = io::stdout().flush();
     }
 
@@ -330,15 +433,8 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let divider = "─".repeat(width).dimmed().to_string();
-        if let Some(status_str) = self.format_status_line(width) {
-            println!("{}", status_str);
-        }
-        println!("{}", divider);
-        println!();
-        println!("{}", divider);
-        print!("\x1b[2A\r{}", PROMPT.bold().yellow());
-        let _ = io::stdout().flush();
+        let buf = self.input_buf.lock().unwrap();
+        self.draw_box(width, &buf);
     }
 
     fn redraw_status_line(&self) {
@@ -486,9 +582,6 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
-    let last_block = Arc::new(Mutex::new(OutputBlockKind::None));
-    let last_block_obs = last_block.clone();
-
     let mut agent = Agent::new(
         provider,
         memory,
@@ -504,38 +597,18 @@ pub async fn run_interactive_chat(
         resume_max_messages: config.session.resume_max_messages,
     })
     .with_observer(Arc::new(move |event| match event {
-        harness_core::AgentEvent::Thinking(text) => {
-            let mut lb = last_block_obs.lock().unwrap();
-            if needs_separator(*lb, OutputBlockKind::Thinking) {
-                ui_obs.print_above("");
-            }
-            *lb = OutputBlockKind::Thinking;
-            drop(lb);
-
-            let mut out = String::new();
-            for line in text.lines() {
-                let trimmed = line.trim_end();
-                if !trimmed.is_empty() {
-                    out.push_str(&format!("  {}\n", trimmed.dimmed()));
-                }
-            }
-            let trimmed_out = out.trim_end();
-            if !trimmed_out.is_empty() {
-                ui_obs.print_above(trimmed_out);
-            }
-        }
+        // Reasoning lands in the live region and is settled into the transcript by the animation
+        // tick, so it is visible while it is still being produced.
+        harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-            let mut lb = last_block_obs.lock().unwrap();
-            if needs_separator(*lb, OutputBlockKind::Tool) {
-                ui_obs.print_above("");
-            }
-            *lb = OutputBlockKind::Tool;
-            drop(lb);
-
-            ui_obs.print_above(&format_tool_call(&name, &arguments));
+            ui_obs.finish_reasoning();
+            ui_obs.begin_block(OutputBlockKind::Tool);
+            ui_obs.emit_above(&format_tool_call(&name, &arguments));
+            ui_obs.start_activity(&name, &arguments);
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
-            ui_obs.print_above(&format_tool_result(is_error, &output));
+            ui_obs.stop_activity();
+            ui_obs.emit_above(&format_tool_result(is_error, &output));
         }
     }));
     if let Some(setup) = compaction {
@@ -694,8 +767,17 @@ pub async fn run_interactive_chat(
     let mut current_cancel = CancellationToken::new();
     let mut active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>> = None;
 
+    // Drives the live region: streamed reasoning and the running-tool spinner advance on this
+    // tick rather than on every delta, so a fast token stream cannot outrun the redraw.
+    let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
+    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
+            _ = animation.tick() => {
+                ui.animate_tick();
+            }
+
             maybe_approval = approval_rx.recv() => {
                 let (request, decision_tx) = match maybe_approval {
                     Some(pair) => pair,
@@ -763,7 +845,7 @@ pub async fn run_interactive_chat(
                                 &mut current_provider,
                                 &mut current_model,
                             ).await {
-                                ui.print_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
+                                ui.emit_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
                             }
                             continue;
                         }
@@ -778,7 +860,7 @@ pub async fn run_interactive_chat(
                                 &agent,
                                 arg_opt,
                             ).await {
-                                ui.print_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
+                                ui.emit_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
                             }
                             continue;
                         }
@@ -794,20 +876,13 @@ pub async fn run_interactive_chat(
                                 arg_opt,
                             ).await {
                                 ui.draw_initial_box();
-                                ui.print_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
+                                ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
                             }
                             continue;
                         }
 
-                        let user_header = right_aligned_user_message(&query, get_terminal_width());
-                        {
-                            let mut lb = last_block.lock().unwrap();
-                            if needs_separator(*lb, OutputBlockKind::User) {
-                                ui.print_above("");
-                            }
-                            *lb = OutputBlockKind::User;
-                        }
-                        ui.print_above(&user_header);
+                        ui.begin_block(OutputBlockKind::User);
+                        ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
 
                         if active_turn.is_some() {
                             queue.push_back(query);
@@ -825,7 +900,8 @@ pub async fn run_interactive_chat(
                     Key::CtrlC => {
                         if active_turn.is_some() {
                             current_cancel.cancel();
-                            ui.print_above(&format!("{}\n", "✖ Cancelled".red()));
+                            ui.stop_activity();
+                            ui.emit_above(&format!("{}\n", "✖ Cancelled".red()));
                         } else {
                             ui.clear_box_on_exit();
                             clear_on_exit();
@@ -847,19 +923,17 @@ pub async fn run_interactive_chat(
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         if let Some(compaction) = &outcome.compaction {
-                            ui.print_above(&format!(
+                            ui.emit_above(&format!(
                                 "compacted {} turns into 1 summary (session {})",
                                 compaction.turns, compaction.session_id
                             ).dimmed().to_string());
                         }
+                        ui.stop_activity();
+                        ui.finish_reasoning();
                         if !outcome.reply.is_empty() {
-                            let mut lb = last_block.lock().unwrap();
-                            if needs_separator(*lb, OutputBlockKind::Reply) {
-                                ui.print_above("");
-                            }
-                            *lb = OutputBlockKind::Reply;
+                            ui.begin_block(OutputBlockKind::Reply);
+                            ui.emit_above(&format!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply));
                         }
-                        ui.print_above(&format!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply));
                         
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -867,7 +941,9 @@ pub async fn run_interactive_chat(
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
-                        ui.print_above(&format!("{}", "✖ Cancelled".red()));
+                        ui.stop_activity();
+                        ui.finish_reasoning();
+                        ui.emit_above(&format!("{}", "✖ Cancelled".red()));
                         
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -875,7 +951,9 @@ pub async fn run_interactive_chat(
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(e)) => {
-                        ui.print_above(&format!("{} Error: {}", "✖".red().bold(), e));
+                        ui.stop_activity();
+                        ui.finish_reasoning();
+                        ui.emit_above(&format!("{} Error: {}", "✖".red().bold(), e));
                         
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -883,7 +961,9 @@ pub async fn run_interactive_chat(
                         ui.update_status(context_used, context_max);
                     }
                     Err(join_err) => {
-                        ui.print_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
+                        ui.stop_activity();
+                        ui.finish_reasoning();
+                        ui.emit_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
                         
                         // Update status bar
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -1397,22 +1477,22 @@ async fn handle_name_command(
 
     if name.is_empty() {
         if arg.is_some() {
-            ui.print_above(&format!("{} Session name cleared", "✔".green().bold()));
+            ui.emit_above(&format!("{} Session name cleared", "✔".green().bold()));
         } else {
-            ui.print_above(&format!(
+            ui.emit_above(&format!(
                 "{} This session has no name — set one with {}",
                 "•".cyan(),
                 "/name <name>".bold()
             ));
         }
     } else if arg.is_some() {
-        ui.print_above(&format!(
+        ui.emit_above(&format!(
             "{} Session name set to '{}'",
             "✔".green().bold(),
             name.cyan()
         ));
     } else {
-        ui.print_above(&format!("{} Session name: {}", "•".cyan(), name.cyan()));
+        ui.emit_above(&format!("{} Session name: {}", "•".cyan(), name.cyan()));
     }
 
     Ok(())
@@ -1432,7 +1512,7 @@ async fn handle_reasoning_switch(
                 Some(e) => Some(e),
                 None => {
                     ui.draw_initial_box();
-                    ui.print_above(&format!(
+                    ui.emit_above(&format!(
                         "{} Unknown reasoning effort '{}'. Available: minimal, low, medium, high, xhigh, max, off",
                         "✖".red().bold(),
                         s
@@ -1485,7 +1565,7 @@ async fn handle_reasoning_switch(
         .map(|e| e.to_string())
         .unwrap_or_else(|| "off".to_string());
 
-    ui.print_above(&format!(
+    ui.emit_above(&format!(
         "{} Reasoning effort set to '{}'",
         "✔".green().bold(),
         effort_label.yellow()
@@ -1549,357 +1629,3 @@ async fn prompt_approval_box(
     }
 }
 
-/// Longest a tool argument may render before it is ellipsised, so one call stays on one line.
-const MAX_TOOL_ARG_CHARS: usize = 68;
-
-/// Longest a tool result summary line may render before it is ellipsised.
-const MAX_TOOL_RESULT_CHARS: usize = 120;
-
-/// A result this short is printed in full; anything longer collapses to its first line plus
-/// a line count so a large tool payload cannot flood the transcript.
-const MAX_INLINE_RESULT_LINES: usize = 3;
-
-/// Render a tool call as one transcript line that names the tool *and* the operation it is
-/// performing. A search spells out its mode (`search_files(content)`) so the reader never has
-/// to guess whether a scan went over file contents or file names.
-fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
-    let bullet = "•".cyan();
-    // Absent and empty are the same thing to a reader: a model that sends `"path": ""` means
-    // "no path given", not "a path called nothing".
-    let text = |key: &str| {
-        arguments
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    let number = |key: &str| arguments.get(key).and_then(|v| v.as_u64());
-    let suffix = |detail: String| format!(" {}", detail.dimmed());
-    let quoted = |value: &str| format!("\"{}\"", truncate_visible(value, MAX_TOOL_ARG_CHARS)).cyan();
-
-    match name {
-        "terminal" | "shell" | "bash" => {
-            if let Some(command) = text("command") {
-                let first_line = command.lines().next().unwrap_or(command).trim();
-                let cwd = text("workdir")
-                    .map(|w| suffix(format!("in {}", w)))
-                    .unwrap_or_default();
-                return format!(
-                    "{} {} {}{}",
-                    bullet,
-                    "$".bold().cyan(),
-                    truncate_visible(first_line, MAX_TOOL_ARG_CHARS).bold(),
-                    cwd
-                );
-            }
-        }
-        "read_file" => {
-            if let Some(path) = text("path") {
-                let range = match (number("offset"), number("limit")) {
-                    (Some(offset), Some(limit)) => {
-                        suffix(format!("lines {}-{}", offset, offset + limit.saturating_sub(1)))
-                    }
-                    (Some(offset), None) => suffix(format!("from line {}", offset)),
-                    (None, Some(limit)) => suffix(format!("first {} lines", limit)),
-                    _ => String::new(),
-                };
-                return format!("{} {} {}{}", bullet, "read".bold(), path.cyan(), range);
-            }
-        }
-        "write_file" => {
-            if let Some(path) = text("path") {
-                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
-                return format!(
-                    "{} {} {}{}",
-                    bullet,
-                    "write".bold(),
-                    path.cyan(),
-                    suffix(format!("{} lines", lines))
-                );
-            }
-        }
-        "patch" => {
-            if let Some(path) = text("path") {
-                let every = match arguments.get("replace_all").and_then(|v| v.as_bool()) {
-                    Some(true) => suffix("all occurrences".to_string()),
-                    _ => String::new(),
-                };
-                return format!("{} {} {}{}", bullet, "patch".bold(), path.cyan(), every);
-            }
-        }
-        "search_files" => {
-            let pattern = text("pattern").unwrap_or("");
-            let path = text("path").unwrap_or(".");
-            let mode = text("output_mode").unwrap_or("content");
-            let include = text("file_glob")
-                // `*` filters nothing, so it carries no information for the reader.
-                .filter(|glob| *glob != "*")
-                .map(|g| suffix(format!("matching {}", g)))
-                .unwrap_or_default();
-            return format!(
-                "{} {} {} {} {}{}",
-                bullet,
-                format!("search_files({})", mode).bold(),
-                quoted(pattern),
-                "in".dimmed(),
-                path.cyan(),
-                include
-            );
-        }
-        "save_memory" => {
-            let subject = text("subject").unwrap_or("?");
-            let predicate = text("predicate").unwrap_or("?");
-            let object = text("object").unwrap_or("?");
-            return format!(
-                "{} {} {}{}{}",
-                bullet,
-                "save_memory".bold(),
-                format!("{}.{}", subject, predicate).cyan(),
-                " = ".dimmed(),
-                quoted(object)
-            );
-        }
-        "update_memory" => {
-            if let Some(id) = text("memory_id") {
-                return format!("{} {} {}", bullet, "update_memory".bold(), id.cyan());
-            }
-        }
-        "forget_memory" => {
-            if let Some(id) = text("memory_id") {
-                return format!("{} {} {}", bullet, "forget_memory".bold(), id.cyan());
-            }
-        }
-        "save_note" => {
-            let title = text("title").unwrap_or("");
-            let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
-            return format!(
-                "{} {} {}{}",
-                bullet,
-                "save_note".bold(),
-                quoted(title),
-                suffix(format!("{} lines", lines))
-            );
-        }
-        "search_notes" => {
-            let query = text("query").unwrap_or("");
-            let limit = number("limit")
-                .map(|l| suffix(format!("limit {}", l)))
-                .unwrap_or_default();
-            return format!("{} {} {}{}", bullet, "search_notes".bold(), quoted(query), limit);
-        }
-        "read_note" | "update_note" => {
-            if let Some(id) = text("id") {
-                return format!("{} {} {}", bullet, name.bold(), id.cyan());
-            }
-        }
-        "inspect_harness_source" => {
-            if let Some(path) = text("path") {
-                return format!("{} {} {}", bullet, name.bold(), path.cyan());
-            }
-        }
-        "propose_harness_patch" => {
-            if let Some(path) = text("target_file") {
-                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
-                return format!(
-                    "{} {} {}{}",
-                    bullet,
-                    name.bold(),
-                    path.cyan(),
-                    suffix(format!("{} lines", lines))
-                );
-            }
-        }
-        "apply_harness_update" => {
-            if let Some(id) = text("patch_id") {
-                return format!("{} {} {}", bullet, name.bold(), id.cyan());
-            }
-        }
-        _ => {}
-    }
-
-    // MCP tools arrive as `mcp__server__tool`.
-    let display_name = match name.strip_prefix("mcp__") {
-        Some(stripped) => stripped.replace("__", "/"),
-        None => name.to_string(),
-    };
-
-    // Fallback: `tool arg=value`, skipping nulls so unset optionals stay invisible.
-    let args_str = match arguments.as_object() {
-        Some(object) => {
-            let parts: Vec<String> = object
-                .iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| {
-                    let value = match v {
-                        serde_json::Value::String(s) => {
-                            let first_line = s.lines().next().unwrap_or(s);
-                            format!("\"{}\"", truncate_visible(first_line, MAX_TOOL_ARG_CHARS))
-                        }
-                        other => other.to_string(),
-                    };
-                    format!("{}={}", k, value)
-                })
-                .collect();
-            if parts.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", parts.join(" "))
-            }
-        }
-        None if arguments.is_null() => String::new(),
-        None => format!(" {}", arguments),
-    };
-
-    format!("{} {}{}", bullet, display_name.bold(), args_str.dimmed())
-}
-
-fn format_tool_result(is_error: bool, output: &str) -> String {
-    let trimmed = output.trim();
-    if is_error {
-        let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-        return format!(
-            "  {} {}",
-            "✖".red(),
-            truncate_visible(first_line, MAX_TOOL_RESULT_CHARS).red()
-        );
-    }
-
-    if trimmed.is_empty() {
-        return format!("  {} {}", "✓".green(), "done".dimmed());
-    }
-
-    let line_count = trimmed.lines().count();
-    if line_count == 1 {
-        return format!(
-            "  {} {}",
-            "✓".green(),
-            truncate_visible(trimmed, MAX_TOOL_RESULT_CHARS).dimmed()
-        );
-    }
-
-    if line_count <= MAX_INLINE_RESULT_LINES && trimmed.len() <= MAX_TOOL_RESULT_CHARS {
-        let mut out = String::new();
-        for (i, line) in trimmed.lines().enumerate() {
-            if i == 0 {
-                out.push_str(&format!("  {} {}\n", "✓".green(), line.dimmed()));
-            } else {
-                out.push_str(&format!("    {}\n", line.dimmed()));
-            }
-        }
-        return out.trim_end().to_string();
-    }
-
-    let first = trimmed.lines().next().unwrap_or("").trim();
-    format!(
-        "  {} {} {}",
-        "✓".green(),
-        truncate_visible(first, MAX_TOOL_ARG_CHARS).dimmed(),
-        format!("(+{} lines)", line_count - 1).dimmed()
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn call(name: &str, arguments: serde_json::Value) -> String {
-        format_tool_call(name, &arguments)
-    }
-
-    #[test]
-    fn terminal_call_shows_the_command_and_directory() {
-        let line = call("terminal", json!({ "command": "cargo test\n--all", "workdir": "/repo" }));
-        assert!(line.contains("cargo test"), "got: {}", line);
-        assert!(line.contains("in /repo"), "got: {}", line);
-        assert!(!line.contains("--all"), "only the first command line is shown");
-    }
-
-    #[test]
-    fn read_call_shows_the_line_range() {
-        assert!(call("read_file", json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }))
-            .contains("lines 10-29"));
-        assert!(call("read_file", json!({ "path": "src/lib.rs" })).contains("src/lib.rs"));
-    }
-
-    #[test]
-    fn write_call_shows_the_payload_size() {
-        let line = call("write_file", json!({ "path": "a.rs", "content": "one\ntwo\nthree" }));
-        assert!(line.contains("3 lines"), "got: {}", line);
-    }
-
-    #[test]
-    fn patch_call_flags_replace_all() {
-        let one = call("patch", json!({ "path": "a.rs", "old_string": "x", "new_string": "y" }));
-        assert!(!one.contains("all occurrences"), "got: {}", one);
-
-        let all = call(
-            "patch",
-            json!({ "path": "a.rs", "old_string": "x", "new_string": "y", "replace_all": true }),
-        );
-        assert!(all.contains("all occurrences"), "got: {}", all);
-    }
-
-    /// The reader must be able to tell which search mode ran, and empty optionals must not
-    /// render as blank gaps.
-    #[test]
-    fn search_call_names_the_mode_and_defaults_the_path() {
-        let content = call("search_files", json!({ "pattern": "needle", "path": "", "file_glob": "*" }));
-        assert!(content.contains("search_files(content)"), "got: {}", content);
-        assert!(content.contains("\"needle\""), "got: {}", content);
-        assert!(content.contains("in ."), "an empty path renders as the workspace root");
-        assert!(!content.contains("matching"), "a `*` glob filters nothing and is hidden");
-
-        let files = call("search_files", json!({ "pattern": "needle", "output_mode": "files_only" }));
-        assert!(files.contains("search_files(files_only)"), "got: {}", files);
-
-        let scoped = call("search_files", json!({ "pattern": "needle", "file_glob": "*.rs" }));
-        assert!(scoped.contains("matching *.rs"), "got: {}", scoped);
-    }
-
-    #[test]
-    fn memory_and_note_calls_show_their_subject() {
-        let memory = call(
-            "save_memory",
-            json!({ "subject": "user", "predicate": "editor", "object": "neovim" }),
-        );
-        assert!(memory.contains("user.editor"), "got: {}", memory);
-        assert!(memory.contains("neovim"), "got: {}", memory);
-
-        assert!(call("search_notes", json!({ "query": "budget", "limit": 5 })).contains("limit 5"));
-        assert!(call("read_note", json!({ "id": "note_123" })).contains("note_123"));
-    }
-
-    #[test]
-    fn unknown_and_mcp_tools_fall_back_to_named_arguments() {
-        let mcp = call("mcp__filesystem__read", json!({ "path": "/etc/hosts", "missing": null }));
-        assert!(mcp.contains("filesystem/read"), "got: {}", mcp);
-        assert!(mcp.contains("path=\"/etc/hosts\""), "got: {}", mcp);
-        assert!(!mcp.contains("missing"), "null arguments are hidden");
-    }
-
-    #[test]
-    fn long_arguments_are_clipped_to_one_line() {
-        let line = call("terminal", json!({ "command": "x".repeat(500) }));
-        assert!(
-            line.chars().count() < 500,
-            "a long command must not wrap the transcript: {} chars",
-            line.chars().count()
-        );
-        assert!(line.contains('…'));
-    }
-
-    #[test]
-    fn long_results_collapse_to_a_line_count() {
-        let output = (0..40).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
-        let rendered = format_tool_result(false, &output);
-        assert!(rendered.contains("line 0"), "got: {}", rendered);
-        assert!(rendered.contains("(+39 lines)"), "got: {}", rendered);
-    }
-
-    #[test]
-    fn errors_report_the_first_line() {
-        let rendered = format_tool_result(true, "boom: file not found\nmore detail");
-        assert!(rendered.contains("boom: file not found"), "got: {}", rendered);
-        assert!(!rendered.contains("more detail"), "got: {}", rendered);
-    }
-}

@@ -23,12 +23,6 @@ pub const HEURISTIC_TOLERANCE: f64 = 0.25;
 /// few dozen tokens is swallowed by `reasoning_content` and yields `content: null` (AGENT_RULES §2).
 const COMPACTION_MAX_TOKENS: u32 = 1024;
 
-/// The instruction that turns the folded turns into a summary turn.
-const COMPACTION_INSTRUCTION: &str = "You compress conversation history for an AI agent. \
-Rewrite the transcript that follows as a compact factual summary that preserves: what the user \
-asked for, decisions taken, facts established, file or tool names, and anything still unresolved. \
-Drop pleasantries. Answer with the summary only — no preamble, no headings.";
-
 /// Where an estimate came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstimateSource {
@@ -200,7 +194,9 @@ pub async fn compact(
     );
 
     let request = vec![
-        Message::system(COMPACTION_INSTRUCTION),
+        Message::system(crate::prompts::section(
+            crate::prompts::COMPACTION_INSTRUCTION,
+        )?),
         Message::user(transcript),
     ];
     let options = CompletionOptions {

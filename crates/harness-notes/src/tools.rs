@@ -234,3 +234,66 @@ impl Tool for UpdateNoteTool {
         Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&note).unwrap_or_default()))
     }
 }
+
+pub struct DeleteNoteTool {
+    engine: Arc<dyn NotesEngine>,
+}
+
+impl DeleteNoteTool {
+    pub fn new(engine: Arc<dyn NotesEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl Tool for DeleteNoteTool {
+    fn name(&self) -> &str {
+        "delete_note"
+    }
+
+    fn description(&self) -> &str {
+        "Permanently delete a stored note by its note_id. Use this to remove notes that are obsolete or were saved in error; the note's full-text index entry is removed with it."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Unique note identifier to delete (e.g. 'note_...')" }
+            },
+            "required": ["id"]
+        })
+    }
+
+    /// Permanently removes a note: gated like `save_note`.
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    /// The id of the note the call would delete.
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        Some(ToolPreview {
+            target: args.get("id").and_then(|i| i.as_str()).map(str::to_string),
+            diff: None,
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let id = args.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+        let deleted = self.engine.delete_note(id).await?;
+
+        Ok(ToolResult::success(
+            call_id,
+            json!({
+                "status": if deleted { "deleted" } else { "not_found" },
+                "note_id": id,
+            })
+            .to_string(),
+        ))
+    }
+}

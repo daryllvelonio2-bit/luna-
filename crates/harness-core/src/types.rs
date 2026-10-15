@@ -132,9 +132,13 @@ pub struct TokenUsage {
     pub total_tokens: u32,
 }
 
+/// One increment of a streaming completion. Reasoning is a separate channel because providers
+/// interleave it with (or emit it entirely before) the visible answer, and the UI renders the
+/// two differently — reasoning dimmed, the answer normally.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StreamEvent {
     ContentDelta(String),
+    ReasoningDelta(String),
     ToolCallDelta {
         index: usize,
         id: Option<String>,

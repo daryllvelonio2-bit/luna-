@@ -16,6 +16,83 @@ use crate::auth::CredentialManager;
 use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
 use crate::discovery::ModelDiscovery;
 
+/// Extract the stream events carried by one OpenAI-compatible SSE chunk. A single chunk can
+/// hold reasoning, visible text and a tool-call fragment at the same time, so every field is
+/// examined instead of returning on the first hit.
+fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessError>> {
+    use StreamEvent as E;
+
+    let mut events = Vec::new();
+
+    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
+        for choice in choices {
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
+
+            // `reasoning_content` is the NVIDIA/DeepSeek/wider-compat spelling; `reasoning` is
+            // what some gateways send instead.
+            for key in ["reasoning_content", "reasoning"] {
+                if let Some(text) = delta.get(key).and_then(|r| r.as_str()) {
+                    if !text.is_empty() {
+                        events.push(Ok(E::ReasoningDelta(text.to_string())));
+                    }
+                }
+            }
+
+            if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+                if !text.is_empty() {
+                    events.push(Ok(E::ContentDelta(text.to_string())));
+                }
+            }
+
+            if let Some(calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                for (position, call) in calls.iter().enumerate() {
+                    let index = call
+                        .get("index")
+                        .and_then(|i| i.as_u64())
+                        .map(|i| i as usize)
+                        .unwrap_or(position);
+                    events.push(Ok(E::ToolCallDelta {
+                        index,
+                        id: call.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()),
+                        name: call
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string()),
+                        arguments_delta: call
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                            .map(|s| s.to_string()),
+                    }));
+                }
+            }
+
+            if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                events.push(Ok(E::Completed {
+                    finish_reason: Some(reason.to_string()),
+                    usage: None,
+                }));
+            }
+        }
+    }
+
+    if let Some(usage) = parsed.get("usage").filter(|u| !u.is_null()) {
+        events.push(Ok(E::Completed {
+            finish_reason: None,
+            usage: Some(TokenUsage {
+                prompt_tokens: usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+                total_tokens: usage.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+            }),
+        }));
+    }
+
+    events
+}
+
 /// A `reqwest` client for one provider, with the per-provider timeout the config resolved
 /// (`providers.<id>.timeout_secs`, default `catalog::DEFAULT_TIMEOUT_SECS`).
 pub(crate) fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
@@ -368,13 +445,29 @@ impl ModelProvider for GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+
+        // Antigravity speaks the Code Assist protocol, not the OpenAI one, so it has its own
+        // SSE reader rather than the `/chat/completions` body below.
+        if self.provider_id == "antigravity" || self.provider_id == "agy" {
+            let (_, _, secret) = self.build_auth_headers().await?;
+            return crate::antigravity::stream_antigravity_completion(
+                &self.http_client,
+                secret.expose_secret(),
+                Some(&self.cred_manager),
+                &model,
+                messages,
+                tools,
+                options,
+            )
+            .await;
+        }
+
         let (headers, query_param, _secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/chat/completions", self.base_url);
         if let Some(q) = query_param {
             url = format!("{}?{}", url, q);
         }
-
-        let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
         let mut body = json!({
             "model": model,
@@ -405,50 +498,32 @@ impl ModelProvider for GenericProviderClient {
         let event_source = resp.bytes_stream().eventsource();
         let provider_id = self.provider_id.clone();
 
-        let mapped = event_source.map(move |event_result| match event_result {
-            Ok(event) => {
-                if event.data == "[DONE]" {
-                    return Ok(StreamEvent::Completed {
-                        finish_reason: Some("stop".to_string()),
-                        usage: None,
-                    });
-                }
-
-                let parsed: serde_json::Value = serde_json::from_str(&event.data).map_err(|e| {
-                    HarnessError::SerializationError(format!("Failed to parse SSE JSON: {}", e))
-                })?;
-
-                if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-                    if let Some(choice) = choices.first() {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
-                                return Ok(StreamEvent::ContentDelta(text.to_string()));
-                            }
+        // Each SSE chunk can carry reasoning, content and tool-call fragments at once, so the
+        // chunk is expanded into every event it holds rather than only the first match.
+        let mapped = event_source.flat_map(move |event_result| {
+            let events: Vec<Result<StreamEvent, HarnessError>> = match event_result {
+                Ok(event) => {
+                    if event.data == "[DONE]" {
+                        vec![Ok(StreamEvent::Completed {
+                            finish_reason: Some("stop".to_string()),
+                            usage: None,
+                        })]
+                    } else {
+                        match serde_json::from_str::<serde_json::Value>(&event.data) {
+                            Ok(parsed) => delta_events(&parsed),
+                            Err(e) => vec![Err(HarnessError::SerializationError(format!(
+                                "Failed to parse SSE JSON: {}",
+                                e
+                            )))],
                         }
                     }
                 }
-
-                if let Some(usage_val) = parsed.get("usage") {
-                    let prompt = usage_val.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                    let completion = usage_val.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                    let total = usage_val.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-
-                    return Ok(StreamEvent::Completed {
-                        finish_reason: None,
-                        usage: Some(TokenUsage {
-                            prompt_tokens: prompt,
-                            completion_tokens: completion,
-                            total_tokens: total,
-                        }),
-                    });
-                }
-
-                Ok(StreamEvent::ContentDelta("".to_string()))
-            }
-            Err(e) => Err(HarnessError::ProviderError {
-                provider: provider_id.clone(),
-                message: format!("SSE stream error: {}", e),
-            }),
+                Err(e) => vec![Err(HarnessError::ProviderError {
+                    provider: provider_id.clone(),
+                    message: format!("SSE stream error: {}", e),
+                })],
+            };
+            futures_util::stream::iter(events)
         });
 
         Ok(Box::pin(mapped))

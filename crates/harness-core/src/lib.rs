@@ -2,6 +2,7 @@ pub mod agent;
 pub mod approval;
 pub mod config;
 pub mod error;
+pub mod prompts;
 pub mod registry;
 pub mod session;
 pub mod tools;

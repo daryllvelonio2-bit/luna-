@@ -32,9 +32,17 @@ pub async fn resolve_session(
     selection: SessionSelection,
 ) -> Result<String, HarnessError> {
     match selection {
-        SessionSelection::Resume(id) => {
-            store.ensure_session(&id).await?;
-            Ok(id)
+        SessionSelection::Resume(value) => {
+            // A session *name* is accepted as well as an id. Someone who named a session "luna"
+            // types `luna --session luna`; creating a fresh session called "luna" instead would
+            // silently strand the transcript they were trying to continue.
+            if store.get(&value).await.is_err() {
+                if let Some(id) = find_by_name(store, &value).await? {
+                    return Ok(id);
+                }
+            }
+            store.ensure_session(&value).await?;
+            Ok(value)
         }
         SessionSelection::Continue => match store.most_recent().await? {
             Some(id) => Ok(id),
@@ -43,6 +51,20 @@ pub async fn resolve_session(
         },
         SessionSelection::New => create_session(store).await,
     }
+}
+
+/// The id of the most recently updated session carrying this name. `list()` is ordered
+/// newest-first, so the first match is the one the user last used.
+async fn find_by_name(store: &SqliteSessionStore, name: &str) -> Result<Option<String>, HarnessError> {
+    if name.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(store
+        .list()
+        .await?
+        .into_iter()
+        .find(|session| session.name == name)
+        .map(|session| session.id))
 }
 
 async fn create_session(store: &SqliteSessionStore) -> Result<String, HarnessError> {

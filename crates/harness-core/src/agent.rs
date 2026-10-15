@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
@@ -85,7 +87,9 @@ pub struct TurnToolCall {
 /// Events emitted during agent execution loop for live observing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
-    Thinking(String),
+    /// One increment of the model's reasoning, emitted as it arrives so the UI can show thinking
+    /// while it is still being produced. Concatenating every delta yields the turn's reasoning.
+    ReasoningDelta(String),
     ToolExecuting {
         name: String,
         arguments: serde_json::Value,
@@ -359,15 +363,11 @@ where
             options.reasoning_effort = self.reasoning_effort;
 
             let response = self
-                .provider
-                .complete(&messages, &tools, &options)
+                .stream_completion(&messages, &tools, &options, &cancel_token)
                 .await?;
 
             if let Some(ref r) = response.reasoning {
                 last_reasoning = Some(r.clone());
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::Thinking(r.clone()));
-                }
             }
 
             // If no tools requested, assistant concluded task
@@ -479,6 +479,22 @@ where
                     }
                 }
 
+                // ...and if a note was deleted, drop its pointer so memory holds no dangling
+                // reference to a document that no longer exists.
+                if tool_call.name == "delete_note" && !execution_result.is_error {
+                    if let Ok(removed) = serde_json::from_str::<serde_json::Value>(&execution_result.content) {
+                        let deleted = removed.get("status").and_then(|s| s.as_str()) == Some("deleted");
+                        if deleted {
+                            if let Some(note_id) = removed.get("note_id").and_then(|n| n.as_str()) {
+                                debug!("Removing note pointer for deleted note '{}'", note_id);
+                                if let Err(e) = self.memory.remove_note_pointer(note_id).await {
+                                    warn!("Failed to remove note pointer from memory: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Add tool result to conversation history
                 let tool_message = Message::tool(execution_result);
                 self.append(&tool_message, false).await?;
@@ -487,32 +503,137 @@ where
         }
     }
 
-    /// The system prompt: the harness protocols plus whatever memory retrieval found.
+    /// One model call, taken through the provider's streaming API so reasoning reaches the
+    /// observer while the model is still producing it. The stream is assembled into the same
+    /// `Message` the buffered call returns, so tool execution and persistence are unchanged.
+    ///
+    /// A provider that cannot stream (or fails before producing anything) falls back to the
+    /// buffered call — the turn is worth more than the live view of it.
+    async fn stream_completion(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+        cancel_token: &CancellationToken,
+    ) -> Result<Message, HarnessError> {
+        let mut stream = match self.provider.stream(messages, tools, options).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                debug!("Provider stream unavailable ({}), falling back to a buffered call", error);
+                return self.provider.complete(messages, tools, options).await;
+            }
+        };
+
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage = None;
+        // Tool-call fragments arrive keyed by the index the provider assigned them.
+        let mut calls: Vec<(usize, ToolCall)> = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            if cancel_token.is_cancelled() {
+                return Err(HarnessError::Cancelled);
+            }
+
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    // Nothing arrived, so the transport never worked: the buffered path may still
+                    // succeed, and a silent no-op turn would be the worse failure.
+                    if content.is_empty() && reasoning.is_empty() && calls.is_empty() {
+                        debug!("Stream failed before any output ({}), retrying buffered", error);
+                        return self.provider.complete(messages, tools, options).await;
+                    }
+                    return Err(error);
+                }
+            };
+
+            match event {
+                StreamEvent::ReasoningDelta(text) => {
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ReasoningDelta(text.clone()));
+                    }
+                    reasoning.push_str(&text);
+                }
+                StreamEvent::ContentDelta(text) => content.push_str(&text),
+                StreamEvent::ToolCallDelta { index, id, name, arguments_delta } => {
+                    let slot = match calls.iter_mut().find(|(i, _)| *i == index) {
+                        Some((_, call)) => call,
+                        None => {
+                            calls.push((
+                                index,
+                                ToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: serde_json::Value::Null,
+                                },
+                            ));
+                            &mut calls.last_mut().expect("just pushed").1
+                        }
+                    };
+                    if let Some(id) = id {
+                        slot.id = id;
+                    }
+                    if let Some(name) = name {
+                        slot.name = name;
+                    }
+                    if let Some(fragment) = arguments_delta {
+                        // Arguments stream as JSON text, so each fragment is stitched onto the raw
+                        // string and parsed once at the end.
+                        let mut raw = match slot.arguments.take() {
+                            serde_json::Value::String(raw) => raw,
+                            _ => String::new(),
+                        };
+                        raw.push_str(&fragment);
+                        slot.arguments = serde_json::Value::String(raw);
+                    }
+                }
+                StreamEvent::Completed { usage: event_usage, .. } => {
+                    if event_usage.is_some() {
+                        usage = event_usage;
+                    }
+                }
+            }
+        }
+
+        calls.sort_by_key(|(index, _)| *index);
+        let tool_calls = calls
+            .into_iter()
+            .enumerate()
+            .map(|(position, (_, mut call))| {
+                call.arguments = match call.arguments {
+                    serde_json::Value::String(raw) => serde_json::from_str(&raw).unwrap_or(json!({})),
+                    value => value,
+                };
+                if call.id.is_empty() {
+                    call.id = format!("call_{}", position);
+                }
+                call
+            })
+            .collect();
+
+        let mut response = Message::assistant(content);
+        response.reasoning = if reasoning.is_empty() { None } else { Some(reasoning) };
+        response.tool_calls = tool_calls;
+        response.usage = usage;
+        Ok(response)
+    }
+
+    /// The system prompt: the `prompts.md` template with the configured prefix and the retrieved
+    /// memories substituted in.
+    ///
+    /// Substitution is a literal `replace`, not `format!`, so the prompt text stays free of format
+    /// syntax — a stray brace in the file can never abort a turn.
     async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
         let relevant_memories = self.memory.retrieve(user_input, 10).await?;
         let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
 
-        Ok(format!(
-            "You are Luna, an autonomous AI agent capable of self-improvement and stateful persistence.\n\
-             {}\n\
-             MEMORY PROTOCOL:\n\
-             You possess native memory tools: `save_memory`, `update_memory`, `forget_memory`.\n\
-             The decision of what is worth remembering or correcting is placed entirely on YOU.\n\
-             When the user states durable preferences, facts, or habits, save them.\n\
-             \n\
-             NOTE PROTOCOL:\n\
-             You possess note tools: `save_note`, `search_notes`, `read_note`, `update_note`.\n\
-             For large texts, specs, or logs, store them in notes. When saved, a strict 1-5 word pointer will be automatically indexed in your memory.\n\
-             \n\
-             SELF-IMPROVEMENT PROTOCOL:\n\
-             You possess harness tools: `inspect_harness_source`, `propose_harness_patch`, `apply_harness_update`.\n\
-             If you encounter bugs, missing features, or friction in your own harness, you can inspect, patch, test, and evolve yourself.\n\
-             \n\
-             CURRENT ACTIVE MEMORIES:\n\
-             {}\n",
-            self.config.system_prompt_prefix.as_deref().unwrap_or(""),
-            memory_prompt
-        ))
+        Ok(crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
+            .replace(
+                "{{SYSTEM_PROMPT_PREFIX}}",
+                self.config.system_prompt_prefix.as_deref().unwrap_or(""),
+            )
+            .replace("{{ACTIVE_MEMORIES}}", &memory_prompt))
     }
 
     /// The session's recent transcript, plus the notice the console prints about the bound.

@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 use std::process::Command;
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use harness_core::{
-    CompletionOptions, HarnessError, Message, ReasoningEffort, Role,
-    TokenUsage, ToolCall, ToolDefinition,
+    CompletionOptions, HarnessError, Message, ReasoningEffort, Role, StreamEvent, TokenUsage,
+    ToolCall, ToolDefinition,
 };
 
 pub const DEFAULT_PROJECT: &str = "aicode-consumers";
@@ -271,16 +273,82 @@ pub async fn fetch_antigravity_models(
     Ok(ANTIGRAVITY_MODELS.iter().map(|&m| m.to_string()).collect())
 }
 
-/// Executes a native Antigravity Code Assist completion directly against Google Cloud endpoints.
-pub async fn execute_antigravity_completion(
-    http_client: &reqwest::Client,
-    raw_secret: &str,
-    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
-    model: &str,
+/// Translate one Code Assist SSE payload into stream events. Both the streaming path and the
+/// buffered `execute_antigravity_completion` go through here, so a thought chunk is classified
+/// identically either way.
+fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
+    let resp_data = event.get("response").unwrap_or(event);
+    let mut events = Vec::new();
+
+    if let Some(meta) = resp_data.get("usageMetadata") {
+        let prompt_tokens = meta.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let completion_tokens = meta.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        events.push(StreamEvent::Completed {
+            finish_reason: None,
+            usage: Some(TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            }),
+        });
+    }
+
+    let Some(candidates) = resp_data.get("candidates").and_then(|c| c.as_array()) else {
+        return events;
+    };
+
+    for candidate in candidates {
+        if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
+            events.push(StreamEvent::Completed {
+                finish_reason: Some(reason.to_lowercase()),
+                usage: None,
+            });
+        }
+        let Some(parts) = candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+        else {
+            continue;
+        };
+        for part in parts {
+            // Code Assist marks a reasoning part with a boolean `thought`, but some responses
+            // carry the reasoning text under a string `thought` instead.
+            let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+            if is_thought {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    events.push(StreamEvent::ReasoningDelta(text.to_string()));
+                }
+            } else if let Some(thought) = part.get("thought").and_then(|t| t.as_str()) {
+                events.push(StreamEvent::ReasoningDelta(thought.to_string()));
+            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                events.push(StreamEvent::ContentDelta(text.to_string()));
+            }
+
+            if let Some(call) = part.get("functionCall") {
+                events.push(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: call.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()),
+                    name: call.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()),
+                    arguments_delta: Some(
+                        call.get("args").cloned().unwrap_or_else(|| json!({})).to_string(),
+                    ),
+                });
+            }
+        }
+    }
+
+    events
+}
+
+/// Build the Code Assist payload for one turn: messages translated to `contents`, tools to
+/// function declarations, and the reasoning effort to a thinking budget.
+fn build_antigravity_payload(
     messages: &[Message],
     tools: &[ToolDefinition],
     options: &CompletionOptions,
-) -> Result<Message, HarnessError> {
+    model: &str,
+) -> serde_json::Value {
     let mut gemini_contents = Vec::new();
     let mut system_instruction = None;
 
@@ -361,9 +429,7 @@ pub async fn execute_antigravity_completion(
         }
     }
 
-    let mut req_obj = json!({
-        "contents": gemini_contents
-    });
+    let mut req_obj = json!({ "contents": gemini_contents });
 
     if let Some(sys) = system_instruction {
         req_obj["systemInstruction"] = sys;
@@ -380,9 +446,7 @@ pub async fn execute_antigravity_completion(
                 })
             })
             .collect();
-        req_obj["tools"] = json!([{
-            "functionDeclarations": func_decls
-        }]);
+        req_obj["tools"] = json!([{ "functionDeclarations": func_decls }]);
     }
 
     let mut gen_config = json!({});
@@ -410,28 +474,42 @@ pub async fn execute_antigravity_completion(
         req_obj["generationConfig"] = gen_config;
     }
 
+    json!({
+        "project": DEFAULT_PROJECT,
+        "model": resolve_antigravity_model(model, options.reasoning_effort.as_ref()),
+        "request": req_obj
+    })
+}
+
+/// POST one turn to Code Assist, refreshing the OAuth token once on a 401 and mapping the
+/// status codes the agent loop distinguishes.
+async fn post_antigravity_turn(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
+    payload: &serde_json::Value,
+) -> Result<reqwest::Response, HarnessError> {
     let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
 
-    let resolved_model = resolve_antigravity_model(model, options.reasoning_effort.as_ref());
+    let send = |token: String| {
+        let client = http_client.clone();
+        let payload = payload.clone();
+        async move {
+            client
+                .post(CODE_ASSIST_ENDPOINT)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(CONTENT_TYPE, "application/json")
+                .json(&payload)
+                .send()
+                .await
+        }
+    };
 
-    let payload = json!({
-        "project": DEFAULT_PROJECT,
-        "model": resolved_model,
-        "request": req_obj
-    });
-
-    let mut resp = http_client
-        .post(CODE_ASSIST_ENDPOINT)
-        .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(CONTENT_TYPE, "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| HarnessError::ProviderError {
-            provider: "antigravity".to_string(),
-            message: format!("HTTP error: {}", e),
-        })?;
+    let mut resp = send(bearer_token.clone()).await.map_err(|e| HarnessError::ProviderError {
+        provider: "antigravity".to_string(),
+        message: format!("HTTP error: {}", e),
+    })?;
 
     if resp.status().as_u16() == 401 {
         if let Some(ref refresh_tok) = refresh_tok_opt {
@@ -446,108 +524,119 @@ pub async fn execute_antigravity_completion(
                         .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
                         .await;
                 }
-                resp = http_client
-                    .post(CODE_ASSIST_ENDPOINT)
-                    .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
-                    .header(USER_AGENT, DEFAULT_USER_AGENT)
-                    .header(CONTENT_TYPE, "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                    .map_err(|e| HarnessError::ProviderError {
-                        provider: "antigravity".to_string(),
-                        message: format!("HTTP error on retry: {}", e),
-                    })?;
+                resp = send(bearer_token).await.map_err(|e| HarnessError::ProviderError {
+                    provider: "antigravity".to_string(),
+                    message: format!("HTTP error on retry: {}", e),
+                })?;
             }
         }
     }
 
-    if resp.status().as_u16() == 401 {
-        return Err(HarnessError::AuthenticationFailed {
+    match resp.status().as_u16() {
+        401 => Err(HarnessError::AuthenticationFailed {
             provider: "antigravity".to_string(),
             message: "Antigravity OAuth token expired or unauthorized (401)".to_string(),
-        });
-    }
-
-    if resp.status().as_u16() == 429 {
-        return Err(HarnessError::RateLimited {
+        }),
+        429 => Err(HarnessError::RateLimited {
             provider: "antigravity".to_string(),
             retry_after_secs: Some(30),
-        });
+        }),
+        status if !resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(HarnessError::ProviderError {
+                provider: "antigravity".to_string(),
+                message: format!("Code Assist API error (HTTP {}): {}", status, body),
+            })
+        }
+        _ => Ok(resp),
     }
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(HarnessError::ProviderError {
-            provider: "antigravity".to_string(),
-            message: format!("Code Assist API error (HTTP {}): {}", status, body),
-        });
-    }
+/// Stream one Code Assist turn: SSE chunks are translated as they arrive, so reasoning reaches
+/// the caller while the model is still producing it instead of after the whole body lands.
+pub async fn stream_antigravity_completion(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    options: &CompletionOptions,
+) -> Result<futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+    let payload = build_antigravity_payload(messages, tools, options, model);
+    let resp = post_antigravity_turn(http_client, raw_secret, cred_manager, &payload).await?;
 
-    let sse_body = resp.text().await.map_err(|e| HarnessError::ProviderError {
-        provider: "antigravity".to_string(),
-        message: format!("Failed reading SSE response: {}", e),
-    })?;
+    let stream = resp.bytes_stream().eventsource().flat_map(|event_result| {
+        let events: Vec<Result<StreamEvent, HarnessError>> = match event_result {
+            Ok(event) => {
+                if event.data.trim().is_empty() || event.data == "[DONE]" {
+                    Vec::new()
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(&event.data) {
+                        Ok(parsed) => parse_antigravity_chunk(&parsed).into_iter().map(Ok).collect(),
+                        Err(_) => Vec::new(),
+                    }
+                }
+            }
+            Err(e) => vec![Err(HarnessError::ProviderError {
+                provider: "antigravity".to_string(),
+                message: format!("SSE stream error: {}", e),
+            })],
+        };
+        futures_util::stream::iter(events)
+    });
+
+    Ok(Box::pin(stream))
+}
+
+pub async fn execute_antigravity_completion(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    options: &CompletionOptions,
+) -> Result<Message, HarnessError> {
+    // Draining the streaming path keeps one parser for both: the buffered call and the live one
+    // classify thought chunks, text and function calls identically.
+    let mut stream =
+        stream_antigravity_completion(http_client, raw_secret, cred_manager, model, messages, tools, options)
+            .await?;
 
     let mut full_text = String::new();
     let mut thought_buf = String::new();
-    let mut tool_calls = Vec::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage = None;
 
-    for line in sse_body.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("data: ") {
-            continue;
-        }
-        let data_str = &trimmed[6..];
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(data_str) {
-            let resp_data = event.get("response").unwrap_or(&event);
-            if let Some(meta) = resp_data.get("usageMetadata") {
-                let prompt_tokens = meta.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let completion_tokens = meta.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                usage = Some(TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                });
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::ContentDelta(text) => full_text.push_str(&text),
+            StreamEvent::ReasoningDelta(text) => thought_buf.push_str(&text),
+            StreamEvent::ToolCallDelta { id, name, arguments_delta, .. } => {
+                if let Some(name) = name {
+                    let arguments = arguments_delta
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str(raw).ok())
+                        .unwrap_or_else(|| json!({}));
+                    tool_calls.push(ToolCall {
+                        id: id.unwrap_or_else(|| "call_agy".to_string()),
+                        name,
+                        arguments,
+                    });
+                }
             }
-
-            if let Some(candidates) = resp_data.get("candidates").and_then(|c| c.as_array()) {
-                for cand in candidates {
-                    if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
-                        for part in parts {
-                            let is_thought_bool = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
-                            if is_thought_bool {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    thought_buf.push_str(text);
-                                }
-                            } else if let Some(thought_str) = part.get("thought").and_then(|t| t.as_str()) {
-                                thought_buf.push_str(thought_str);
-                            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                full_text.push_str(text);
-                            }
-
-                            if let Some(fc) = part.get("functionCall") {
-                                let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-                                let args = fc.get("args").cloned().unwrap_or(json!({}));
-                                let id = fc.get("id").and_then(|i| i.as_str()).unwrap_or("call_agy").to_string();
-                                tool_calls.push(ToolCall {
-                                    id,
-                                    name,
-                                    arguments: args,
-                                });
-                            }
-                        }
-                    }
+            StreamEvent::Completed { usage: event_usage, .. } => {
+                if event_usage.is_some() {
+                    usage = event_usage;
                 }
             }
         }
     }
 
-    // Extract inline <think> or <thought> tags if thought_buf is empty
+    // Extract inline  thinking or <thought> tags if thought_buf is empty
     if thought_buf.is_empty() {
-        for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+        for (open_tag, close_tag) in &[(" thinking", "</think>"), ("<thought>", "</thought>")] {
             if let Some(start) = full_text.find(open_tag) {
                 if let Some(end) = full_text.find(close_tag) {
                     let think_text = full_text[start + open_tag.len()..end].trim().to_string();
@@ -574,3 +663,4 @@ pub async fn execute_antigravity_completion(
     res_msg.usage = usage;
     Ok(res_msg)
 }
+

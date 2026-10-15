@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long)]
     yes: bool,
 
-    /// Resume a stored session by id (`luna sessions list` shows the ids)
+    /// Resume a stored session by id or name (`luna sessions list` shows both)
     #[arg(long, conflicts_with = "continue_session")]
     session: Option<String>,
 
@@ -64,7 +64,7 @@ enum Commands {
         /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
         #[arg(long)]
         yes: bool,
-        /// Resume a stored session by id (`luna sessions list` shows the ids)
+        /// Resume a stored session by id or name (`luna sessions list` shows both)
         #[arg(long, conflicts_with = "continue_session")]
         session: Option<String>,
         /// Resume the most recently updated session

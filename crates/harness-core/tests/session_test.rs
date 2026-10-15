@@ -75,14 +75,6 @@ impl RecordingProvider {
     }
 }
 
-fn unimplemented_stream() -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError>
-{
-    Err(HarnessError::ProviderError {
-        provider: "fake".to_string(),
-        message: "streaming is not part of these tests".to_string(),
-    })
-}
-
 #[async_trait]
 impl ModelProvider for CannedProvider {
     fn provider_id(&self) -> &str {
@@ -101,15 +93,6 @@ impl ModelProvider for CannedProvider {
     ) -> Result<Message, HarnessError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Message::assistant(self.summary.clone()))
-    }
-
-    async fn stream(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _options: &CompletionOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        unimplemented_stream()
     }
 
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
@@ -140,15 +123,6 @@ impl ModelProvider for FailingProvider {
         })
     }
 
-    async fn stream(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _options: &CompletionOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        unimplemented_stream()
-    }
-
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         Ok(Vec::new())
     }
@@ -172,15 +146,6 @@ impl ModelProvider for RecordingProvider {
     ) -> Result<Message, HarnessError> {
         self.received.lock().unwrap().push(messages.to_vec());
         Ok(Message::assistant(self.reply.clone()))
-    }
-
-    async fn stream(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _options: &CompletionOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        unimplemented_stream()
     }
 
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
@@ -240,6 +205,9 @@ impl NotesEngine for MockNotes {
         _content: Option<&str>,
         _tags: Option<&[String]>,
     ) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError("no notes in this test".to_string()))
+    }
+    async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
         Err(HarnessError::NotesError("no notes in this test".to_string()))
     }
 }
