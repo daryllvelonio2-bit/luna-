@@ -57,6 +57,13 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
     pub tool_result: Option<ToolResult>,
+    /// Provider-reported usage for the request that produced this message (the response's `usage`
+    /// object, or `StreamEvent::Completed.usage` when streaming). `None` for messages no provider
+    /// produced, and for providers that do not report it. It is what lets
+    /// [`crate::session::estimate_tokens`] measure the transcript the provider actually billed
+    /// instead of guessing from characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 impl Message {
@@ -66,6 +73,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: vec![],
             tool_result: None,
+            usage: None,
         }
     }
 
@@ -75,6 +83,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: vec![],
             tool_result: None,
+            usage: None,
         }
     }
 
@@ -84,6 +93,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: vec![],
             tool_result: None,
+            usage: None,
         }
     }
 
@@ -93,6 +103,7 @@ impl Message {
             content: None,
             tool_calls,
             tool_result: None,
+            usage: None,
         }
     }
 
@@ -102,6 +113,7 @@ impl Message {
             content: Some(result.content.clone()),
             tool_calls: vec![],
             tool_result: Some(result),
+            usage: None,
         }
     }
 }

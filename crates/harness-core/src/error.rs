@@ -44,6 +44,9 @@ pub enum HarnessError {
     #[error("Notes engine error: {0}")]
     NotesError(String),
 
+    #[error("Session store error: {0}")]
+    SessionError(String),
+
     #[error("Plugin/Wasm execution error: {0}")]
     PluginError(String),
 

@@ -12,6 +12,7 @@ use commands::auth::{handle_auth_command, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::models::{handle_models_command, ModelsCommand};
+use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
 use commands::supervisor::run_supervisor_loop;
 use commands::voice::run_voice_loop;
 use eval::command::{handle_eval_command, EvalCommand};
@@ -43,6 +44,17 @@ enum Commands {
         /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
         #[arg(long)]
         yes: bool,
+        /// Resume a stored session by id (`luna sessions list` shows the ids)
+        #[arg(long, conflicts_with = "continue_session")]
+        session: Option<String>,
+        /// Resume the most recently updated session
+        #[arg(long = "continue")]
+        continue_session: bool,
+    },
+    /// List stored chat sessions
+    Sessions {
+        #[command(subcommand)]
+        subcommand: SessionsCommand,
     },
     /// Manage multi-provider credentials and key rotation
     Auth {
@@ -98,8 +110,8 @@ async fn main() -> Result<(), HarnessError> {
 
     // CLI flags are the highest-precedence layer.
     match &cli.command {
-        Some(Commands::Chat { provider, model, yes })
-        | Some(Commands::Voice { provider, model, yes }) => {
+        Some(Commands::Chat { provider, model, yes, .. })
+        | Some(Commands::Voice { provider, model, yes, .. }) => {
             if let Some(provider) = provider {
                 layers.flags.insert("model.provider".to_string(), provider.clone());
             }
@@ -139,8 +151,17 @@ async fn main() -> Result<(), HarnessError> {
     ));
 
     match cli.command {
-        Some(Commands::Chat { .. }) => {
-            run_interactive_chat(config, cred_manager, discovery).await?;
+        Some(Commands::Chat {
+            session,
+            continue_session,
+            ..
+        }) => {
+            let selection = match (session, continue_session) {
+                (Some(id), _) => SessionSelection::Resume(id),
+                (None, true) => SessionSelection::Continue,
+                (None, false) => SessionSelection::New,
+            };
+            run_interactive_chat(config, cred_manager, discovery, selection).await?;
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
@@ -151,6 +172,9 @@ async fn main() -> Result<(), HarnessError> {
         Some(Commands::Models { subcommand }) => {
             let default_provider = config.model.provider.clone();
             handle_models_command(subcommand, &default_provider, cred_manager, discovery).await?;
+        }
+        Some(Commands::Sessions { subcommand }) => {
+            handle_sessions_command(subcommand, &config).await?;
         }
         Some(Commands::Supervisor { args }) => {
             run_supervisor_loop(args).await?;
@@ -163,7 +187,7 @@ async fn main() -> Result<(), HarnessError> {
         }
         None => {
             // Default to chat if no subcommand specified
-            run_interactive_chat(config, cred_manager, discovery).await?;
+            run_interactive_chat(config, cred_manager, discovery, SessionSelection::New).await?;
         }
     }
 

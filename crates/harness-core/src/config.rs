@@ -53,6 +53,7 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderOverride>,
     pub agent: AgentConfig,
     pub tools: ToolsSettings,
+    pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
 }
 
@@ -80,6 +81,7 @@ impl Default for ModelSettings {
 pub struct PathsSettings {
     pub memory_db: PathBuf,
     pub notes_db: PathBuf,
+    pub sessions_db: PathBuf,
     pub credentials: PathBuf,
     pub models_cache: PathBuf,
     /// Scope every filesystem/shell tool is confined to. Defaults to the process working
@@ -93,6 +95,7 @@ impl Default for PathsSettings {
         Self {
             memory_db: luna.join("memory.db"),
             notes_db: luna.join("notes.db"),
+            sessions_db: luna.join("sessions.db"),
             credentials: luna.join("credentials.json"),
             models_cache: luna.join("models_cache.json"),
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -154,6 +157,23 @@ impl Default for TelemetrySettings {
         Self {
             json: false,
             level: "harness=info,harness_cli=info".to_string(),
+        }
+    }
+}
+
+/// Session replay bounds. Compaction thresholds live under `agent.*` because the agent loop
+/// applies them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionSettings {
+    /// Most messages `luna chat --session <id>` replays from the session transcript.
+    pub resume_max_messages: usize,
+}
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self {
+            resume_max_messages: 200,
         }
     }
 }
@@ -655,6 +675,7 @@ fn expand_paths(paths: &mut PathsSettings) {
     let fields = [
         &mut paths.memory_db,
         &mut paths.notes_db,
+        &mut paths.sessions_db,
         &mut paths.credentials,
         &mut paths.models_cache,
         &mut paths.workspace_root,

@@ -5,6 +5,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
 use crate::error::HarnessError;
+use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
 use crate::traits::*;
 use crate::types::*;
 
@@ -17,6 +18,14 @@ pub struct AgentConfig {
     pub max_consecutive_failures: usize,
     pub require_hitl_for_mutation: bool,
     pub system_prompt_prefix: Option<String>,
+    /// Estimated transcript size at which the oldest turns are summarised.
+    pub compact_at_tokens: usize,
+    /// Trailing user turns kept verbatim when compacting.
+    pub keep_recent_turns: usize,
+    /// Model that writes the summary; `None` means the session's model.
+    pub compaction_model: Option<String>,
+    /// Provider that serves the compaction call; `None` means the session's provider.
+    pub compaction_provider: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -25,8 +34,53 @@ impl Default for AgentConfig {
             max_consecutive_failures: 5,
             require_hitl_for_mutation: true,
             system_prompt_prefix: None,
+            compact_at_tokens: 60_000,
+            keep_recent_turns: 8,
+            compaction_model: None,
+            compaction_provider: None,
         }
     }
+}
+
+/// The provider and model that write summaries. A separate provider is what makes a failing
+/// compaction reachable (point `agent.compaction_provider` at a provider with no credentials).
+pub struct CompactionSetup {
+    pub provider: Arc<dyn ModelProvider>,
+    pub model: String,
+}
+
+/// The session a run appends to and replays from.
+pub struct SessionBinding {
+    pub store: Arc<dyn SessionStore>,
+    pub session_id: String,
+    /// Messages replayed at most, from `session.resume_max_messages`.
+    pub resume_max_messages: usize,
+}
+
+/// What a replay did, for the caller to report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayNotice {
+    pub session_id: String,
+    pub replayed: usize,
+    pub total: usize,
+}
+
+/// What this turn's compaction did, for the caller to report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionNotice {
+    pub session_id: String,
+    /// User turns folded into the summary.
+    pub turns: usize,
+}
+
+/// Everything a turn produced: the reply, plus what the console should say about persistence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnOutcome {
+    pub reply: String,
+    /// `Some` whenever the run is bound to a session.
+    pub replayed: Option<ReplayNotice>,
+    /// `Some` only on a turn that actually compacted.
+    pub compaction: Option<CompactionNotice>,
 }
 
 pub struct Agent<P, M, N, E, R>
@@ -45,6 +99,8 @@ where
     config: AgentConfig,
     approver: Arc<dyn Approver>,
     approval: ApprovalSettings,
+    compaction: Option<CompactionSetup>,
+    session: Option<SessionBinding>,
 }
 
 /// What the gate decided for one call.
@@ -82,6 +138,8 @@ where
             // than running them ungated. The CLI injects the real one from `tools.approval`.
             approver: Arc::new(DenyAll),
             approval: ApprovalSettings::default(),
+            compaction: None,
+            session: None,
         }
     }
 
@@ -89,6 +147,19 @@ where
     pub fn with_approval(mut self, approver: Arc<dyn Approver>, approval: ApprovalSettings) -> Self {
         self.approver = approver;
         self.approval = approval;
+        self
+    }
+
+    /// Persist and replay through `binding`. Without it the agent runs a single stateless turn,
+    /// which is the previous behaviour.
+    pub fn with_session(mut self, binding: SessionBinding) -> Self {
+        self.session = Some(binding);
+        self
+    }
+
+    /// Serve the summarising call through a provider other than the session's.
+    pub fn with_compaction(mut self, setup: CompactionSetup) -> Self {
+        self.compaction = Some(setup);
         self
     }
 
@@ -169,41 +240,42 @@ where
         }
     }
 
+    /// The turn's reply only. Kept for callers with no console to report to (the voice pipeline);
+    /// [`Agent::run_turn`] is the same run with the compaction and replay facts attached.
     pub async fn run_task(
         &self,
         user_input: &str,
         cancel_token: CancellationToken,
     ) -> Result<String, HarnessError> {
-        let mut messages = Vec::new();
+        self.run_turn(user_input, cancel_token)
+            .await
+            .map(|outcome| outcome.reply)
+    }
 
-        // 1. Retrieve relevant memories (includes active facts & 1-5 word note pointers)
-        let relevant_memories = self.memory.retrieve(user_input, 10).await?;
-        let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
+    /// Run one turn: replay the session, bound the context, call the model until it stops asking
+    /// for tools, and append everything to the session store as it happens.
+    pub async fn run_turn(
+        &self,
+        user_input: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<TurnOutcome, HarnessError> {
+        let system_text = self.system_prompt(user_input).await?;
 
-        let system_text = format!(
-            "You are Luna, an autonomous AI agent capable of self-improvement and stateful persistence.\n\
-             {}\n\
-             MEMORY PROTOCOL:\n\
-             You possess native memory tools: `save_memory`, `update_memory`, `forget_memory`.\n\
-             The decision of what is worth remembering or correcting is placed entirely on YOU.\n\
-             When the user states durable preferences, facts, or habits, save them.\n\
-             \n\
-             NOTE PROTOCOL:\n\
-             You possess note tools: `save_note`, `search_notes`, `read_note`, `update_note`.\n\
-             For large texts, specs, or logs, store them in notes. When saved, a strict 1-5 word pointer will be automatically indexed in your memory.\n\
-             \n\
-             SELF-IMPROVEMENT PROTOCOL:\n\
-             You possess harness tools: `inspect_harness_source`, `propose_harness_patch`, `apply_harness_update`.\n\
-             If you encounter bugs, missing features, or friction in your own harness, you can inspect, patch, test, and evolve yourself.\n\
-             \n\
-             CURRENT ACTIVE MEMORIES:\n\
-             {}\n",
-            self.config.system_prompt_prefix.as_deref().unwrap_or(""),
-            memory_prompt
-        );
-
-        messages.push(Message::system(system_text));
+        // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
+        let (history, replay_notice) = self.load_history().await?;
+        let mut messages = Vec::with_capacity(history.len() + 3);
+        messages.push(Message::system(system_text.clone()));
+        messages.extend(history.iter().map(|stored| stored.message.clone()));
         messages.push(Message::user(user_input));
+
+        // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
+        // or fails and leaves the transcript alone. No retry inside the turn.
+        let compaction = self.compact_once(&history, &system_text, &mut messages).await?;
+
+        // 3. Persist the user line before the model call, so a failed call still costs the session
+        //    nothing (and the row count in the criteria reflects turns actually attempted).
+        let user_message = Message::user(user_input);
+        self.append(&user_message, false).await?;
 
         let mut consecutive_failures = 0;
         let tools = self.registry.list_tools().await?;
@@ -226,10 +298,16 @@ where
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
                 info!("Task successfully completed without further tool calls");
-                return Ok(response.content.unwrap_or_default());
+                self.append(&response, false).await?;
+                return Ok(TurnOutcome {
+                    reply: response.content.unwrap_or_default(),
+                    replayed: replay_notice,
+                    compaction,
+                });
             }
 
             // Append assistant response with tool calls to conversation history
+            self.append(&response, false).await?;
             messages.push(response.clone());
 
             // Execute each requested tool call
@@ -304,8 +382,137 @@ where
                 }
 
                 // Add tool result to conversation history
-                messages.push(Message::tool(execution_result));
+                let tool_message = Message::tool(execution_result);
+                self.append(&tool_message, false).await?;
+                messages.push(tool_message);
             }
         }
+    }
+
+    /// The system prompt: the harness protocols plus whatever memory retrieval found.
+    async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
+        let relevant_memories = self.memory.retrieve(user_input, 10).await?;
+        let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
+
+        Ok(format!(
+            "You are Luna, an autonomous AI agent capable of self-improvement and stateful persistence.\n\
+             {}\n\
+             MEMORY PROTOCOL:\n\
+             You possess native memory tools: `save_memory`, `update_memory`, `forget_memory`.\n\
+             The decision of what is worth remembering or correcting is placed entirely on YOU.\n\
+             When the user states durable preferences, facts, or habits, save them.\n\
+             \n\
+             NOTE PROTOCOL:\n\
+             You possess note tools: `save_note`, `search_notes`, `read_note`, `update_note`.\n\
+             For large texts, specs, or logs, store them in notes. When saved, a strict 1-5 word pointer will be automatically indexed in your memory.\n\
+             \n\
+             SELF-IMPROVEMENT PROTOCOL:\n\
+             You possess harness tools: `inspect_harness_source`, `propose_harness_patch`, `apply_harness_update`.\n\
+             If you encounter bugs, missing features, or friction in your own harness, you can inspect, patch, test, and evolve yourself.\n\
+             \n\
+             CURRENT ACTIVE MEMORIES:\n\
+             {}\n",
+            self.config.system_prompt_prefix.as_deref().unwrap_or(""),
+            memory_prompt
+        ))
+    }
+
+    /// The session's recent transcript, plus the notice the console prints about the bound.
+    async fn load_history(&self) -> Result<(Vec<StoredMessage>, Option<ReplayNotice>), HarnessError> {
+        let Some(binding) = &self.session else {
+            return Ok((Vec::new(), None));
+        };
+
+        let replay = binding
+            .store
+            .replay(&binding.session_id, binding.resume_max_messages)
+            .await?;
+        let notice = ReplayNotice {
+            session_id: binding.session_id.clone(),
+            replayed: replay.replayed,
+            total: replay.total,
+        };
+        debug!(
+            "Replayed {} of {} messages of session '{}'",
+            replay.replayed, replay.total, binding.session_id
+        );
+        Ok((replay.history, Some(notice)))
+    }
+
+    /// Summarise the oldest turns when the estimate crosses `agent.compact_at_tokens`, and swap the
+    /// sent vector for the bounded one. A provider failure is non-fatal: the vector is untouched,
+    /// a warning is logged, and the turn continues on the full history.
+    async fn compact_once(
+        &self,
+        history: &[StoredMessage],
+        system_text: &str,
+        messages: &mut Vec<Message>,
+    ) -> Result<Option<CompactionNotice>, HarnessError> {
+        let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
+            return Ok(None);
+        };
+
+        let estimate = estimate_tokens(messages);
+        if estimate.tokens as usize <= self.config.compact_at_tokens {
+            debug!(
+                "Transcript estimate {} tokens ({:?}) is within agent.compact_at_tokens = {}",
+                estimate.tokens, estimate.source, self.config.compact_at_tokens
+            );
+            return Ok(None);
+        }
+
+        info!(
+            "Transcript estimate {} tokens exceeds agent.compact_at_tokens = {}; compacting",
+            estimate.tokens, self.config.compact_at_tokens
+        );
+
+        let outcome: CompactionOutcome =
+            match compact(setup.provider.as_ref(), &setup.model, history, self.config.keep_recent_turns)
+                .await
+            {
+                Ok(Some(outcome)) => outcome,
+                Ok(None) => {
+                    debug!("Nothing to fold: the session holds no more turns than agent.keep_recent_turns");
+                    return Ok(None);
+                }
+                Err(failure) => {
+                    // Non-fatal by design: the transcript is unchanged, the turn runs on the full
+                    // history, and this turn makes no second attempt.
+                    warn!("Compaction failed, continuing on the full transcript: {}", failure);
+                    return Ok(None);
+                }
+            };
+
+        // The summary row is what a later resume replays, and the folded rows stay readable
+        // (`compacted_at` set) for a future rewind. A store failure here is an error, not a
+        // warning: silently running without the summary would make the next resume replay a
+        // transcript this turn never sent.
+        binding
+            .store
+            .record_compaction(&binding.session_id, &outcome.folded_ids, &outcome.summary)
+            .await?;
+
+        let user_line = messages.pop();
+        *messages = outcome.bounded_messages(system_text.to_string());
+        messages.extend(user_line);
+
+        Ok(Some(CompactionNotice {
+            session_id: binding.session_id.clone(),
+            turns: outcome.folded_turns,
+        }))
+    }
+
+    /// Append to the session store, if this run is bound to one. A failed write is an error: the
+    /// session is the record of what was sent, and a turn that cannot be recorded must not be
+    /// reported as a normal turn.
+    async fn append(&self, message: &Message, is_summary: bool) -> Result<(), HarnessError> {
+        let Some(binding) = &self.session else {
+            return Ok(());
+        };
+        binding
+            .store
+            .append(&binding.session_id, message, is_summary)
+            .await
+            .map(|_| ())
     }
 }

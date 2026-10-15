@@ -163,7 +163,7 @@ async fn test_5_consecutive_failures_halts_agent() {
         AgentConfig {
             max_consecutive_failures: 5,
             require_hitl_for_mutation: false,
-            system_prompt_prefix: None,
+            ..AgentConfig::default()
         },
     );
 
