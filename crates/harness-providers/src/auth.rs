@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rand::Rng;
@@ -51,7 +50,6 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 pub struct CredentialManager {
     storage_path: PathBuf,
     state: RwLock<LunaAuthStorage>,
-    round_robin_counter: AtomicUsize,
 }
 
 impl CredentialManager {
@@ -68,7 +66,6 @@ impl CredentialManager {
         Ok(Arc::new(Self {
             storage_path: path.clone(),
             state: RwLock::new(Self::load_from_disk(&path)?),
-            round_robin_counter: AtomicUsize::new(0),
         }))
     }
 
@@ -103,20 +100,58 @@ impl CredentialManager {
         })
     }
 
+    /// Rewrite the store file from `bytes`. Shared tail of every persist path.
+    fn write_store(&self, bytes: &str) -> Result<(), HarnessError> {
+        if let Some(parent) = self.storage_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| HarnessError::Io(e.to_string()))?;
+        }
+        fs::write(&self.storage_path, bytes).map_err(|e| HarnessError::Io(e.to_string()))
+    }
+
+    /// Persist the rotation state after an acquire: `usage_count`, `last_used` and the per-provider
+    /// round-robin position must survive a restart (t_29ea5d7c) or `LeastUsed` restarts from the
+    /// same key in every new process and `luna auth list` shows `Used: 0` forever.
+    ///
+    /// Deliberately NOT persisted (process-local by design, per t_d79b9293): the
+    /// `is_temporarily_disabled` failover flag. A key retired because it was rate-limited must be
+    /// retried on the next run, so `persist_state` serializes a copy of the state with those flags
+    /// cleared instead of writing what is in memory. Persistence failures are logged, not returned:
+    /// a full disk must not turn a working API key into a failed request.
+    async fn persist_state(&self) {
+        let mut to_write = self.state.read().await.clone();
+        for p in to_write.providers.values_mut() {
+            for cred in &mut p.credentials {
+                cred.is_temporarily_disabled = false;
+            }
+        }
+        let bytes = match serde_json::to_string_pretty(&to_write) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!(error = %e, "cannot serialize credential rotation state; skipping persist");
+                return;
+            }
+        };
+        if let Err(e) = self.write_store(&bytes) {
+            warn!(
+                path = %self.storage_path.display(),
+                error = %e,
+                "cannot persist credential rotation state; usage counts may reset on restart"
+            );
+        }
+    }
+
     pub async fn save_to_disk(&self) -> Result<(), HarnessError> {
-        let state = self.state.read().await;
+        let bytes = {
+            let state = self.state.read().await;
+            serde_json::to_string_pretty(&*state)
+                .map_err(|e| HarnessError::SerializationError(e.to_string()))?
+        };
         // Never overwrite a store that exists but does not read back: a truncation or hand-edit
         // between load and write must not turn into "all your keys are gone" (t_24375a7e).
         if self.storage_path.exists() {
             Self::load_from_disk(&self.storage_path)?;
         }
-        if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| HarnessError::Io(e.to_string()))?;
-        }
-        let serialized = serde_json::to_string_pretty(&*state)
-            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
-        fs::write(&self.storage_path, serialized).map_err(|e| HarnessError::Io(e.to_string()))?;
-        Ok(())
+        self.write_store(&bytes)
     }
 
     pub async fn add_credential(
@@ -264,8 +299,15 @@ impl CredentialManager {
             }
             RotationStrategy::RoundRobin => {
                 let count = active_credentials.len();
-                let next = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % count;
-                active_credentials[next]
+                // Per provider, and persisted: the position survives a restart (t_29ea5d7c). A
+                // process-local counter restarted from 0 in every new process, so round_robin
+                // always opened on the same key, and `current_round_robin_index` sat dead in the
+                // file. The counter advances even when the provider later rejects the pick —
+                // which is fine: it only decides *who goes next*, unlike LeastUsed, which must
+                // count real traffic.
+                let consumed = provider_state.current_round_robin_index;
+                provider_state.current_round_robin_index = consumed.wrapping_add(1) % count.max(1);
+                active_credentials[consumed % count]
             }
             RotationStrategy::Random => {
                 let mut rng = rand::thread_rng();
@@ -289,6 +331,12 @@ impl CredentialManager {
         cred.usage_count += 1;
         cred.last_used = Some(Utc::now());
         let raw_key = cred.api_key.clone();
+
+        // The write lock guards the whole read-modify-write, so acquires cannot interleave.
+        // Persist after dropping it: the snapshot on disk reflects this selection (or a newer one
+        // from a concurrent acquire), and `luna auth list` reads exactly these fields (t_29ea5d7c).
+        drop(state);
+        self.persist_state().await;
 
         Ok(SecretString::new(raw_key))
     }
