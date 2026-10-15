@@ -1,0 +1,33 @@
+# Two-step write-then-read turn: the sandbox must hold the exact bytes afterwards.
+# This is also the case `--live --filter write-then-read` drives against the real model, so the
+# prompt states the required bytes exactly.
+case: write-then-read
+prompt: >-
+  Use the eval_write_file tool to write the file out.txt with content that is exactly these 13
+  characters: luna-eval-42 followed by a single newline. Then use the eval_read_file tool to read
+  out.txt back, and tell me the exact bytes the file contains.
+tools:
+  - eval_write_file
+  - eval_read_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "out.txt", content: "luna-eval-42\n" }
+  - tool_calls:
+      - name: eval_read_file
+        arguments: { path: "out.txt" }
+  - answer: out.txt contains the exact bytes luna-eval-42 followed by one newline.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      arguments_contain: { path: "out.txt" }
+      error: false
+    - name: eval_read_file
+      arguments_contain: { path: "out.txt" }
+      error: false
+  final_answer_contains:
+    - "luna-eval-42"
+  files:
+    - path: out.txt
+      exists: true
+      content_equals: "luna-eval-42\n"

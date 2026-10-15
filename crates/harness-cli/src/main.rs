@@ -7,12 +7,14 @@ use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_telemetry::init_telemetry;
 
 mod commands;
+mod eval;
 use commands::auth::{handle_auth_command, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::models::{handle_models_command, ModelsCommand};
 use commands::supervisor::run_supervisor_loop;
 use commands::voice::run_voice_loop;
+use eval::command::{handle_eval_command, EvalCommand};
 
 /// Model-discovery cache lifetime. A cache TTL rather than user intent, so it is not a v1 config
 /// key; the cache path itself is `paths.models_cache`.
@@ -67,6 +69,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         subcommand: ConfigCommand,
+    },
+    /// Run the scripted end-to-end scenario suite (offline fake provider, or live NIM)
+    Eval {
+        #[command(subcommand)]
+        subcommand: EvalCommand,
     },
 }
 
@@ -135,6 +142,9 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Config { subcommand }) => {
             handle_config_command(subcommand, &layers)?;
+        }
+        Some(Commands::Eval { subcommand }) => {
+            handle_eval_command(subcommand, cred_manager, discovery).await?;
         }
         None => {
             // Default to chat if no subcommand specified

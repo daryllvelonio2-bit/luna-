@@ -116,3 +116,12 @@ Run agent under the supervisor to enable live self-patching and automatic rebuil
 ```bash
 cargo run --bin luna -- supervisor chat
 ```
+
+### 6. Eval Suite (regression gate)
+Scripted end-to-end scenarios that drive the real agent loop; offline by default (no credential, no
+quota), `--live` for the real provider. One line per case, non-zero exit on failure,
+machine-readable `eval-report.json`. Format and case-authoring guide: [`docs/EVALS.md`](docs/EVALS.md).
+```bash
+cargo run --bin luna -- eval run --suite tests/eval --offline
+cargo run --bin luna -- eval run --suite tests/eval --live --filter write-then-read
+```

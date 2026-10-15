@@ -1,0 +1,11 @@
+# A prompt that needs no tools: the loop must answer and dispatch nothing.
+case: read-only-turn
+prompt: In one sentence, say what the Luna harness is.
+tools: []
+script:
+  - answer: Luna is a Rust autonomous-agent harness that runs a model-driven tool loop.
+expect:
+  final_answer_contains:
+    - "Luna is a Rust autonomous-agent harness"
+  tool_calls: []
+  files: []

@@ -1,0 +1,25 @@
+# Malformed tool arguments: a missing key and a payload that is not an object must both surface as
+# tool errors, and the loop must carry on to the next turn instead of aborting.
+case: malformed-tool-arguments
+prompt: Try to write the file bad.txt with eval_write_file, then explain what went wrong.
+tools:
+  - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { content: "a path key is missing" }
+  - tool_calls:
+      - name: eval_write_file
+        arguments: "this is not an argument object"
+  - answer: Both calls failed because eval_write_file needs a path string, so nothing was written.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      error: true
+    - name: eval_write_file
+      error: true
+  final_answer_contains:
+    - "path"
+  files:
+    - path: bad.txt
+      exists: false
