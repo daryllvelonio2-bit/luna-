@@ -333,6 +333,119 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
     format!("{} {}{}", bullet, display_name.bold(), args_str.dimmed())
 }
 
+/// Formats the single-line verdict when a human approves or cancels a tool call.
+/// "Approved:" is styled in bold blue, file paths in cyan, and command arguments
+/// are structured cleanly rather than dumped as raw unparsed blobs.
+pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> String {
+    let tag = if is_approved {
+        format!("{} {}", "✔".blue().bold(), "Approved:".blue().bold())
+    } else {
+        format!("{} {}", "✖".red().bold(), "Cancelled:".red().bold())
+    };
+
+    let text_arg = |key: &str| {
+        request
+            .arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+
+    let body = match request.tool.as_str() {
+        "write_file" => {
+            let path = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("path"))
+                .unwrap_or("file");
+            let lines = text_arg("content").map(|c| c.lines().count()).unwrap_or(0);
+            let suffix = if lines > 0 {
+                format!(" {}", format!("(+{} lines)", lines).dimmed())
+            } else {
+                String::new()
+            };
+            format!("{} {}{}", "write".bold(), path.cyan().bold(), suffix)
+        }
+        "patch" => {
+            let path = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("path"))
+                .unwrap_or("file");
+            let detail = tool_activity_detail("patch", &request.arguments);
+            let suffix = match detail {
+                Some(d) => format!(" ({})", d.dimmed()),
+                None => String::new(),
+            };
+            format!("{} {}{}", "patch".bold(), path.cyan().bold(), suffix)
+        }
+        "terminal" | "shell" | "bash" => {
+            let cmd = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("command"))
+                .unwrap_or("");
+            let first_line = cmd.lines().next().unwrap_or(cmd).trim();
+            let display_cmd = truncate_visible(first_line, 65);
+            let cwd = text_arg("workdir")
+                .map(|w| format!(" {}", format!("(in {})", w).dimmed()))
+                .unwrap_or_default();
+            format!("{} {}{}", "$".bold().cyan(), display_cmd.bold(), cwd)
+        }
+        "save_note" => {
+            let title = text_arg("title").unwrap_or("note");
+            let lines = text_arg("content").map(|c| c.lines().count()).unwrap_or(0);
+            let suffix = if lines > 0 {
+                format!(" {}", format!("({} lines)", lines).dimmed())
+            } else {
+                String::new()
+            };
+            format!("{} \"{}\"{}", "note".bold(), title.cyan().bold(), suffix)
+        }
+        "update_note" | "delete_note" | "read_note" => {
+            let id = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("id"))
+                .unwrap_or("note");
+            let short_id = if id.len() > 16 && id.starts_with("note_") {
+                format!("{}…", &id[..13])
+            } else {
+                id.to_string()
+            };
+            let action = match request.tool.as_str() {
+                "update_note" => " (update)",
+                "delete_note" => " (delete)",
+                _ => "",
+            };
+            format!("{} {}{}", "note".bold(), short_id.cyan().bold(), action.dimmed())
+        }
+        "update_memory" | "forget_memory" | "save_memory" => {
+            let target = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("subject"))
+                .unwrap_or("memory");
+            format!("{} {}", "memory".bold(), target.cyan().bold())
+        }
+        "apply_harness_update" => {
+            let id = request
+                .target
+                .as_deref()
+                .or_else(|| text_arg("patch_id"))
+                .unwrap_or("patch");
+            format!("{} {}", "update".bold(), id.cyan().bold())
+        }
+        other => {
+            let target = request.target.as_deref().unwrap_or("-");
+            let clean_target = truncate_visible(target, 60);
+            format!("{} ({})", other.bold(), clean_target.cyan())
+        }
+    };
+
+    format!("{} {}", tag, body)
+}
+
 /// Render a tool result as the line that closes a tool call: an error's first line, a short
 /// result in full, or a first line plus a count for a long one.
 pub fn format_tool_result(is_error: bool, output: &str) -> String {
@@ -538,5 +651,49 @@ mod tests {
         assert!(needs_separator(Thinking, Tool));
         assert!(!needs_separator(Tool, Tool), "consecutive tool calls stay adjacent");
         assert!(needs_separator(Reply, User), "a new user message starts after a blank line");
+    }
+
+    #[test]
+    fn approval_verdict_colors_approved_blue_and_file_cyan() {
+        let req = ApprovalRequest {
+            tool: "write_file".to_string(),
+            call_id: "c1".to_string(),
+            target: Some("/home/janelle/fts-verify/src/main.rs".to_string()),
+            diff: None,
+            arguments: json!({ "path": "/home/janelle/fts-verify/src/main.rs", "content": "fn main() {}\n" }),
+        };
+        let line = format_approval_verdict(true, &req);
+        assert!(line.contains("Approved:"), "got: {}", line);
+        assert!(line.contains("/home/janelle/fts-verify/src/main.rs"), "got: {}", line);
+        assert!(line.contains("write"), "got: {}", line);
+    }
+
+    #[test]
+    fn approval_verdict_formats_terminal_unbloated() {
+        let req = ApprovalRequest {
+            tool: "terminal".to_string(),
+            call_id: "c2".to_string(),
+            target: Some("cargo run --quiet 2>&1 | tail -110".to_string()),
+            diff: None,
+            arguments: json!({ "command": "cargo run --quiet 2>&1 | tail -110" }),
+        };
+        let line = format_approval_verdict(true, &req);
+        assert!(line.contains("$"), "got: {}", line);
+        assert!(line.contains("cargo run --quiet"), "got: {}", line);
+        assert!(!line.contains("terminal (cargo"), "must not be wrapped in bloated tool parentheses");
+    }
+
+    #[test]
+    fn approval_verdict_formats_note_uuid_shortened() {
+        let req = ApprovalRequest {
+            tool: "update_note".to_string(),
+            call_id: "c3".to_string(),
+            target: Some("note_5d26a9f8-b905-43aa-8168-3f286a96ee3f".to_string()),
+            diff: None,
+            arguments: json!({ "id": "note_5d26a9f8-b905-43aa-8168-3f286a96ee3f" }),
+        };
+        let line = format_approval_verdict(true, &req);
+        assert!(line.contains("note_5d26a9f8…"), "got: {}", line);
+        assert!(!line.contains("note_5d26a9f8-b905-43aa-8168-3f286a96ee3f"), "raw UUID must be shortened");
     }
 }

@@ -24,7 +24,7 @@ pub fn render_approval_box(
     let inner_width = width.saturating_sub(4).max(50);
     let title = " Approval Required ";
     let header_dashes = inner_width.saturating_sub(title.len() + 2);
-    let top_border = format!("┌─{}{}{}┐", title.yellow().bold(), "─".repeat(header_dashes).yellow(), "─".repeat(2).yellow());
+    let top_border = format!("┌─{}{}{}┐", title.blue().bold(), "─".repeat(header_dashes).blue(), "─".repeat(2).blue());
     lines.push(top_border);
 
     let make_line = |content: &str| -> String {
@@ -33,15 +33,22 @@ pub fn render_approval_box(
         format!("│ {}{} │", content, " ".repeat(pad))
     };
 
-    lines.push(make_line(&format!("{}:   {}", "Tool".bold(), request.tool.cyan().bold())));
+    lines.push(make_line(&format!("{}:   {}", "Tool".bold(), request.tool.bold())));
 
     if let Some(target) = &request.target {
-        let target_display = if target.len() > inner_width.saturating_sub(12) {
-            format!("{}...", &target[..inner_width.saturating_sub(15)])
+        let max_target = inner_width.saturating_sub(14);
+        let target_display = if target.len() > max_target {
+            format!("{}…", &target[..max_target.saturating_sub(1)])
         } else {
             target.clone()
         };
-        lines.push(make_line(&format!("{}: {}", "Target".bold(), target_display)));
+        let (label, colored_target) = match request.tool.as_str() {
+            "write_file" | "patch" => ("File".bold(), target_display.cyan().bold().to_string()),
+            "terminal" | "shell" | "bash" => ("Command".bold(), format!("{} {}", "$".cyan().bold(), target_display.bold())),
+            "update_note" | "save_note" | "delete_note" => ("Note".bold(), target_display.cyan().to_string()),
+            _ => ("Target".bold(), target_display.cyan().to_string()),
+        };
+        lines.push(make_line(&format!("{}: {}", label, colored_target)));
     }
 
     if let Some(diff) = &request.diff {
@@ -73,7 +80,7 @@ pub fn render_approval_box(
     lines.push(make_line(""));
 
     let approve_btn = if selected == 0 {
-        format!("❯ {}", "[ Approve ]".green().bold())
+        format!("❯ {}", "[ Approve ]".blue().bold())
     } else {
         format!("  {}", "[ Approve ]".dimmed())
     };
@@ -87,7 +94,7 @@ pub fn render_approval_box(
     let btn_row = format!("      {}        {}", approve_btn, cancel_btn);
     lines.push(make_line(&btn_row));
 
-    let bot_border = format!("└{}┘", "─".repeat(inner_width + 2).yellow());
+    let bot_border = format!("└{}┘", "─".repeat(inner_width + 2).blue());
     lines.push(bot_border);
 
     let count = lines.len();

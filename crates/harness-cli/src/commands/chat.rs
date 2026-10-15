@@ -90,8 +90,8 @@ fn get_terminal_width() -> usize {
 mod render;
 
 use render::{
-    activity_line, format_tool_call, format_tool_result, needs_separator, reasoning_rows,
-    right_aligned_user_message, tool_activity_detail, wrap_rows, OutputBlockKind, LUNA_LABEL,
+    activity_line, format_approval_verdict, format_tool_call, format_tool_result, needs_separator,
+    reasoning_rows, right_aligned_user_message, tool_activity_detail, OutputBlockKind, LUNA_LABEL,
     PROMPT,
 };
 
@@ -829,13 +829,11 @@ pub async fn run_interactive_chat(
 
                 ui.clear_live_and_box();
                 let decision = prompt_approval_box(&mut key_rx, &request).await;
-                let target_label = request.target.as_deref().unwrap_or("-");
-                if decision == harness_core::ApprovalDecision::Run {
-                    ui.emit_above(&format!("{} Approved: {} ({})", "✔".green().bold(), request.tool.bold(), target_label));
+                let is_run = decision == harness_core::ApprovalDecision::Run;
+                ui.emit_above(&format_approval_verdict(is_run, &request));
+                if is_run {
                     let args = request.arguments.clone();
                     ui.start_activity(&request.tool, &args);
-                } else {
-                    ui.emit_above(&format!("{} Cancelled: {} ({})", "✖".red().bold(), request.tool.bold(), target_label));
                 }
                 let _ = decision_tx.send(decision);
             }
