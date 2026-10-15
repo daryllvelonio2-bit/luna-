@@ -389,6 +389,45 @@ impl CredentialManager {
             None => false,
         }
     }
+
+    /// Get the configured rotation strategy for a provider.
+    pub async fn get_rotation_strategy(&self, provider: &str) -> RotationStrategy {
+        let state = self.state.read().await;
+        state
+            .providers
+            .get(&provider.to_lowercase())
+            .map(|p| p.strategy)
+            .unwrap_or_default()
+    }
+
+    /// Reset cooldowns / temporary disabled flags for a provider, or for all providers if None.
+    pub async fn reset_cooldowns(&self, provider: Option<&str>) -> Result<usize, HarnessError> {
+        let mut state = self.state.write().await;
+        let mut reset_count = 0;
+
+        let targets: Vec<String> = if let Some(p) = provider {
+            vec![p.to_lowercase()]
+        } else {
+            state.providers.keys().cloned().collect()
+        };
+
+        for p in targets {
+            if let Some(p_state) = state.providers.get_mut(&p) {
+                for c in &mut p_state.credentials {
+                    if c.is_temporarily_disabled {
+                        c.is_temporarily_disabled = false;
+                        reset_count += 1;
+                    }
+                }
+            }
+        }
+
+        drop(state);
+        if reset_count > 0 {
+            self.save_to_disk().await?;
+        }
+        Ok(reset_count)
+    }
 }
 
 #[cfg(test)]

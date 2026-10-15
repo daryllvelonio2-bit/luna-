@@ -8,7 +8,7 @@ use harness_telemetry::init_telemetry;
 
 mod commands;
 mod eval;
-use commands::auth::{handle_auth_command, AuthCommand};
+use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::models::{handle_models_command, ModelsCommand};
@@ -79,7 +79,7 @@ enum Commands {
     /// Manage multi-provider credentials and key rotation
     Auth {
         #[command(subcommand)]
-        subcommand: AuthCommand,
+        subcommand: Option<AuthCommand>,
     },
     /// Query and refresh dynamic model catalog
     Models {
@@ -199,7 +199,11 @@ async fn main() -> Result<(), HarnessError> {
             run_voice_loop(config, cred_manager, discovery).await?;
         }
         Some(Commands::Auth { subcommand }) => {
-            handle_auth_command(subcommand, cred_manager).await?;
+            if let Some(sub) = subcommand {
+                handle_auth_command(sub, cred_manager).await?;
+            } else {
+                handle_interactive_auth(cred_manager).await?;
+            }
         }
         Some(Commands::Models { subcommand }) => {
             let default_provider = config.model.provider.clone();

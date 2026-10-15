@@ -33,6 +33,11 @@ pub enum AuthCommand {
         #[arg(short, long)]
         target: String,
     },
+    /// Reset cooldowns / temporary disabled status for a provider (or all providers)
+    Reset {
+        #[arg(short, long)]
+        provider: Option<String>,
+    },
     /// Set key rotation strategy (round_robin, fill_first, random, least_used)
     Strategy {
         #[arg(short, long)]
@@ -122,13 +127,15 @@ pub async fn handle_auth_command(
                 }
                 println!("\nProvider: {}", p_id.cyan().bold());
                 for c in creds {
-                    let prio = if c.is_priority { "[PRIORITY]".yellow().bold() } else { "".normal() };
+                    let prio = if c.is_priority { " [PRIORITY]".yellow().bold() } else { "".normal() };
+                    let status = if c.is_temporarily_disabled { " [COOLDOWN/DISABLED]".red().bold() } else { "".normal() };
                     println!(
-                        "  - Label: {:<16} ID: {:<36} Used: {:<5} {}",
+                        "  - Label: {:<16} ID: {:<36} Used: {:<5}{}{}",
                         c.label.green(),
                         c.id,
                         c.usage_count,
-                        prio
+                        prio,
+                        status
                     );
                 }
             }
@@ -139,6 +146,14 @@ pub async fn handle_auth_command(
                 println!("{} Credential '{}' removed.", "✔".green(), target);
             } else {
                 println!("{} Credential '{}' not found.", "✖".red(), target);
+            }
+        }
+        AuthCommand::Reset { provider } => {
+            let count = cred_manager.reset_cooldowns(provider.as_deref()).await?;
+            if let Some(ref p) = provider {
+                println!("{} Reset cooldowns for provider '{}' ({} credentials re-enabled)", "✔".green(), p, count);
+            } else {
+                println!("{} Reset cooldowns across all providers ({} credentials re-enabled)", "✔".green(), count);
             }
         }
         AuthCommand::Strategy { provider, strategy } => {
@@ -171,5 +186,241 @@ pub async fn handle_auth_command(
             }
         }
     }
+    Ok(())
+}
+
+/// Interactive credential pool management when `luna auth` is called bare.
+pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    println!("{}", "Credential Pool Status".bold().underline());
+    println!("{}", "==================================================".dimmed());
+    handle_auth_command(AuthCommand::List { provider: None }, cred_manager.clone()).await?;
+    println!();
+
+    let choices = [
+        "Add a credential",
+        "Remove a credential",
+        "Reset cooldowns for a provider",
+        "Set rotation strategy for a provider",
+        "Exit",
+    ];
+
+    println!("{}", "What would you like to do?".bold());
+    for (i, choice) in choices.iter().enumerate() {
+        println!("  {}. {}", i + 1, choice);
+    }
+    println!();
+
+    let selection = match Input::<String>::new().with_prompt("Choice [1-5]").interact_text() {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return Ok(()),
+    };
+
+    match selection.as_str() {
+        "1" => interactive_add(cred_manager).await?,
+        "2" => interactive_remove(cred_manager).await?,
+        "3" => interactive_reset(cred_manager).await?,
+        "4" => interactive_strategy(cred_manager).await?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    let catalog = get_provider_catalog();
+    let items: Vec<String> = catalog
+        .iter()
+        .map(|c| format!("{} ({})", c.display_name, c.id))
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select Provider")
+        .items(&items)
+        .default(0)
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+    let provider_id = catalog[selection].id.clone();
+
+    let label = Input::<String>::new()
+        .with_prompt("Credential Label (e.g. 'work-account', 'backup-key')")
+        .interact_text()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+    let api_key = Password::new()
+        .with_prompt("API Key (masked)")
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+    let is_priority = dialoguer::Confirm::new()
+        .with_prompt("Set as priority/primary credential?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
+    let id = cred_manager
+        .add_credential(&provider_id, &label, &api_key, is_priority)
+        .await?;
+
+    println!(
+        "{} Credential '{}' registered for provider '{}' (ID: {})",
+        "✔".green().bold(),
+        label.bold(),
+        provider_id.cyan(),
+        id
+    );
+    Ok(())
+}
+
+async fn interactive_remove(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    let catalog = get_provider_catalog();
+    let mut configured_providers = Vec::new();
+    for p in &catalog {
+        let creds = cred_manager.get_credentials(&p.id).await;
+        if !creds.is_empty() {
+            configured_providers.push(p.id.clone());
+        }
+    }
+
+    if configured_providers.is_empty() {
+        println!("No credentials registered for any provider.");
+        return Ok(());
+    }
+
+    let selection = Select::new()
+        .with_prompt("Select Provider to remove credential from")
+        .items(&configured_providers)
+        .default(0)
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+    let provider = &configured_providers[selection];
+
+    let creds = cred_manager.get_credentials(provider).await;
+    if creds.is_empty() {
+        println!("No credentials for {}.", provider);
+        return Ok(());
+    }
+
+    println!("\nCredentials for {}:", provider.cyan().bold());
+    for (i, c) in creds.iter().enumerate() {
+        println!(
+            "  #{:<2} {:<18} ID: {:<36} (Used: {})",
+            i + 1,
+            c.label.green(),
+            c.id,
+            c.usage_count
+        );
+    }
+    println!();
+
+    let raw = Input::<String>::new()
+        .with_prompt("Remove #, ID, or label (blank to cancel)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(());
+    }
+
+    let target = if let Ok(idx) = raw.parse::<usize>() {
+        if idx > 0 && idx <= creds.len() {
+            creds[idx - 1].id.clone()
+        } else {
+            raw.to_string()
+        }
+    } else {
+        raw.to_string()
+    };
+
+    let removed = cred_manager.remove_credential(provider, &target).await?;
+    if removed {
+        println!("{} Credential '{}' removed from '{}'.", "✔".green(), target, provider);
+    } else {
+        println!("{} Credential '{}' not found for '{}'.", "✖".red(), target, provider);
+    }
+    Ok(())
+}
+
+async fn interactive_reset(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    let catalog = get_provider_catalog();
+    let mut options = vec!["All providers".to_string()];
+    for p in &catalog {
+        options.push(format!("{} ({})", p.display_name, p.id));
+    }
+
+    let selection = Select::new()
+        .with_prompt("Select Provider to reset cooldowns for")
+        .items(&options)
+        .default(0)
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+    let provider = if selection == 0 {
+        None
+    } else {
+        Some(catalog[selection - 1].id.clone())
+    };
+
+    let count = cred_manager.reset_cooldowns(provider.as_deref()).await?;
+    if let Some(ref p) = provider {
+        println!("{} Reset cooldowns for provider '{}' ({} credentials re-enabled)", "✔".green(), p, count);
+    } else {
+        println!("{} Reset cooldowns across all providers ({} credentials re-enabled)", "✔".green(), count);
+    }
+    Ok(())
+}
+
+async fn interactive_strategy(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    let catalog = get_provider_catalog();
+    let items: Vec<String> = catalog
+        .iter()
+        .map(|c| format!("{} ({})", c.display_name, c.id))
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select Provider to configure rotation strategy")
+        .items(&items)
+        .default(0)
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+    let provider_id = &catalog[selection].id;
+
+    let current = cred_manager.get_rotation_strategy(provider_id).await;
+    println!("\nCurrent rotation strategy for {}: {:?}", provider_id.cyan().bold(), current);
+
+    let strategies = [
+        ("round_robin", "Cycle through keys evenly", RotationStrategy::RoundRobin),
+        ("fill_first", "Use first/priority key until exhausted, then next", RotationStrategy::FillFirst),
+        ("least_used", "Always pick the least-used key", RotationStrategy::LeastUsed),
+        ("random", "Random selection across active keys", RotationStrategy::Random),
+    ];
+
+    let strat_items: Vec<String> = strategies
+        .iter()
+        .map(|(name, desc, strat)| {
+            let mark = if *strat == current { " (current)" } else { "" };
+            format!("{:<14} — {}{}", name, desc, mark)
+        })
+        .collect();
+
+    let strat_idx = Select::new()
+        .with_prompt("Select strategy")
+        .items(&strat_items)
+        .default(match current {
+            RotationStrategy::RoundRobin => 0,
+            RotationStrategy::FillFirst => 1,
+            RotationStrategy::LeastUsed => 2,
+            RotationStrategy::Random => 3,
+        })
+        .interact()
+        .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+    let chosen_strategy = strategies[strat_idx].2;
+    cred_manager.set_rotation_strategy(provider_id, chosen_strategy).await?;
+    println!(
+        "{} Rotation strategy for '{}' set to {:?}",
+        "✔".green().bold(),
+        provider_id,
+        chosen_strategy
+    );
     Ok(())
 }
