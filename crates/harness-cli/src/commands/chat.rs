@@ -1,10 +1,14 @@
+use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use colored::Colorize;
+use dialoguer::console::{Key, Term};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
     Agent, Config, DefaultToolRegistry, HarnessError, ModelProvider, SessionBinding, ToolRegistry,
+    TurnOutcome,
 };
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
@@ -21,26 +25,75 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
 fn get_terminal_width() -> usize {
-    dialoguer::console::Term::stdout()
+    Term::stdout()
         .size_checked()
         .map(|(_, w)| w as usize)
         .filter(|&w| w > 0)
         .unwrap_or(80)
 }
 
-fn draw_input_box(is_attended: bool) {
-    if !is_attended {
-        print!("{}", "User > ".bold().yellow());
-        let _ = io::stdout().flush();
-        return;
+#[derive(Clone)]
+struct ChatUi {
+    input_buf: Arc<Mutex<String>>,
+    is_attended: bool,
+}
+
+impl ChatUi {
+    fn new(is_attended: bool) -> Self {
+        Self {
+            input_buf: Arc::new(Mutex::new(String::new())),
+            is_attended,
+        }
     }
-    let width = get_terminal_width();
-    let divider = "─".repeat(width).dimmed();
-    println!("{}", divider);
-    println!();
-    println!("{}", divider);
-    print!("\x1b[2A\r{}", "User > ".bold().yellow());
-    let _ = io::stdout().flush();
+
+    fn print_above(&self, text: &str) {
+        if !self.is_attended {
+            println!("{}", text);
+            return;
+        }
+        let buf = self.input_buf.lock().unwrap();
+        let width = get_terminal_width();
+        let divider = "─".repeat(width).dimmed().to_string();
+
+        print!("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K");
+        println!("{}", text);
+        println!("{}", divider);
+        println!();
+        println!("{}", divider);
+        print!("\x1b[2A\r{}{}", "User > ".bold().yellow(), *buf);
+        let _ = io::stdout().flush();
+    }
+
+    fn redraw_input_line(&self) {
+        if !self.is_attended {
+            return;
+        }
+        let buf = self.input_buf.lock().unwrap();
+        print!("\r\x1b[K{}{}", "User > ".bold().yellow(), *buf);
+        let _ = io::stdout().flush();
+    }
+
+    fn draw_initial_box(&self) {
+        if !self.is_attended {
+            print!("{}", "User > ".bold().yellow());
+            let _ = io::stdout().flush();
+            return;
+        }
+        let width = get_terminal_width();
+        let divider = "─".repeat(width).dimmed().to_string();
+        println!("{}", divider);
+        println!();
+        println!("{}", divider);
+        print!("\x1b[2A\r{}", "User > ".bold().yellow());
+        let _ = io::stdout().flush();
+    }
+
+    fn clear_box_on_exit(&self) {
+        if self.is_attended {
+            print!("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K");
+            let _ = io::stdout().flush();
+        }
+    }
 }
 
 /// Wipe the terminal on session exit, so only the shell prompt remains.
@@ -131,6 +184,10 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(ProposePatchTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ApplyUpdateTool::new(evolver.clone()))).await?;
 
+    let is_attended = Term::stdout().features().is_attended();
+    let ui = Arc::new(ChatUi::new(is_attended));
+    let ui_obs = ui.clone();
+
     let mut agent = Agent::new(
         provider,
         memory,
@@ -145,13 +202,13 @@ pub async fn run_interactive_chat(
         session_id: session_id.clone(),
         resume_max_messages: config.session.resume_max_messages,
     })
-    .with_observer(Arc::new(|event| match event {
+    .with_observer(Arc::new(move |event| match event {
         harness_core::AgentEvent::Thinking(text) => {
-            println!("{}", "Thinking:".bold().dimmed());
+            let mut out = format!("{}\n", "Thinking:".bold().dimmed());
             for line in text.lines() {
-                println!("  {}", line.dimmed());
+                out.push_str(&format!("  {}\n", line.dimmed()));
             }
-            println!();
+            ui_obs.print_above(&out);
         }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
             let args_preview = if arguments.is_null() || arguments == serde_json::json!({}) {
@@ -177,7 +234,7 @@ pub async fn run_interactive_chat(
             } else {
                 arguments.to_string()
             };
-            println!("{} {} {}", "•".cyan(), name.bold(), args_preview.dimmed());
+            ui_obs.print_above(&format!("{} {} {}", "•".cyan(), name.bold(), args_preview.dimmed()));
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
             let trimmed = output.trim();
@@ -190,111 +247,188 @@ pub async fn run_interactive_chat(
                 trimmed.to_string()
             };
 
-            if is_error {
-                println!("  {} {}", "✖".red(), preview.red());
+            let line = if is_error {
+                format!("  {} {}", "✖".red(), preview.red())
             } else {
-                println!("  {} {}", "✓".green(), preview.dimmed());
-            }
+                format!("  {} {}", "✓".green(), preview.dimmed())
+            };
+            ui_obs.print_above(&line);
         }
     }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
     }
 
-    let is_attended = dialoguer::console::Term::stdout().features().is_attended();
-    let cancel_token = CancellationToken::new();
-    let mut first_turn = true;
+    if !is_attended {
+        let cancel_token = CancellationToken::new();
+        loop {
+            print!("{}", "User > ".bold().yellow());
+            io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
 
-    draw_input_box(is_attended);
-
-    loop {
-        let mut input = String::new();
-        let read = io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
-        // EOF (piped or redirected stdin): without this the loop would spin on empty input
-        // forever instead of ending the session.
-        if read == 0 {
-            if is_attended {
-                print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-                let _ = io::stdout().flush();
+            let mut input = String::new();
+            let read = io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
+            if read == 0 {
+                break;
             }
-            clear_on_exit();
-            break;
-        }
-        let query = input.trim();
-
-        if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
-            if is_attended {
-                print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-                let _ = io::stdout().flush();
+            let query = input.trim();
+            if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
+                break;
             }
-            clear_on_exit();
-            break;
-        }
-
-        if query.is_empty() {
-            if is_attended {
-                print!("\x1b[1A\r\x1b[K{}", "User > ".bold().yellow());
-                let _ = io::stdout().flush();
-            } else {
-                print!("{}", "User > ".bold().yellow());
-                let _ = io::stdout().flush();
+            if query.is_empty() {
+                continue;
             }
-            continue;
+            match agent.run_turn(query, cancel_token.child_token()).await {
+                Ok(outcome) => {
+                    println!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply);
+                }
+                Err(e) => {
+                    eprintln!("\n{} Error: {}\n", "✖".red().bold(), e);
+                }
+            }
         }
+        return Ok(());
+    }
 
-        if is_attended {
-            print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
-            println!("{} {}\n", "User > ".bold().yellow(), query);
-            let _ = io::stdout().flush();
-        }
+    ui.draw_initial_box();
 
-        match agent.run_turn(query, cancel_token.child_token()).await {
-            Ok(outcome) => {
-                // The replay line belongs to the resume, not to every turn: print it once.
-                if first_turn {
-                    if let Some(replay) = &outcome.replayed {
-                        if replay.replayed < replay.total {
-                            println!(
-                                "{}",
-                                format!(
-                                    "resumed {}: replaying {} of {} messages (session.resume_max_messages = {})",
-                                    replay.session_id,
-                                    replay.replayed,
-                                    replay.total,
-                                    config.session.resume_max_messages
-                                )
-                                .dimmed()
-                            );
-                        } else if replay.total > 0 {
-                            println!(
-                                "{}",
-                                format!(
-                                    "resumed {}: {} messages replayed",
-                                    replay.session_id, replay.replayed
-                                )
-                                .dimmed()
-                            );
-                        }
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
+    std::thread::spawn(move || {
+        let term = Term::stdout();
+        loop {
+            match term.read_key() {
+                Ok(key) => {
+                    if key_tx.send(key).is_err() {
+                        break;
                     }
                 }
-                if let Some(compaction) = &outcome.compaction {
-                    println!(
-                        "{}",
-                        format!(
-                            "compacted {} turns into 1 summary (session {})",
-                            compaction.turns, compaction.session_id
-                        )
-                        .dimmed()
-                    );
-                }
-                println!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply);
-            }
-            Err(e) => {
-                eprintln!("\n{} Error: {}\n", "✖".red().bold(), e);
+                Err(_) => break,
             }
         }
-        first_turn = false;
-        draw_input_box(is_attended);
+    });
+
+    let agent = Arc::new(tokio::sync::Mutex::new(agent));
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut current_cancel = CancellationToken::new();
+    let mut active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>> = None;
+    let mut first_turn = true;
+
+    loop {
+        tokio::select! {
+            maybe_key = key_rx.recv() => {
+                let key = match maybe_key {
+                    Some(k) => k,
+                    None => break,
+                };
+
+                match key {
+                    Key::Char(c) => {
+                        ui.input_buf.lock().unwrap().push(c);
+                        ui.redraw_input_line();
+                    }
+                    Key::Backspace => {
+                        ui.input_buf.lock().unwrap().pop();
+                        ui.redraw_input_line();
+                    }
+                    Key::Enter => {
+                        let query = {
+                            let mut b = ui.input_buf.lock().unwrap();
+                            let s = b.trim().to_string();
+                            b.clear();
+                            s
+                        };
+
+                        if query.is_empty() {
+                            ui.redraw_input_line();
+                            continue;
+                        }
+
+                        if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
+                            ui.clear_box_on_exit();
+                            clear_on_exit();
+                            break;
+                        }
+
+                        let user_header = format!("{} {}", "User > ".bold().yellow(), query);
+                        ui.print_above(&user_header);
+
+                        if active_turn.is_some() {
+                            queue.push_back(query);
+                        } else {
+                            current_cancel = CancellationToken::new();
+                            let cancel_child = current_cancel.child_token();
+                            let ag_ref = agent.clone();
+                            let q = query.clone();
+                            active_turn = Some(tokio::spawn(async move {
+                                let ag = ag_ref.lock().await;
+                                ag.run_turn(&q, cancel_child).await
+                            }));
+                        }
+                    }
+                    Key::CtrlC => {
+                        if active_turn.is_some() {
+                            current_cancel.cancel();
+                            ui.print_above(&format!("{}\n", "✖ Cancelled".red()));
+                        } else {
+                            ui.clear_box_on_exit();
+                            clear_on_exit();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            turn_res = async {
+                if let Some(ref mut handle) = active_turn {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                active_turn = None;
+                match turn_res {
+                    Ok(Ok(outcome)) => {
+                        if first_turn {
+                            if let Some(replay) = &outcome.replayed {
+                                if replay.replayed < replay.total {
+                                    ui.print_above(&format!(
+                                        "resumed {}: replaying {} of {} messages",
+                                        replay.session_id, replay.replayed, replay.total
+                                    ).dimmed().to_string());
+                                }
+                            }
+                        }
+                        if let Some(compaction) = &outcome.compaction {
+                            ui.print_above(&format!(
+                                "compacted {} turns into 1 summary (session {})",
+                                compaction.turns, compaction.session_id
+                            ).dimmed().to_string());
+                        }
+                        ui.print_above(&format!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply));
+                    }
+                    Ok(Err(HarnessError::Cancelled)) => {
+                        ui.print_above(&format!("{}\n", "✖ Cancelled".red()));
+                    }
+                    Ok(Err(e)) => {
+                        ui.print_above(&format!("\n{} Error: {}\n", "✖".red().bold(), e));
+                    }
+                    Err(join_err) => {
+                        ui.print_above(&format!("\n{} Task join error: {}\n", "✖".red().bold(), join_err));
+                    }
+                }
+                first_turn = false;
+
+                if let Some(next_query) = queue.pop_front() {
+                    current_cancel = CancellationToken::new();
+                    let cancel_child = current_cancel.child_token();
+                    let ag_ref = agent.clone();
+                    active_turn = Some(tokio::spawn(async move {
+                        let ag = ag_ref.lock().await;
+                        ag.run_turn(&next_query, cancel_child).await
+                    }));
+                }
+            }
+        }
     }
 
     clear_on_exit();
