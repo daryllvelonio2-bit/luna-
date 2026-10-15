@@ -21,7 +21,8 @@ target/release/luna eval run --suite tests/eval --live --provider nvidia --model
 - **`--live`** drives the real provider. With no credential registered for the provider the suite
   prints `skip  skipped: no credential` and still exits 0; it is skipped, not failed.
 - `--filter <substring>` selects cases by name; `--report <path>` (default `eval-report.json`)
-  chooses where the machine-readable report goes.
+  chooses where the machine-readable report goes. Parent directories in the path are created if
+  missing.
 - Exit codes: `0` all pass or skipped, `1` at least one case failed — or the suite itself could not
   be loaded (bad YAML, missing directory, filter matched nothing), which prints
   `Error: ConfigurationError(…)` and exits 1 as well.
