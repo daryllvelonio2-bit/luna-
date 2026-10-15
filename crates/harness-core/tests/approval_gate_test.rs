@@ -383,7 +383,7 @@ async fn the_flag_switched_off_short_circuits_the_gate() {
         AgentConfig {
             max_consecutive_failures: 5,
             require_hitl_for_mutation: false,
-            system_prompt_prefix: None,
+            ..AgentConfig::default()
         },
         ApprovalSettings::default(),
         // Even an approver that would deny is never asked.
