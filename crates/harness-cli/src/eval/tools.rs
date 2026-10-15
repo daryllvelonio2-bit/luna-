@@ -120,6 +120,10 @@ impl ToolRegistry for RecordingRegistry {
         self.inner.list_tools().await
     }
 
+    async fn is_mutating(&self, name: &str) -> Result<bool, HarnessError> {
+        self.inner.is_mutating(name).await
+    }
+
     async fn execute(
         &self,
         call: &ToolCall,
