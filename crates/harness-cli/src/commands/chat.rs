@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use harness_core::{
     Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
-    ReasoningEffort, SessionBinding, ToolRegistry, TurnOutcome,
+    ReasoningEffort, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
@@ -250,7 +250,12 @@ pub async fn run_interactive_chat(
     // Every turn is appended to this session; a resumed one replays its recent transcript.
     let store = Arc::new(open_store(&config)?);
     let session_id = resolve_session(store.as_ref(), selection).await?;
-    println!("Session:  {}", session_id.green());
+    let session_name = store.get(&session_id).await?.name;
+    if session_name.is_empty() {
+        println!("Session:  {}", session_id.green());
+    } else {
+        println!("Session:  {} ({})", session_name.green(), session_id);
+    }
     println!("Resume:   luna --session {}\n", session_id);
 
     // The compaction call is a plain model call: one provider, one model, resolved from
@@ -413,6 +418,12 @@ pub async fn run_interactive_chat(
                 handle_reasoning_switch(None, &ui, &agent, arg_opt).await?;
                 continue;
             }
+            if query.starts_with("/name") {
+                let arg = query.strip_prefix("/name").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_name_command(&ui, store.as_ref(), &session_id, arg_opt).await?;
+                continue;
+            }
             let ag_ref = agent.clone();
             let q = query.to_string();
             let cancel_child = cancel_token.child_token();
@@ -547,6 +558,22 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
+                        if query.starts_with("/name") {
+                            let arg = query.strip_prefix("/name").unwrap().trim();
+                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                            ui.clear_box_on_exit();
+                            if let Err(e) = handle_name_command(
+                                &ui,
+                                store.as_ref(),
+                                &session_id,
+                                arg_opt,
+                            ).await {
+                                ui.draw_initial_box();
+                                ui.print_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
+                            }
+                            continue;
+                        }
+
                         let user_header = format!("{} {}", "User > ".bold().yellow(), query);
                         ui.print_above(&user_header);
 
@@ -665,9 +692,10 @@ async fn select_from_rx(
     }
 
     let mut selected = default_idx.min(items.len() - 1);
-    let page_size = 12.min(items.len());
+    let page_size = 7.min(items.len());
 
     let render = |selected: usize| {
+        let term_width = get_terminal_width().saturating_sub(4).max(30);
         let half = page_size / 2;
         let start = if selected > half {
             (selected - half).min(items.len() - page_size)
@@ -679,19 +707,35 @@ async fn select_from_rx(
         let mut output = String::new();
         let total_pages = (items.len() + page_size - 1) / page_size;
         let current_page = (selected / page_size) + 1;
-        output.push_str(&format!(
-            "\r\x1b[2K{}: (Page {}/{}, ↑/↓ to navigate, Enter to select, Esc to cancel)\n",
-            prompt.bold().cyan(),
-            current_page,
-            total_pages
-        ));
+
+        let page_indicator = if total_pages > 1 {
+            format!(" ({}/{})", current_page, total_pages)
+        } else {
+            String::new()
+        };
+
+        let raw_header = format!("{}:{}", prompt, page_indicator);
+        let header = if raw_header.len() > term_width {
+            format!("{}…", &raw_header[..term_width.saturating_sub(1)])
+        } else {
+            raw_header
+        };
+
+        output.push_str(&format!("\r\x1b[2K{}\n", header.bold().cyan()));
 
         for idx in start..end {
             let item = &items[idx];
-            if idx == selected {
-                output.push_str(&format!("\r\x1b[2K  {} {}\n", "❯".cyan().bold(), item.bold()));
+            let item_width = term_width.saturating_sub(4);
+            let display_item = if item.len() > item_width {
+                format!("{}…", &item[..item_width.saturating_sub(1)])
             } else {
-                output.push_str(&format!("\r\x1b[2K    {}\n", item.dimmed()));
+                item.clone()
+            };
+
+            if idx == selected {
+                output.push_str(&format!("\r\x1b[2K  {} {}\n", "❯".cyan().bold(), display_item.bold()));
+            } else {
+                output.push_str(&format!("\r\x1b[2K    {}\n", display_item.dimmed()));
             }
         }
         (output, end - start + 1)
@@ -720,7 +764,7 @@ async fn select_from_rx(
             Key::Enter => {
                 print!("\r\x1b[{}A", line_count);
                 for _ in 0..line_count {
-                    print!("\x1b[2K\x1b[1B");
+                    print!("\r\x1b[2K\x1b[1B");
                 }
                 print!("\r\x1b[{}A", line_count);
                 let _ = io::stdout().flush();
@@ -729,7 +773,7 @@ async fn select_from_rx(
             Key::Escape | Key::Char('q') | Key::CtrlC => {
                 print!("\r\x1b[{}A", line_count);
                 for _ in 0..line_count {
-                    print!("\x1b[2K\x1b[1B");
+                    print!("\r\x1b[2K\x1b[1B");
                 }
                 print!("\r\x1b[{}A", line_count);
                 let _ = io::stdout().flush();
@@ -738,7 +782,13 @@ async fn select_from_rx(
             _ => continue,
         }
 
+        // Cleanly erase the previous menu rows before drawing new ones
         print!("\r\x1b[{}A", line_count);
+        for _ in 0..line_count {
+            print!("\r\x1b[2K\x1b[1B");
+        }
+        print!("\r\x1b[{}A", line_count);
+
         let (new_text, new_count) = render(selected);
         print!("{}", new_text);
         line_count = new_count;
@@ -978,6 +1028,43 @@ async fn handle_model_switch(
         chosen_model.cyan(),
         effort_label.yellow()
     ));
+
+    Ok(())
+}
+
+/// `/name [name]`: set the current session's user-assigned name, or report it when no name is given.
+async fn handle_name_command(
+    ui: &ChatUi,
+    store: &SqliteSessionStore,
+    session_id: &str,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    if let Some(raw) = arg {
+        store.set_name(session_id, raw).await?;
+    }
+
+    let name = store.get(session_id).await?.name;
+    ui.draw_initial_box();
+
+    if name.is_empty() {
+        if arg.is_some() {
+            ui.print_above(&format!("{} Session name cleared", "✔".green().bold()));
+        } else {
+            ui.print_above(&format!(
+                "{} This session has no name — set one with {}",
+                "•".cyan(),
+                "/name <name>".bold()
+            ));
+        }
+    } else if arg.is_some() {
+        ui.print_above(&format!(
+            "{} Session name set to '{}'",
+            "✔".green().bold(),
+            name.cyan()
+        ));
+    } else {
+        ui.print_above(&format!("{} Session name: {}", "•".cyan(), name.cyan()));
+    }
 
     Ok(())
 }

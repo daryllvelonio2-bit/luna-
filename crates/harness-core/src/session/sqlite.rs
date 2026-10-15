@@ -16,6 +16,9 @@ use crate::types::{Message, Role, ToolCall, ToolResult, TokenUsage};
 /// Longest title kept from the first user line.
 const TITLE_MAX_CHARS: usize = 80;
 
+/// Longest user-assigned session name kept (`/name`).
+const NAME_MAX_CHARS: usize = 64;
+
 /// `sessions` + `messages`. `compacted_at` is what makes compaction non-destructive: folded rows
 /// stay in the table and are simply excluded from replay.
 const SCHEMA: &str = r#"
@@ -26,7 +29,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     id          TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
-    title       TEXT NOT NULL DEFAULT ''
+    title       TEXT NOT NULL DEFAULT '',
+    name        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -108,7 +112,32 @@ impl SqliteSessionStore {
     fn init_schema(conn: &Connection) -> Result<(), HarnessError> {
         conn.execute_batch(SCHEMA).map_err(|error| {
             HarnessError::SessionError(format!("sessions schema initialization failed: {}", error))
-        })
+        })?;
+        Self::migrate(conn)
+    }
+
+    /// Databases written before `/name` existed lack the `name` column. `CREATE TABLE IF NOT
+    /// EXISTS` cannot widen an existing table, so widen it here when the column is absent.
+    fn migrate(conn: &Connection) -> Result<(), HarnessError> {
+        let has_name = conn
+            .prepare("PRAGMA table_info(sessions)")
+            .and_then(|mut stmt| {
+                let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                Ok(columns
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .any(|column| column == "name"))
+            })
+            .map_err(|error| session_error("failed to inspect the sessions schema", error))?;
+
+        if !has_name {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| session_error("failed to add the session name column", error))?;
+        }
+        Ok(())
     }
 }
 
@@ -244,11 +273,11 @@ fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title): (String, String, String) = conn
+    let (created_at, updated_at, title, name): (String, String, String, String) = conn
         .query_row(
-            "SELECT created_at, updated_at, title FROM sessions WHERE id = ?1",
+            "SELECT created_at, updated_at, title, name FROM sessions WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|error| session_error(&format!("session '{}' not found", id), error))?;
 
@@ -257,6 +286,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         created_at: parse_time(&created_at),
         updated_at: parse_time(&updated_at),
         title,
+        name,
         message_count: count_live(conn, id)?,
     })
 }
@@ -272,6 +302,29 @@ impl SessionStore for SqliteSessionStore {
         )
         .map_err(|error| session_error("failed to create the session", error))?;
         read_session(&conn, id)
+    }
+
+    async fn get(&self, id: &str) -> Result<SessionRecord, HarnessError> {
+        let conn = self.conn.lock().await;
+        read_session(&conn, id)
+    }
+
+    async fn set_name(&self, id: &str, name: &str) -> Result<(), HarnessError> {
+        let conn = self.conn.lock().await;
+        let name: String = name.trim().chars().take(NAME_MAX_CHARS).collect();
+        let updated = conn
+            .execute(
+                "UPDATE sessions SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )
+            .map_err(|error| session_error("failed to set the session name", error))?;
+        if updated == 0 {
+            return Err(HarnessError::SessionError(format!(
+                "session '{}' not found",
+                id
+            )));
+        }
+        Ok(())
     }
 
     async fn append(

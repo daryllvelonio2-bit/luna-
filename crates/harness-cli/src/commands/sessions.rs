@@ -67,14 +67,23 @@ pub async fn handle_sessions_command(
                 return Ok(());
             }
 
-            println!("{:<10} {:<19} {:<19} {:>5}  TITLE", "ID", "CREATED", "UPDATED", "MSGS");
+            println!(
+                "{:<10} {:<19} {:<19} {:>5}  {:<16}  TITLE",
+                "ID", "CREATED", "UPDATED", "MSGS", "NAME"
+            );
             for session in sessions {
+                let name = if session.name.is_empty() {
+                    "-"
+                } else {
+                    session.name.as_str()
+                };
                 println!(
-                    "{:<10} {:<19} {:<19} {:>5}  {}",
+                    "{:<10} {:<19} {:<19} {:>5}  {:<16}  {}",
                     session.id,
                     session.created_at.format("%Y-%m-%d %H:%M:%S"),
                     session.updated_at.format("%Y-%m-%d %H:%M:%S"),
                     session.message_count,
+                    name,
                     session.title
                 );
             }

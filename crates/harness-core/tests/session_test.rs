@@ -422,8 +422,52 @@ async fn list_reports_the_first_user_line_and_the_most_recent_session() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "s1");
     assert_eq!(sessions[0].title, "what is a compaction boundary?");
+    assert_eq!(sessions[0].name, "", "a fresh session has no name");
     assert_eq!(sessions[0].message_count, 2);
     assert_eq!(store.most_recent().await.unwrap().as_deref(), Some("s1"));
+}
+
+#[tokio::test]
+async fn set_name_is_persisted_and_reported_by_list() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+
+    store.set_name("s1", "  release triage  ").await.unwrap();
+    assert_eq!(store.get("s1").await.unwrap().name, "release triage");
+
+    let sessions = store.list().await.unwrap();
+    assert_eq!(sessions[0].name, "release triage");
+
+    // An empty name clears it again.
+    store.set_name("s1", "").await.unwrap();
+    assert_eq!(store.get("s1").await.unwrap().name, "");
+}
+
+#[tokio::test]
+async fn naming_tolerates_databases_written_before_the_column_existed() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    // A pre-`/name` database: the sessions table has no `name` column yet.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id         TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 title      TEXT NOT NULL DEFAULT ''
+             );
+             INSERT INTO sessions (id, created_at, updated_at, title)
+             VALUES ('s1', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00', 'old');",
+        )
+        .unwrap();
+    }
+
+    let store = SqliteSessionStore::new(Some(path)).expect("opening migrates the table");
+    assert_eq!(store.get("s1").await.unwrap().name, "", "backfilled as empty");
+    store.set_name("s1", "migrated").await.unwrap();
+    assert_eq!(store.get("s1").await.unwrap().name, "migrated");
 }
 
 // ---------------------------------------------------------------- estimator

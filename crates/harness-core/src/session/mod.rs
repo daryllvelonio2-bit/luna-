@@ -34,6 +34,8 @@ pub struct SessionRecord {
     pub updated_at: DateTime<Utc>,
     /// First user line, truncated. Empty until the first user message is appended.
     pub title: String,
+    /// User-assigned name (`/name`), distinct from the auto-derived `title`. Empty when unset.
+    pub name: String,
     /// Messages that are still live (not folded into a summary).
     pub message_count: usize,
 }
@@ -72,6 +74,12 @@ impl ReplayOutcome {
 pub trait SessionStore: Send + Sync {
     /// Create the session when it does not exist, and return its record.
     async fn ensure_session(&self, id: &str) -> Result<SessionRecord, HarnessError>;
+
+    /// The record for an existing session.
+    async fn get(&self, id: &str) -> Result<SessionRecord, HarnessError>;
+
+    /// Set the user-assigned name (`/name`); an empty string clears it.
+    async fn set_name(&self, id: &str, name: &str) -> Result<(), HarnessError>;
 
     /// Append one message, assigning the next `seq` and updating the session's `updated_at`.
     /// Returns the new row id.
