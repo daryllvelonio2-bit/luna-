@@ -91,9 +91,11 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
-                ("deepseek-chat", 64_000),
-                ("deepseek-coder", 64_000),
-                ("deepseek-reasoner", 64_000),
+                ("deepseek-chat", 1_000_000),
+                ("deepseek-reasoner", 1_000_000),
+                ("deepseek-v4.1-flash", 1_000_000),
+                ("deepseek-v4-flash", 1_000_000),
+                ("deepseek-coder", 128_000),
             ]),
         },
         ProviderDescriptor {
@@ -137,6 +139,9 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
+                ("deepseek/deepseek-v4.1-flash", 1_000_000),
+                ("deepseek/deepseek-v4-flash", 1_000_000),
+                ("deepseek/deepseek-v4-pro", 1_000_000),
                 ("anthropic/claude-3.5-sonnet", 200_000),
                 ("openai/gpt-4o", 128_000),
                 ("google/gemini-pro-1.5", 2_000_000),
@@ -178,7 +183,9 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
-                ("deepseek-ai/deepseek-v4.1-flash", 128_000),
+                ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
+                ("deepseek-ai/deepseek-v4-flash", 1_000_000),
+                ("deepseek-ai/deepseek-v4-pro", 262_144),
                 ("meta/llama-3.1-70b-instruct", 128_000),
                 ("meta/llama-3.1-8b-instruct", 128_000),
                 ("nvidia/nemotron-3-ultra", 128_000),
@@ -398,8 +405,93 @@ pub fn get_default_model(provider: &str) -> &'static str {
 }
 
 /// Get the context window for a provider+model combination.
-/// Returns None if not found (caller should provide a fallback).
+/// Resolves hierarchically:
+/// 1. Exact or leaf match in the provider's declared context_windows
+/// 2. Cross-provider catalog lookup
+/// 3. Universal model family architecture heuristics (DeepSeek V4 = 1M, Gemini = 1M/2M, Claude = 200k)
 pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
-    let descriptor = find_provider(provider)?;
-    descriptor.context_windows.get(model).copied()
+    let model_lower = model.to_lowercase();
+    let model_trimmed = model_lower.trim();
+
+    // 1. Direct match or leaf match in the chosen provider descriptor
+    if let Some(desc) = find_provider(provider) {
+        for (k, v) in &desc.context_windows {
+            if k.eq_ignore_ascii_case(model_trimmed) {
+                return Some(*v);
+            }
+        }
+        let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+        for (k, v) in &desc.context_windows {
+            let k_leaf = k.rsplit('/').next().unwrap_or(k);
+            if k.eq_ignore_ascii_case(leaf) || k_leaf.eq_ignore_ascii_case(leaf) {
+                return Some(*v);
+            }
+        }
+    }
+
+    // 2. Cross-provider catalog lookup
+    for desc in get_provider_catalog() {
+        for (k, v) in &desc.context_windows {
+            if k.eq_ignore_ascii_case(model_trimmed) {
+                return Some(*v);
+            }
+            let k_leaf = k.rsplit('/').next().unwrap_or(k);
+            let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+            if k_leaf.eq_ignore_ascii_case(leaf) {
+                return Some(*v);
+            }
+        }
+    }
+
+    // 3. Known architectural model families & token heuristics (matching Shiina model_metadata)
+    let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+
+    // DeepSeek V4 family is 1,000,000 (1M tokens)
+    if leaf.contains("deepseek-v4")
+        || leaf.contains("deepseek-flash")
+        || leaf.starts_with("deepseek-chat")
+        || leaf.starts_with("deepseek-reasoner")
+    {
+        if leaf.contains("deepseek-v4-pro") && provider.eq_ignore_ascii_case("nvidia") {
+            return Some(262_144);
+        }
+        return Some(1_000_000);
+    }
+
+    // Gemini 1.5/2.x/3.x family
+    if leaf.contains("gemini") {
+        if leaf.contains("pro") {
+            return Some(2_000_000);
+        }
+        return Some(1_000_000);
+    }
+
+    // Claude family
+    if leaf.contains("claude") {
+        return Some(200_000);
+    }
+
+    // Llama 3 / GPT-4o / Grok / Qwen / GLM
+    if leaf.contains("gpt-4o")
+        || leaf.contains("o1")
+        || leaf.contains("o3")
+        || leaf.contains("llama-3")
+        || leaf.contains("llama3")
+        || leaf.contains("grok")
+        || leaf.contains("qwen")
+        || leaf.contains("glm-4")
+        || leaf.contains("glm-5")
+    {
+        return Some(128_000);
+    }
+
+    if leaf.contains("kimi") || leaf.contains("moonshot") {
+        return Some(1_000_000);
+    }
+
+    if leaf.contains("minimax") {
+        return Some(245_760);
+    }
+
+    None
 }
