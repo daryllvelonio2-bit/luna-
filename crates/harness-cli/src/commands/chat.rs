@@ -65,7 +65,7 @@ pub async fn run_interactive_chat(
     let store = Arc::new(open_store(&config)?);
     let session_id = resolve_session(store.as_ref(), selection).await?;
     println!("Session:  {}", session_id.green());
-    println!("Resume:   luna chat --session {}\n", session_id);
+    println!("Resume:   luna --session {}\n", session_id);
 
     // The compaction call is a plain model call: one provider, one model, resolved from
     // `agent.compaction_provider` / `agent.compaction_model` (both default to the session's).

@@ -100,9 +100,13 @@ cargo run --bin luna -- models list --provider openai
 ```
 
 ### 3. Interactive Chat REPL
-Start an unbounded, stateful agent session:
+Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash
-cargo run --bin luna -- chat --provider openai --model gpt-4o
+# Launch interactive chat directly:
+luna
+
+# Or specify provider and model:
+luna --provider openai --model gpt-4o
 ```
 
 ### 4. Hands-Free Voice Mode

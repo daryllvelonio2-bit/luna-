@@ -27,6 +27,26 @@ struct Cli {
     #[arg(long, global = true, help = "Output telemetry logs in JSON format")]
     json: bool,
 
+    /// Provider id; without it, `model.provider` from the config file
+    #[arg(short, long)]
+    provider: Option<String>,
+
+    /// Model id; without it, `model.default` from the config file
+    #[arg(short, long)]
+    model: Option<String>,
+
+    /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
+    #[arg(long)]
+    yes: bool,
+
+    /// Resume a stored session by id (`luna sessions list` shows the ids)
+    #[arg(long, conflicts_with = "continue_session")]
+    session: Option<String>,
+
+    /// Resume the most recently updated session
+    #[arg(long = "continue")]
+    continue_session: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -109,31 +129,41 @@ async fn main() -> Result<(), HarnessError> {
     };
 
     // CLI flags are the highest-precedence layer.
-    match &cli.command {
+    let (chat_provider, chat_model, chat_yes) = match &cli.command {
         Some(Commands::Chat { provider, model, yes, .. })
-        | Some(Commands::Voice { provider, model, yes, .. }) => {
-            if let Some(provider) = provider {
-                layers.flags.insert("model.provider".to_string(), provider.clone());
-            }
-            if let Some(model) = model {
-                layers.flags.insert("model.default".to_string(), model.clone());
-            }
-            // `--yes` is the flag layer of `tools.approval`, so the effective mode is the same
-            // value the gate reads and `luna config get` reports.
-            if *yes {
-                layers.flags.insert("tools.approval".to_string(), "allow".to_string());
-            }
+        | Some(Commands::Voice { provider, model, yes, .. }) => (
+            provider.as_ref().or(cli.provider.as_ref()),
+            model.as_ref().or(cli.model.as_ref()),
+            *yes || cli.yes,
+        ),
+        None => (
+            cli.provider.as_ref(),
+            cli.model.as_ref(),
+            cli.yes,
+        ),
+        _ => (cli.provider.as_ref(), cli.model.as_ref(), cli.yes),
+    };
+
+    if let Some(provider) = chat_provider {
+        layers.flags.insert("model.provider".to_string(), provider.clone());
+    }
+    if let Some(model) = chat_model {
+        layers.flags.insert("model.default".to_string(), model.clone());
+    }
+    // `--yes` is the flag layer of `tools.approval`, so the effective mode is the same
+    // value the gate reads and `luna config get` reports.
+    if chat_yes {
+        layers.flags.insert("tools.approval".to_string(), "allow".to_string());
+    }
+
+    if let Some(Commands::Models { subcommand }) = &cli.command {
+        let provider = match subcommand {
+            ModelsCommand::List { provider, .. } => provider,
+            ModelsCommand::Refresh { provider } => provider,
+        };
+        if let Some(provider) = provider {
+            layers.flags.insert("model.provider".to_string(), provider.clone());
         }
-        Some(Commands::Models { subcommand }) => {
-            let provider = match subcommand {
-                ModelsCommand::List { provider, .. } => provider,
-                ModelsCommand::Refresh { provider } => provider,
-            };
-            if let Some(provider) = provider {
-                layers.flags.insert("model.provider".to_string(), provider.clone());
-            }
-        }
-        _ => {}
     }
 
     let config: Config = config::resolve(&layers)?.into_config();
@@ -156,6 +186,8 @@ async fn main() -> Result<(), HarnessError> {
             continue_session,
             ..
         }) => {
+            let session = session.or(cli.session);
+            let continue_session = continue_session || cli.continue_session;
             let selection = match (session, continue_session) {
                 (Some(id), _) => SessionSelection::Resume(id),
                 (None, true) => SessionSelection::Continue,
@@ -186,8 +218,12 @@ async fn main() -> Result<(), HarnessError> {
             handle_eval_command(subcommand, cred_manager, discovery, &config).await?;
         }
         None => {
-            // Default to chat if no subcommand specified
-            run_interactive_chat(config, cred_manager, discovery, SessionSelection::New).await?;
+            let selection = match (cli.session, cli.continue_session) {
+                (Some(id), _) => SessionSelection::Resume(id),
+                (None, true) => SessionSelection::Continue,
+                (None, false) => SessionSelection::New,
+            };
+            run_interactive_chat(config, cred_manager, discovery, selection).await?;
         }
     }
 
@@ -202,6 +238,8 @@ fn build_command(resolved: &config::Resolved) -> clap::Command {
     let model_help = format!("Model id (config default: {})", model);
 
     Cli::command()
+        .mut_arg("provider", |arg| arg.help(provider_help.clone()))
+        .mut_arg("model", |arg| arg.help(model_help.clone()))
         .mut_subcommand("chat", |chat| {
             chat.mut_arg("provider", |arg| arg.help(provider_help.clone()))
                 .mut_arg("model", |arg| arg.help(model_help.clone()))
