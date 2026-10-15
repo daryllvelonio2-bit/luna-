@@ -33,16 +33,25 @@ assigned by the dispatcher; you never pick your own lane.
   ~500 MB each) pushed the box into swap and made the dispatcher refuse to spawn anyone. Do not raise
   it, and do not run a build in the background while another one is running in your own card — one
   build at a time per worker.
-- Build: `cargo build --release` from the repo root → binary at `target/release/luna`.
+- Build: `cargo build --release` from the repo root → binary at `target/release/luna` (per-tree). If
+  your shell still exports `CARGO_TARGET_DIR` (an old worker session, for instance), the binary lands
+  at `$CARGO_TARGET_DIR/release/luna` instead — a path other trees write to as well, so it is never
+  proof of your branch: rebuild before testing it. Measured cold-build cost (card t_eb80814a): one
+  uninterrupted release build of this workspace (~800 dependency crates, bundled sqlite/audio/tls)
+  was still compiling when `timeout 900` killed it at 55 minutes, and the tree finished at 65 minutes
+  of wall clock including two restarts — the first build in a fresh worktree is not a quick step.
 - Inner loop: `cargo build -p harness-providers` (or whichever crate the card touches).
 - Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets -- -D warnings`.
 - Credentials: the harness reads `~/.luna/credentials.json`. The NVIDIA NIM key comes from the
   Shiina CLI config, never from a file in this repo:
 
-      python3 scripts/register-nvidia-key.py     # idempotent, prints key=***<last4> only
+      python3 scripts/register-nvidia-key.py     # prints key=***<last4> only (see the note below)
 
   Never print, log, `echo`, commit or paste the key. A card that needs another provider extends
-  that script — nobody hand-writes JSON.
+  that script — nobody hand-writes JSON. It is **not idempotent today**: it replaces
+  `providers.<provider>` wholesale with a fresh entry (new id, `usage_count`/`last_used` reset) and
+  therefore drops credentials added for that provider with `luna auth add`. Card t_968e1d04 makes it
+  merge; until then, re-running it after `luna auth add` costs you those entries.
 - Live model for testing: provider `nvidia`, model `deepseek-ai/deepseek-v4.1-flash`
   (endpoint `https://integrate.api.nvidia.com/v1`). Verified on this machine: `/models` returns 80
   ids including the target; a chat round-trip answers in 1–4s.

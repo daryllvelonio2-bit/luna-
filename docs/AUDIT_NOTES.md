@@ -199,15 +199,15 @@ path failed.
 - `crates/harness-evolver/src/sandbox.rs:61-65` — a `cargo` that cannot be spawned yields
   `Ok("Syntax inspection verified")`; already recorded in `FEATURE_GAPS.md:54`.
 
-### 2.10 `verify_patch` rebuilds the whole workspace, uncached, on the shared target dir
+### 2.10 `verify_patch` rebuilds the whole workspace, uncached, every time
 
 `crates/harness-evolver/src/sandbox.rs:19-44` copies the repo (minus `target/`, `.git`) into a fresh
-`tempfile::tempdir()` and runs `cargo test --workspace` there. Two consequences on this machine:
-`CARGO_TARGET_DIR=/home/janelle/.luna/cargo-target` is exported workspace-wide
-(`docs/AGENT_RULES.md:17`), so the sandbox build runs against the *shared* target dir with
-temp-dir-dependent fingerprints — a full rebuild that also holds the shared build lock the five worker
-profiles contend on; and the temp dir is deleted when `verify_patch` returns, so none of that work is
-ever reused. Budget ~10 minutes of full-workspace build per `apply_harness_update`, on a 7.6 GB box.
+`tempfile::tempdir()` and runs `cargo test --workspace` there. Two consequences: the sandbox build is
+always cold — the copy has no `target/`, and since the fleet removed the shared `CARGO_TARGET_DIR`
+nothing points it at a warm one (per-worktree `target/` is the rule; `docs/AGENT_RULES.md` §2) — so
+each call is a full cold-workspace build, the tens-of-minutes case §2 budgets; and the temp dir is
+deleted when `verify_patch` returns, so none of that work is ever reused. Run `apply_harness_update`
+only when no other build is running (one build at a time per worker, §2).
 
 ### 2.11 README claims that do not match the code
 
