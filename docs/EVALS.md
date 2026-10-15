@@ -22,8 +22,9 @@ target/release/luna eval run --suite tests/eval --live --provider nvidia --model
   prints `skip  skipped: no credential` and still exits 0; it is skipped, not failed.
 - `--filter <substring>` selects cases by name; `--report <path>` (default `eval-report.json`)
   chooses where the machine-readable report goes.
-- Exit codes: `0` all pass or skipped, `1` at least one case failed, `2` the suite itself could not
-  be loaded (bad YAML, missing directory, filter matched nothing).
+- Exit codes: `0` all pass or skipped, `1` at least one case failed — or the suite itself could not
+  be loaded (bad YAML, missing directory, filter matched nothing), which prints
+  `Error: ConfigurationError(…)` and exits 1 as well.
 - Default live model is `deepseek-ai/deepseek-v4.1-flash` on `nvidia` (the fleet's model under test,
   `AGENT_RULES.md` §2); override with `--model`.
 

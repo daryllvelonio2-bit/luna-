@@ -4,7 +4,7 @@
 //! the suite runs in CI with no credential and no quota. `--live` drives the real provider instead
 //! and skips every case when no credential is registered for it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clap::Subcommand;
@@ -120,7 +120,7 @@ pub async fn handle_eval_command(
     Ok(())
 }
 
-fn print_report(report: &EvalReport, report_path: &PathBuf) {
+fn print_report(report: &EvalReport, report_path: &Path) {
     for case in &report.cases {
         println!(
             "{:<24} {:<4} {}",
