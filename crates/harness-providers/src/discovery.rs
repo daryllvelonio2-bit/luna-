@@ -110,6 +110,11 @@ impl ModelDiscovery {
         let secret = cred_manager.acquire_credential(provider_id).await?;
         let api_key = secret.expose_secret();
 
+        if provider_id == "antigravity" || provider_id == "agy" {
+            let (bearer, _) = crate::antigravity::extract_bearer_token(api_key);
+            return crate::antigravity::fetch_antigravity_models(&http_client, &bearer).await;
+        }
+
         let mut url = format!("{}{}", descriptor.default_base_url, descriptor.models_endpoint);
         let mut headers = HeaderMap::new();
 

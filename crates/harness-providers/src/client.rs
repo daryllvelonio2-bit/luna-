@@ -207,6 +207,19 @@ impl ModelProvider for GenericProviderClient {
 
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
+        if self.provider_id == "antigravity" || self.provider_id == "agy" {
+            let (bearer, _) = crate::antigravity::extract_bearer_token(secret.expose_secret());
+            return crate::antigravity::execute_antigravity_completion(
+                &self.http_client,
+                &bearer,
+                &model,
+                messages,
+                tools,
+                options,
+            )
+            .await;
+        }
+
         let mut body = json!({
             "model": model,
             "messages": self.serialize_messages(messages),

@@ -219,6 +219,14 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
         },
+        ProviderDescriptor {
+            id: "antigravity".to_string(),
+            display_name: "Google Antigravity".to_string(),
+            default_base_url: "https://daily-cloudcode-pa.googleapis.com/v1internal".to_string(),
+            models_endpoint: "/fetchAvailableModels".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+        },
     ]
 }
 
@@ -283,6 +291,7 @@ pub fn get_default_model(provider: &str) -> &'static str {
         "huggingface" => "meta-llama/Llama-3.1-70B-Instruct",
         "copilot" => "gpt-4o",
         "openai" => "gpt-4o",
+        "antigravity" | "agy" => "gemini-3.8-flash-tiered",
         _ => "default",
     }
 }

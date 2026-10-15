@@ -52,6 +52,17 @@ pub enum AuthCommand {
         #[arg(short, long)]
         target: String,
     },
+    /// Manage Google Antigravity OAuth credentials
+    Antigravity {
+        #[command(subcommand)]
+        subcommand: AntigravitySubcommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AntigravitySubcommand {
+    /// Copy logged-in Antigravity credentials from system/Shiina into Luna harness
+    Copy,
 }
 
 pub async fn handle_auth_command(
@@ -185,6 +196,31 @@ pub async fn handle_auth_command(
                 println!("{} Credential '{}' not found.", "✖".red(), target);
             }
         }
+        AuthCommand::Antigravity { subcommand } => match subcommand {
+            AntigravitySubcommand::Copy => {
+                let creds = harness_providers::detect_antigravity_credentials()?;
+                let label = creds
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| "antigravity-user".to_string());
+                let secret_payload = serde_json::to_string(&creds)
+                    .unwrap_or_else(|_| creds.access_token.clone());
+
+                let id = cred_manager
+                    .add_credential("antigravity", &label, &secret_payload, true)
+                    .await?;
+
+                println!(
+                    "{} Successfully copied Antigravity credentials for '{}' into Luna!",
+                    "✔".green().bold(),
+                    label.bold()
+                );
+                println!("  Provider:        {}", "antigravity".cyan().bold());
+                println!("  Credential ID:   {}", id);
+                println!("  Default model:   {}", "gemini-3.8-flash-tiered".cyan());
+                println!("  Set as priority: {}", "yes".green());
+            }
+        },
     }
     Ok(())
 }
@@ -201,6 +237,7 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
         "Remove a credential",
         "Reset cooldowns for a provider",
         "Set rotation strategy for a provider",
+        "Copy Antigravity credentials (from logged-in session)",
         "Exit",
     ];
 
@@ -210,7 +247,7 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
     }
     println!();
 
-    let selection = match Input::<String>::new().with_prompt("Choice [1-5]").interact_text() {
+    let selection = match Input::<String>::new().with_prompt("Choice [1-6]").interact_text() {
         Ok(s) => s.trim().to_string(),
         Err(_) => return Ok(()),
     };
@@ -220,6 +257,15 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
         "2" => interactive_remove(cred_manager).await?,
         "3" => interactive_reset(cred_manager).await?,
         "4" => interactive_strategy(cred_manager).await?,
+        "5" => {
+            handle_auth_command(
+                AuthCommand::Antigravity {
+                    subcommand: AntigravitySubcommand::Copy,
+                },
+                cred_manager,
+            )
+            .await?;
+        }
         _ => {}
     }
 
