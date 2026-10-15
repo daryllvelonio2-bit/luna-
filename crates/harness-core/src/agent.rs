@@ -130,6 +130,7 @@ where
     compaction: Option<CompactionSetup>,
     session: Option<SessionBinding>,
     observer: Option<AgentObserver>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// What the gate decided for one call.
@@ -170,7 +171,23 @@ where
             compaction: None,
             session: None,
             observer: None,
+            reasoning_effort: None,
         }
+    }
+
+    /// Update the active model provider dynamically during a session.
+    pub fn set_provider(&mut self, provider: Arc<P>) {
+        self.provider = provider;
+    }
+
+    /// Update the reasoning effort setting dynamically during a session.
+    pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
+        self.reasoning_effort = effort;
+    }
+
+    /// Current reasoning effort setting.
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
     }
 
     /// Attach an event observer for live thinking and tool-call rendering.
@@ -328,9 +345,12 @@ where
             }
 
             debug!("Invoking model completion with {} messages and {} tools", messages.len(), tools.len());
+            let mut options = CompletionOptions::default();
+            options.reasoning_effort = self.reasoning_effort;
+
             let response = self
                 .provider
-                .complete(&messages, &tools, &CompletionOptions::default())
+                .complete(&messages, &tools, &options)
                 .await?;
 
             if let Some(ref r) = response.reasoning {

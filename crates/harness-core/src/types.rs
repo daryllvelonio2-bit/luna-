@@ -147,6 +147,48 @@ pub enum StreamEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "minimal" | "min" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "extra-high" | "extra_high" => Some(Self::Xhigh),
+            "max" | "maximum" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionOptions {
     pub model: Option<String>,
@@ -154,6 +196,7 @@ pub struct CompletionOptions {
     pub max_tokens: Option<u32>,
     pub top_p: Option<f32>,
     pub stop: Vec<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Default for CompletionOptions {
@@ -164,6 +207,7 @@ impl Default for CompletionOptions {
             max_tokens: Some(4096),
             top_p: Some(1.0),
             stop: vec![],
+            reasoning_effort: None,
         }
     }
 }

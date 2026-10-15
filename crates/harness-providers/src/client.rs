@@ -221,6 +221,9 @@ impl ModelProvider for GenericProviderClient {
         if let Some(max_tok) = options.max_tokens {
             body["max_tokens"] = json!(max_tok);
         }
+        if let Some(effort) = options.reasoning_effort {
+            body["reasoning_effort"] = json!(effort.as_str());
+        }
 
         let resp = self
             .http_client
@@ -364,6 +367,9 @@ impl ModelProvider for GenericProviderClient {
 
         if !tools.is_empty() {
             body["tools"] = self.serialize_tools(tools);
+        }
+        if let Some(effort) = options.reasoning_effort {
+            body["reasoning_effort"] = json!(effort.as_str());
         }
 
         let resp = self

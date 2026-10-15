@@ -3,12 +3,13 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::{Key, Term};
+use dialoguer::{Input, Select};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, Config, DefaultToolRegistry, HarnessError, ModelProvider, SessionBinding, ToolRegistry,
-    TurnOutcome,
+    Agent, Config, DefaultToolRegistry, HarnessError, ModelProvider, ReasoningEffort,
+    SessionBinding, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{ApplyUpdateTool, CodebaseEvolver, InspectSourceTool, ProposePatchTool};
 use harness_memory::{
@@ -17,7 +18,10 @@ use harness_memory::{
 use harness_notes::{
     ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
 };
-use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
+use harness_providers::{
+    get_default_model, get_provider_catalog, CredentialManager, GenericProviderClient,
+    ModelDiscovery,
+};
 
 use super::approval::{approval_settings, build_approver};
 use super::sessions::{open_store, resolve_session, SessionSelection};
@@ -96,6 +100,14 @@ impl ChatUi {
     }
 }
 
+type ChatAgent = Agent<
+    GenericProviderClient,
+    SqliteMemoryEngine,
+    SqliteNotesEngine,
+    CodebaseEvolver,
+    DefaultToolRegistry,
+>;
+
 /// Wipe the terminal on session exit, so only the shell prompt remains.
 /// Cosmetic: a failure to write is ignored on purpose (see `commands::clear_screen`).
 fn clear_on_exit() {
@@ -108,24 +120,24 @@ pub async fn run_interactive_chat(
     discovery: Arc<ModelDiscovery>,
     selection: SessionSelection,
 ) -> Result<(), HarnessError> {
-    let provider_id = config.model.provider.clone();
-    let model = config.model.default.clone();
+    let mut current_provider = config.model.provider.clone();
+    let mut current_model = config.model.default.clone();
 
-    if provider_id.is_empty() {
+    if current_provider.is_empty() {
         return Err(HarnessError::ConfigurationError(
             "No LLM provider configured or loaded with credentials. Run 'luna auth' to register a credential or specify '--provider <name>'.".to_string(),
         ));
     }
 
-    println!("Provider: {}", provider_id.cyan());
-    println!("Model:    {}", model.cyan());
+    println!("Provider: {}", current_provider.cyan());
+    println!("Model:    {}", current_model.cyan());
 
     let provider = Arc::new(GenericProviderClient::new(
-        provider_id.clone(),
-        model.clone(),
+        current_provider.clone(),
+        current_model.clone(),
         cred_manager.clone(),
         discovery.clone(),
-        config.providers.get(&provider_id),
+        config.providers.get(&current_provider),
     )?);
 
     // Every turn is appended to this session; a resumed one replays its recent transcript.
@@ -140,12 +152,12 @@ pub async fn run_interactive_chat(
         .agent
         .compaction_provider
         .clone()
-        .unwrap_or_else(|| provider_id.clone());
+        .unwrap_or_else(|| current_provider.clone());
     let compaction_model = config
         .agent
         .compaction_model
         .clone()
-        .unwrap_or_else(|| model.clone());
+        .unwrap_or_else(|| current_model.clone());
     let compaction = match GenericProviderClient::new(
         compaction_provider_id.clone(),
         compaction_model.clone(),
@@ -273,6 +285,8 @@ pub async fn run_interactive_chat(
         agent = agent.with_compaction(setup);
     }
 
+    let agent = Arc::new(tokio::sync::Mutex::new(agent));
+
     if !is_attended {
         let cancel_token = CancellationToken::new();
         loop {
@@ -291,7 +305,36 @@ pub async fn run_interactive_chat(
             if query.is_empty() {
                 continue;
             }
-            match agent.run_turn(query, cancel_token.child_token()).await {
+            if query.eq_ignore_ascii_case("/model")
+                || query.eq_ignore_ascii_case("/models")
+                || query.eq_ignore_ascii_case("/provider")
+            {
+                handle_model_switch(
+                    &ui,
+                    &config,
+                    &cred_manager,
+                    &discovery,
+                    &agent,
+                    &mut current_provider,
+                    &mut current_model,
+                )
+                .await?;
+                continue;
+            }
+            if query.starts_with("/reasoning") {
+                let arg = query.strip_prefix("/reasoning").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_reasoning_switch(&ui, &agent, arg_opt).await?;
+                continue;
+            }
+            let ag_ref = agent.clone();
+            let q = query.to_string();
+            let cancel_child = cancel_token.child_token();
+            let res = {
+                let ag = ag_ref.lock().await;
+                ag.run_turn(&q, cancel_child).await
+            };
+            match res {
                 Ok(outcome) => {
                     println!("\n{}\n{}\n", "Luna >".bold().green(), outcome.reply);
                 }
@@ -320,7 +363,6 @@ pub async fn run_interactive_chat(
         }
     });
 
-    let agent = Arc::new(tokio::sync::Mutex::new(agent));
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut current_cancel = CancellationToken::new();
     let mut active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>> = None;
@@ -360,6 +402,41 @@ pub async fn run_interactive_chat(
                             ui.clear_box_on_exit();
                             clear_on_exit();
                             break;
+                        }
+
+                        if query.eq_ignore_ascii_case("/model")
+                            || query.eq_ignore_ascii_case("/models")
+                            || query.eq_ignore_ascii_case("/provider")
+                        {
+                            ui.clear_box_on_exit();
+                            if let Err(e) = handle_model_switch(
+                                &ui,
+                                &config,
+                                &cred_manager,
+                                &discovery,
+                                &agent,
+                                &mut current_provider,
+                                &mut current_model,
+                            ).await {
+                                ui.draw_initial_box();
+                                ui.print_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
+                            }
+                            continue;
+                        }
+
+                        if query.starts_with("/reasoning") {
+                            let arg = query.strip_prefix("/reasoning").unwrap().trim();
+                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                            ui.clear_box_on_exit();
+                            if let Err(e) = handle_reasoning_switch(
+                                &ui,
+                                &agent,
+                                arg_opt,
+                            ).await {
+                                ui.draw_initial_box();
+                                ui.print_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
+                            }
+                            continue;
                         }
 
                         let user_header = format!("{} {}", "User > ".bold().yellow(), query);
@@ -446,5 +523,261 @@ pub async fn run_interactive_chat(
     }
 
     clear_on_exit();
+    Ok(())
+}
+
+async fn handle_model_switch(
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    current_provider: &mut String,
+    current_model: &mut String,
+) -> Result<(), HarnessError> {
+    let catalog = get_provider_catalog();
+    let loaded = cred_manager.get_loaded_providers().await;
+
+    let items: Vec<String> = catalog
+        .iter()
+        .map(|p| {
+            let mut tags = Vec::new();
+            if p.id.eq_ignore_ascii_case(current_provider) {
+                tags.push("active");
+            }
+            if loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id)) {
+                tags.push("configured");
+            }
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tags.join(", "))
+            };
+            format!("{:<28} ({}){}", p.display_name, p.id, tag_str)
+        })
+        .collect();
+
+    let default_idx = catalog
+        .iter()
+        .position(|p| p.id.eq_ignore_ascii_case(current_provider))
+        .unwrap_or(0);
+
+    let sel = match Select::new()
+        .with_prompt("Select Provider")
+        .items(&items)
+        .default(default_idx)
+        .interact_opt()
+    {
+        Ok(Some(i)) => i,
+        _ => {
+            ui.draw_initial_box();
+            return Ok(());
+        }
+    };
+
+    let chosen_provider = catalog[sel].id.clone();
+
+    // Fetch models for chosen provider
+    println!("{}", format!("Fetching models for '{}'...", chosen_provider).dimmed());
+    let mut models = match discovery.get_models(&chosen_provider, cred_manager, false).await {
+        Ok(m) => m,
+        Err(_) => Vec::new(),
+    };
+
+    let default_model = get_default_model(&chosen_provider).to_string();
+    if !default_model.is_empty() && !models.contains(&default_model) {
+        models.insert(0, default_model.clone());
+    }
+
+    let mut model_items = models.clone();
+    model_items.push("[Custom model name...]".to_string());
+
+    let default_model_idx = models
+        .iter()
+        .position(|m| m.eq_ignore_ascii_case(current_model))
+        .unwrap_or(0);
+
+    let model_sel = match Select::new()
+        .with_prompt(format!("Select Model for '{}'", chosen_provider))
+        .items(&model_items)
+        .default(default_model_idx)
+        .interact_opt()
+    {
+        Ok(Some(i)) => i,
+        _ => {
+            ui.draw_initial_box();
+            return Ok(());
+        }
+    };
+
+    let chosen_model = if model_sel < models.len() {
+        model_items[model_sel].clone()
+    } else {
+        match Input::<String>::new()
+            .with_prompt("Enter custom model name")
+            .interact_text()
+        {
+            Ok(name) => name.trim().to_string(),
+            Err(_) => {
+                ui.draw_initial_box();
+                return Ok(());
+            }
+        }
+    };
+
+    if chosen_model.is_empty() {
+        ui.draw_initial_box();
+        return Ok(());
+    }
+
+    // Reasoning effort selection
+    let reasoning_options = [
+        ("Keep current / Default", None),
+        ("minimal", Some(ReasoningEffort::Minimal)),
+        ("low", Some(ReasoningEffort::Low)),
+        ("medium", Some(ReasoningEffort::Medium)),
+        ("high", Some(ReasoningEffort::High)),
+        ("xhigh", Some(ReasoningEffort::Xhigh)),
+        ("max", Some(ReasoningEffort::Max)),
+        ("off / disabled", None),
+    ];
+
+    let reasoning_items: Vec<&str> = reasoning_options.iter().map(|(label, _)| *label).collect();
+    let current_effort = agent.lock().await.reasoning_effort();
+    let default_reasoning_idx = match current_effort {
+        None => 0,
+        Some(ReasoningEffort::Minimal) => 1,
+        Some(ReasoningEffort::Low) => 2,
+        Some(ReasoningEffort::Medium) => 3,
+        Some(ReasoningEffort::High) => 4,
+        Some(ReasoningEffort::Xhigh) => 5,
+        Some(ReasoningEffort::Max) => 6,
+    };
+
+    let reasoning_sel = match Select::new()
+        .with_prompt("Select Reasoning Effort")
+        .items(&reasoning_items)
+        .default(default_reasoning_idx)
+        .interact_opt()
+    {
+        Ok(Some(i)) => i,
+        _ => {
+            ui.draw_initial_box();
+            return Ok(());
+        }
+    };
+
+    let chosen_effort = if reasoning_sel == 0 {
+        current_effort
+    } else {
+        reasoning_options[reasoning_sel].1
+    };
+
+    let new_provider = Arc::new(GenericProviderClient::new(
+        chosen_provider.clone(),
+        chosen_model.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&chosen_provider),
+    )?);
+
+    {
+        let mut ag = agent.lock().await;
+        ag.set_provider(new_provider);
+        ag.set_reasoning_effort(chosen_effort);
+    }
+
+    *current_provider = chosen_provider.clone();
+    *current_model = chosen_model.clone();
+
+    ui.draw_initial_box();
+
+    let effort_label = chosen_effort
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "default".to_string());
+
+    ui.print_above(&format!(
+        "{} Switched to provider '{}', model '{}', reasoning '{}'",
+        "✔".green().bold(),
+        chosen_provider.cyan(),
+        chosen_model.cyan(),
+        effort_label.yellow()
+    ));
+
+    Ok(())
+}
+
+async fn handle_reasoning_switch(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let chosen_effort = if let Some(s) = arg {
+        if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            match ReasoningEffort::from_str_loose(s) {
+                Some(e) => Some(e),
+                None => {
+                    ui.draw_initial_box();
+                    ui.print_above(&format!(
+                        "{} Unknown reasoning effort '{}'. Available: minimal, low, medium, high, xhigh, max, off",
+                        "✖".red().bold(),
+                        s
+                    ));
+                    return Ok(());
+                }
+            }
+        }
+    } else {
+        let reasoning_options = [
+            ("off / default", None),
+            ("minimal", Some(ReasoningEffort::Minimal)),
+            ("low", Some(ReasoningEffort::Low)),
+            ("medium", Some(ReasoningEffort::Medium)),
+            ("high", Some(ReasoningEffort::High)),
+            ("xhigh", Some(ReasoningEffort::Xhigh)),
+            ("max", Some(ReasoningEffort::Max)),
+        ];
+        let reasoning_items: Vec<&str> = reasoning_options.iter().map(|(label, _)| *label).collect();
+        let current_effort = agent.lock().await.reasoning_effort();
+        let default_idx = match current_effort {
+            None => 0,
+            Some(ReasoningEffort::Minimal) => 1,
+            Some(ReasoningEffort::Low) => 2,
+            Some(ReasoningEffort::Medium) => 3,
+            Some(ReasoningEffort::High) => 4,
+            Some(ReasoningEffort::Xhigh) => 5,
+            Some(ReasoningEffort::Max) => 6,
+        };
+
+        let sel = match Select::new()
+            .with_prompt("Select Reasoning Effort")
+            .items(&reasoning_items)
+            .default(default_idx)
+            .interact_opt()
+        {
+            Ok(Some(i)) => i,
+            _ => {
+                ui.draw_initial_box();
+                return Ok(());
+            }
+        };
+        reasoning_options[sel].1
+    };
+
+    agent.lock().await.set_reasoning_effort(chosen_effort);
+    ui.draw_initial_box();
+
+    let effort_label = chosen_effort
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "off".to_string());
+
+    ui.print_above(&format!(
+        "{} Reasoning effort set to '{}'",
+        "✔".green().bold(),
+        effort_label.yellow()
+    ));
+
     Ok(())
 }
