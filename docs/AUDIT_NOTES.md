@@ -263,3 +263,72 @@ reproduced with a scratch test rather than read off the suite.
   `t_16a223b8` is already `ready` with the §2.5 evidence attached as a comment.
 - MCP tools are dispatched with no approval gate → `t_c4f9c07d` ("Human-in-the-loop approval gate for
   mutating tools") covers the mutation surface.
+
+# Verification pass — do the five landed handoffs hold on `main`? (`t_c9176d9f`)
+
+Read-only verification by `luna-audit` at `be84886`, on `/home/janelle/Downloads/rust-agent-harness`.
+No product file was modified. The binary was **rebuilt from this tree** (`CARGO_TARGET_DIR` unset;
+`rm -f target/release/luna && CARGO_BUILD_JOBS=2 cargo build --release` → `Finished … in 1m 43s`,
+exit 0) rather than trusting an artifact left by another worker. Every verdict below is a command and
+its observed output; the claim table with the evidence lines lives in the card `t_c9176d9f` comment.
+
+## 5. Verdicts
+
+| Card | Claim | Verdict |
+| --- | --- | --- |
+| `t_0a789e15` | `cargo build --release` exit 0 | **TRUE** |
+| `t_0a789e15` | `target/release/luna --help` prints the command surface | **TRUE** (artifact-path deviation disclosed in the handoff: at the time it was the shared-`CARGO_TARGET_DIR` binary; the literal path builds and prints the surface on `main` today) |
+| `t_0a789e15` | `cargo test --workspace` green on 12 targets | **TRUE** |
+| `t_0a789e15` | two named tests still red | **TRUE when written, superseded on `main`** — both are green since `e5ae82c`; the pre-fix source at `7188aa0` does carry `blocking_lock()` at `memory/engine.rs:49` / `notes/engine.rs:50` |
+| `t_8935ed8a` | `blocking_lock()` gone from `crates/` | **TRUE** |
+| `t_8935ed8a` | `cargo test -p harness-memory -p harness-notes` → 2 passed | **TRUE** (rc=0) |
+| `t_8935ed8a` | live NIM round-trip through `luna chat` reached the prompt | **TRUE** (one call reproduced) |
+| `t_8935ed8a` | `chat.rs`/`voice.rs` needed no edits | **TRUE** (`git show --stat e5ae82c` = the two engine files only) |
+| `t_d79b9293` | 401/429 retirement works and disables the *failing* key | **TRUE** — 4 shipped tests pass, plus an independent RoundRobin/3-key witness the shipped tests do not cover |
+| `t_d79b9293` | "all 4 new tests fail against the pre-fix code" | **TRUE by source inspection** (`836b5e6^` ignores `_api_key`, acts only under `FillFirst`, disables the first non-disabled entry), not re-executed — reverting product sources is outside this card's lane |
+| `t_5c1eca76` | precedence defaults → file → env → flags | **TRUE** (flag layer witnessed on the `luna chat` banner, not just in unit tests) |
+| `t_5c1eca76` | `config get/list/set` with source reporting | **TRUE** (41 keys; PTY prompt for a missing value) |
+| `t_5c1eca76` | no-config behaviour identical to before | **TRUE** (`Provider: openai / Model: gpt-4o`, and each default equals the pre-change literal at `a36fee3^`) |
+| `t_5c1eca76` | YAML, no new dependency | **TRUE** (`Cargo.lock`: `toml` 0 hits, `serde_yaml` 1) |
+
+The author's own acceptance script (`t_5c1eca76` attachment) was re-run against the freshly built
+binary: **14/14 PASS**. Nothing in the five handoffs was false. The one guess that does not survive
+today is `t_0a789e15`'s "still red" pair, and it is not a false claim: it was true at `7188aa0` and the
+later card `t_8935ed8a` fixed both.
+
+## 6. Could not test, and what it would take
+
+- **`t_d79b9293`'s "fails on pre-fix code" proof** — re-running it needs the four new tests compiled
+  against the pre-fix `auth.rs`/`client.rs`. That means a source revert, which is out of this card's
+  read-only lane; done by source inspection instead. A worker with a worktree can do it with
+  `git stash`-free temporary edits on a branch.
+- **`t_0a789e15`'s original `target/release/luna`** — the artifact the handoff's acceptance named was
+  never produced at that commit (the worker used the shared target dir and said so). Retroactively
+  unverifiable; substituted with a rebuild on `main`.
+
+## 7. Filed as cards from this pass (2, the cap)
+
+| Card | Defect | Where |
+| --- | --- | --- |
+| `t_e4acbdf6` | `luna chat` has no EOF branch: `read_line` → `Ok(0)` is treated as an empty line, so Ctrl-D wedges the REPL on a real tty and piped/`</dev/null` stdin busy-loops writing `User > ` forever (5.4 MB and ~99% of a core in 5 s; `rc=124`) | `crates/harness-cli/src/commands/chat.rs:74-100` |
+| `t_8a84e855` | any CLI write to a closed stdout panics: `luna config list \| head -3` prints `failed printing to stdout: Broken pipe (os error 32)` and exits **101** (std sets `SIGPIPE` to `SIG_IGN`, nothing resets it) | `crates/harness-cli/src/main.rs` (one place) / every `println!` |
+
+## 8. Verified but not filed (notes for the next pass)
+
+- `.worktrees/t_2ccd2241/` is a stale sibling branch: it still contains both `blocking_lock()` calls
+  (`crates/harness-memory/src/engine.rs:49`, `crates/harness-notes/src/engine.rs:50`) because it has not
+  merged `e5ae82c`. Correct for that branch, wrong if it ever lands as-is; the `crates/` tree on `main`
+  is clean.
+- `crates/harness-providers/src/discovery.rs:158-165` maps *every* non-2xx from model discovery to
+  `AuthenticationFailed` — a 404 (wrong `base_url`/`models_endpoint`) is reported as an auth problem.
+  Self-reported in the `t_5c1eca76` handoff; read-only confirmed, message is distinguishable only by the
+  embedded `HTTP 404` text. Cosmetic-ish, so it stays here rather than taking one of the two card slots.
+- `t_5c1eca76` handoff's other two "flagged not fixed" items reproduce as described: `config set`
+  rewrites the YAML value tree (comments and key order lost — documented in the module docs), and
+  `luna config list \| head` is the SIGPIPE case above, now carded.
+- `kanban_create`'s `project` parameter did not resolve in this session for either new card
+  (`project_id` came back `NULL` and `workspace_path` stayed at the shared repo root, i.e. a worker
+  would have been handed the shared checkout). Both rows were repaired to the sibling shape
+  (`project_id = p_f47ecaea`, `.worktrees/<task-id>`, `branch_name = luna-harness/<task-id>-<slug>`)
+  and re-read to confirm. Worth a tool-side fix: nothing in the worker-facing API can anchor a card
+  after creation.
