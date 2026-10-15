@@ -20,6 +20,15 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
+fn print_input_divider() {
+    let width = dialoguer::console::Term::stdout()
+        .size_checked()
+        .map(|(_, w)| w as usize)
+        .filter(|&w| w > 0)
+        .unwrap_or(80);
+    println!("{}", "─".repeat(width).dimmed());
+}
+
 pub async fn run_interactive_chat(
     config: Config,
     cred_manager: Arc<CredentialManager>,
@@ -139,6 +148,7 @@ pub async fn run_interactive_chat(
     let mut first_turn = true;
 
     loop {
+        print_input_divider();
         print!("{}", "User > ".bold().yellow());
         io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
 
@@ -160,6 +170,8 @@ pub async fn run_interactive_chat(
         if query.is_empty() {
             continue;
         }
+
+        print_input_divider();
 
         println!("{}", "Luna is thinking...".dimmed());
         match agent.run_turn(query, cancel_token.child_token()).await {
