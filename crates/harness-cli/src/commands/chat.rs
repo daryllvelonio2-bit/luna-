@@ -20,13 +20,27 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 
 /// `config` is already resolved (defaults → file → `LUNA_*` → flags); this function only reads it,
 /// so the engines/filesystem paths come from one place instead of each engine guessing `~/.luna/…`.
-fn print_input_divider() {
-    let width = dialoguer::console::Term::stdout()
+fn get_terminal_width() -> usize {
+    dialoguer::console::Term::stdout()
         .size_checked()
         .map(|(_, w)| w as usize)
         .filter(|&w| w > 0)
-        .unwrap_or(80);
-    println!("{}", "─".repeat(width).dimmed());
+        .unwrap_or(80)
+}
+
+fn draw_input_box(is_attended: bool) {
+    if !is_attended {
+        print!("{}", "User > ".bold().yellow());
+        let _ = io::stdout().flush();
+        return;
+    }
+    let width = get_terminal_width();
+    let divider = "─".repeat(width).dimmed();
+    println!("{}", divider);
+    println!();
+    println!("{}", divider);
+    print!("\x1b[2A\r{}", "User > ".bold().yellow());
+    let _ = io::stdout().flush();
 }
 
 /// Wipe the terminal on session exit, so only the shell prompt remains.
@@ -187,34 +201,52 @@ pub async fn run_interactive_chat(
         agent = agent.with_compaction(setup);
     }
 
+    let is_attended = dialoguer::console::Term::stdout().features().is_attended();
     let cancel_token = CancellationToken::new();
     let mut first_turn = true;
 
-    loop {
-        print_input_divider();
-        print!("{}", "User > ".bold().yellow());
-        io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
+    draw_input_box(is_attended);
 
+    loop {
         let mut input = String::new();
         let read = io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
         // EOF (piped or redirected stdin): without this the loop would spin on empty input
         // forever instead of ending the session.
         if read == 0 {
+            if is_attended {
+                print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+                let _ = io::stdout().flush();
+            }
             clear_on_exit();
             break;
         }
         let query = input.trim();
 
         if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
+            if is_attended {
+                print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+                let _ = io::stdout().flush();
+            }
             clear_on_exit();
             break;
         }
 
         if query.is_empty() {
+            if is_attended {
+                print!("\x1b[1A\r\x1b[K{}", "User > ".bold().yellow());
+                let _ = io::stdout().flush();
+            } else {
+                print!("{}", "User > ".bold().yellow());
+                let _ = io::stdout().flush();
+            }
             continue;
         }
 
-        print_input_divider();
+        if is_attended {
+            print!("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+            println!("{} {}\n", "User > ".bold().yellow(), query);
+            let _ = io::stdout().flush();
+        }
 
         match agent.run_turn(query, cancel_token.child_token()).await {
             Ok(outcome) => {
@@ -262,6 +294,7 @@ pub async fn run_interactive_chat(
             }
         }
         first_turn = false;
+        draw_input_box(is_attended);
     }
 
     clear_on_exit();
