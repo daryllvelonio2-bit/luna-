@@ -18,7 +18,7 @@ use harness_notes::{
     ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
 };
 use harness_providers::{
-    get_default_model, get_provider_catalog, CredentialManager, GenericProviderClient,
+    get_default_model, get_provider_catalog, get_context_window, CredentialManager, GenericProviderClient,
     ModelDiscovery,
 };
 
@@ -97,6 +97,61 @@ impl ChatUi {
             print!("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K");
             let _ = io::stdout().flush();
         }
+    }
+
+    /// Draw the status bar: left = context used/max, center = session name, right = model
+    fn draw_status_bar(&self, session_id: &str, provider: &str, model: &str, context_used: u32, context_max: u32) {
+        if !self.is_attended {
+            return;
+        }
+        let width = get_terminal_width();
+        if width < 40 {
+            return; // Too narrow for status bar
+        }
+
+        let left = format!("ctx: {}/{}", context_used, context_max);
+        let center = format!("session: {}", session_id);
+        let right = format!("{}/{}", provider, model);
+
+        // Calculate spacing
+        let left_len = left.chars().count();
+        let center_len = center.chars().count();
+        let right_len = right.chars().count();
+        let total_used = left_len + center_len + right_len;
+
+        if total_used + 4 > width {
+            // Truncate center if needed
+            let available = width.saturating_sub(left_len + right_len + 4);
+            let center_truncated = if center_len > available {
+                format!("{}…", &center[..available.saturating_sub(1)])
+            } else {
+                center
+            };
+            let spaces_left = (width.saturating_sub(left_len + center_truncated.chars().count() + right_len)) / 2;
+            let spaces_right = width - left_len - center_truncated.chars().count() - right_len - spaces_left;
+            let status = format!(
+                "{}{}{}{}{}",
+                left,
+                " ".repeat(spaces_left),
+                center_truncated,
+                " ".repeat(spaces_right),
+                right
+            );
+            print!("\r\x1b[7m{}\x1b[0m", status);
+        } else {
+            let spaces_left = (width - total_used) / 2;
+            let spaces_right = width - total_used - spaces_left;
+            let status = format!(
+                "{}{}{}{}{}",
+                left,
+                " ".repeat(spaces_left),
+                center,
+                " ".repeat(spaces_right),
+                right
+            );
+            print!("\r\x1b[7m{}\x1b[0m", status);
+        }
+        let _ = io::stdout().flush();
     }
 }
 
@@ -359,6 +414,10 @@ pub async fn run_interactive_chat(
 
     ui.draw_initial_box();
 
+    // Draw initial status bar
+    let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+    ui.draw_status_bar(&session_id, &current_provider, &current_model, 0, context_max);
+
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
     std::thread::spawn(move || {
         let term = Term::stdout();
@@ -527,15 +586,35 @@ pub async fn run_interactive_chat(
                             ).dimmed().to_string());
                         }
                         ui.print_above(&format!("{}\n{}", "Luna >".bold().green(), outcome.reply));
+                        
+                        // Update status bar with current context usage
+                        let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.print_above(&format!("{}", "✖ Cancelled".red()));
+                        
+                        // Update status bar
+                        let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
                     }
                     Ok(Err(e)) => {
                         ui.print_above(&format!("{} Error: {}", "✖".red().bold(), e));
+                        
+                        // Update status bar
+                        let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
                     }
                     Err(join_err) => {
                         ui.print_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
+                        
+                        // Update status bar
+                        let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        ui.draw_status_bar(&session_id, &current_provider, &current_model, context_used, context_max);
                     }
                 }
                 first_turn = false;
@@ -746,9 +825,18 @@ async fn handle_model_switch(
 
     // Fetch models for chosen provider
     println!("{}", format!("Fetching models for '{}'...", chosen_provider).dimmed());
-    let mut models = match discovery.get_models(&chosen_provider, cred_manager, false).await {
-        Ok(m) => m,
-        Err(_) => Vec::new(),
+    let mut models = if chosen_provider == "antigravity" || chosen_provider == "agy" {
+        vec![
+            "gemini-3.8-flash".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            "claude-opus-4-6".to_string(),
+            "gpt-oss-120b".to_string(),
+        ]
+    } else {
+        match discovery.get_models(&chosen_provider, cred_manager, false).await {
+            Ok(m) => m,
+            Err(_) => Vec::new(),
+        }
     };
 
     let default_model = get_default_model(&chosen_provider).to_string();

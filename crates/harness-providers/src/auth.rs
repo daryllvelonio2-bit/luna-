@@ -242,6 +242,33 @@ impl CredentialManager {
         }
     }
 
+    /// Atomically updates a credential's secret (used for OAuth token rotation).
+    pub async fn update_credential_key(
+        &self,
+        provider: &str,
+        old_key: &str,
+        new_key: &str,
+    ) -> Result<bool, HarnessError> {
+        let mut state = self.state.write().await;
+        if let Some(pool) = state.providers.get_mut(&provider.to_lowercase()) {
+            let mut found = false;
+            for cred in &mut pool.credentials {
+                if cred.api_key == old_key {
+                    cred.api_key = new_key.to_string();
+                    found = true;
+                    break;
+                }
+            }
+            drop(state);
+            if found {
+                self.save_to_disk().await?;
+            }
+            Ok(found)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn get_credentials(&self, provider: &str) -> Vec<CredentialEntry> {
         let state = self.state.read().await;
         state

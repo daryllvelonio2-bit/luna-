@@ -224,88 +224,58 @@ pub fn extract_bearer_token(secret: &str) -> (String, Option<String>) {
     (trimmed.to_string(), None)
 }
 
-/// Fetch available models directly from Google Code Assist API.
+pub const ANTIGRAVITY_MODELS: &[&str] = &[
+    "gemini-3.8-flash",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "gpt-oss-120b",
+];
+
+/// Resolves user-facing clean model names and reasoning effort settings to backend Code Assist model names.
+pub fn resolve_antigravity_model(
+    raw_model: &str,
+    reasoning_effort: Option<&ReasoningEffort>,
+) -> String {
+    let cleaned = raw_model.trim();
+    let cleaned = cleaned.strip_prefix("antigravity/").unwrap_or(cleaned);
+    let cleaned = cleaned.strip_prefix("agy/").unwrap_or(cleaned);
+    let lower = cleaned.to_lowercase();
+
+    if lower.contains("gemini") || lower.contains("flash") {
+        match reasoning_effort {
+            Some(ReasoningEffort::High | ReasoningEffort::Xhigh | ReasoningEffort::Max) => {
+                "gemini-3.8-flash-high".to_string()
+            }
+            Some(ReasoningEffort::Medium) => "gemini-3.8-flash-medium".to_string(),
+            Some(ReasoningEffort::Low | ReasoningEffort::Minimal) => {
+                "gemini-3.8-flash-low".to_string()
+            }
+            None => "gemini-3.8-flash-tiered".to_string(),
+        }
+    } else if lower.contains("opus") {
+        "claude-opus-4-6-thinking".to_string()
+    } else if lower.contains("sonnet") {
+        "claude-sonnet-4-6".to_string()
+    } else if lower.contains("gpt-oss") || lower.contains("oss") {
+        "gpt-oss-120b-medium".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Fetches supported Antigravity models, returning clean user-facing model names without reasoning effort suffixes.
 pub async fn fetch_antigravity_models(
-    http_client: &reqwest::Client,
-    bearer_token: &str,
+    _http_client: &reqwest::Client,
+    _bearer_token: &str,
 ) -> Result<Vec<String>, HarnessError> {
-    let resp = http_client
-        .post(MODELS_ENDPOINT)
-        .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(CONTENT_TYPE, "application/json")
-        .json(&json!({}))
-        .send()
-        .await
-        .map_err(|e| HarnessError::ProviderError {
-            provider: "antigravity".to_string(),
-            message: format!("Failed to fetch Antigravity models: {}", e),
-        })?;
-
-    if !resp.status().is_success() {
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(HarnessError::ProviderError {
-            provider: "antigravity".to_string(),
-            message: format!("Antigravity models fetch error: {}", err_body),
-        });
-    }
-
-    let data: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
-        provider: "antigravity".to_string(),
-        message: format!("Invalid JSON from Antigravity models endpoint: {}", e),
-    })?;
-
-    let mut model_names = Vec::new();
-
-    // Prioritize models in agentModelSorts
-    if let Some(sort_groups) = data.get("agentModelSorts").and_then(|s| s.as_array()) {
-        for sg in sort_groups {
-            if let Some(groups) = sg.get("groups").and_then(|g| g.as_array()) {
-                for g in groups {
-                    if let Some(mids) = g.get("modelIds").and_then(|m| m.as_array()) {
-                        for mid in mids {
-                            if let Some(name) = mid.as_str() {
-                                if !model_names.contains(&name.to_string()) {
-                                    model_names.push(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Append remaining models from models object
-    if let Some(models) = data.get("models").and_then(|m| m.as_object()) {
-        for key in models.keys() {
-            if !key.starts_with("chat_") && !key.starts_with("models/proactive") && !key.starts_with("MODEL_") {
-                if !model_names.contains(key) {
-                    model_names.push(key.clone());
-                }
-            }
-        }
-    }
-
-    if model_names.is_empty() {
-        // Fallback curated defaults
-        model_names = vec![
-            "claude-sonnet-4-6".to_string(),
-            "claude-opus-4-6-thinking".to_string(),
-            "gemini-3.8-flash-tiered".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gpt-oss-120b-medium".to_string(),
-            "gemini-3.5-flash-lite".to_string(),
-        ];
-    }
-
-    Ok(model_names)
+    Ok(ANTIGRAVITY_MODELS.iter().map(|&m| m.to_string()).collect())
 }
 
 /// Executes a native Antigravity Code Assist completion directly against Google Cloud endpoints.
 pub async fn execute_antigravity_completion(
     http_client: &reqwest::Client,
-    bearer_token: &str,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
     model: &str,
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -418,13 +388,17 @@ pub async fn execute_antigravity_completion(
         req_obj["generationConfig"] = gen_config;
     }
 
+    let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
+
+    let resolved_model = resolve_antigravity_model(model, options.reasoning_effort.as_ref());
+
     let payload = json!({
         "project": DEFAULT_PROJECT,
-        "model": model,
+        "model": resolved_model,
         "request": req_obj
     });
 
-    let resp = http_client
+    let mut resp = http_client
         .post(CODE_ASSIST_ENDPOINT)
         .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
         .header(USER_AGENT, DEFAULT_USER_AGENT)
@@ -436,6 +410,35 @@ pub async fn execute_antigravity_completion(
             provider: "antigravity".to_string(),
             message: format!("HTTP error: {}", e),
         })?;
+
+    if resp.status().as_u16() == 401 {
+        if let Some(ref refresh_tok) = refresh_tok_opt {
+            if let Ok(new_token) = refresh_antigravity_token(http_client, refresh_tok).await {
+                bearer_token = new_token.clone();
+                if let Some(cm) = cred_manager {
+                    let updated_secret = json!({
+                        "access_token": new_token,
+                        "refresh_token": refresh_tok,
+                    });
+                    let _ = cm
+                        .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
+                        .await;
+                }
+                resp = http_client
+                    .post(CODE_ASSIST_ENDPOINT)
+                    .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
+                    .header(USER_AGENT, DEFAULT_USER_AGENT)
+                    .header(CONTENT_TYPE, "application/json")
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| HarnessError::ProviderError {
+                        provider: "antigravity".to_string(),
+                        message: format!("HTTP error on retry: {}", e),
+                    })?;
+            }
+        }
+    }
 
     if resp.status().as_u16() == 401 {
         return Err(HarnessError::AuthenticationFailed {

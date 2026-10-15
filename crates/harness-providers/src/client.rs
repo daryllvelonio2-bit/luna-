@@ -74,9 +74,14 @@ impl GenericProviderClient {
 
         match self.auth_format.clone() {
             AuthHeaderFormat::Bearer => {
+                let token = if self.provider_id == "antigravity" || self.provider_id == "agy" {
+                    crate::antigravity::extract_bearer_token(&api_key).0
+                } else {
+                    api_key
+                };
                 headers.insert(
                     AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {}", api_key))
+                    HeaderValue::from_str(&format!("Bearer {}", token))
                         .map_err(|e| HarnessError::ConfigurationError(e.to_string()))?,
                 );
             }
@@ -208,10 +213,10 @@ impl ModelProvider for GenericProviderClient {
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
-            let (bearer, _) = crate::antigravity::extract_bearer_token(secret.expose_secret());
             return crate::antigravity::execute_antigravity_completion(
                 &self.http_client,
-                &bearer,
+                secret.expose_secret(),
+                Some(&self.cred_manager),
                 &model,
                 messages,
                 tools,

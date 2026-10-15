@@ -217,7 +217,7 @@ pub async fn handle_auth_command(
                 );
                 println!("  Provider:        {}", "antigravity".cyan().bold());
                 println!("  Credential ID:   {}", id);
-                println!("  Default model:   {}", "gemini-3.8-flash-tiered".cyan());
+                println!("  Default model:   {}", "gemini-3.8-flash".cyan());
                 println!("  Set as priority: {}", "yes".green());
             }
         },

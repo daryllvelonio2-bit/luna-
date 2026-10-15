@@ -232,6 +232,16 @@ where
         &self.registry
     }
 
+    /// Get the estimated token count for the current session's conversation history.
+    /// This loads the history from the session store and runs the compaction estimator.
+    pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
+        let (history, _replay_notice) = self.load_history().await?;
+        let mut messages = Vec::with_capacity(history.len() + 1);
+        messages.extend(history.iter().map(|stored| stored.message.clone()));
+        let estimate = estimate_tokens(&messages);
+        Ok(estimate.tokens)
+    }
+
     /// Whether this call must be put to the human: the flag is on *and* the tool mutates (or
     /// `tools.mutating_overrides` names it).
     async fn needs_approval(&self, name: &str) -> bool {

@@ -10,7 +10,7 @@ pub use antigravity::{
 };
 pub use auth::{CredentialEntry, CredentialManager, RotationStrategy};
 pub use catalog::{
-    find_provider, get_default_model, get_provider_catalog, known_provider_ids, resolve_descriptor,
+    find_provider, get_default_model, get_provider_catalog, get_context_window, known_provider_ids, resolve_descriptor,
     AuthHeaderFormat, ProviderDescriptor, DEFAULT_TIMEOUT_SECS,
 };
 pub use client::GenericProviderClient;
