@@ -3,7 +3,6 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::{Key, Term};
-use dialoguer::{Input, Select};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -310,6 +309,7 @@ pub async fn run_interactive_chat(
                 || query.eq_ignore_ascii_case("/provider")
             {
                 handle_model_switch(
+                    None,
                     &ui,
                     &config,
                     &cred_manager,
@@ -324,7 +324,7 @@ pub async fn run_interactive_chat(
             if query.starts_with("/reasoning") {
                 let arg = query.strip_prefix("/reasoning").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                handle_reasoning_switch(&ui, &agent, arg_opt).await?;
+                handle_reasoning_switch(None, &ui, &agent, arg_opt).await?;
                 continue;
             }
             let ag_ref = agent.clone();
@@ -410,6 +410,7 @@ pub async fn run_interactive_chat(
                         {
                             ui.clear_box_on_exit();
                             if let Err(e) = handle_model_switch(
+                                Some(&mut key_rx),
                                 &ui,
                                 &config,
                                 &cred_manager,
@@ -429,6 +430,7 @@ pub async fn run_interactive_chat(
                             let arg_opt = if arg.is_empty() { None } else { Some(arg) };
                             ui.clear_box_on_exit();
                             if let Err(e) = handle_reasoning_switch(
+                                Some(&mut key_rx),
                                 &ui,
                                 &agent,
                                 arg_opt,
@@ -526,7 +528,143 @@ pub async fn run_interactive_chat(
     Ok(())
 }
 
+async fn select_from_rx(
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    prompt: &str,
+    items: &[String],
+    default_idx: usize,
+) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut selected = default_idx.min(items.len() - 1);
+    let page_size = 12.min(items.len());
+
+    let render = |selected: usize| {
+        let half = page_size / 2;
+        let start = if selected > half {
+            (selected - half).min(items.len() - page_size)
+        } else {
+            0
+        };
+        let end = (start + page_size).min(items.len());
+
+        let mut output = String::new();
+        let total_pages = (items.len() + page_size - 1) / page_size;
+        let current_page = (selected / page_size) + 1;
+        output.push_str(&format!(
+            "\r\x1b[2K{}: (Page {}/{}, ↑/↓ to navigate, Enter to select, Esc to cancel)\n",
+            prompt.bold().cyan(),
+            current_page,
+            total_pages
+        ));
+
+        for idx in start..end {
+            let item = &items[idx];
+            if idx == selected {
+                output.push_str(&format!("\r\x1b[2K  {} {}\n", "❯".cyan().bold(), item.bold()));
+            } else {
+                output.push_str(&format!("\r\x1b[2K    {}\n", item.dimmed()));
+            }
+        }
+        (output, end - start + 1)
+    };
+
+    let (initial_text, mut line_count) = render(selected);
+    print!("{}", initial_text);
+    let _ = io::stdout().flush();
+
+    while let Some(key) = key_rx.recv().await {
+        match key {
+            Key::ArrowUp => {
+                if selected > 0 {
+                    selected -= 1;
+                } else {
+                    selected = items.len() - 1;
+                }
+            }
+            Key::ArrowDown => {
+                if selected + 1 < items.len() {
+                    selected += 1;
+                } else {
+                    selected = 0;
+                }
+            }
+            Key::Enter => {
+                print!("\r\x1b[{}A", line_count);
+                for _ in 0..line_count {
+                    print!("\x1b[2K\x1b[1B");
+                }
+                print!("\r\x1b[{}A", line_count);
+                let _ = io::stdout().flush();
+                return Some(selected);
+            }
+            Key::Escape | Key::Char('q') | Key::CtrlC => {
+                print!("\r\x1b[{}A", line_count);
+                for _ in 0..line_count {
+                    print!("\x1b[2K\x1b[1B");
+                }
+                print!("\r\x1b[{}A", line_count);
+                let _ = io::stdout().flush();
+                return None;
+            }
+            _ => continue,
+        }
+
+        print!("\r\x1b[{}A", line_count);
+        let (new_text, new_count) = render(selected);
+        print!("{}", new_text);
+        line_count = new_count;
+        let _ = io::stdout().flush();
+    }
+
+    None
+}
+
+async fn input_from_rx(
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    prompt: &str,
+) -> Option<String> {
+    print!("{}: ", prompt.bold().cyan());
+    let _ = io::stdout().flush();
+    let mut buf = String::new();
+
+    while let Some(key) = key_rx.recv().await {
+        match key {
+            Key::Char(c) => {
+                buf.push(c);
+                print!("{}", c);
+                let _ = io::stdout().flush();
+            }
+            Key::Backspace => {
+                if buf.pop().is_some() {
+                    print!("\x08 \x08");
+                    let _ = io::stdout().flush();
+                }
+            }
+            Key::Enter => {
+                print!("\r\x1b[2K");
+                let _ = io::stdout().flush();
+                let res = buf.trim().to_string();
+                if res.is_empty() {
+                    return None;
+                }
+                return Some(res);
+            }
+            Key::Escape | Key::CtrlC => {
+                print!("\r\x1b[2K");
+                let _ = io::stdout().flush();
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 async fn handle_model_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
     ui: &ChatUi,
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
@@ -562,17 +700,17 @@ async fn handle_model_switch(
         .position(|p| p.id.eq_ignore_ascii_case(current_provider))
         .unwrap_or(0);
 
-    let sel = match Select::new()
-        .with_prompt("Select Provider")
-        .items(&items)
-        .default(default_idx)
-        .interact_opt()
-    {
-        Ok(Some(i)) => i,
-        _ => {
-            ui.draw_initial_box();
-            return Ok(());
+    let sel = if let Some(ref mut rx) = key_rx {
+        while rx.try_recv().is_ok() {}
+        match select_from_rx(rx, "Select Provider", &items, default_idx).await {
+            Some(i) => i,
+            None => {
+                ui.draw_initial_box();
+                return Ok(());
+            }
         }
+    } else {
+        default_idx
     };
 
     let chosen_provider = catalog[sel].id.clone();
@@ -597,32 +735,32 @@ async fn handle_model_switch(
         .position(|m| m.eq_ignore_ascii_case(current_model))
         .unwrap_or(0);
 
-    let model_sel = match Select::new()
-        .with_prompt(format!("Select Model for '{}'", chosen_provider))
-        .items(&model_items)
-        .default(default_model_idx)
-        .interact_opt()
-    {
-        Ok(Some(i)) => i,
-        _ => {
-            ui.draw_initial_box();
-            return Ok(());
-        }
-    };
-
-    let chosen_model = if model_sel < models.len() {
-        model_items[model_sel].clone()
-    } else {
-        match Input::<String>::new()
-            .with_prompt("Enter custom model name")
-            .interact_text()
-        {
-            Ok(name) => name.trim().to_string(),
-            Err(_) => {
+    let model_sel = if let Some(ref mut rx) = key_rx {
+        while rx.try_recv().is_ok() {}
+        match select_from_rx(rx, &format!("Select Model for '{}'", chosen_provider), &model_items, default_model_idx).await {
+            Some(i) => i,
+            None => {
                 ui.draw_initial_box();
                 return Ok(());
             }
         }
+    } else {
+        default_model_idx
+    };
+
+    let chosen_model = if model_sel < models.len() {
+        model_items[model_sel].clone()
+    } else if let Some(ref mut rx) = key_rx {
+        while rx.try_recv().is_ok() {}
+        match input_from_rx(rx, "Enter custom model name").await {
+            Some(name) => name,
+            None => {
+                ui.draw_initial_box();
+                return Ok(());
+            }
+        }
+    } else {
+        default_model
     };
 
     if chosen_model.is_empty() {
@@ -642,7 +780,7 @@ async fn handle_model_switch(
         ("off / disabled", None),
     ];
 
-    let reasoning_items: Vec<&str> = reasoning_options.iter().map(|(label, _)| *label).collect();
+    let reasoning_items: Vec<String> = reasoning_options.iter().map(|(label, _)| label.to_string()).collect();
     let current_effort = agent.lock().await.reasoning_effort();
     let default_reasoning_idx = match current_effort {
         None => 0,
@@ -654,17 +792,17 @@ async fn handle_model_switch(
         Some(ReasoningEffort::Max) => 6,
     };
 
-    let reasoning_sel = match Select::new()
-        .with_prompt("Select Reasoning Effort")
-        .items(&reasoning_items)
-        .default(default_reasoning_idx)
-        .interact_opt()
-    {
-        Ok(Some(i)) => i,
-        _ => {
-            ui.draw_initial_box();
-            return Ok(());
+    let reasoning_sel = if let Some(ref mut rx) = key_rx {
+        while rx.try_recv().is_ok() {}
+        match select_from_rx(rx, "Select Reasoning Effort", &reasoning_items, default_reasoning_idx).await {
+            Some(i) => i,
+            None => {
+                ui.draw_initial_box();
+                return Ok(());
+            }
         }
+    } else {
+        default_reasoning_idx
     };
 
     let chosen_effort = if reasoning_sel == 0 {
@@ -708,6 +846,7 @@ async fn handle_model_switch(
 }
 
 async fn handle_reasoning_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
     ui: &ChatUi,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     arg: Option<&str>,
@@ -739,7 +878,7 @@ async fn handle_reasoning_switch(
             ("xhigh", Some(ReasoningEffort::Xhigh)),
             ("max", Some(ReasoningEffort::Max)),
         ];
-        let reasoning_items: Vec<&str> = reasoning_options.iter().map(|(label, _)| *label).collect();
+        let reasoning_items: Vec<String> = reasoning_options.iter().map(|(label, _)| label.to_string()).collect();
         let current_effort = agent.lock().await.reasoning_effort();
         let default_idx = match current_effort {
             None => 0,
@@ -751,19 +890,18 @@ async fn handle_reasoning_switch(
             Some(ReasoningEffort::Max) => 6,
         };
 
-        let sel = match Select::new()
-            .with_prompt("Select Reasoning Effort")
-            .items(&reasoning_items)
-            .default(default_idx)
-            .interact_opt()
-        {
-            Ok(Some(i)) => i,
-            _ => {
-                ui.draw_initial_box();
-                return Ok(());
+        if let Some(ref mut rx) = key_rx {
+            while rx.try_recv().is_ok() {}
+            match select_from_rx(rx, "Select Reasoning Effort", &reasoning_items, default_idx).await {
+                Some(i) => reasoning_options[i].1,
+                None => {
+                    ui.draw_initial_box();
+                    return Ok(());
+                }
             }
-        };
-        reasoning_options[sel].1
+        } else {
+            None
+        }
     };
 
     agent.lock().await.set_reasoning_effort(chosen_effort);
