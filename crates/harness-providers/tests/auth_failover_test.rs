@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 
 fn manager(dir: &tempfile::TempDir) -> Arc<CredentialManager> {
     CredentialManager::new(Some(dir.path().join("credentials.json")))
+        .expect("a fresh temp store path always loads")
 }
 
 async fn seed_two_keys(mgr: &Arc<CredentialManager>) {

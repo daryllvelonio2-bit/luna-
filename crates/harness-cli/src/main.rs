@@ -116,7 +116,10 @@ async fn main() -> Result<(), HarnessError> {
 
     init_telemetry(cli.json || config.telemetry.json, &config.telemetry.level);
 
-    let cred_manager = CredentialManager::new(Some(config.paths.credentials.clone()));
+    // The credential manager's own error (unreadable/corrupt store) must reach the user: the
+    // corrupt-store defect this merge fixes is exactly a `CredentialManager::new` that used to
+    // silently fall back to an empty store. It now reads the config-resolved path.
+    let cred_manager = CredentialManager::new(Some(config.paths.credentials.clone()))?;
     let discovery = Arc::new(ModelDiscovery::new(
         Some(config.paths.models_cache.clone()),
         MODEL_CACHE_TTL_HOURS,
