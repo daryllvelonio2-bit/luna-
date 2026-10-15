@@ -179,12 +179,18 @@ impl ChatUi {
             }
             reasoning_rows(&live.reasoning, get_terminal_width())
         };
-        self.live.lock().unwrap().rows.clear();
-        self.begin_block(OutputBlockKind::Thinking);
-        self.emit_above(&rows.join("\n"));
-        let mut live = self.live.lock().unwrap();
-        live.reasoning.clear();
-        live.settled_rows = 0;
+        let unsettled = {
+            let mut live = self.live.lock().unwrap();
+            let start = live.settled_rows.min(rows.len());
+            let remaining = rows[start..].to_vec();
+            live.reasoning.clear();
+            live.settled_rows = 0;
+            remaining
+        };
+        if !unsettled.is_empty() {
+            self.begin_block(OutputBlockKind::Thinking);
+            self.emit_above(&unsettled.join("\n"));
+        }
     }
 
     /// Start the animated line for a tool that is now running.
@@ -200,6 +206,22 @@ impl ChatUi {
     /// Stop the animated line; the result line that follows takes its place.
     fn stop_activity(&self) {
         self.live.lock().unwrap().activity = None;
+    }
+
+    /// Erase the live region and the composer box cleanly, e.g. before an approval prompt.
+    fn clear_live_and_box(&self) {
+        if !self.is_attended {
+            return;
+        }
+        self.erase_box();
+        let previous = {
+            let mut live = self.live.lock().unwrap();
+            let prev = live.rows.len();
+            live.rows.clear();
+            live.activity = None;
+            prev
+        };
+        self.erase_live(previous);
     }
 
     fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
@@ -278,12 +300,14 @@ impl ChatUi {
         let buf = self.input_buf.lock().unwrap();
         let width = get_terminal_width();
         self.erase_box();
-        let live_rows = self.live.lock().unwrap().rows.clone();
-        self.erase_live(live_rows.len());
+        let previous = {
+            let mut live = self.live.lock().unwrap();
+            let prev = live.rows.len();
+            live.rows.clear();
+            prev
+        };
+        self.erase_live(previous);
         println!("{}", text);
-        for row in &live_rows {
-            println!("{}", row);
-        }
         self.draw_box(width, &buf);
     }
 
@@ -784,15 +808,16 @@ pub async fn run_interactive_chat(
                     None => continue,
                 };
 
-                ui.clear_box_on_exit();
+                ui.clear_live_and_box();
                 let decision = prompt_approval_box(&mut key_rx, &request).await;
                 let target_label = request.target.as_deref().unwrap_or("-");
                 if decision == harness_core::ApprovalDecision::Run {
-                    println!("{} Approved: {} ({})", "✔".green().bold(), request.tool.bold(), target_label);
+                    ui.emit_above(&format!("{} Approved: {} ({})", "✔".green().bold(), request.tool.bold(), target_label));
+                    let args = request.arguments.clone();
+                    ui.start_activity(&request.tool, &args);
                 } else {
-                    println!("{} Cancelled: {} ({})", "✖".red().bold(), request.tool.bold(), target_label);
+                    ui.emit_above(&format!("{} Cancelled: {} ({})", "✖".red().bold(), request.tool.bold(), target_label));
                 }
-                ui.draw_initial_box();
                 let _ = decision_tx.send(decision);
             }
 
