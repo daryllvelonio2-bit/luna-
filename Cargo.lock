@@ -1057,6 +1057,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1066,6 +1067,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -292,11 +292,30 @@ impl ModelProvider for GenericProviderClient {
             }
         }
 
+        // The response's own `usage` object: what the provider billed for this request. The session
+        // store persists it so compaction compares its threshold against a real count instead of a
+        // character guess (`harness_core::session::estimate_tokens`).
+        let usage = resp_json.get("usage").map(|usage| TokenUsage {
+            prompt_tokens: usage
+                .get("prompt_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+            completion_tokens: usage
+                .get("completion_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+            total_tokens: usage
+                .get("total_tokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+        });
+
         Ok(Message {
             role: Role::Assistant,
             content,
             tool_calls,
             tool_result: None,
+            usage,
         })
     }
 

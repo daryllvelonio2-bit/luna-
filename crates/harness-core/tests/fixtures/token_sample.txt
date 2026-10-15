@@ -1,0 +1,17 @@
+A session is the unit of continuity in an agent harness. Without one, every turn starts from nothing: the
+process forgets the file it just read, the decision it just took, and the question it was halfway through
+answering. Persisting the transcript is the cheap half of the fix, because a database write is local and
+bounded; the expensive half is deciding what to send back to the provider. Model context windows are finite
+and billed by the token, so a harness that replays a whole transcript on every turn eventually pays for the
+same history twice, and then pays again. The usual answer is compaction: keep the recent turns verbatim
+because they carry the live thread, fold the older turns into one summary because their detail is no longer
+load-bearing, and leave the original rows in storage so a later rewind still has raw material to work with.
+The threshold that triggers compaction has to be measured, not guessed. Character counts are a usable proxy
+when nothing better is available, roughly one token per four characters of English prose, but a provider
+that reports usage for the request it just served has already done the counting, and an estimate built on
+that number is a fact rather than an approximation. The two only diverge when the heuristic is asked to
+extend a reported figure over messages the provider never saw, which is exactly the case the estimator
+documents. What matters in practice is that one estimator decides, so the console line and the folded
+transcript describe the same event, and that a compaction failure is survivable: the model call that writes
+the summary is just another network call, it can fail, and a harness that loses the user's turn because its
+own bookkeeping call timed out has made the bookkeeping more important than the work.

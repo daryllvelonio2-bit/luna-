@@ -3,20 +3,29 @@ pub mod approval;
 pub mod config;
 pub mod error;
 pub mod registry;
+pub mod session;
 pub mod traits;
 pub mod types;
 
-pub use agent::{Agent, AgentConfig};
+pub use agent::{
+    Agent, AgentConfig, CompactionNotice, CompactionSetup, ReplayNotice, SessionBinding,
+    TurnOutcome,
+};
 pub use approval::{
     unified_diff, AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings,
     Approver, DenyAll, FnApprover, NonInteractive, ToolPreview, DEFAULT_APPROVAL_TIMEOUT_SECS,
 };
 pub use config::{
-    resolve, Config, Layers, ModelSettings, PathsSettings, ProviderOverride, Resolved, Source,
-    ToolsSettings,
+    resolve, Config, Layers, ModelSettings, PathsSettings, ProviderOverride, Resolved,
+    SessionSettings, Source, ToolsSettings,
 };
 pub use error::HarnessError;
 pub use registry::DefaultToolRegistry;
+pub use session::{
+    compact, estimate_tokens, fold_boundary, heuristic_tokens, CompactionOutcome, Estimate,
+    EstimateSource, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE, ReplayOutcome, SessionRecord,
+    SessionStore, SqliteSessionStore, StoredMessage,
+};
 pub use traits::{
     EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry,
 };

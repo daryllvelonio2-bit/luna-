@@ -1,0 +1,469 @@
+//! The sqlite implementation of [`SessionStore`] — one file, WAL, no schema migration machinery.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use rusqlite::{params, params_from_iter, types::Value, Connection};
+use tokio::sync::Mutex;
+use tracing::debug;
+
+use super::{default_sessions_db, ReplayOutcome, SessionRecord, SessionStore, StoredMessage};
+use crate::error::HarnessError;
+use crate::types::{Message, Role, ToolCall, ToolResult, TokenUsage};
+
+/// Longest title kept from the first user line.
+const TITLE_MAX_CHARS: usize = 80;
+
+/// `sessions` + `messages`. `compacted_at` is what makes compaction non-destructive: folded rows
+/// stay in the table and are simply excluded from replay.
+const SCHEMA: &str = r#"
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id          TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    seq              INTEGER NOT NULL,
+    role             TEXT NOT NULL,
+    content          TEXT,
+    tool_calls_json  TEXT,
+    tool_result_json TEXT,
+    usage_json       TEXT,
+    is_summary       INTEGER NOT NULL DEFAULT 0,
+    compacted_at     TEXT,
+    created_at       TEXT NOT NULL,
+    UNIQUE (session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS messages_session_seq ON messages (session_id, seq);
+"#;
+
+/// One row of `messages`, before the JSON columns are parsed.
+struct RawRow {
+    id: i64,
+    seq: i64,
+    role: String,
+    content: Option<String>,
+    tool_calls_json: Option<String>,
+    tool_result_json: Option<String>,
+    usage_json: Option<String>,
+    is_summary: bool,
+}
+
+pub struct SqliteSessionStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteSessionStore {
+    /// Open (creating parent directories and the file as needed) and apply the schema.
+    pub fn new(path: Option<PathBuf>) -> Result<Self, HarnessError> {
+        let db_path = path.unwrap_or_else(default_sessions_db);
+        if let Some(parent) = db_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    HarnessError::SessionError(format!(
+                        "failed to create the sessions db directory '{}': {}",
+                        parent.display(),
+                        error
+                    ))
+                })?;
+            }
+        }
+
+        let conn = Connection::open(&db_path).map_err(|error| {
+            HarnessError::SessionError(format!(
+                "failed to open the sessions db '{}': {}",
+                db_path.display(),
+                error
+            ))
+        })?;
+        // The schema is applied to the owned connection before it is shared behind the mutex: the
+        // constructors are reachable from async callers, and a tokio lock taken there would panic
+        // inside the runtime (see the memory/notes engines for the same ordering).
+        Self::init_schema(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// A session store that lives only for the process — what the tests use.
+    pub fn in_memory() -> Result<Self, HarnessError> {
+        let conn = Connection::open_in_memory()
+            .map_err(|error| HarnessError::SessionError(error.to_string()))?;
+        Self::init_schema(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    fn init_schema(conn: &Connection) -> Result<(), HarnessError> {
+        conn.execute_batch(SCHEMA).map_err(|error| {
+            HarnessError::SessionError(format!("sessions schema initialization failed: {}", error))
+        })
+    }
+}
+
+fn session_error(context: &str, error: impl std::fmt::Display) -> HarnessError {
+    HarnessError::SessionError(format!("{}: {}", context, error))
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn parse_time(raw: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn role_to_text(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+fn text_to_role(raw: &str) -> Result<Role, HarnessError> {
+    match raw {
+        "system" => Ok(Role::System),
+        "user" => Ok(Role::User),
+        "assistant" => Ok(Role::Assistant),
+        "tool" => Ok(Role::Tool),
+        other => Err(HarnessError::SessionError(format!(
+            "unknown message role '{}' in the sessions db",
+            other
+        ))),
+    }
+}
+
+fn raw_to_stored(raw: RawRow) -> Result<StoredMessage, HarnessError> {
+    let tool_calls: Vec<ToolCall> = match &raw.tool_calls_json {
+        Some(json) if !json.is_empty() => serde_json::from_str(json)
+            .map_err(|error| session_error("failed to parse tool_calls_json", error))?,
+        _ => Vec::new(),
+    };
+    let tool_result: Option<ToolResult> = match &raw.tool_result_json {
+        Some(json) if !json.is_empty() => Some(
+            serde_json::from_str(json)
+                .map_err(|error| session_error("failed to parse tool_result_json", error))?,
+        ),
+        _ => None,
+    };
+    let usage: Option<TokenUsage> = match &raw.usage_json {
+        Some(json) if !json.is_empty() => Some(
+            serde_json::from_str(json)
+                .map_err(|error| session_error("failed to parse usage_json", error))?,
+        ),
+        _ => None,
+    };
+
+    Ok(StoredMessage {
+        id: raw.id,
+        seq: raw.seq,
+        is_summary: raw.is_summary,
+        message: Message {
+            role: text_to_role(&raw.role)?,
+            content: raw.content,
+            tool_calls,
+            tool_result,
+            usage,
+        },
+    })
+}
+
+/// Query the live transcript: `summaries` selects the synthetic summary rows (`is_summary = 1`)
+/// instead of the ordinary ones; ordinary rows are always restricted to `compacted_at IS NULL`, so
+/// folded rows never come back while staying readable for a later rewind.
+fn query_rows(
+    conn: &Connection,
+    session_id: &str,
+    summaries: bool,
+    limit: Option<usize>,
+) -> Result<Vec<StoredMessage>, HarnessError> {
+    let filter = if summaries {
+        "is_summary = 1"
+    } else {
+        "is_summary = 0 AND compacted_at IS NULL"
+    };
+    let mut sql = format!(
+        "SELECT id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary
+         FROM messages
+         WHERE session_id = ?1 AND {filter}
+         ORDER BY seq DESC"
+    );
+    if let Some(limit) = limit {
+        sql.push_str(&format!(" LIMIT {}", limit));
+    }
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| session_error("failed to read session messages", error))?;
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok(RawRow {
+                id: row.get(0)?,
+                seq: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+                tool_calls_json: row.get(4)?,
+                tool_result_json: row.get(5)?,
+                usage_json: row.get(6)?,
+                is_summary: row.get::<_, i64>(7)? != 0,
+            })
+        })
+        .map_err(|error| session_error("failed to read session messages", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| session_error("failed to read session messages", error))?;
+
+    // Read newest-first (that is where a LIMIT has to bite), hand back oldest-first.
+    rows.into_iter().rev().map(raw_to_stored).collect()
+}
+
+fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND compacted_at IS NULL",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| session_error("failed to count session messages", error))?;
+    Ok(count as usize)
+}
+
+fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
+    let (created_at, updated_at, title): (String, String, String) = conn
+        .query_row(
+            "SELECT created_at, updated_at, title FROM sessions WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| session_error(&format!("session '{}' not found", id), error))?;
+
+    Ok(SessionRecord {
+        id: id.to_string(),
+        created_at: parse_time(&created_at),
+        updated_at: parse_time(&updated_at),
+        title,
+        message_count: count_live(conn, id)?,
+    })
+}
+
+#[async_trait]
+impl SessionStore for SqliteSessionStore {
+    async fn ensure_session(&self, id: &str) -> Result<SessionRecord, HarnessError> {
+        let conn = self.conn.lock().await;
+        let timestamp = now();
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
+            params![id, timestamp],
+        )
+        .map_err(|error| session_error("failed to create the session", error))?;
+        read_session(&conn, id)
+    }
+
+    async fn append(
+        &self,
+        session_id: &str,
+        message: &Message,
+        is_summary: bool,
+    ) -> Result<i64, HarnessError> {
+        let conn = self.conn.lock().await;
+        let timestamp = now();
+        // Defensive: an append can only land against an existing session (the row is a foreign
+        // key), and losing a whole turn to a missing session row would be a bad trade for one
+        // statement.
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
+            params![session_id, timestamp],
+        )
+        .map_err(|error| session_error("failed to create the session", error))?;
+
+        let seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| session_error("failed to allocate a message sequence", error))?;
+
+        let tool_calls_json = if message.tool_calls.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&message.tool_calls)
+                    .map_err(|error| session_error("failed to serialize tool calls", error))?,
+            )
+        };
+        let tool_result_json = match &message.tool_result {
+            Some(result) => Some(
+                serde_json::to_string(result)
+                    .map_err(|error| session_error("failed to serialize the tool result", error))?,
+            ),
+            None => None,
+        };
+        let usage_json = match &message.usage {
+            Some(usage) => Some(
+                serde_json::to_string(usage)
+                    .map_err(|error| session_error("failed to serialize token usage", error))?,
+            ),
+            None => None,
+        };
+
+        conn.execute(
+            "INSERT INTO messages
+                (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json,
+                 is_summary, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                seq,
+                role_to_text(message.role),
+                message.content,
+                tool_calls_json,
+                tool_result_json,
+                usage_json,
+                if is_summary { 1 } else { 0 },
+                timestamp,
+            ],
+        )
+        .map_err(|error| session_error("failed to append the message", error))?;
+
+        // The first user line becomes the title `luna sessions list` shows.
+        if message.role == Role::User {
+            if let Some(content) = &message.content {
+                let title: String = content.trim().chars().take(TITLE_MAX_CHARS).collect();
+                conn.execute(
+                    "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
+                    params![title, session_id],
+                )
+                .map_err(|error| session_error("failed to set the session title", error))?;
+            }
+        }
+
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![timestamp, session_id],
+        )
+        .map_err(|error| session_error("failed to touch the session", error))?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn replay(&self, session_id: &str, limit: usize) -> Result<ReplayOutcome, HarnessError> {
+        let conn = self.conn.lock().await;
+        let total = count_live(&conn, session_id)?;
+        // Summaries are never dropped by the bound: they are the only trace of the turns they
+        // replaced, and there is at most a handful of them.
+        let mut history = query_rows(&conn, session_id, true, None)?;
+        history.extend(query_rows(&conn, session_id, false, Some(limit))?);
+
+        let replayed = history.len();
+        Ok(ReplayOutcome {
+            history,
+            total,
+            replayed,
+        })
+    }
+
+    async fn record_compaction(
+        &self,
+        session_id: &str,
+        folded: &[i64],
+        summary: &str,
+    ) -> Result<i64, HarnessError> {
+        let mut conn = self.conn.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| session_error("failed to open a compaction transaction", error))?;
+
+        let seq: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| session_error("failed to allocate a summary sequence", error))?;
+
+        let timestamp = now();
+        transaction
+            .execute(
+                "INSERT INTO messages
+                    (session_id, seq, role, content, is_summary, created_at)
+                 VALUES (?1, ?2, 'system', ?3, 1, ?4)",
+                params![session_id, seq, summary, timestamp],
+            )
+            .map_err(|error| session_error("failed to write the summary row", error))?;
+        let summary_id = transaction.last_insert_rowid();
+
+        if !folded.is_empty() {
+            let placeholders = vec!["?"; folded.len()].join(",");
+            let sql = format!(
+                "UPDATE messages SET compacted_at = ? WHERE id IN ({}) AND compacted_at IS NULL",
+                placeholders
+            );
+            let mut values = vec![Value::Text(timestamp.clone())];
+            values.extend(folded.iter().map(|id| Value::Integer(*id)));
+            transaction
+                .execute(&sql, params_from_iter(values.iter()))
+                .map_err(|error| session_error("failed to mark the compacted rows", error))?;
+        }
+
+        transaction
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![timestamp, session_id],
+            )
+            .map_err(|error| session_error("failed to touch the session", error))?;
+        transaction
+            .commit()
+            .map_err(|error| session_error("failed to commit the compaction", error))?;
+
+        debug!(
+            "Recorded a summary for session '{}' folding {} messages",
+            session_id,
+            folded.len()
+        );
+        Ok(summary_id)
+    }
+
+    async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions ORDER BY updated_at DESC")
+            .map_err(|error| session_error("failed to list sessions", error))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| session_error("failed to list sessions", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| session_error("failed to list sessions", error))?;
+
+        ids.iter().map(|id| read_session(&conn, id)).collect()
+    }
+
+    async fn most_recent(&self) -> Result<Option<String>, HarnessError> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(session_error("failed to read the most recent session", other)),
+        })
+    }
+}
+
