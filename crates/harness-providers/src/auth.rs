@@ -8,6 +8,7 @@ use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use harness_core::HarnessError;
 
@@ -206,7 +207,11 @@ impl CredentialManager {
             .collect();
 
         if active_credentials.is_empty() {
-            // Re-enable if all were temporarily disabled
+            // Recovery hatch, kept deliberately: `is_temporarily_disabled` is part of the persisted
+            // credential file, so a file whose keys were all retired (by an older build, or by
+            // hand) would otherwise leave the provider permanently unusable with no way back from
+            // `luna auth`. The failover path itself never gets here — `mark_credential_failed`
+            // refuses to retire the last active key.
             for c in &mut provider_state.credentials {
                 c.is_temporarily_disabled = false;
             }
@@ -260,15 +265,52 @@ impl CredentialManager {
         Ok(SecretString::new(raw_key))
     }
 
-    pub async fn mark_credential_failed(&self, provider: &str, _api_key: &str) {
+    /// Retire the credential that just failed so the next [`acquire_credential`] fails over.
+    ///
+    /// The caller only ever holds the secret it was handed, so the credential is matched by key
+    /// value — not by position, and not by strategy: a revoked or rate-limited key must be
+    /// retired whatever the rotation strategy is.
+    ///
+    /// Returns `true` when a credential was retired. The last active credential is never retired:
+    /// retiring it would leave the provider with nothing to hand out, which is worse than a key
+    /// that keeps failing. The flag is process-local (never written back to disk), so a key that
+    /// was only rate-limited is retried on the next run.
+    ///
+    /// [`acquire_credential`]: CredentialManager::acquire_credential
+    pub async fn mark_credential_failed(&self, provider: &str, api_key: &str) -> bool {
         let mut state = self.state.write().await;
-        if let Some(p) = state.providers.get_mut(&provider.to_lowercase()) {
-            if p.strategy == RotationStrategy::FillFirst && p.credentials.len() > 1 {
-                // Temporarily disable the first/priority one to failover
-                if let Some(first) = p.credentials.iter_mut().find(|c| !c.is_temporarily_disabled) {
-                    first.is_temporarily_disabled = true;
-                }
+        let Some(p) = state.providers.get_mut(&provider.to_lowercase()) else {
+            return false;
+        };
+
+        let active_count = p
+            .credentials
+            .iter()
+            .filter(|c| !c.is_temporarily_disabled)
+            .count();
+        if active_count < 2 {
+            warn!(
+                provider = %provider,
+                "Sole active credential failed; keeping it selected instead of retiring it"
+            );
+            return false;
+        }
+
+        match p
+            .credentials
+            .iter_mut()
+            .find(|c| !c.is_temporarily_disabled && c.api_key == api_key)
+        {
+            Some(cred) => {
+                cred.is_temporarily_disabled = true;
+                warn!(
+                    provider = %provider,
+                    label = %cred.label,
+                    "Credential retired after a provider error; failing over to another key"
+                );
+                true
             }
+            None => false,
         }
     }
 }
