@@ -6,7 +6,6 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use secrecy::ExposeSecret;
 use serde_json::json;
-use tracing::{debug, error, info, warn};
 
 use harness_core::{
     config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider, Role,

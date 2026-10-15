@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use harness_core::config::ProviderOverride;
 use harness_core::HarnessError;
