@@ -15,14 +15,21 @@ pub struct ProviderDescriptor {
     pub models_endpoint: String,
     pub timeout_secs: u64,
     pub auth_header_format: AuthHeaderFormat,
+    /// Per-model context window (max tokens). Key = model id, value = max tokens.
+    /// If a model isn't listed, the caller should fall back to a sensible default.
+    pub context_windows: std::collections::HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuthHeaderFormat {
-    Bearer,               // Authorization: Bearer <key>
-    AnthropicApiKey,      // x-api-key: <key>
-    QueryParam(String),   // ?key=<key> (e.g. Gemini)
-    None,                 // Ollama default local
+    Bearer,             // Authorization: Bearer <key>
+    AnthropicApiKey,    // x-api-key: <key>
+    QueryParam(String), // ?key=<key> (e.g. Gemini)
+    None,               // Ollama default local
+}
+
+fn ctx_windows(map: &[(&str, u32)]) -> std::collections::HashMap<String, u32> {
+    map.iter().map(|(k, v)| (k.to_string(), *v)).collect()
 }
 
 pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
@@ -34,6 +41,18 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("gpt-4o", 128_000),
+                ("gpt-4o-mini", 128_000),
+                ("gpt-4-turbo", 128_000),
+                ("gpt-4", 8_192),
+                ("gpt-4-32k", 32_768),
+                ("gpt-3.5-turbo", 16_385),
+                ("gpt-3.5-turbo-16k", 16_385),
+                ("o1-preview", 128_000),
+                ("o1-mini", 128_000),
+                ("o3-mini", 200_000),
+            ]),
         },
         ProviderDescriptor {
             id: "anthropic".to_string(),
@@ -42,6 +61,13 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::AnthropicApiKey,
+            context_windows: ctx_windows(&[
+                ("claude-3-5-sonnet-20241022", 200_000),
+                ("claude-3-5-haiku-20241022", 200_000),
+                ("claude-3-opus-20240229", 200_000),
+                ("claude-3-sonnet-20240229", 200_000),
+                ("claude-3-haiku-20240307", 200_000),
+            ]),
         },
         ProviderDescriptor {
             id: "gemini".to_string(),
@@ -50,6 +76,12 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::QueryParam("key".to_string()),
+            context_windows: ctx_windows(&[
+                ("gemini-1.5-pro", 2_000_000),
+                ("gemini-1.5-flash", 1_000_000),
+                ("gemini-1.0-pro", 32_768),
+                ("gemini-2.0-flash-exp", 1_000_000),
+            ]),
         },
         ProviderDescriptor {
             id: "deepseek".to_string(),
@@ -58,6 +90,11 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("deepseek-chat", 64_000),
+                ("deepseek-coder", 64_000),
+                ("deepseek-reasoner", 64_000),
+            ]),
         },
         ProviderDescriptor {
             id: "groq".to_string(),
@@ -66,6 +103,13 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("llama-3.3-70b-versatile", 128_000),
+                ("llama-3.1-70b-versatile", 128_000),
+                ("llama-3.1-8b-instant", 128_000),
+                ("mixtral-8x7b-32768", 32_768),
+                ("gemma2-9b-it", 8_192),
+            ]),
         },
         ProviderDescriptor {
             id: "ollama".to_string(),
@@ -74,6 +118,16 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::None,
+            context_windows: ctx_windows(&[
+                ("llama3.2", 128_000),
+                ("llama3.1", 128_000),
+                ("llama3", 8_192),
+                ("mistral", 32_768),
+                ("codellama", 16_384),
+                ("qwen2.5", 128_000),
+                ("phi3", 16_384),
+                ("gemma2", 8_192),
+            ]),
         },
         ProviderDescriptor {
             id: "openrouter".to_string(),
@@ -82,6 +136,12 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("anthropic/claude-3.5-sonnet", 200_000),
+                ("openai/gpt-4o", 128_000),
+                ("google/gemini-pro-1.5", 2_000_000),
+                ("meta-llama/llama-3.3-70b-instruct", 128_000),
+            ]),
         },
         ProviderDescriptor {
             id: "together".to_string(),
@@ -90,6 +150,11 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("meta-llama/Llama-3.3-70B-Instruct-Turbo", 128_000),
+                ("meta-llama/Llama-3.1-70B-Instruct-Turbo", 128_000),
+                ("Qwen/Qwen2.5-72B-Instruct", 128_000),
+            ]),
         },
         ProviderDescriptor {
             id: "mistral".to_string(),
@@ -98,6 +163,12 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("mistral-large-latest", 128_000),
+                ("pixtral-large-latest", 128_000),
+                ("codestral-latest", 32_768),
+                ("ministral-8b-latest", 128_000),
+            ]),
         },
         ProviderDescriptor {
             id: "nvidia".to_string(),
@@ -106,6 +177,13 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("deepseek-ai/deepseek-v4.1-flash", 128_000),
+                ("meta/llama-3.1-70b-instruct", 128_000),
+                ("meta/llama-3.1-8b-instruct", 128_000),
+                ("nvidia/nemotron-3-ultra", 128_000),
+                ("mistralai/mistral-large", 128_000),
+            ]),
         },
         ProviderDescriptor {
             id: "xai".to_string(),
@@ -114,6 +192,10 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("grok-2-latest", 131_072),
+                ("grok-beta", 131_072),
+            ]),
         },
         ProviderDescriptor {
             id: "zai".to_string(),
@@ -122,6 +204,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("glm-4-plus", 128_000)]),
         },
         ProviderDescriptor {
             id: "alibaba".to_string(),
@@ -130,6 +213,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("qwen-plus", 128_000)]),
         },
         ProviderDescriptor {
             id: "moonshot".to_string(),
@@ -138,6 +222,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("moonshot-v1-8k", 8_192)]),
         },
         ProviderDescriptor {
             id: "minimax".to_string(),
@@ -146,6 +231,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("abab6.5s-chat", 245_760)]),
         },
         ProviderDescriptor {
             id: "huggingface".to_string(),
@@ -154,6 +240,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("meta-llama/Llama-3.1-70B-Instruct", 128_000)]),
         },
         ProviderDescriptor {
             id: "copilot".to_string(),
@@ -162,6 +249,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[("gpt-4o", 128_000)]),
         },
         ProviderDescriptor {
             id: "lmstudio".to_string(),
@@ -170,6 +258,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "stepfun".to_string(),
@@ -178,6 +267,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "arcee".to_string(),
@@ -186,6 +276,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "gmi".to_string(),
@@ -194,6 +285,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "kilocode".to_string(),
@@ -202,6 +294,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "ai-gateway".to_string(),
@@ -210,6 +303,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "custom".to_string(),
@@ -218,6 +312,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: std::collections::HashMap::new(),
         },
         ProviderDescriptor {
             id: "antigravity".to_string(),
@@ -226,6 +321,12 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/fetchAvailableModels".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("gemini-3.8-flash-tiered", 1_000_000),
+                ("claude-sonnet-4-6", 200_000),
+                ("claude-opus-4-6-thinking", 200_000),
+                ("gemini-2.5-pro", 1_000_000),
+            ]),
         },
     ]
 }
