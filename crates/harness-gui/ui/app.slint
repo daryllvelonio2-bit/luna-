@@ -72,10 +72,18 @@ export component AppWindow inherits Window {
     in-out property <[SessionItem]> sessions: [];
     in-out property <[FileItem]> files: [];
 
-    in-out property <string> model_name: "Gemini 3.8 Flash High";
+    in-out property <string> model_name: "gemini-3.8-flash";
+    in-out property <string> current_provider: "antigravity";
+    in-out property <string> selected_provider: "antigravity";
     in-out property <string> workspace_name: "rust-agent-harness";
     in-out property <string> current_file: "crates/harness-gui/src/main.rs";
     in-out property <string> composer_text: "";
+
+    in-out property <bool> model_picker_open: false;
+    in-out property <int> picker_step: 0;
+
+    in-out property <[string]> available_providers: ["antigravity", "nvidia"];
+    in-out property <[string]> available_models: ["gemini-3.8-flash", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b"];
 
     in-out property <length> left_sidebar_width: 240px;
     in-out property <bool> left_sidebar_open: true;
@@ -86,6 +94,8 @@ export component AppWindow inherits Window {
     callback submit_message(string);
     callback select_session(string);
     callback new_session();
+    callback select_provider(string);
+    callback select_model(string);
 
     VerticalLayout {
         padding: 0px;
@@ -262,10 +272,364 @@ export component AppWindow inherits Window {
             }
 
             // 2. Center Screen (Full screen, zero margin gaps to sidebars)
-            Rectangle {
+            center_area := Rectangle {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 background: #101014;
+                clip: true;
+
+                // Scrollable Chat Message History
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        padding-bottom: 100px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        for msg in root.transcript : Rectangle {
+                            background: msg.role == "user" ? #191924 : #14141d;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: msg.role == "user" ? #28283a : #20202e;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 6px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: msg.author;
+                                        color: msg.role == "user" ? #38bdf8 : #c084fc;
+                                        font-weight: 700;
+                                        font-size: 11px;
+                                    }
+                                    Text {
+                                        text: msg.timestamp;
+                                        color: #52525b;
+                                        font-size: 10px;
+                                    }
+                                }
+
+                                Text {
+                                    text: msg.content;
+                                    color: #e4e4e7;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Backdrop to close picker on outside click
+                if root.model_picker_open : TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => {
+                        root.model_picker_open = false;
+                    }
+                }
+
+                // Anchored Dropdown Menu for Model Changing
+                if root.model_picker_open : Rectangle {
+                    x: max(16px, chat_box.x + 12px);
+                    y: max(16px, chat_box.y - self.height - 8px);
+                    width: 330px;
+                    height: 220px;
+                    border-radius: 10px;
+                    background: #181822;
+                    border-width: 1px;
+                    border-color: #323246;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-color: #00000099;
+                    drop-shadow-offset-y: 4px;
+                    clip: true;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+
+                        // Step 0: Available Providers
+                        if root.picker_step == 0 : VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                padding-left: 6px;
+                                padding-right: 6px;
+
+                                Text {
+                                    text: "AVAILABLE PROVIDERS";
+                                    color: #71717a;
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.available_providers.length + " available";
+                                    color: #52525b;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #262634; }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for prov in root.available_providers : Rectangle {
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: p_touch.has-hover ? #252536 : (root.current_provider == prov ? #20202e : transparent);
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            alignment: space-between;
+
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: "●";
+                                                    color: #22c55e;
+                                                    font-size: 8px;
+                                                    vertical-alignment: center;
+                                                }
+                                                Text {
+                                                    text: prov;
+                                                    color: root.current_provider == prov ? #38bdf8 : #f4f4f5;
+                                                    font-size: 12px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            Text {
+                                                text: "›";
+                                                color: #71717a;
+                                                font-size: 14px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        p_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.select_provider(prov);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Step 1: Available Models for Selected Provider
+                        if root.picker_step == 1 : VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                padding-left: 4px;
+                                padding-right: 6px;
+
+                                // Back button
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: back_touch.has-hover ? #262636 : transparent;
+
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        padding-left: 4px;
+                                        padding-right: 4px;
+                                        Text { text: "‹"; color: #38bdf8; font-size: 14px; vertical-alignment: center; }
+                                        Text { text: "Providers"; color: #38bdf8; font-size: 11px; vertical-alignment: center; }
+                                    }
+
+                                    back_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.picker_step = 0;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: root.selected_provider;
+                                    color: #a1a1aa;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #262634; }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for mdl in root.available_models : Rectangle {
+                                        height: 30px;
+                                        border-radius: 6px;
+                                        background: m_touch.has-hover ? #252536 : (root.model_name == mdl ? #20202e : transparent);
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            alignment: space-between;
+
+                                            Text {
+                                                text: mdl;
+                                                color: root.model_name == mdl ? #38bdf8 : #e4e4e7;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+
+                                            if root.model_name == mdl : Text {
+                                                text: "✓";
+                                                color: #38bdf8;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        m_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.select_model(mdl);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Floating Chat Box in Lower Part
+                chat_box := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 20px;
+                    width: min(720px, parent.width - 40px);
+                    height: 72px;
+                    border-radius: 12px;
+                    background: #181822;
+                    border-width: 1px;
+                    border-color: #2b2b3a;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-color: #00000088;
+                    drop-shadow-offset-y: 4px;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+
+                        // Upper Row: Small Change Model Button
+                        HorizontalLayout {
+                            alignment: start;
+
+                            model_btn := Rectangle {
+                                height: 22px;
+                                border-radius: 5px;
+                                background: model_touch.pressed ? #2c2c3e : (model_touch.has-hover ? #242434 : #1e1e2c);
+                                border-width: 1px;
+                                border-color: root.model_picker_open ? #38bdf8 : #2e2e42;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "⚡ " + (root.current_provider != "" ? root.current_provider + " : " : "") + root.model_name;
+                                        color: root.model_picker_open ? #38bdf8 : #e4e4e7;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: root.model_picker_open ? "▴" : "▾";
+                                        color: #71717a;
+                                        font-size: 9px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                model_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.model_picker_open = !root.model_picker_open;
+                                        if root.model_picker_open {
+                                            root.picker_step = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Lower Row: Text Input & Submit
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: center;
+
+                            input := TextInput {
+                                text <=> root.composer_text;
+                                color: #f4f4f5;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                accepted => {
+                                    if (root.composer_text != "") {
+                                        root.submit_message(root.composer_text);
+                                        root.composer_text = "";
+                                    }
+                                }
+                            }
+
+                            send_btn := Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                border-radius: 13px;
+                                background: root.composer_text != "" ? #38bdf8 : #282836;
+
+                                Text {
+                                    text: "↑";
+                                    color: root.composer_text != "" ? #000000 : #71717a;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.composer_text != "") {
+                                            root.submit_message(root.composer_text);
+                                            root.composer_text = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Right Splitter (Resize handle)
