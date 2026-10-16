@@ -120,8 +120,8 @@ impl Tool for SearchNotesTool {
             .into_iter()
             .map(|n| {
                 json!({
-                    "id": n.id,
                     "title": n.title,
+                    "id": n.id,
                     "summary_pointer": n.summary_pointer,
                     "tags": n.tags,
                     "snippet": n.content.chars().take(200).collect::<String>(),
@@ -150,14 +150,14 @@ impl Tool for ReadNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Retrieve the full verbatim content of a note by its note_id."
+        "Retrieve the full verbatim content of a note by its title or note_id."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Unique note identifier (e.g. 'note_...')" }
+                "id": { "type": "string", "description": "Note title or unique note identifier (e.g. 'Stripe Webhook Spec' or 'note_...')" }
             },
             "required": ["id"]
         })
@@ -199,7 +199,7 @@ impl Tool for UpdateNoteTool {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Unique note identifier" },
+                "id": { "type": "string", "description": "Note title or unique note identifier" },
                 "title": { "type": "string", "description": "New title (optional)" },
                 "content": { "type": "string", "description": "New content body (optional)" }
             },
@@ -259,7 +259,7 @@ impl Tool for DeleteNoteTool {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Unique note identifier to delete (e.g. 'note_...')" }
+                "id": { "type": "string", "description": "Note title or unique note identifier to delete" }
             },
             "required": ["id"]
         })

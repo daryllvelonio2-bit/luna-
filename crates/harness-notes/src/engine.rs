@@ -182,7 +182,7 @@ impl NotesEngine for SqliteNotesEngine {
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, content, summary_pointer, tags, created_at, updated_at
-                 FROM notes WHERE id = ?1",
+                 FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE",
             )
             .map_err(|e| HarnessError::NotesError(e.to_string()))?;
 
@@ -254,7 +254,10 @@ impl NotesEngine for SqliteNotesEngine {
         // The `notes_ad` trigger mirrors the delete into the FTS index, so no manual
         // `notes_fts` maintenance is needed here.
         let affected = conn
-            .execute("DELETE FROM notes WHERE id = ?1", params![id])
+            .execute(
+                "DELETE FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE",
+                params![id],
+            )
             .map_err(|e| HarnessError::NotesError(e.to_string()))?;
 
         if affected > 0 {

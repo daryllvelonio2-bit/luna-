@@ -271,3 +271,167 @@ impl Tool for VerifyAndStageUpdateTool {
         }
     }
 }
+
+pub struct PtyScreenCaptureTool {
+    workspace_root: std::path::PathBuf,
+}
+
+impl PtyScreenCaptureTool {
+    pub fn new(workspace_root: std::path::PathBuf) -> Self {
+        Self { workspace_root }
+    }
+}
+
+#[async_trait]
+impl Tool for PtyScreenCaptureTool {
+    fn name(&self) -> &str {
+        "pty_screen_capture"
+    }
+
+    fn description(&self) -> &str {
+        "Spawn a binary or command in an isolated pseudo-terminal (PTY) with timed inputs and return a 2D virtual screen capture snapshot as seen by a human terminal user."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "binary": { "type": "string", "description": "Path to binary or executable (default: 'target/release/luna')" },
+                "args": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments" },
+                "inputs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "delay_ms": { "type": "integer", "description": "Delay in milliseconds before sending this keystroke sequence" },
+                            "input": { "type": "string", "description": "Keystroke string (supports escape sequences like '\\r' for enter, '\\x03' for Ctrl-C, '\\x1b[B' for down)" }
+                        },
+                        "required": ["delay_ms", "input"]
+                    },
+                    "description": "Timed keystroke sequence to feed into the PTY"
+                },
+                "rows": { "type": "integer", "description": "Terminal rows (default: 24)" },
+                "cols": { "type": "integer", "description": "Terminal columns (default: 80)" },
+                "timeout_secs": { "type": "integer", "description": "Maximum execution time in seconds (default: 15)" }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let binary_str = args
+            .get("binary")
+            .and_then(|b| b.as_str())
+            .unwrap_or("target/release/luna");
+
+        let bin_path = if std::path::Path::new(binary_str).is_absolute() {
+            std::path::PathBuf::from(binary_str)
+        } else {
+            self.workspace_root.join(binary_str)
+        };
+
+        if !bin_path.exists() {
+            return Ok(ToolResult::error(
+                call_id,
+                format!("Binary not found at {}", bin_path.display()),
+            ));
+        }
+
+        let cmd_args: Vec<String> = args
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cmd_args_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+
+        let mut timed_inputs: Vec<crate::pty::TimedInput> = Vec::new();
+        if let Some(arr) = args.get("inputs").and_then(|i| i.as_array()) {
+            for item in arr {
+                let delay = item.get("delay_ms").and_then(|d| d.as_u64()).unwrap_or(0);
+                if let Some(txt) = item.get("input").and_then(|t| t.as_str()) {
+                    let unescaped = unescape_keystrokes(txt);
+                    timed_inputs.push(crate::pty::TimedInput {
+                        delay_ms: delay,
+                        input: unescaped,
+                    });
+                }
+            }
+        }
+
+        let rows = args.get("rows").and_then(|r| r.as_u64()).unwrap_or(24) as usize;
+        let cols = args.get("cols").and_then(|c| c.as_u64()).unwrap_or(80) as usize;
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(15);
+
+        match crate::pty::run_in_pty_with_capture(
+            &bin_path,
+            &cmd_args_refs,
+            &self.workspace_root,
+            &timed_inputs,
+            rows,
+            cols,
+            std::time::Duration::from_secs(timeout_secs),
+        ) {
+            Ok((code, _raw, capture)) => {
+                let out = json!({
+                    "exit_code": code,
+                    "rows": capture.rows,
+                    "cols": capture.cols,
+                    "cursor": {
+                        "row": capture.cursor_row,
+                        "col": capture.cursor_col
+                    },
+                    "screen_display": capture.rendered_display,
+                    "visible_lines": capture.lines
+                });
+                Ok(ToolResult::success(call_id, out.to_string()))
+            }
+            Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
+        }
+    }
+}
+
+fn unescape_keystrokes(s: &str) -> String {
+    let mut res = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('r') => res.push('\r'),
+                Some('n') => res.push('\n'),
+                Some('t') => res.push('\t'),
+                Some('\\') => res.push('\\'),
+                Some('x') => {
+                    let mut hex = String::new();
+                    if let Some(h1) = chars.next() {
+                        hex.push(h1);
+                    }
+                    if let Some(h2) = chars.next() {
+                        hex.push(h2);
+                    }
+                    if let Ok(b) = u8::from_str_radix(&hex, 16) {
+                        res.push(b as char);
+                    }
+                }
+                Some(other) => {
+                    res.push('\\');
+                    res.push(other);
+                }
+                None => res.push('\\'),
+            }
+        } else {
+            res.push(c);
+        }
+    }
+    res
+}

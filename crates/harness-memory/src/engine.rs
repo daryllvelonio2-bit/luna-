@@ -295,7 +295,7 @@ impl MemoryEngine for SqliteMemoryEngine {
             subject: "note".to_string(),
             predicate: format!("doc_{}", note_id),
             object: pointer.to_string(),
-            raw_content: format!("Note [ID: {}]: {}", note_id, pointer),
+            raw_content: format!("Note \"{}\" (id: {})", pointer, note_id),
             category: MemoryCategory::NotePointer,
             confidence: 1.0,
             created_at: Utc::now(),
@@ -313,10 +313,14 @@ impl MemoryEngine for SqliteMemoryEngine {
 
         let mut lines = Vec::new();
         for m in memories {
-            lines.push(format!(
-                "- [{}] {}: {} (ID: {})",
-                m.category, m.subject, m.raw_content, m.id
-            ));
+            if m.category == MemoryCategory::NotePointer {
+                lines.push(format!("- [Note] {}", m.raw_content));
+            } else {
+                lines.push(format!(
+                    "- [{}] {}: {} (ID: {})",
+                    m.category, m.subject, m.raw_content, m.id
+                ));
+            }
         }
         lines.join("\n")
     }

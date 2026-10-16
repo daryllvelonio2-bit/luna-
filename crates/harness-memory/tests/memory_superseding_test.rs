@@ -55,7 +55,7 @@ async fn test_multiple_note_pointers_remain_active() {
     engine.add_note_pointer("note_1", "Stripe Payment Gateway Spec 2026").await.unwrap();
     engine.add_note_pointer("note_2", "Rust Harness Architecture").await.unwrap();
 
-    let res = engine.retrieve("Note [ID:", 10).await.unwrap();
+    let res = engine.retrieve("Note", 10).await.unwrap();
     assert_eq!(res.len(), 2, "Both note pointers must remain active");
 
     let ids: Vec<String> = res.iter().map(|m| m.id.clone()).collect();

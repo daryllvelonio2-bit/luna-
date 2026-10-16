@@ -257,8 +257,8 @@ pub struct MemoryRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
-    pub id: String,
     pub title: String,
+    pub id: String,
     pub content: String,
     pub summary_pointer: String,
     pub tags: Vec<String>,

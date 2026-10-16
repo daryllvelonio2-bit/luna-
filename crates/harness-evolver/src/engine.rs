@@ -18,8 +18,6 @@ use harness_core::tools::{
     PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, WriteFileTool,
 };
 
-use crate::pty::run_in_pty;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "details")]
 pub enum JobStatus {
@@ -55,6 +53,99 @@ pub struct PendingUpdate {
     pub staged_at: DateTime<Utc>,
 }
 
+/// Discovers the true root of the Luna harness repository.
+/// When Luna is launched from outside its git repository (e.g. from the user's home directory),
+/// this resolves the repository path by checking:
+/// 1. `LUNA_HARNESS_REPO` environment variable.
+/// 2. Whether `hint` is within the harness git repository.
+/// 3. The executable location (canonicalized target).
+/// 4. Common known user checkout directories under `$HOME`.
+pub fn discover_harness_repo_root(hint: PathBuf) -> PathBuf {
+    if let Ok(env_path) = std::env::var("LUNA_HARNESS_REPO") {
+        let p = PathBuf::from(env_path);
+        if is_harness_repo(&p) {
+            return p;
+        }
+    }
+
+    if let Some(root) = find_git_toplevel(&hint) {
+        if is_harness_repo(&root) {
+            return root;
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let mut curr = canonical.parent();
+        while let Some(parent) = curr {
+            if is_harness_repo(parent) {
+                return parent.to_path_buf();
+            }
+            curr = parent.parent();
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME").map(PathBuf::from) {
+        for candidate in [
+            home.join("Downloads/rust-agent-harness"),
+            home.join("rust-agent-harness"),
+            home.join("Projects/rust-agent-harness"),
+            home.join("src/rust-agent-harness"),
+        ] {
+            if is_harness_repo(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    hint
+}
+
+fn is_harness_repo(path: &Path) -> bool {
+    path.join(".git").exists() && path.join("crates/harness-core").exists()
+}
+
+fn find_git_toplevel(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !root.is_empty() {
+            return Some(PathBuf::from(root));
+        }
+    }
+    None
+}
+
+/// Cleans up a git worktree, its branch, and any leftover directory on disk.
+fn cleanup_worktree(repo_root: &Path, worktree_dir: &Path, branch: Option<&str>) {
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_dir.to_string_lossy(),
+        ])
+        .output();
+
+    if let Some(b) = branch {
+        let _ = Command::new("git")
+            .args(["-C", &repo_root.to_string_lossy(), "branch", "-D", b])
+            .output();
+    }
+
+    if worktree_dir.exists() {
+        let _ = fs::remove_dir_all(worktree_dir);
+    }
+}
+
 pub struct CodebaseEvolver {
     repo_root: PathBuf,
     jobs_dir: PathBuf,
@@ -64,6 +155,7 @@ pub struct CodebaseEvolver {
 
 impl CodebaseEvolver {
     pub fn new(repo_root: PathBuf, jobs_dir: PathBuf) -> Self {
+        let repo_root = discover_harness_repo_root(repo_root);
         let _ = fs::create_dir_all(&jobs_dir);
         Self {
             repo_root,
@@ -71,6 +163,10 @@ impl CodebaseEvolver {
             provider: RwLock::new(None),
             jobs: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
     }
 
     pub fn with_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
@@ -209,18 +305,32 @@ impl CodebaseEvolver {
 
         let wt_dir = PathBuf::from(&job.worktree_dir);
 
-        // Run scenario in PTY
-        let (code, output) = run_in_pty(
+        let inputs = if let Some(txt) = scenario_input {
+            vec![crate::pty::TimedInput {
+                delay_ms: 400,
+                input: txt.to_string(),
+            }]
+        } else {
+            vec![]
+        };
+
+        // Run scenario in PTY with full 2D virtual terminal screen capture
+        let (code, output, capture) = crate::pty::run_in_pty_with_capture(
             &binary_path,
             &[],
             &wt_dir,
-            scenario_input,
+            &inputs,
+            24,
+            80,
             Duration::from_secs(45),
         )?;
 
-        // Differential verification: exit code 0 and absent pattern not in output
+        // Differential verification: exit code 0 and absent pattern not in output or screen
         if code != 0 {
-            let reason = format!("PTY execution failed with exit code {}:\n{}", code, output);
+            let reason = format!(
+                "PTY execution failed with exit code {}.\n\n--- SCREEN CAPTURE ({}x{}) ---\n{}\n\nRaw output:\n{}",
+                code, capture.rows, capture.cols, capture.rendered_display, output
+            );
             job.status = JobStatus::FailedVerification {
                 reason: reason.clone(),
             };
@@ -228,18 +338,15 @@ impl CodebaseEvolver {
             job.logs.push(format!("Verification failed: {}", reason));
             let _ = self.save_job(&job).await;
             // Clean up worktree on failure
-            let _ = Command::new("git")
-                .args(["worktree", "remove", "--force", &job.worktree_dir])
-                .current_dir(&self.repo_root)
-                .output();
+            cleanup_worktree(&self.repo_root, Path::new(&job.worktree_dir), Some(&job.branch));
             return Err(HarnessError::EvolverError(reason));
         }
 
         if let Some(pattern) = absent_pattern {
-            if output.contains(pattern) {
+            if output.contains(pattern) || capture.rendered_display.contains(pattern) {
                 let reason = format!(
-                    "Regression check failed: forbidden pattern '{}' found in output:\n{}",
-                    pattern, output
+                    "Regression check failed: forbidden pattern '{}' found in terminal display.\n\n--- SCREEN CAPTURE ({}x{}) ---\n{}",
+                    pattern, capture.rows, capture.cols, capture.rendered_display
                 );
                 job.status = JobStatus::FailedVerification {
                     reason: reason.clone(),
@@ -247,10 +354,7 @@ impl CodebaseEvolver {
                 job.updated_at = Utc::now();
                 job.logs.push(format!("Verification failed: {}", reason));
                 let _ = self.save_job(&job).await;
-                let _ = Command::new("git")
-                    .args(["worktree", "remove", "--force", &job.worktree_dir])
-                    .current_dir(&self.repo_root)
-                    .output();
+                cleanup_worktree(&self.repo_root, Path::new(&job.worktree_dir), Some(&job.branch));
                 return Err(HarnessError::EvolverError(reason));
             }
         }
@@ -278,8 +382,8 @@ impl CodebaseEvolver {
             .map_err(|e| HarnessError::Io(e.to_string()))?;
 
         Ok(format!(
-            "Job '{}' successfully verified! Update is scheduled to apply on next launch.",
-            job_id
+            "Job '{}' successfully verified! Update is scheduled to apply on next launch.\n\n--- SCREEN CAPTURE ({}x{}) ---\n{}",
+            job_id, capture.rows, capture.cols, capture.rendered_display
         ))
     }
 
@@ -332,6 +436,8 @@ async fn run_engineer_job(
 
     let add_res = Command::new("git")
         .args([
+            "-C",
+            &repo_root.to_string_lossy(),
             "worktree",
             "add",
             "-b",
@@ -339,7 +445,6 @@ async fn run_engineer_job(
             &worktree_dir.to_string_lossy(),
             "main",
         ])
-        .current_dir(&repo_root)
         .output();
 
     match add_res {
@@ -348,6 +453,7 @@ async fn run_engineer_job(
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
+            cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
             record.status = JobStatus::FailedTest {
                 error: format!("git worktree add failed: {}", err),
             };
@@ -356,6 +462,7 @@ async fn run_engineer_job(
             return Err(HarnessError::EvolverError(err));
         }
         Err(e) => {
+            cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
             record.status = JobStatus::FailedTest {
                 error: format!("Failed to run git: {}", e),
             };
@@ -460,11 +567,8 @@ async fn run_engineer_job(
     if !tests_passed {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        // Clean up worktree
-        let _ = Command::new("git")
-            .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
-            .current_dir(&repo_root)
-            .output();
+        // Clean up worktree and branch
+        cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
         return Ok(());
     }
 
@@ -497,10 +601,7 @@ async fn run_engineer_job(
     if !build_ok {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        let _ = Command::new("git")
-            .args(["worktree", "remove", "--force", &worktree_dir.to_string_lossy()])
-            .current_dir(&repo_root)
-            .output();
+        cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
         return Ok(());
     }
 
@@ -520,6 +621,8 @@ async fn run_engineer_job(
 
 /// Applies a pending update: merges git branch, swaps binary, cleans worktree and branch.
 pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Option<String>, HarnessError> {
+    let repo_root_buf = discover_harness_repo_root(repo_root.to_path_buf());
+    let repo_root = repo_root_buf.as_path();
     let pending_file = jobs_dir.join("pending_update.json");
     if !pending_file.exists() {
         return Ok(None);
@@ -534,8 +637,13 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
 
     // 1. Merge branch into main
     let merge_out = Command::new("git")
-        .args(["merge", "--no-edit", &pending.branch])
-        .current_dir(repo_root)
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "merge",
+            "--no-edit",
+            &pending.branch,
+        ])
         .output()
         .map_err(|e| HarnessError::Io(format!("Failed to execute git merge: {}", e)))?;
 
@@ -555,15 +663,7 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
     }
 
     // 3. Clean up worktree and branch
-    let _ = Command::new("git")
-        .args(["worktree", "remove", "--force", &pending.worktree_dir])
-        .current_dir(repo_root)
-        .output();
-
-    let _ = Command::new("git")
-        .args(["branch", "-D", &pending.branch])
-        .current_dir(repo_root)
-        .output();
+    cleanup_worktree(repo_root, Path::new(&pending.worktree_dir), Some(&pending.branch));
 
     // 4. Delete pending update marker
     let _ = fs::remove_file(&pending_file);
@@ -684,5 +784,39 @@ impl EvolverEngine for NoopEvolver {
     }
     async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
         Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_harness_repo_root_finds_actual_repo() {
+        let discovered = discover_harness_repo_root(PathBuf::from("/tmp"));
+        assert!(
+            discovered.join("crates/harness-core").exists(),
+            "must locate repo root with crates/harness-core, got: {:?}",
+            discovered
+        );
+        assert!(
+            discovered.join(".git").exists(),
+            "must locate repo root with .git, got: {:?}",
+            discovered
+        );
+    }
+
+    #[test]
+    fn discover_harness_repo_root_respects_env_var() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("fake_repo");
+        fs::create_dir_all(repo_path.join(".git")).unwrap();
+        fs::create_dir_all(repo_path.join("crates/harness-core")).unwrap();
+
+        std::env::set_var("LUNA_HARNESS_REPO", repo_path.to_string_lossy().to_string());
+        let discovered = discover_harness_repo_root(PathBuf::from("/tmp"));
+        std::env::remove_var("LUNA_HARNESS_REPO");
+
+        assert_eq!(discovered, repo_path);
     }
 }

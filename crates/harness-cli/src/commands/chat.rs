@@ -12,7 +12,7 @@ use harness_core::{
 };
 use harness_evolver::{
     apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
-    InspectSourceTool, ListImprovementJobsTool, VerifyAndStageUpdateTool,
+    InspectSourceTool, ListImprovementJobsTool, PtyScreenCaptureTool, VerifyAndStageUpdateTool,
 };
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
@@ -559,6 +559,7 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone()))).await?;
+    registry.register(Arc::new(PtyScreenCaptureTool::new(config.paths.workspace_root.clone()))).await?;
 
     // Register skills from skills_dir
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
@@ -706,7 +707,7 @@ pub async fn run_interactive_chat(
                     || trimmed.eq_ignore_ascii_case("yes")
                 {
                     match apply_update_at_startup(
-                        &config.paths.workspace_root,
+                        evolver.repo_root(),
                         &config.paths.jobs_dir,
                     ) {
                         Ok(Some(msg)) => {
