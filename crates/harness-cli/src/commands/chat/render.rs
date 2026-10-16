@@ -7,7 +7,193 @@
 use std::time::Duration;
 
 use colored::Colorize;
-use harness_core::ApprovalRequest;
+use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
+
+/// Formatted tool execution lines for a single tool call within a turn's process.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnProcessItem {
+    pub call_formatted: String,
+    pub result_formatted: String,
+}
+
+/// A completed turn in the chat session, holding its query, intermediate reasoning, tool calls, and final reply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnRecord {
+    pub user_query: String,
+    pub reasoning: Option<String>,
+    pub tools: Vec<TurnToolCall>,
+    pub tool_items: Vec<TurnProcessItem>,
+    pub duration: Duration,
+    pub reply: String,
+}
+
+/// Parse historical stored messages into structured `TurnRecord`s for collapsible rendering.
+pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
+    let mut turns = Vec::new();
+    let mut current_query: Option<String> = None;
+    let mut current_reasoning: Option<String> = None;
+    let mut current_tools: Vec<TurnProcessItem> = Vec::new();
+
+    for stored in history {
+        let msg = &stored.message;
+        match msg.role {
+            Role::User => {
+                if let Some(q) = current_query.take() {
+                    turns.push(TurnRecord {
+                        user_query: q,
+                        reasoning: current_reasoning.take(),
+                        tools: Vec::new(),
+                        tool_items: std::mem::take(&mut current_tools),
+                        duration: Duration::ZERO,
+                        reply: String::new(),
+                    });
+                }
+                current_query = msg.content.clone();
+            }
+            Role::Assistant => {
+                if let Some(ref r) = msg.reasoning {
+                    current_reasoning = Some(r.clone());
+                }
+                for call in &msg.tool_calls {
+                    current_tools.push(TurnProcessItem {
+                        call_formatted: format_tool_call(&call.name, &call.arguments),
+                        result_formatted: String::new(),
+                    });
+                }
+                if let Some(ref content) = msg.content {
+                    if !content.trim().is_empty() {
+                        let q = current_query.take().unwrap_or_default();
+                        turns.push(TurnRecord {
+                            user_query: q,
+                            reasoning: current_reasoning.take(),
+                            tools: Vec::new(),
+                            tool_items: std::mem::take(&mut current_tools),
+                            duration: Duration::ZERO,
+                            reply: content.clone(),
+                        });
+                    }
+                }
+            }
+            Role::Tool => {
+                if let Some(ref res) = msg.tool_result {
+                    let fmt = format_tool_result(res.is_error, &res.content);
+                    if let Some(last) = current_tools.last_mut() {
+                        if last.result_formatted.is_empty() {
+                            last.result_formatted = fmt;
+                        } else {
+                            current_tools.push(TurnProcessItem {
+                                call_formatted: String::new(),
+                                result_formatted: fmt,
+                            });
+                        }
+                    } else {
+                        current_tools.push(TurnProcessItem {
+                            call_formatted: String::new(),
+                            result_formatted: fmt,
+                        });
+                    }
+                }
+            }
+            Role::System if stored.is_summary => {
+                if let Some(ref c) = msg.content {
+                    turns.push(TurnRecord {
+                        user_query: format!("• {}", c),
+                        reasoning: None,
+                        tools: Vec::new(),
+                        tool_items: Vec::new(),
+                        duration: Duration::ZERO,
+                        reply: String::new(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(q) = current_query {
+        turns.push(TurnRecord {
+            user_query: q,
+            reasoning: current_reasoning,
+            tools: Vec::new(),
+            tool_items: current_tools,
+            duration: Duration::ZERO,
+            reply: String::new(),
+        });
+    }
+
+    turns
+}
+
+/// Renders all completed turns into the transcript.
+/// When `expanded` is false, intermediate processes (reasoning + tools) collapse into a single line.
+/// When `expanded` is true (toggled via Ctrl+O), full reasoning and tool logs are rendered inline.
+pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
+    for (i, turn) in turns.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("{}", right_aligned_user_message(&turn.user_query, width));
+
+        let has_reasoning = turn
+            .reasoning
+            .as_ref()
+            .map(|r| !r.trim().is_empty())
+            .unwrap_or(false);
+        let has_tools = !turn.tools.is_empty() || !turn.tool_items.is_empty();
+
+        if has_reasoning || has_tools {
+            println!();
+            let tool_names: Vec<String> = if !turn.tools.is_empty() {
+                turn.tools.iter().map(|t| t.name.clone()).collect()
+            } else {
+                turn.tool_items
+                    .iter()
+                    .filter_map(|it| {
+                        it.call_formatted
+                            .split_whitespace()
+                            .nth(1)
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            };
+            let tools_count = turn.tools.len().max(turn.tool_items.len());
+
+            println!(
+                "{}",
+                format_process_header(
+                    expanded,
+                    tools_count,
+                    &tool_names,
+                    Some(turn.duration),
+                    has_reasoning
+                )
+            );
+
+            if expanded {
+                if let Some(r) = &turn.reasoning {
+                    if !r.trim().is_empty() {
+                        for row in reasoning_rows(r, width) {
+                            println!("{}", row);
+                        }
+                    }
+                }
+                for item in &turn.tool_items {
+                    if !item.call_formatted.is_empty() {
+                        println!("{}", item.call_formatted);
+                    }
+                    if !item.result_formatted.is_empty() {
+                        println!("{}", item.result_formatted);
+                    }
+                }
+            }
+        }
+
+        if !turn.reply.is_empty() {
+            println!();
+            println!("{}\n{}", LUNA_LABEL.bold().green(), turn.reply);
+        }
+    }
+}
 
 /// The composer prompt. The `User >` label is gone, so Luna's crescent marks the input line
 /// instead. U+263E LAST QUARTER MOON is a plain text glyph — terminals keep it
@@ -447,6 +633,76 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
     format!("{} {}", tag, body)
 }
 
+/// Formats the single summary header for intermediate processes (reasoning + tools).
+/// Collapsed by default: "▶ Process (N tools: ..., thought for X.Xs) · Ctrl+O to expand"
+/// Expanded when toggled: "▼ Process (N tools: ..., thought for X.Xs) · Ctrl+O to collapse"
+pub fn format_process_header(
+    expanded: bool,
+    tools_count: usize,
+    tool_names: &[String],
+    duration: Option<Duration>,
+    has_reasoning: bool,
+) -> String {
+    let glyph = if expanded {
+        "▼".cyan().bold()
+    } else {
+        "▶".cyan().bold()
+    };
+
+    let mut parts = Vec::new();
+
+    if tools_count > 0 {
+        let unique_names: Vec<String> = {
+            let mut set = Vec::new();
+            for name in tool_names {
+                if !set.contains(name) {
+                    set.push(name.clone());
+                }
+            }
+            set
+        };
+
+        let tools_label = if tools_count == 1 {
+            format!("1 tool: {}", unique_names.first().map(|s| s.as_str()).unwrap_or("tool"))
+        } else if unique_names.len() <= 2 {
+            format!("{} tools: {}", tools_count, unique_names.join(", "))
+        } else {
+            format!(
+                "{} tools: {}, {}, +{}",
+                tools_count,
+                unique_names[0],
+                unique_names[1],
+                unique_names.len() - 2
+            )
+        };
+        parts.push(tools_label);
+    }
+
+    if let Some(d) = duration {
+        if d.as_millis() >= 100 {
+            parts.push(format!("thought for {:.1}s", d.as_secs_f32()));
+        } else if has_reasoning {
+            parts.push("thinking".to_string());
+        }
+    } else if has_reasoning {
+        parts.push("thinking".to_string());
+    }
+
+    let meta = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(" · "))
+    };
+
+    let hint = if expanded {
+        " · Ctrl+O to collapse".dimmed()
+    } else {
+        " · Ctrl+O to expand".dimmed()
+    };
+
+    format!("{} {}{}{}", glyph, "Process".bold(), meta, hint)
+}
+
 /// Render a tool result as the line that closes a tool call: an error's first line, a short
 /// result in full, or a first line plus a count for a long one.
 pub fn format_tool_result(is_error: bool, output: &str) -> String {
@@ -714,5 +970,25 @@ mod tests {
         let line = format_approval_verdict(true, &req);
         assert!(line.contains("note_5d26a9f8…"), "got: {}", line);
         assert!(!line.contains("note_5d26a9f8-b905-43aa-8168-3f286a96ee3f"), "raw UUID must be shortened");
+    }
+
+    #[test]
+    fn process_header_formats_collapsed_with_tools_and_duration() {
+        let tools = vec!["read_file".to_string(), "patch".to_string()];
+        let header = format_process_header(false, 2, &tools, Some(Duration::from_millis(2400)), true);
+        assert!(header.contains("Process"), "got: {}", header);
+        assert!(header.contains("2 tools: read_file, patch"), "got: {}", header);
+        assert!(header.contains("thought for 2.4s"), "got: {}", header);
+        assert!(header.contains("Ctrl+O to expand"), "got: {}", header);
+        assert!(header.contains("▶"), "got: {}", header);
+    }
+
+    #[test]
+    fn process_header_formats_expanded_header() {
+        let tools = vec!["terminal".to_string()];
+        let header = format_process_header(true, 1, &tools, Some(Duration::from_millis(500)), false);
+        assert!(header.contains("▼"), "got: {}", header);
+        assert!(header.contains("1 tool: terminal"), "got: {}", header);
+        assert!(header.contains("Ctrl+O to collapse"), "got: {}", header);
     }
 }

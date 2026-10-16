@@ -95,8 +95,8 @@ mod render;
 
 use render::{
     activity_line, format_approval_verdict, format_tool_call, format_tool_result, needs_separator,
-    reasoning_rows, right_aligned_user_message, tool_activity_detail, OutputBlockKind, LUNA_LABEL,
-    PROMPT,
+    parse_turns_from_history, reasoning_rows, render_all_turns, right_aligned_user_message,
+    tool_activity_detail, OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 
 /// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
@@ -594,7 +594,7 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
-    let mut agent = Agent::new(
+    let agent = Agent::new(
         provider,
         memory,
         notes,
@@ -607,20 +607,33 @@ pub async fn run_interactive_chat(
         store: store.clone(),
         session_id: session_id.clone(),
         resume_max_messages: config.session.resume_max_messages,
-    })
-    .with_observer(Arc::new(move |event| match event {
+    });
+
+    let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
+    let in_flight_tools_obs = in_flight_tools.clone();
+
+    let mut agent = agent.with_observer(Arc::new(move |event| match event {
         // Reasoning lands in the live region and is settled into the transcript by the animation
         // tick, so it is visible while it is still being produced.
         harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
             ui_obs.finish_reasoning();
+            let call_fmt = format_tool_call(&name, &arguments);
             ui_obs.begin_block(OutputBlockKind::Tool);
-            ui_obs.emit_above(&format_tool_call(&name, &arguments));
+            ui_obs.emit_above(&call_fmt);
             ui_obs.start_activity(&name, &arguments);
+            in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                call_formatted: call_fmt,
+                result_formatted: String::new(),
+            });
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
             ui_obs.stop_activity();
-            ui_obs.emit_above(&format_tool_result(is_error, &output));
+            let res_fmt = format_tool_result(is_error, &output);
+            ui_obs.emit_above(&res_fmt);
+            if let Some(last) = in_flight_tools_obs.lock().unwrap().last_mut() {
+                last.result_formatted = res_fmt;
+            }
         }
     }));
     if let Some(setup) = compaction {
@@ -808,6 +821,9 @@ pub async fn run_interactive_chat(
     let replayed = store
         .replay(&session_id, config.session.resume_max_messages)
         .await?;
+    let mut turns: Vec<TurnRecord> = parse_turns_from_history(&replayed.history);
+    let mut process_expanded = false;
+
     if replayed.replayed > 0 {
         let width = get_terminal_width();
         if replayed.truncated() {
@@ -821,21 +837,7 @@ pub async fn run_interactive_chat(
                 .dimmed()
             );
         }
-        for stored in &replayed.history {
-            let content = stored.message.content.as_deref().unwrap_or_default();
-            match stored.message.role {
-                Role::User => println!("{}", right_aligned_user_message(content, width)),
-                Role::Assistant if !content.trim().is_empty() => {
-                    println!("{}\n{}", LUNA_LABEL.bold().green(), content)
-                }
-                Role::System if stored.is_summary => {
-                    println!("{}\n{}\n", "• Previous Session Summary:".dimmed().bold(), content.dimmed());
-                }
-                // Tool traffic and ordinary system messages are noise when the transcript is read
-                // back: the user cares what was said, not which calls produced it.
-                Role::Assistant | Role::Tool | Role::System => {}
-            }
-        }
+        render_all_turns(&turns, process_expanded, width);
         println!();
     }
 
@@ -883,6 +885,8 @@ pub async fn run_interactive_chat(
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut current_cancel = CancellationToken::new();
     let mut active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>> = None;
+    let mut current_query = String::new();
+    let mut turn_start = std::time::Instant::now();
 
     // Drives the live region: streamed reasoning and the running-tool spinner advance on this
     // tick rather than on every delta, so a fast token stream cannot outrun the redraw.
@@ -913,7 +917,12 @@ pub async fn run_interactive_chat(
                 } else {
                     harness_core::ApprovalDecision::Deny
                 };
-                ui.emit_above(&format_approval_verdict(is_run, &request));
+                let verdict_str = format_approval_verdict(is_run, &request);
+                ui.emit_above(&verdict_str);
+                in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                    call_formatted: verdict_str,
+                    result_formatted: String::new(),
+                });
                 if is_run {
                     let args = request.arguments.clone();
                     ui.start_activity(&request.tool, &args);
@@ -928,6 +937,18 @@ pub async fn run_interactive_chat(
                 };
 
                 match key {
+                    Key::Char('\x0f') => {
+                        // Ctrl+O: toggle process expansion
+                        if active_turn.is_none() && !turns.is_empty() {
+                            process_expanded = !process_expanded;
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                ui.draw_initial_box();
+                            }
+                        }
+                        continue;
+                    }
                     Key::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
                         ui.input_buf.lock().unwrap().push('/');
                         ui.redraw_input_line();
@@ -946,6 +967,8 @@ pub async fn run_interactive_chat(
                                 &mut session_id,
                                 &mut current_provider,
                                 &mut current_model,
+                                &mut turns,
+                                &mut process_expanded,
                             )
                             .await?
                             {
@@ -990,6 +1013,8 @@ pub async fn run_interactive_chat(
                                     &mut session_id,
                                     &mut current_provider,
                                     &mut current_model,
+                                    &mut turns,
+                                    &mut process_expanded,
                                 )
                                 .await?
                                 {
@@ -1015,6 +1040,8 @@ pub async fn run_interactive_chat(
                                 &mut session_id,
                                 &mut current_provider,
                                 &mut current_model,
+                                &mut turns,
+                                &mut process_expanded,
                             )
                             .await?
                             {
@@ -1033,6 +1060,9 @@ pub async fn run_interactive_chat(
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
                             let q = query.clone();
+                            current_query = query.clone();
+                            turn_start = std::time::Instant::now();
+                            in_flight_tools.lock().unwrap().clear();
                             active_turn = Some(tokio::spawn(async move {
                                 let ag = ag_ref.lock().await;
                                 ag.run_turn(&q, cancel_child).await
@@ -1064,19 +1094,30 @@ pub async fn run_interactive_chat(
                 active_turn = None;
                 match turn_res {
                     Ok(Ok(outcome)) => {
-                        if let Some(compaction) = &outcome.compaction {
-                            ui.emit_above(&format!(
-                                "compacted {} turns into 1 summary (session {})",
-                                compaction.turns, compaction.session_id
-                            ).dimmed().to_string());
-                        }
                         ui.stop_activity();
-                        ui.finish_reasoning();
-                        if !outcome.reply.is_empty() {
-                            ui.begin_block(OutputBlockKind::Reply);
-                            ui.emit_above(&format!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply));
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let turn_dur = turn_start.elapsed();
+
+                        let record = TurnRecord {
+                            user_query: current_query.clone(),
+                            reasoning: outcome.reasoning.clone(),
+                            tools: outcome.tool_calls.clone(),
+                            tool_items: current_tools,
+                            duration: turn_dur,
+                            reply: outcome.reply.clone(),
+                        };
+                        turns.push(record);
+
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            ui.draw_initial_box();
+                        } else {
+                            if !outcome.reply.is_empty() {
+                                println!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply);
+                            }
                         }
-                        
+
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
@@ -1084,30 +1125,81 @@ pub async fn run_interactive_chat(
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.stop_activity();
-                        ui.finish_reasoning();
-                        ui.emit_above(&format!("{}", "✖ Cancelled".red()));
-                        
-                        // Update status bar
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let turn_dur = turn_start.elapsed();
+
+                        let record = TurnRecord {
+                            user_query: current_query.clone(),
+                            reasoning: None,
+                            tools: Vec::new(),
+                            tool_items: current_tools,
+                            duration: turn_dur,
+                            reply: "✖ Cancelled".to_string(),
+                        };
+                        turns.push(record);
+
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            ui.draw_initial_box();
+                        } else {
+                            println!("{}", "✖ Cancelled".red());
+                        }
+
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(e)) => {
                         ui.stop_activity();
-                        ui.finish_reasoning();
-                        ui.emit_above(&format!("{} Error: {}", "✖".red().bold(), e));
-                        
-                        // Update status bar
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let turn_dur = turn_start.elapsed();
+
+                        let record = TurnRecord {
+                            user_query: current_query.clone(),
+                            reasoning: None,
+                            tools: Vec::new(),
+                            tool_items: current_tools,
+                            duration: turn_dur,
+                            reply: format!("✖ Error: {}", e),
+                        };
+                        turns.push(record);
+
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            ui.draw_initial_box();
+                        } else {
+                            println!("{} Error: {}", "✖".red().bold(), e);
+                        }
+
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
                         ui.update_status(context_used, context_max);
                     }
                     Err(join_err) => {
                         ui.stop_activity();
-                        ui.finish_reasoning();
-                        ui.emit_above(&format!("{} Task join error: {}", "✖".red().bold(), join_err));
-                        
-                        // Update status bar
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let turn_dur = turn_start.elapsed();
+
+                        let record = TurnRecord {
+                            user_query: current_query.clone(),
+                            reasoning: None,
+                            tools: Vec::new(),
+                            tool_items: current_tools,
+                            duration: turn_dur,
+                            reply: format!("✖ Task join error: {}", join_err),
+                        };
+                        turns.push(record);
+
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            ui.draw_initial_box();
+                        } else {
+                            println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                        }
+
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
                         let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
                         ui.update_status(context_used, context_max);
@@ -1118,6 +1210,9 @@ pub async fn run_interactive_chat(
                     current_cancel = CancellationToken::new();
                     let cancel_child = current_cancel.child_token();
                     let ag_ref = agent.clone();
+                    current_query = next_query.clone();
+                    turn_start = std::time::Instant::now();
+                    in_flight_tools.lock().unwrap().clear();
                     active_turn = Some(tokio::spawn(async move {
                         let ag = ag_ref.lock().await;
                         ag.run_turn(&next_query, cancel_child).await
@@ -1163,6 +1258,18 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Start a fresh chat session",
     },
     SlashCommand {
+        name: "/summarize",
+        details: "Summarize and start a new session with it",
+    },
+    SlashCommand {
+        name: "/expand",
+        details: "Expand intermediate tool and reasoning processes (or Ctrl+O)",
+    },
+    SlashCommand {
+        name: "/collapse",
+        details: "Collapse intermediate tool and reasoning processes (or Ctrl+O)",
+    },
+    SlashCommand {
         name: "/clear",
         details: "Clear terminal screen",
     },
@@ -1184,6 +1291,8 @@ async fn execute_slash_command(
     session_id: &mut String,
     current_provider: &mut String,
     current_model: &mut String,
+    turns: &mut Vec<TurnRecord>,
+    process_expanded: &mut bool,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -1230,6 +1339,7 @@ async fn execute_slash_command(
             Ok(false)
         }
         "/summarize" | "/compact" => {
+            turns.clear();
             ui.clear_box_on_exit();
             if let Err(e) = handle_summarize_and_new_command(
                 ui,
@@ -1249,6 +1359,7 @@ async fn execute_slash_command(
             Ok(false)
         }
         "/new" => {
+            turns.clear();
             let (is_summarize, remaining_arg) = if let Some(a) = arg {
                 if a.starts_with("-s ") || a == "-s" {
                     (true, a.strip_prefix("-s").unwrap().trim())
@@ -1299,7 +1410,26 @@ async fn execute_slash_command(
             }
             Ok(false)
         }
+        "/expand" => {
+            *process_expanded = true;
+            if ui.is_attended {
+                crate::commands::clear_screen();
+                render_all_turns(turns, *process_expanded, get_terminal_width());
+                ui.draw_initial_box();
+            }
+            Ok(false)
+        }
+        "/collapse" => {
+            *process_expanded = false;
+            if ui.is_attended {
+                crate::commands::clear_screen();
+                render_all_turns(turns, *process_expanded, get_terminal_width());
+                ui.draw_initial_box();
+            }
+            Ok(false)
+        }
         "/clear" => {
+            turns.clear();
             crate::commands::clear_screen();
             ui.draw_initial_box();
             Ok(false)
