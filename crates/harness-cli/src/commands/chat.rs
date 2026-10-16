@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, AllowAll, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, Message,
+    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, Message,
     ModelProvider, ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore,
     ToolRegistry, TurnOutcome,
 };
@@ -595,9 +595,11 @@ pub async fn run_interactive_chat(
     let (approval_tx, mut approval_rx) =
         mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<harness_core::ApprovalDecision>)>();
 
+    let allow_all_session = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let approver: Arc<dyn harness_core::Approver> =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
-            Arc::new(ChatApprover::new(approval_tx))
+            Arc::new(ChatApprover::new(approval_tx, allow_all_session.clone()))
         } else {
             build_approver(&config)
         };
@@ -928,7 +930,7 @@ pub async fn run_interactive_chat(
                 let choice = prompt_approval_choice(&mut key_rx, &request, &ui).await;
                 if matches!(choice, ApprovalChoice::AllSession) {
                     // Sticky "approve all": flip the gate once and it stays for this chat.
-                    agent.lock().await.set_approval(Arc::new(AllowAll));
+                    allow_all_session.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 let is_run = matches!(choice, ApprovalChoice::Once | ApprovalChoice::AllSession);
                 let decision = if is_run {

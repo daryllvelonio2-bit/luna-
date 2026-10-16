@@ -2,6 +2,7 @@
 //! injects into `Agent` from `tools.approval`.
 
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,19 +157,27 @@ pub fn render_approval_box(
 /// Approver for interactive Chat mode: routes approval requests through a channel to the UI loop.
 pub struct ChatApprover {
     request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    allow_all: Arc<AtomicBool>,
 }
 
 impl ChatApprover {
     pub fn new(
         request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+        allow_all: Arc<AtomicBool>,
     ) -> Self {
-        Self { request_tx }
+        Self {
+            request_tx,
+            allow_all,
+        }
     }
 }
 
 #[async_trait]
 impl Approver for ChatApprover {
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError> {
+        if self.allow_all.load(Ordering::SeqCst) {
+            return Ok(ApprovalDecision::Run);
+        }
         let (decision_tx, decision_rx) = oneshot::channel();
         if self.request_tx.send((request.clone(), decision_tx)).is_err() {
             return Ok(ApprovalDecision::Deny);
@@ -265,6 +274,29 @@ mod tests {
                 .unwrap(),
             ApprovalDecision::Deny
         );
+    }
+
+    #[tokio::test]
+    async fn chat_approver_respects_allow_all_without_deadlock() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let allow_all = Arc::new(AtomicBool::new(false));
+        let approver = ChatApprover::new(tx, allow_all.clone());
+
+        // Initial request should ask
+        let req = ApprovalRequest::default();
+        tokio::spawn(async move {
+            if let Some((_request, decision_tx)) = rx.recv().await {
+                let _ = decision_tx.send(ApprovalDecision::Run);
+            }
+        });
+
+        let decision = approver.approve(&req).await.unwrap();
+        assert_eq!(decision, ApprovalDecision::Run);
+
+        // Turn on allow_all: subsequent requests bypass the channel completely
+        allow_all.store(true, Ordering::SeqCst);
+        let decision2 = approver.approve(&req).await.unwrap();
+        assert_eq!(decision2, ApprovalDecision::Run);
     }
 
     #[test]
