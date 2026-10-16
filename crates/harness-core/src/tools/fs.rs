@@ -826,6 +826,12 @@ fn scan_files(
 /// read by a model rather than a pager, so an unbounded one floods the transcript.
 const MAX_LISTED_ENTRIES: usize = 1_000;
 
+/// How many entries the walk collects before it stops, independent of `MAX_LISTED_ENTRIES`.
+/// The display cap is applied *after* sorting, so the walk has to see enough of the tree to
+/// guarantee the alphabetically-first entries are found, while a pathological tree still
+/// cannot grow the buffer without bound.
+const MAX_COLLECTED_ENTRIES: usize = 50_000;
+
 pub struct ListFilesTool {
     workspace_root: PathBuf,
 }
@@ -896,16 +902,25 @@ impl Tool for ListFilesTool {
         let glob = glob.map(|g| g.to_string());
         // The walk is a blocking syscall; owning a blocking thread keeps a large tree from
         // parking an async worker, the same reason `search_files` runs its scan this way.
+        let request_glob = glob.clone();
         let (entries, truncated) = tokio::task::spawn_blocking(move || {
             list_entries(&root, &resolved, glob.as_deref())
         })
         .await
         .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
 
-        let mut output = entries.join("\n");
-        if !output.is_empty() {
-            output.push('\n');
-        }
+        // An empty result must say *why* it is empty: a silent success reads as "nothing to
+        // see here" when the truth is a glob that matched nothing or an empty directory.
+        let mut output = if entries.is_empty() {
+            match request_glob {
+                Some(g) => format!("[no entries match glob '{}']", g),
+                None => format!("[nothing under '{}']", path_str),
+            }
+        } else {
+            let mut listing = entries.join("\n");
+            listing.push('\n');
+            listing
+        };
         if truncated {
             output.push_str(&format!(
                 "[listing stopped after {MAX_LISTED_ENTRIES} entries; narrow 'path' or add 'glob']"
@@ -938,10 +953,6 @@ fn list_entries(
         if entry.depth() == 0 {
             continue;
         }
-        if entries.len() >= MAX_LISTED_ENTRIES {
-            truncated = true;
-            break;
-        }
 
         let path = entry.path();
         let is_dir = entry.file_type().is_dir();
@@ -955,18 +966,31 @@ fn list_entries(
             }
         }
 
+        // The collection cap counts *matches*, not visited entries, so a glob that matches
+        // only a few files deep in a large tree still returns all of them.
+        if entries.len() >= MAX_COLLECTED_ENTRIES {
+            truncated = true;
+            break;
+        }
+
         let rel = path
             .strip_prefix(workspace_root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
 
-        // Sorted so two listings of the same tree are identical, and a capped subset is a
-        // predictable one rather than whatever order the filesystem happened to hand back.
         entries.push(if is_dir { format!("{rel}/") } else { rel });
     }
 
+    // Sorted so two listings of the same tree are identical, and — because the display cap is
+    // applied *after* sorting — a capped subset is the alphabetically-first entries rather
+    // than whatever order the filesystem happened to hand back.
     entries.sort();
+    if entries.len() > MAX_LISTED_ENTRIES {
+        entries.truncate(MAX_LISTED_ENTRIES);
+        truncated = true;
+    }
+
     (entries, truncated)
 }
 
@@ -1010,6 +1034,45 @@ mod tests {
         assert!(!glob_match("", "a"));
         // A trailing star on an empty text still matches.
         assert!(glob_match("*", ""));
+    }
+
+    /// A capped listing must be the alphabetically-first entries, not whichever ones the
+    /// filesystem happened to hand back: `list_entries` sorts before it truncates.
+    #[test]
+    fn list_entries_caps_after_sorting_so_a_truncated_listing_is_predictable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..(MAX_LISTED_ENTRIES + 500) {
+            std::fs::write(root.join(format!("{:05}.txt", i)), "x").unwrap();
+        }
+
+        let (entries, truncated) = list_entries(root, root, None);
+
+        assert!(truncated, "dropping entries must be announced");
+        assert_eq!(entries.len(), MAX_LISTED_ENTRIES);
+        assert_eq!(entries.first().map(String::as_str), Some("00000.txt"));
+        let expected_last = format!("{:05}.txt", MAX_LISTED_ENTRIES - 1);
+        assert_eq!(entries.last().map(String::as_str), Some(expected_last.as_str()));
+    }
+
+    /// A bare glob matches the entry *name*, so `*rust-harness*` finds `rust-harness.md` but
+    /// not a sibling directory called `rust-agent-harness` — the pattern has to spell out the
+    /// name it wants.
+    #[test]
+    fn list_entries_bare_glob_matches_the_entry_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("rust-agent-harness")).unwrap();
+        std::fs::write(root.join("rust-harness.md"), "x").unwrap();
+
+        let (matched, _) = list_entries(root, root, Some("*rust-harness*"));
+        assert_eq!(matched, vec!["rust-harness.md".to_string()]);
+
+        let (dirs, _) = list_entries(root, root, Some("*agent-harness*"));
+        assert_eq!(dirs, vec!["rust-agent-harness/".to_string()]);
+
+        let (nothing, _) = list_entries(root, root, Some("*nope*"));
+        assert!(nothing.is_empty(), "an unmatched glob returns nothing, not a guess");
     }
 
     #[test]
