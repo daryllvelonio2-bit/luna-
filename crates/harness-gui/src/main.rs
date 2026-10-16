@@ -85,30 +85,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prov_slint: Vec<slint::SharedString> = configured_providers.iter().map(|s| s.into()).collect();
     app.set_available_providers(Rc::new(VecModel::from(prov_slint)).into());
 
-    // Populate initial models immediately from RAM
-    let initial_models = model_cache
-        .get(&default_prov)
-        .cloned()
-        .unwrap_or_else(|| vec![format!("{}-default", default_prov)]);
-    if let Some(first_model) = initial_models.first() {
+    // Pre-build ModelRc for each provider so switching providers takes 0ns (pointer copy)
+    let mut model_rc_cache: HashMap<String, slint::ModelRc<slint::SharedString>> = HashMap::new();
+    for (prov, models) in model_cache.iter() {
+        let slint_models: Vec<slint::SharedString> = models.iter().map(|s| s.into()).collect();
+        model_rc_cache.insert(prov.clone(), slint::ModelRc::new(VecModel::from(slint_models)));
+    }
+    let prebuilt_models = Arc::new(model_rc_cache);
+
+    // Populate initial models immediately from prebuilt RAM cache
+    if let Some(rc) = prebuilt_models.get(&default_prov) {
+        app.set_available_models(rc.clone());
+    }
+    if let Some(first_model) = model_cache.get(&default_prov).and_then(|m| m.first()) {
         app.set_model_name(first_model.clone().into());
     }
-    let initial_models_slint: Vec<slint::SharedString> = initial_models.iter().map(|s| s.into()).collect();
-    app.set_available_models(Rc::new(VecModel::from(initial_models_slint)).into());
+
+    // Instant in-memory search filter callback
+    let app_weak = app.as_weak();
+    let cache_clone_filter = model_cache.clone();
+    app.on_filter_models(move |query| {
+        if let Some(app) = app_weak.upgrade() {
+            let prov_str = app.get_selected_provider().to_string();
+            let query_lower = query.trim().to_lowercase();
+            if let Some(models) = cache_clone_filter.get(&prov_str) {
+                let filtered: Vec<slint::SharedString> = models
+                    .iter()
+                    .filter(|m| query_lower.is_empty() || m.to_lowercase().contains(&query_lower))
+                    .map(|s| s.into())
+                    .collect();
+                app.set_available_models(Rc::new(VecModel::from(filtered)).into());
+            }
+        }
+    });
 
     // Provider selection callback: instantaneous synchronous in-memory transition (0ms)
     let app_weak = app.as_weak();
-    let cache_clone = model_cache.clone();
+    let prebuilt_clone = prebuilt_models.clone();
     app.on_select_provider(move |provider_id| {
         let prov_str = provider_id.to_string();
         if let Some(app) = app_weak.upgrade() {
-            let models = cache_clone
-                .get(&prov_str)
-                .cloned()
-                .unwrap_or_else(|| vec![format!("{}-default", prov_str)]);
-            let models_slint: Vec<slint::SharedString> = models.iter().map(|s| s.into()).collect();
+            if let Some(rc) = prebuilt_clone.get(&prov_str) {
+                app.set_available_models(rc.clone());
+            } else {
+                let fallback = vec![slint::SharedString::from(format!("{}-default", prov_str))];
+                app.set_available_models(Rc::new(VecModel::from(fallback)).into());
+            }
+            app.set_model_filter("".into());
             app.set_selected_provider(prov_str.into());
-            app.set_available_models(Rc::new(VecModel::from(models_slint)).into());
             app.set_picker_step(1);
         }
     });
