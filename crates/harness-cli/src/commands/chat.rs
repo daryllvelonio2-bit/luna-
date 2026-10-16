@@ -143,6 +143,7 @@ struct ChatUi {
     live: Arc<Mutex<LiveRegion>>,
     /// The kind of the last transcript block, so blank lines land only between differing blocks.
     last_block: Arc<Mutex<OutputBlockKind>>,
+    transient_error: Arc<Mutex<Option<String>>>,
     is_attended: bool,
 }
 
@@ -153,8 +154,21 @@ impl ChatUi {
             status: Arc::new(Mutex::new(None)),
             live: Arc::new(Mutex::new(LiveRegion::default())),
             last_block: Arc::new(Mutex::new(OutputBlockKind::None)),
+            transient_error: Arc::new(Mutex::new(None)),
             is_attended,
         }
+    }
+
+    fn set_transient_error(&self, err: Option<String>) {
+        *self.transient_error.lock().unwrap() = err;
+    }
+
+    fn transient_error(&self) -> Option<String> {
+        self.transient_error.lock().unwrap().clone()
+    }
+
+    fn clear_transient_error(&self) {
+        *self.transient_error.lock().unwrap() = None;
     }
 
     /// Open a transcript block, writing the blank line that separates it from a block of a
@@ -965,6 +979,10 @@ pub async fn run_interactive_chat(
                             if ui.is_attended {
                                 crate::commands::clear_screen();
                                 render_all_turns(&turns, process_expanded, get_terminal_width());
+                                if let Some(ref err) = ui.transient_error() {
+                                    println!();
+                                    println!("{}", err);
+                                }
                                 ui.draw_initial_box();
                             }
                         }
@@ -1071,8 +1089,18 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        ui.begin_block(OutputBlockKind::User);
-                        ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
+                        ui.clear_transient_error();
+
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            println!();
+                            println!("{}", right_aligned_user_message(&query, get_terminal_width()));
+                            ui.draw_initial_box();
+                        } else {
+                            ui.begin_block(OutputBlockKind::User);
+                            ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
+                        }
 
                         if active_turn.is_some() {
                             queue.push_back(query);
@@ -1262,14 +1290,17 @@ pub async fn run_interactive_chat(
                                 *ui.input_buf.lock().unwrap() = current_query.clone();
                             }
 
+                            let err_msg = format!("{} Error: {}", "✖".red().bold(), e);
+                            ui.set_transient_error(Some(err_msg.clone()));
+
                             if ui.is_attended {
                                 crate::commands::clear_screen();
                                 render_all_turns(&turns, process_expanded, get_terminal_width());
                                 println!();
-                                println!("{} Error: {}", "✖".red().bold(), e);
+                                println!("{}", err_msg);
                                 ui.draw_initial_box();
                             } else {
-                                println!("{} Error: {}", "✖".red().bold(), e);
+                                println!("{}", err_msg);
                             }
                         }
 
@@ -1308,14 +1339,17 @@ pub async fn run_interactive_chat(
                                 *ui.input_buf.lock().unwrap() = current_query.clone();
                             }
 
+                            let err_msg = format!("{} Task join error: {}", "✖".red().bold(), join_err);
+                            ui.set_transient_error(Some(err_msg.clone()));
+
                             if ui.is_attended {
                                 crate::commands::clear_screen();
                                 render_all_turns(&turns, process_expanded, get_terminal_width());
                                 println!();
-                                println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                                println!("{}", err_msg);
                                 ui.draw_initial_box();
                             } else {
-                                println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                                println!("{}", err_msg);
                             }
                         }
 
