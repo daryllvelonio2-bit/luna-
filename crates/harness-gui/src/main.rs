@@ -101,24 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_model_name(first_model.clone().into());
     }
 
-    // Instant in-memory search filter callback
-    let app_weak = app.as_weak();
-    let cache_clone_filter = model_cache.clone();
-    app.on_filter_models(move |query| {
-        if let Some(app) = app_weak.upgrade() {
-            let prov_str = app.get_selected_provider().to_string();
-            let query_lower = query.trim().to_lowercase();
-            if let Some(models) = cache_clone_filter.get(&prov_str) {
-                let filtered: Vec<slint::SharedString> = models
-                    .iter()
-                    .filter(|m| query_lower.is_empty() || m.to_lowercase().contains(&query_lower))
-                    .map(|s| s.into())
-                    .collect();
-                app.set_available_models(Rc::new(VecModel::from(filtered)).into());
-            }
-        }
-    });
-
     // Provider selection callback: instantaneous synchronous in-memory transition (0ms)
     let app_weak = app.as_weak();
     let prebuilt_clone = prebuilt_models.clone();
@@ -131,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let fallback = vec![slint::SharedString::from(format!("{}-default", prov_str))];
                 app.set_available_models(Rc::new(VecModel::from(fallback)).into());
             }
-            app.set_model_filter("".into());
+            app.set_model_scroll_index(0);
             app.set_selected_provider(prov_str.into());
             app.set_picker_step(1);
         }
