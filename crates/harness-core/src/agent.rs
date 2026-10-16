@@ -237,6 +237,11 @@ where
         self
     }
 
+    /// Set or update the compaction setup at runtime.
+    pub fn set_compaction(&mut self, setup: Option<CompactionSetup>) {
+        self.compaction = setup;
+    }
+
     pub fn memory(&self) -> &Arc<M> {
         &self.memory
     }

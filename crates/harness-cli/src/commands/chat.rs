@@ -666,6 +666,9 @@ pub async fn run_interactive_chat(
 
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
+    let mut compact_provider: Option<String> = config.agent.compaction_provider.clone();
+    let mut compact_model: Option<String> = config.agent.compaction_model.clone();
+
     if !is_attended {
         let cancel_token = CancellationToken::new();
         loop {
@@ -697,6 +700,26 @@ pub async fn run_interactive_chat(
                     &agent,
                     &mut current_provider,
                     &mut current_model,
+                    &compact_model,
+                )
+                .await?;
+                continue;
+            }
+            if query.starts_with("/compact-model") {
+                let arg = query.strip_prefix("/compact-model").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_compact_model_switch(
+                    None,
+                    &ui,
+                    &config,
+                    &cred_manager,
+                    &discovery,
+                    &agent,
+                    &current_provider,
+                    &current_model,
+                    &mut compact_provider,
+                    &mut compact_model,
+                    arg_opt,
                 )
                 .await?;
                 continue;
@@ -1006,6 +1029,8 @@ pub async fn run_interactive_chat(
                                 &mut session_id,
                                 &mut current_provider,
                                 &mut current_model,
+                                &mut compact_provider,
+                                &mut compact_model,
                                 &mut turns,
                                 &mut process_expanded,
                             )
@@ -1052,6 +1077,8 @@ pub async fn run_interactive_chat(
                                     &mut session_id,
                                     &mut current_provider,
                                     &mut current_model,
+                                    &mut compact_provider,
+                                    &mut compact_model,
                                     &mut turns,
                                     &mut process_expanded,
                                 )
@@ -1079,6 +1106,8 @@ pub async fn run_interactive_chat(
                                 &mut session_id,
                                 &mut current_provider,
                                 &mut current_model,
+                                &mut compact_provider,
+                                &mut compact_model,
                                 &mut turns,
                                 &mut process_expanded,
                             )
@@ -1401,6 +1430,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Switch provider and model",
     },
     SlashCommand {
+        name: "/compact-model",
+        details: "Choose provider and model for context compaction",
+    },
+    SlashCommand {
         name: "/reasoning",
         details: "Set reasoning effort (off, low, medium, high)",
     },
@@ -1446,6 +1479,8 @@ async fn execute_slash_command(
     session_id: &mut String,
     current_provider: &mut String,
     current_model: &mut String,
+    compact_provider: &mut Option<String>,
+    compact_model: &mut Option<String>,
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
 ) -> Result<bool, HarnessError> {
@@ -1465,10 +1500,32 @@ async fn execute_slash_command(
                 agent,
                 current_provider,
                 current_model,
+                compact_model,
             )
             .await
             {
                 ui.emit_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/compact-model" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_compact_model_switch(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                agent,
+                current_provider,
+                current_model,
+                compact_provider,
+                compact_model,
+                arg,
+            )
+            .await
+            {
+                ui.emit_above(&format!("{} Failed to set compaction model: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
@@ -2087,16 +2144,14 @@ async fn input_from_rx(
     None
 }
 
-async fn handle_model_switch(
+async fn pick_provider_and_model(
     mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
     ui: &ChatUi,
-    config: &Config,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
-    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
-    current_provider: &mut String,
-    current_model: &mut String,
-) -> Result<(), HarnessError> {
+    current_provider: &str,
+    current_model: &str,
+) -> Result<Option<(String, String)>, HarnessError> {
     let catalog = get_provider_catalog();
     let loaded = cred_manager.get_loaded_providers().await;
 
@@ -2129,7 +2184,7 @@ async fn handle_model_switch(
         match select_from_rx(rx, ui, "Select Provider", &items, default_idx, false, true).await {
             Some(i) => i,
             None => {
-                return Ok(());
+                return Ok(None);
             }
         }
     } else {
@@ -2171,7 +2226,7 @@ async fn handle_model_switch(
         match select_from_rx(rx, ui, &format!("Select Model [{}]", chosen_provider), &model_items, default_model_idx, true, true).await {
             Some(i) => i,
             None => {
-                return Ok(());
+                return Ok(None);
             }
         }
     } else {
@@ -2185,7 +2240,7 @@ async fn handle_model_switch(
         match input_from_rx(rx, "Enter custom model name").await {
             Some(name) => name,
             None => {
-                return Ok(());
+                return Ok(None);
             }
         }
     } else {
@@ -2193,8 +2248,37 @@ async fn handle_model_switch(
     };
 
     if chosen_model.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
+
+    Ok(Some((chosen_provider, chosen_model)))
+}
+
+async fn handle_model_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    current_provider: &mut String,
+    current_model: &mut String,
+    compact_model: &Option<String>,
+) -> Result<(), HarnessError> {
+    let Some((chosen_provider, chosen_model)) = pick_provider_and_model(
+        key_rx.as_deref_mut(),
+        ui,
+        cred_manager,
+        discovery,
+        current_provider,
+        current_model,
+    )
+    .await?
+    else {
+        ui.clear_box_on_exit();
+        ui.draw_initial_box();
+        return Ok(());
+    };
 
     // Reasoning effort selection
     let reasoning_options = [
@@ -2225,6 +2309,8 @@ async fn handle_model_switch(
         match select_from_rx(rx, ui, "Select Reasoning Effort", &reasoning_items, default_reasoning_idx, true, false).await {
             Some(i) => i,
             None => {
+                ui.clear_box_on_exit();
+                ui.draw_initial_box();
                 return Ok(());
             }
         }
@@ -2255,6 +2341,22 @@ async fn handle_model_switch(
     *current_provider = chosen_provider.clone();
     *current_model = chosen_model.clone();
 
+    // If compaction model is not custom set, default it to the used model
+    if compact_model.is_none() {
+        if let Ok(comp_client) = GenericProviderClient::new(
+            chosen_provider.clone(),
+            chosen_model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&chosen_provider),
+        ) {
+            agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
+                provider: Arc::new(comp_client),
+                model: chosen_model.clone(),
+            }));
+        }
+    }
+
     // The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
     // that stale box so the status bar is drawn once, showing the model now in use.
     let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
@@ -2264,6 +2366,92 @@ async fn handle_model_switch(
     ui.set_model(&chosen_model, context_used, context_max);
     ui.clear_box_on_exit();
     ui.draw_initial_box();
+
+    Ok(())
+}
+
+async fn handle_compact_model_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    current_provider: &str,
+    current_model: &str,
+    compact_provider: &mut Option<String>,
+    compact_model: &mut Option<String>,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    if let Some(a) = arg {
+        if a.eq_ignore_ascii_case("reset") || a.eq_ignore_ascii_case("default") {
+            *compact_provider = None;
+            *compact_model = None;
+            let comp_client = GenericProviderClient::new(
+                current_provider.to_string(),
+                current_model.to_string(),
+                cred_manager.clone(),
+                discovery.clone(),
+                config.providers.get(current_provider),
+            )?;
+            agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
+                provider: Arc::new(comp_client),
+                model: current_model.to_string(),
+            }));
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            ui.emit_above(&format!(
+                "{} Compaction model reset to active model: {} ({})",
+                "✓".green(),
+                current_model,
+                current_provider
+            ));
+            return Ok(());
+        }
+    }
+
+    let initial_p = compact_provider.as_deref().unwrap_or(current_provider);
+    let initial_m = compact_model.as_deref().unwrap_or(current_model);
+
+    let Some((chosen_provider, chosen_model)) = pick_provider_and_model(
+        key_rx.as_deref_mut(),
+        ui,
+        cred_manager,
+        discovery,
+        initial_p,
+        initial_m,
+    )
+    .await?
+    else {
+        ui.clear_box_on_exit();
+        ui.draw_initial_box();
+        return Ok(());
+    };
+
+    let comp_client = GenericProviderClient::new(
+        chosen_provider.clone(),
+        chosen_model.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&chosen_provider),
+    )?;
+
+    agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
+        provider: Arc::new(comp_client),
+        model: chosen_model.clone(),
+    }));
+
+    *compact_provider = Some(chosen_provider.clone());
+    *compact_model = Some(chosen_model.clone());
+
+    ui.clear_box_on_exit();
+    ui.draw_initial_box();
+    ui.emit_above(&format!(
+        "{} Compaction model set to {} ({})",
+        "✓".green(),
+        chosen_model,
+        chosen_provider
+    ));
 
     Ok(())
 }
