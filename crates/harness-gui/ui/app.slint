@@ -1,0 +1,528 @@
+import { ScrollView, Button, LineEdit } from "std-widgets.slint";
+
+export struct ChatMsg {
+    role: string,
+    author: string,
+    content: string,
+    timestamp: string,
+}
+
+export struct SessionItem {
+    id: string,
+    name: string,
+    active: bool,
+}
+
+export struct FileItem {
+    path: string,
+    is_dir: bool,
+}
+
+export component AppWindow inherits Window {
+    title: "Luna Desktop";
+    min-width: 900px;
+    min-height: 600px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    background: #121216;
+
+    in-out property <[ChatMsg]> transcript: [
+        {
+            role: "assistant",
+            author: "Luna",
+            content: "Welcome to Luna Desktop. Workspace indexed and ready.",
+            timestamp: "Now"
+        }
+    ];
+    in-out property <[SessionItem]> sessions: [
+        { id: "1", name: "Luna Main Session", active: true },
+        { id: "2", name: "TUI & GUI Architecture", active: false },
+        { id: "3", name: "Evolver Hardening", active: false }
+    ];
+    in-out property <[FileItem]> files: [
+        { path: "crates/harness-cli/src/main.rs", is_dir: false },
+        { path: "crates/harness-gui/src/main.rs", is_dir: false },
+        { path: "crates/harness-core/src/agent.rs", is_dir: false },
+        { path: "agents.md", is_dir: false },
+        { path: "Cargo.toml", is_dir: false }
+    ];
+
+    in-out property <string> model_name: "Gemini 3.8 Flash High";
+    in-out property <string> workspace_name: "rust-agent-harness";
+    in-out property <string> current_file: "crates/harness-gui/src/main.rs";
+    in-out property <string> composer_text: "";
+
+    in property <int> subagents_count: 0;
+    in property <int> files_changed_count: 3;
+    in property <int> artifacts_count: 0;
+    in property <int> uploads_count: 0;
+    in property <int> bg_tasks_count: 0;
+    in property <int> terminals_count: 0;
+    in property <int> context_used: 3642;
+    in property <int> context_max: 128000;
+
+    callback submit_message(string);
+    callback select_session(string);
+    callback new_session();
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // --- Top Header Bar ---
+        Rectangle {
+            height: 40px;
+            background: #181820;
+            border-width: 1px;
+            border-color: #262632;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: space-between;
+
+                // Brand & window navigation
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: "☾ Luna";
+                        color: #c084fc;
+                        font-weight: 700;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "File   View   Window";
+                        color: #71717a;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Workspace breadcrumb
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: root.workspace_name + " / " + root.current_file;
+                        color: #a1a1aa;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Right controls
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #22c55e;
+                        y: 16px;
+                    }
+                    Text {
+                        text: "Connected";
+                        color: #71717a;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // --- 3-Column Antigravity Body ---
+        HorizontalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // 1. Left Sidebar (Navigation & Sessions)
+            Rectangle {
+                width: 260px;
+                background: #15151c;
+                border-width: 1px;
+                border-color: #262632;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 12px;
+
+                    // New Chat Button
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 8px;
+                        background: #22222e;
+                        border-width: 1px;
+                        border-color: #323242;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Text {
+                                text: "+";
+                                color: #38bdf8;
+                                font-size: 16px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "New Conversation";
+                                color: #f4f4f5;
+                                font-size: 13px;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => { root.new_session(); }
+                        }
+                    }
+
+                    // Pinned Conversations Section
+                    Text {
+                        text: "PINNED CONVERSATIONS";
+                        color: #71717a;
+                        font-size: 10px;
+                        font-weight: 700;
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        for s in root.sessions: Rectangle {
+                            height: 32px;
+                            border-radius: 6px;
+                            background: s.active ? #262636 : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+
+                                Rectangle {
+                                    width: 6px;
+                                    height: 6px;
+                                    border-radius: 3px;
+                                    background: s.active ? #38bdf8 : #52525b;
+                                    y: 13px;
+                                }
+
+                                Text {
+                                    text: s.name;
+                                    color: s.active ? #ffffff : #a1a1aa;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                clicked => { root.select_session(s.id); }
+                            }
+                        }
+                    }
+
+                    // Projects & Workspace Files
+                    Text {
+                        text: "WORKSPACE FILES";
+                        color: #71717a;
+                        font-size: 10px;
+                        font-weight: 700;
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        for f in root.files: Rectangle {
+                            height: 28px;
+                            border-radius: 4px;
+                            background: transparent;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                spacing: 8px;
+                                Text {
+                                    text: f.is_dir ? "📁" : "📄";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: f.path;
+                                    color: #a1a1aa;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Bottom Settings
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 6px;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            spacing: 8px;
+                            Text {
+                                text: "⚙";
+                                color: #71717a;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Settings";
+                                color: #71717a;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Center Main Workspace (Transcript & Floating Composer)
+            Rectangle {
+                background: #121216;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    // Scrollable Transcript
+                    ScrollView {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            spacing: 16px;
+                            padding-right: 12px;
+
+                            for msg in root.transcript: Rectangle {
+                                background: msg.role == "user" ? #1a1a24 : #16161e;
+                                border-radius: 10px;
+                                border-width: 1px;
+                                border-color: msg.role == "user" ? #2a2a3a : #22222e;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 8px;
+
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text {
+                                            text: msg.author;
+                                            color: msg.role == "user" ? #38bdf8 : #c084fc;
+                                            font-weight: 700;
+                                            font-size: 12px;
+                                        }
+                                        Text {
+                                            text: msg.timestamp;
+                                            color: #52525b;
+                                            font-size: 11px;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: msg.content;
+                                        color: #e4e4e7;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Floating Antigravity-Style Rounded Composer
+                    Rectangle {
+                        height: 64px;
+                        border-radius: 16px;
+                        background: #1b1b24;
+                        border-width: 1px;
+                        border-color: #303040;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            spacing: 12px;
+
+                            // Model Badge Selector
+                            Rectangle {
+                                width: 180px;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: #262634;
+                                border-width: 1px;
+                                border-color: #38384c;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: space-between;
+                                    Text {
+                                        text: root.model_name;
+                                        color: #e4e4e7;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: "▾";
+                                        color: #a1a1aa;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Text Input Line
+                            input := TextInput {
+                                text <=> root.composer_text;
+                                color: #f4f4f5;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                accepted => {
+                                    if (root.composer_text != "") {
+                                        root.submit_message(root.composer_text);
+                                        root.composer_text = "";
+                                    }
+                                }
+                            }
+
+                            // Send Button
+                            Rectangle {
+                                width: 34px;
+                                height: 34px;
+                                border-radius: 17px;
+                                background: #38bdf8;
+
+                                Text {
+                                    text: "➔";
+                                    color: #000000;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                TouchArea {
+                                    clicked => {
+                                        if (root.composer_text != "") {
+                                            root.submit_message(root.composer_text);
+                                            root.composer_text = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Right Sidebar (Context & Telemetry)
+            Rectangle {
+                width: 240px;
+                background: #15151c;
+                border-width: 1px;
+                border-color: #262632;
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 14px;
+
+                    Text {
+                        text: "TELEMETRY & CONTEXT";
+                        color: #71717a;
+                        font-size: 10px;
+                        font-weight: 700;
+                    }
+
+                    // Metrics List
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Subagents"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.subagents_count; color: #f4f4f5; font-size: 12px; }
+                        }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Files Changed"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.files_changed_count; color: #fbbf24; font-size: 12px; font-weight: 600; }
+                        }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Artifacts"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.artifacts_count; color: #f4f4f5; font-size: 12px; }
+                        }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Uploads"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.uploads_count; color: #f4f4f5; font-size: 12px; }
+                        }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Background Tasks"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.bg_tasks_count; color: #38bdf8; font-size: 12px; font-weight: 600; }
+                        }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Terminals"; color: #a1a1aa; font-size: 12px; }
+                            Text { text: root.terminals_count; color: #f4f4f5; font-size: 12px; }
+                        }
+                    }
+
+                    // Context Window Meter
+                    Rectangle {
+                        height: 1px;
+                        background: #262632;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Context Window"; color: #a1a1aa; font-size: 11px; }
+                            Text {
+                                text: (root.context_used * 100 / root.context_max) + "%";
+                                color: #c084fc;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+
+                        // Progress Bar Track
+                        Rectangle {
+                            height: 6px;
+                            border-radius: 3px;
+                            background: #272736;
+
+                            // Fill
+                            Rectangle {
+                                width: parent.width * (root.context_used / root.context_max);
+                                height: parent.height;
+                                border-radius: 3px;
+                                background: #c084fc;
+                                x: 0px;
+                            }
+                        }
+
+                        Text {
+                            text: root.context_used + " / " + root.context_max + " tokens";
+                            color: #71717a;
+                            font-size: 10px;
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+}

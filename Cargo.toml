@@ -10,6 +10,7 @@ members = [
     "crates/harness-voice",
     "crates/harness-telemetry",
     "crates/harness-cli",
+    "crates/harness-gui",
 ]
 resolver = "2"
 
@@ -53,7 +54,7 @@ walkdir = "2.5"
 libc = "0.2"
 pulldown-cmark = "0.10"
 url = "2.5"
-ratatui = "0.29"
+ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Internal crate dependencies
