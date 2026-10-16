@@ -95,6 +95,7 @@ pub struct BackgroundTaskState {
     pub job_id: String,
     pub task: String,
     pub current_tool: String,
+    pub started_at: std::time::Instant,
     pub status: String,
 }
 
@@ -108,6 +109,17 @@ pub struct ChatUi {
     bg_task: Arc<Mutex<Option<BackgroundTaskState>>>,
     box_drawn: Arc<AtomicBool>,
     pub is_attended: bool,
+}
+
+fn format_elapsed(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 impl ChatUi {
@@ -285,70 +297,33 @@ impl ChatUi {
         let task = bg.as_ref()?;
 
         let icon = "⚙".cyan().bold();
-        let job_tag = format!("[{}]", task.job_id).cyan();
+        let tag = "evolver-harness".cyan().bold();
+        let elapsed = format_elapsed(task.started_at.elapsed()).dimmed().to_string();
         let right_hint = "[Ctrl+B]".dimmed().bold().to_string();
         let right_visible = dialoguer::console::strip_ansi_codes(&right_hint).to_string();
         let right_len = right_visible.chars().count();
 
-        let bullet = "•".dimmed();
-        let tool = if task.current_tool.is_empty() {
-            "running".dimmed().to_string()
+        let tool_str = if task.current_tool.is_empty() {
+            "running".to_string()
         } else {
-            task.current_tool.dimmed().to_string()
+            task.current_tool.clone()
         };
 
-        let left_prefix = format!("{} {} {}", icon, job_tag, task.task.bold());
-        let prefix_visible = dialoguer::console::strip_ansi_codes(&left_prefix).to_string();
-        let tool_visible = dialoguer::console::strip_ansi_codes(&tool).to_string();
+        // Format: ⚙ evolver-harness 24m read chats.rs                         [Ctrl+B]
+        let left_part = format!("{} {} {} {}", icon, tag, elapsed, tool_str.dimmed());
+        let left_visible = dialoguer::console::strip_ansi_codes(&left_part).to_string();
+        let left_len = left_visible.chars().count();
 
-        let fixed_len = prefix_visible.chars().count() + 3 + right_len;
-        if fixed_len + tool_visible.chars().count() + 2 <= width {
-            let spaces = width.saturating_sub(fixed_len + tool_visible.chars().count());
-            Some(format!(
-                "{} {} {}{}{}",
-                left_prefix,
-                bullet,
-                tool,
-                " ".repeat(spaces),
-                right_hint
-            ))
-        } else if fixed_len + 4 <= width {
-            let available_tool = width.saturating_sub(fixed_len + 2);
-            let truncated_tool = if available_tool > 3 {
-                format!(
-                    "{}…",
-                    tool_visible.chars().take(available_tool - 1).collect::<String>()
-                )
-                .dimmed()
-                .to_string()
-            } else {
-                String::new()
-            };
-            let truncated_vis = dialoguer::console::strip_ansi_codes(&truncated_tool).to_string();
-            let used = prefix_visible.chars().count()
-                + (if truncated_vis.is_empty() {
-                    0
-                } else {
-                    3 + truncated_vis.chars().count()
-                });
-            let spaces = width.saturating_sub(used + right_len);
-            if truncated_vis.is_empty() {
-                Some(format!("{}{}{}", left_prefix, " ".repeat(spaces), right_hint))
-            } else {
-                Some(format!(
-                    "{} {} {}{}{}",
-                    left_prefix,
-                    bullet,
-                    truncated_tool,
-                    " ".repeat(spaces),
-                    right_hint
-                ))
-            }
+        if left_len + right_len + 2 <= width {
+            let spaces = width.saturating_sub(left_len + right_len);
+            Some(format!("{}{}{}", left_part, " ".repeat(spaces), right_hint))
+        } else if left_len + 2 <= width {
+            Some(left_part)
         } else {
-            let available = width.saturating_sub(right_len + 1);
+            let available = width.saturating_sub(right_len + 2);
             let truncated = format!(
                 "{}…",
-                prefix_visible.chars().take(available.saturating_sub(1)).collect::<String>()
+                left_visible.chars().take(available.saturating_sub(1)).collect::<String>()
             );
             let spaces = width.saturating_sub(truncated.chars().count() + right_len);
             Some(format!("{}{}{}", truncated, " ".repeat(spaces), right_hint))
@@ -608,5 +583,29 @@ impl ChatUi {
         };
         self.erase_live_and_box(previous);
         let _ = io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_background_task_line() {
+        let ui = ChatUi::new(true);
+        ui.set_background_task(Some(BackgroundTaskState {
+            job_id: "job_0d24ea53".to_string(),
+            task: "Fix search_notes".to_string(),
+            current_tool: "read chat.rs".to_string(),
+            started_at: std::time::Instant::now() - std::time::Duration::from_secs(1440),
+            status: "running".to_string(),
+        }));
+
+        let line = ui.format_background_task_line(80).expect("bg line");
+        let stripped = dialoguer::console::strip_ansi_codes(&line);
+        assert!(stripped.contains("evolver-harness"));
+        assert!(stripped.contains("24m"));
+        assert!(stripped.contains("read chat.rs"));
+        assert!(stripped.contains("[Ctrl+B]"));
     }
 }

@@ -513,7 +513,7 @@ async fn run_engineer_job(
     let _ = event_tx.send(EvolverEvent::JobProgress {
         job_id: job_id.clone(),
         task: task.clone(),
-        current_tool: "Setting up git worktree".to_string(),
+        current_tool: "git worktree setup".to_string(),
     });
 
     // 1. Create worktree
@@ -627,13 +627,33 @@ async fn run_engineer_job(
     let engineer_agent = engineer_agent.with_observer(Arc::new(move |event| {
         match event {
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-                let args_str = arguments.to_string();
-                let brief_args = if args_str.chars().count() > 60 {
-                    format!("{}…", args_str.chars().take(59).collect::<String>())
-                } else {
-                    args_str
+                let tool_desc = match name.as_str() {
+                    "read_file" => {
+                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                        format!("read {}", leaf)
+                    }
+                    "write_file" => {
+                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                        format!("write {}", leaf)
+                    }
+                    "patch" => {
+                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                        format!("patch {}", leaf)
+                    }
+                    "search_files" => {
+                        let pat = arguments.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+                        format!("search {}", pat)
+                    }
+                    "terminal" => {
+                        let cmd = arguments.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                        let first = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+                        format!("run {}", first)
+                    }
+                    other => other.to_string(),
                 };
-                let tool_desc = format!("{}({})", name, brief_args);
                 let _ = event_tx_obs.send(EvolverEvent::JobProgress {
                     job_id: j_id_obs.clone(),
                     task: task_obs.clone(),
@@ -664,7 +684,7 @@ async fn run_engineer_job(
     let _ = event_tx.send(EvolverEvent::JobProgress {
         job_id: job_id.clone(),
         task: task.clone(),
-        current_tool: "Engineer investigating code".to_string(),
+        current_tool: "inspecting codebase".to_string(),
     });
 
     // Initial prompt

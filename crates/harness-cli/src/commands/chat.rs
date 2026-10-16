@@ -504,6 +504,7 @@ pub async fn run_interactive_chat(
             job_id: active.id,
             task: active.task,
             current_tool,
+            started_at: std::time::Instant::now(),
             status: "running".to_string(),
         }));
     }
@@ -567,9 +568,7 @@ pub async fn run_interactive_chat(
     loop {
         tokio::select! {
             _ = animation.tick() => {
-                if active_turn.is_some() {
-                    ui.animate_tick();
-                }
+                ui.animate_tick();
             }
 
             maybe_evolver = evolver_rx.recv() => {
@@ -579,7 +578,8 @@ pub async fn run_interactive_chat(
                             ui.set_background_task(Some(BackgroundTaskState {
                                 job_id,
                                 task,
-                                current_tool: "Setting up worktree...".to_string(),
+                                current_tool: "git worktree setup".to_string(),
+                                started_at: std::time::Instant::now(),
                                 status: "running".to_string(),
                             }));
                         }
