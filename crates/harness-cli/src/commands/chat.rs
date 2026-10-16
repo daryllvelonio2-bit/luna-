@@ -516,14 +516,40 @@ pub async fn run_interactive_chat(
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
     selection: SessionSelection,
+    explicit_model: bool,
 ) -> Result<(), HarnessError> {
+    // Every turn is appended to this session; a resumed one replays its recent transcript.
+    // Resolved before the provider client so the session's stored model choice can take effect.
+    let store = Arc::new(open_store(&config)?);
+    let mut session_id = resolve_session(store.as_ref(), selection).await?;
+
     let mut current_provider = config.model.provider.clone();
     let mut current_model = config.model.default.clone();
+
+    // A session carries its own model choice: `/model` stamps it on the session row, so a
+    // resumed session returns to the model that conversation was switched to even when the
+    // config default has moved on. An explicit CLI `--provider`/`--model` outranks the stored
+    // choice for the run but does not overwrite it.
+    let record = store.get(&session_id).await?;
+    if !explicit_model {
+        if let Some((provider, model)) = record.model.clone() {
+            current_provider = provider;
+            current_model = model;
+        }
+    }
 
     if current_provider.is_empty() {
         return Err(HarnessError::ConfigurationError(
             "No LLM provider configured or loaded with credentials. Run 'luna auth' to register a credential or specify '--provider <name>'.".to_string(),
         ));
+    }
+
+    // Stamp the model this session starts on (a fresh session, or a row written before model
+    // persistence existed) so the choice stays durable even after the config default changes.
+    if record.model.is_none() {
+        store
+            .set_model(&session_id, &current_provider, &current_model)
+            .await?;
     }
 
     let provider = Arc::new(GenericProviderClient::new(
@@ -533,10 +559,6 @@ pub async fn run_interactive_chat(
         discovery.clone(),
         config.providers.get(&current_provider),
     )?);
-
-    // Every turn is appended to this session; a resumed one replays its recent transcript.
-    let store = Arc::new(open_store(&config)?);
-    let mut session_id = resolve_session(store.as_ref(), selection).await?;
 
     // The compaction call is a plain model call: one provider, one model, resolved from
     // `agent.compaction_provider` / `agent.compaction_model` (both default to the session's).
@@ -715,6 +737,8 @@ pub async fn run_interactive_chat(
                     &cred_manager,
                     &discovery,
                     &agent,
+                    store.as_ref(),
+                    &session_id,
                     &mut current_provider,
                     &mut current_model,
                     &compact_model,
@@ -974,13 +998,17 @@ pub async fn run_interactive_chat(
             }
 
             maybe_approval = approval_rx.recv() => {
-                let (request, decision_tx) = match maybe_approval {
+                let (request, mut decision_tx) = match maybe_approval {
                     Some(pair) => pair,
                     None => continue,
                 };
 
+                if decision_tx.is_closed() {
+                    continue;
+                }
+
                 ui.clear_live_and_box();
-                let choice = prompt_approval_choice(&mut key_rx, &request, &ui).await;
+                let choice = prompt_approval_choice(&mut key_rx, &request, &ui, &mut decision_tx).await;
                 if matches!(choice, ApprovalChoice::AllSession) {
                     // Sticky "approve all": flip the gate once and it stays for this chat.
                     allow_all_session.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1526,6 +1554,8 @@ async fn execute_slash_command(
                 cred_manager,
                 discovery,
                 agent,
+                store,
+                session_id,
                 current_provider,
                 current_model,
                 compact_model,
@@ -2314,6 +2344,8 @@ async fn handle_model_switch(
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &SqliteSessionStore,
+    session_id: &str,
     current_provider: &mut String,
     current_model: &mut String,
     compact_model: &Option<String>,
@@ -2394,6 +2426,17 @@ async fn handle_model_switch(
 
     *current_provider = chosen_provider.clone();
     *current_model = chosen_model.clone();
+
+    // The switch is session state, not just process state: stamping the row means a later
+    // `luna --session <id>` resumes on this pair instead of the config default. A failure to
+    // persist is surfaced as a warning — the in-memory switch already happened.
+    if let Err(error) = store.set_model(session_id, &chosen_provider, &chosen_model).await {
+        ui.emit_above(&format!(
+            "{} Model switched in this session, but persisting it failed: {}",
+            "⚠".yellow(),
+            error
+        ));
+    }
 
     // If compaction model is not custom set, default it to the used model
     if compact_model.is_none() {
@@ -2560,6 +2603,11 @@ async fn handle_new_command(
     if !name.is_empty() {
         store.set_name(&new_id, name).await?;
     }
+    // The new session inherits the model currently in use, so the switch carried into it is
+    // not lost the next time this session is resumed.
+    store
+        .set_model(&new_id, current_provider, current_model)
+        .await?;
 
     *session_id = new_id.clone();
     agent.lock().await.set_session(SessionBinding {
@@ -2664,6 +2712,10 @@ async fn handle_summarize_and_new_command(
     if !name.is_empty() {
         store.set_name(&new_id, name).await?;
     }
+    // As with `/new`: the follow-up session inherits the model in use when it was created.
+    store
+        .set_model(&new_id, current_provider, current_model)
+        .await?;
 
     let summary_header = if !name.is_empty() {
         format!("Context summary from session '{}' ({}):\n{}", name, old_id, summary)
@@ -2850,6 +2902,7 @@ async fn prompt_approval_choice(
     key_rx: &mut mpsc::UnboundedReceiver<Key>,
     request: &ApprovalRequest,
     ui: &ChatUi,
+    decision_tx: &mut oneshot::Sender<harness_core::ApprovalDecision>,
 ) -> ApprovalChoice {
     let width = get_terminal_width();
     let mut selected = 0; // index into APPROVAL_ACTIONS
@@ -2865,7 +2918,28 @@ async fn prompt_approval_choice(
     print!("{}", initial_text);
     let _ = io::stdout().flush();
 
-    while let Some(key) = key_rx.recv().await {
+    loop {
+        let key = tokio::select! {
+            _ = decision_tx.closed() => {
+                // The agent timed out waiting for approval or the turn was cancelled.
+                // Cleanly erase the popup box and return Deny immediately so the UI loop does not hang!
+                print!("\r\x1b[{}A", line_count);
+                for _ in 0..line_count {
+                    print!("\x1b[2K\x1b[1B");
+                }
+                print!("\r\x1b[{}A", line_count);
+                let _ = io::stdout().flush();
+                ui.draw_initial_box();
+                return ApprovalChoice::Deny;
+            }
+            maybe_key = key_rx.recv() => {
+                match maybe_key {
+                    Some(k) => k,
+                    None => break,
+                }
+            }
+        };
+
         let chosen = match key {
             Key::ArrowUp | Key::ArrowLeft | Key::BackTab => {
                 selected = (selected + APPROVAL_ACTIONS.len() - 1) % APPROVAL_ACTIONS.len();

@@ -299,6 +299,24 @@ mod tests {
         assert_eq!(decision2, ApprovalDecision::Run);
     }
 
+    #[tokio::test]
+    async fn chat_approver_denies_on_dropped_receiver() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let allow_all = Arc::new(AtomicBool::new(false));
+        let approver = ChatApprover::new(tx, allow_all);
+
+        let req = ApprovalRequest::default();
+        tokio::spawn(async move {
+            if let Some((_request, decision_tx)) = rx.recv().await {
+                // Drop decision_tx without sending
+                drop(decision_tx);
+            }
+        });
+
+        let decision = approver.approve(&req).await.unwrap();
+        assert_eq!(decision, ApprovalDecision::Deny);
+    }
+
     #[test]
     fn settings_come_from_the_config_keys() {
         let mut config = Config::default();
