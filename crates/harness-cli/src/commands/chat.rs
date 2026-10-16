@@ -206,6 +206,14 @@ impl ChatUi {
         self.live.lock().unwrap().activity = None;
     }
 
+    /// Reset live reasoning, active tool spinners, and live rows cleanly.
+    fn clear_live_state(&self) {
+        let mut live = self.live.lock().unwrap();
+        live.reasoning.clear();
+        live.rows.clear();
+        live.activity = None;
+    }
+
     /// Erase the live region and the composer box cleanly, e.g. before an approval prompt.
     fn clear_live_and_box(&self) {
         self.clear_box_on_exit();
@@ -905,7 +913,9 @@ pub async fn run_interactive_chat(
     loop {
         tokio::select! {
             _ = animation.tick() => {
-                ui.animate_tick();
+                if active_turn.is_some() {
+                    ui.animate_tick();
+                }
             }
 
             maybe_approval = approval_rx.recv() => {
@@ -1083,6 +1093,7 @@ pub async fn run_interactive_chat(
                             current_cancel.cancel();
                             handle.abort();
                             ui.stop_activity();
+                            ui.clear_live_state();
                             let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                             let turn_dur = turn_start.elapsed();
 
@@ -1118,6 +1129,7 @@ pub async fn run_interactive_chat(
                             current_cancel.cancel();
                             handle.abort();
                             ui.stop_activity();
+                            ui.clear_live_state();
                             let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                             let turn_dur = turn_start.elapsed();
 
@@ -1159,6 +1171,7 @@ pub async fn run_interactive_chat(
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
+                        ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
 
@@ -1189,6 +1202,7 @@ pub async fn run_interactive_chat(
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.stop_activity();
+                        ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
 
@@ -1216,6 +1230,7 @@ pub async fn run_interactive_chat(
                     }
                     Ok(Err(e)) => {
                         ui.stop_activity();
+                        ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
 
@@ -1243,6 +1258,7 @@ pub async fn run_interactive_chat(
                     }
                     Err(join_err) => {
                         ui.stop_activity();
+                        ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
 

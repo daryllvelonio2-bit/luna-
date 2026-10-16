@@ -738,6 +738,22 @@ where
             return Ok(buffered);
         }
 
+        if reasoning.is_empty() {
+            for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+                if let Some(start) = content.find(open_tag) {
+                    if let Some(end) = content.find(close_tag) {
+                        let think_text = content[start + open_tag.len()..end].trim().to_string();
+                        let rest = format!("{}{}", &content[..start], &content[end + close_tag.len()..]).trim().to_string();
+                        if !think_text.is_empty() {
+                            reasoning = think_text;
+                        }
+                        content = rest;
+                        break;
+                    }
+                }
+            }
+        }
+
         let mut response = Message::assistant(content);
         response.reasoning = if reasoning.is_empty() { None } else { Some(reasoning) };
         response.tool_calls = tool_calls;
