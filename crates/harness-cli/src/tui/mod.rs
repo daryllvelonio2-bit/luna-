@@ -15,7 +15,8 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Block, Borders};
 use ratatui::Terminal;
 
 use self::app::{AppState, PanelFocus};
@@ -66,15 +67,26 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
             let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(2), // Top Header Bar
-                    Constraint::Min(10),   // 3-Column Antigravity Body
+                    Constraint::Length(3), // Top Head Box
+                    Constraint::Min(0),    // Full remaining screen height
                 ])
                 .split(full_area);
 
-            // 1. Top Header
-            render_header(f, &mut app, main_chunks[0]);
+            // 1. Top Head Box, full screen width
+            let head_area = main_chunks[0];
+            app.rect_header = head_area;
+            let mut head_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(app.theme.border_type)
+                .border_style(app.theme.border);
+            if app.theme.card_bg != ratatui::style::Color::Reset {
+                head_block = head_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+            }
+            let head_inner = head_block.inner(head_area);
+            f.render_widget(head_block, head_area);
+            render_header(f, &mut app, head_inner);
 
-            // 2. Responsive Multi-Column Body
+            // 2. Responsive Full-Screen Body Area
             let body_area = main_chunks[1];
             let width = body_area.width;
 
@@ -92,43 +104,137 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
                 0
             };
 
-            match (show_left, show_right) {
-                (true, true) => {
-                    let body_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Length(left_w),
-                            Constraint::Min(35),
-                            Constraint::Length(right_w),
-                        ])
-                        .split(body_area);
-                    render_left_sidebar(f, &mut app, body_chunks[0]);
-                    render_center(f, &mut app, body_chunks[1]);
-                    render_right_sidebar(f, &mut app, body_chunks[2]);
+            let (left_rect, combined_rect) = if show_left {
+                (
+                    Rect {
+                        x: body_area.x,
+                        y: body_area.y,
+                        width: left_w,
+                        height: body_area.height,
+                    },
+                    Rect {
+                        x: body_area.x + left_w,
+                        y: body_area.y,
+                        width: width.saturating_sub(left_w),
+                        height: body_area.height,
+                    },
+                )
+            } else {
+                app.rect_left = Rect::default();
+                (
+                    Rect::default(),
+                    Rect {
+                        x: body_area.x,
+                        y: body_area.y,
+                        width,
+                        height: body_area.height,
+                    },
+                )
+            };
+
+            if show_left && left_rect.width > 0 {
+                render_left_sidebar(f, &mut app, left_rect);
+            }
+
+            // Render Center ("the bigger one") and Right Box CONNECTED with NO SPACES:
+            let combined_w = combined_rect.width;
+            let combined_h = combined_rect.height;
+
+            if show_right && combined_w > right_w + 20 {
+                let center_w = combined_w.saturating_sub(right_w);
+                let divider_x = combined_rect.x + center_w;
+
+                let is_center_focused =
+                    app.focus == PanelFocus::CenterTranscript || app.focus == PanelFocus::Composer;
+                let is_right_focused = app.focus == PanelFocus::RightSidebar;
+                let border_style = if is_center_focused || is_right_focused {
+                    app.theme.border_focused
+                } else {
+                    app.theme.border
+                };
+
+                let mut outer_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(app.theme.border_type)
+                    .border_style(border_style);
+                if app.theme.card_bg != ratatui::style::Color::Reset {
+                    outer_block =
+                        outer_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
                 }
-                (true, false) => {
-                    app.rect_right = ratatui::layout::Rect::default();
-                    let body_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Length(left_w), Constraint::Min(35)])
-                        .split(body_area);
-                    render_left_sidebar(f, &mut app, body_chunks[0]);
-                    render_center(f, &mut app, body_chunks[1]);
+                f.render_widget(outer_block, combined_rect);
+
+                // Connected single-border divider (no spaces!)
+                let buf = f.buffer_mut();
+                if let Some(cell) = buf.cell_mut((divider_x, combined_rect.y)) {
+                    cell.set_symbol("┬");
+                    cell.set_style(border_style);
                 }
-                (false, true) => {
-                    app.rect_left = ratatui::layout::Rect::default();
-                    let body_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Min(35), Constraint::Length(right_w)])
-                        .split(body_area);
-                    render_center(f, &mut app, body_chunks[0]);
-                    render_right_sidebar(f, &mut app, body_chunks[1]);
+                if combined_h > 1 {
+                    let bottom_y = combined_rect.y + combined_h - 1;
+                    if let Some(cell) = buf.cell_mut((divider_x, bottom_y)) {
+                        cell.set_symbol("┴");
+                        cell.set_style(border_style);
+                    }
                 }
-                (false, false) => {
-                    app.rect_left = ratatui::layout::Rect::default();
-                    app.rect_right = ratatui::layout::Rect::default();
-                    render_center(f, &mut app, body_area);
+                for row in (combined_rect.y + 1)..(combined_rect.y + combined_h.saturating_sub(1)) {
+                    if let Some(cell) = buf.cell_mut((divider_x, row)) {
+                        cell.set_symbol("│");
+                        cell.set_style(border_style);
+                    }
                 }
+
+                let inner_center = Rect {
+                    x: combined_rect.x + 1,
+                    y: combined_rect.y + 1,
+                    width: center_w.saturating_sub(1),
+                    height: combined_h.saturating_sub(2),
+                };
+                let inner_right = Rect {
+                    x: divider_x + 1,
+                    y: combined_rect.y + 1,
+                    width: (combined_rect.x + combined_w).saturating_sub(divider_x + 2),
+                    height: combined_h.saturating_sub(2),
+                };
+
+                app.rect_center = Rect {
+                    x: combined_rect.x,
+                    y: combined_rect.y,
+                    width: center_w + 1,
+                    height: combined_h,
+                };
+                app.rect_right = Rect {
+                    x: divider_x,
+                    y: combined_rect.y,
+                    width: right_w,
+                    height: combined_h,
+                };
+
+                render_center(f, &mut app, inner_center);
+                render_right_sidebar(f, &mut app, inner_right);
+            } else {
+                app.rect_right = Rect::default();
+                let is_focused =
+                    app.focus == PanelFocus::CenterTranscript || app.focus == PanelFocus::Composer;
+                let border_style = if is_focused {
+                    app.theme.border_focused
+                } else {
+                    app.theme.border
+                };
+
+                let mut outer_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(app.theme.border_type)
+                    .border_style(border_style);
+                if app.theme.card_bg != ratatui::style::Color::Reset {
+                    outer_block =
+                        outer_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+                }
+
+                let inner = outer_block.inner(combined_rect);
+                f.render_widget(outer_block, combined_rect);
+
+                app.rect_center = combined_rect;
+                render_center(f, &mut app, inner);
             }
         })?;
 
