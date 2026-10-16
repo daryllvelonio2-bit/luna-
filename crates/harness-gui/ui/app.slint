@@ -1,4 +1,4 @@
-import { ScrollView, Button, LineEdit } from "std-widgets.slint";
+import { ScrollView, ListView, Button, LineEdit } from "std-widgets.slint";
 
 export struct ChatMsg {
     role: string,
@@ -472,43 +472,37 @@ export component AppWindow inherits Window {
 
                             Rectangle { height: 1px; background: #262634; }
 
-                            ScrollView {
-                                vertical-stretch: 1;
+                            ListView {
+                                for mdl in root.available_models : Rectangle {
+                                    height: 30px;
+                                    background: m_touch.has-hover ? #252536 : (root.model_name == mdl ? #20202e : transparent);
 
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    for mdl in root.available_models : Rectangle {
-                                        height: 30px;
-                                        border-radius: 6px;
-                                        background: m_touch.has-hover ? #252536 : (root.model_name == mdl ? #20202e : transparent);
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        alignment: space-between;
 
-                                        HorizontalLayout {
-                                            padding-left: 10px;
-                                            padding-right: 10px;
-                                            alignment: space-between;
-
-                                            Text {
-                                                text: mdl;
-                                                color: root.model_name == mdl ? #38bdf8 : #e4e4e7;
-                                                font-size: 12px;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                            }
-
-                                            if root.model_name == mdl : Text {
-                                                text: "✓";
-                                                color: #38bdf8;
-                                                font-size: 11px;
-                                                font-weight: 700;
-                                                vertical-alignment: center;
-                                            }
+                                        Text {
+                                            text: mdl;
+                                            color: root.model_name == mdl ? #38bdf8 : #e4e4e7;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
                                         }
 
-                                        m_touch := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                root.select_model(mdl);
-                                            }
+                                        if root.model_name == mdl : Text {
+                                            text: "✓";
+                                            color: #38bdf8;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    m_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.select_model(mdl);
                                         }
                                     }
                                 }
