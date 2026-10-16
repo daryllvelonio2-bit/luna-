@@ -271,115 +271,6 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 background: #101014;
-
-                VerticalLayout {
-                    padding: 0px;
-                    spacing: 0px;
-
-                    // Breadcrumbs bar
-                    Rectangle {
-                        height: 32px;
-                        background: #14141a;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 6px;
-                            alignment: start;
-
-                            // Hamburger icon for left side when closed
-                            if !root.left_sidebar_open : IconButton {
-                                icon: "☰";
-                                tip: "Open Explorer";
-                                icon-color: #38bdf8;
-                                clicked => { root.left_sidebar_open = true; }
-                            }
-
-                            // Breadcrumb hierarchy
-                            Text {
-                                text: "📁 " + root.workspace_name;
-                                color: #a1a1aa;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "›";
-                                color: #52525b;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "📁 crates";
-                                color: #a1a1aa;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "›";
-                                color: #52525b;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "📁 harness-gui";
-                                color: #a1a1aa;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "›";
-                                color: #52525b;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "📁 src";
-                                color: #a1a1aa;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "›";
-                                color: #52525b;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "📄 main.rs";
-                                color: #f4f4f5;
-                                font-size: 12px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            // Flexible space
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            // Hamburger icon for right side when closed (same as left side)
-                            if !root.right_sidebar_open : IconButton {
-                                icon: "☰";
-                                tip: "Open Context Panel";
-                                icon-color: #38bdf8;
-                                clicked => { root.right_sidebar_open = true; }
-                            }
-                        }
-                    }
-
-                    // Breadcrumb bottom border divider
-                    Rectangle {
-                        height: 1px;
-                        background: #23232c;
-                    }
-
-                    // Full Screen Center Content Area (Clean canvas)
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        vertical-stretch: 1;
-                        background: #101014;
-                    }
-                }
             }
 
             // Right Splitter (Resize handle)
@@ -398,14 +289,9 @@ export component AppWindow inherits Window {
                     padding: 10px;
                     spacing: 8px;
 
-                    // Header with title and collapse button
+                    // Header with title
                     HorizontalLayout {
-                        alignment: space-between;
-                        IconButton {
-                            icon: "▶";
-                            tip: "Collapse panel";
-                            clicked => { root.right_sidebar_open = false; }
-                        }
+                        alignment: start;
                         Text {
                             text: "CONTEXT";
                             color: #71717a;
