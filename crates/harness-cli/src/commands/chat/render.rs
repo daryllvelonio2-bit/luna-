@@ -267,9 +267,9 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 .unwrap_or_default();
             return format!("{} {} {}{}", bullet, "search_notes".bold(), quoted(query), limit);
         }
-        "read_note" | "update_note" => {
-            if let Some(id) = text("id") {
-                return format!("{} {} {}", bullet, name.bold(), id.cyan());
+        "read_note" | "update_note" | "delete_note" => {
+            if let Some(target) = text("title").or_else(|| text("id")) {
+                return format!("{} {} {}", bullet, name.bold(), quoted(target));
             }
         }
         "inspect_harness_source" => {
@@ -461,6 +461,24 @@ pub fn format_tool_result(is_error: bool, output: &str) -> String {
 
     if trimmed.is_empty() {
         return format!("  {} {}", "✓".green(), "done".dimmed());
+    }
+
+    if !is_error && trimmed.starts_with('{') {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(title) = val.get("title").and_then(|t| t.as_str()) {
+                let id_suffix = val
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|id| format!(" ({})", id))
+                    .unwrap_or_default();
+                return format!(
+                    "  {} Note \"{}\" saved{}",
+                    "✓".green(),
+                    title.bold(),
+                    id_suffix.dimmed()
+                );
+            }
+        }
     }
 
     let line_count = trimmed.lines().count();
