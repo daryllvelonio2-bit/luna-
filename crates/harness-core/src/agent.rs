@@ -610,11 +610,17 @@ where
         options: &CompletionOptions,
         cancel_token: &CancellationToken,
     ) -> Result<Message, HarnessError> {
-        let mut stream = match self.provider.stream(messages, tools, options).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                debug!("Provider stream unavailable ({}), falling back to a buffered call", error);
-                return self.provider.complete(messages, tools, options).await;
+        let mut stream = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+            res = self.provider.stream(messages, tools, options) => match res {
+                Ok(stream) => stream,
+                Err(error) => {
+                    debug!("Provider stream unavailable ({}), falling back to a buffered call", error);
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                        buffered = self.provider.complete(messages, tools, options) => return buffered,
+                    }
+                }
             }
         };
 
@@ -624,10 +630,14 @@ where
         // Tool-call fragments arrive keyed by the index the provider assigned them.
         let mut calls: Vec<(usize, ToolCall)> = Vec::new();
 
-        while let Some(event) = stream.next().await {
-            if cancel_token.is_cancelled() {
-                return Err(HarnessError::Cancelled);
-            }
+        loop {
+            let event = tokio::select! {
+                _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                ev = stream.next() => match ev {
+                    Some(event) => event,
+                    None => break,
+                }
+            };
 
             let event = match event {
                 Ok(event) => event,

@@ -877,7 +877,16 @@ pub async fn run_interactive_chat(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    // SIGINT or other signal interrupted read syscall - do not terminate reader thread!
+                    continue;
+                }
+                Err(_) => {
+                    if key_tx.is_closed() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
     });
@@ -1070,14 +1079,69 @@ pub async fn run_interactive_chat(
                         }
                     }
                     Key::CtrlC => {
-                        if active_turn.is_some() {
+                        if let Some(handle) = active_turn.take() {
                             current_cancel.cancel();
+                            handle.abort();
                             ui.stop_activity();
-                            ui.emit_above(&format!("{}\n", "✖ Cancelled".red()));
+                            let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                            let turn_dur = turn_start.elapsed();
+
+                            let record = TurnRecord {
+                                user_query: current_query.clone(),
+                                reasoning: None,
+                                tools: Vec::new(),
+                                tool_items: current_tools,
+                                duration: turn_dur,
+                                reply: "✖ Cancelled".to_string(),
+                            };
+                            turns.push(record);
+
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{}", "✖ Cancelled".red());
+                            }
+
+                            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                            ui.update_status(context_used, context_max);
                         } else {
                             ui.clear_box_on_exit();
                             clear_on_exit();
                             break;
+                        }
+                    }
+                    Key::Escape => {
+                        if let Some(handle) = active_turn.take() {
+                            current_cancel.cancel();
+                            handle.abort();
+                            ui.stop_activity();
+                            let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                            let turn_dur = turn_start.elapsed();
+
+                            let record = TurnRecord {
+                                user_query: current_query.clone(),
+                                reasoning: None,
+                                tools: Vec::new(),
+                                tool_items: current_tools,
+                                duration: turn_dur,
+                                reply: "✖ Cancelled".to_string(),
+                            };
+                            turns.push(record);
+
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{}", "✖ Cancelled".red());
+                            }
+
+                            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                            ui.update_status(context_used, context_max);
                         }
                     }
                     _ => {}
@@ -2444,7 +2508,7 @@ async fn prompt_approval_choice(
             }
             Key::Char('y') | Key::Char('Y') => Some(ApprovalChoice::Once),
             Key::Char('a') | Key::Char('A') => Some(ApprovalChoice::AllSession),
-            Key::Char('n') | Key::Char('N') | Key::Char('c') | Key::Char('C') | Key::Escape => {
+            Key::Char('n') | Key::Char('N') | Key::Char('c') | Key::Char('C') | Key::Escape | Key::CtrlC => {
                 Some(ApprovalChoice::Deny)
             }
             Key::Enter => match selected {
