@@ -61,6 +61,7 @@ pub struct AppState {
     pub left_collapsed: bool,
     pub right_collapsed: bool,
     pub active_drag: Option<DragTarget>,
+    pub mouse_down_pos: Option<(u16, u16)>,
 
     // Telemetry & context stats
     pub subagents_count: usize,
@@ -138,6 +139,7 @@ impl Default for AppState {
             left_collapsed: false,
             right_collapsed: false,
             active_drag: None,
+            mouse_down_pos: None,
             subagents_count: 0,
             files_changed_count: 3,
             artifacts_count: 0,
@@ -205,12 +207,47 @@ impl AppState {
         self.right_collapsed = false;
     }
 
+    /// Horizontal two-finger trackpad swipe or wheel swipe
+    pub fn handle_horizontal_swipe(&mut self, left: bool, col: u16, total_width: u16) {
+        if col < total_width / 2 {
+            // Left sidebar swipe:
+            if left {
+                // Swiping left shrinks or collapses
+                if self.left_width <= 18 {
+                    self.left_collapsed = true;
+                } else {
+                    self.resize_left(-2, total_width);
+                }
+            } else {
+                // Swiping right expands or restores
+                self.left_collapsed = false;
+                self.resize_left(2, total_width);
+            }
+        } else {
+            // Right sidebar swipe:
+            if left {
+                // Swiping left expands or restores
+                self.right_collapsed = false;
+                self.resize_right(2, total_width);
+            } else {
+                // Swiping right shrinks or collapses
+                if self.right_width <= 18 {
+                    self.right_collapsed = true;
+                } else {
+                    self.resize_right(-2, total_width);
+                }
+            }
+        }
+    }
+
     pub fn handle_mouse_down(&mut self, col: u16, row: u16) {
-        // Divider drag hit testing:
-        // Left divider boundary:
+        self.mouse_down_pos = Some((col, row));
+
+        // Broad boundary detection (+/- 3 cells) so normal swiping/dragging catches easily
         if !self.left_collapsed && self.rect_left.width > 0 {
             let left_edge = self.rect_left.x + self.rect_left.width;
-            if (col == left_edge || col + 1 == left_edge || col == left_edge + 1)
+            if col >= left_edge.saturating_sub(3)
+                && col <= left_edge + 3
                 && row >= self.rect_left.y
                 && row < self.rect_left.y + self.rect_left.height
             {
@@ -219,13 +256,27 @@ impl AppState {
             }
         }
 
-        // Right divider boundary:
         if !self.right_collapsed && self.rect_right.width > 0 {
             let right_edge = self.rect_right.x;
-            if (col == right_edge || col + 1 == right_edge || col == right_edge + 1)
+            if col >= right_edge.saturating_sub(3)
+                && col <= right_edge + 3
                 && row >= self.rect_right.y
                 && row < self.rect_right.y + self.rect_right.height
             {
+                self.active_drag = Some(DragTarget::RightDivider);
+                return;
+            }
+        }
+
+        // Edge swipe-in detection when collapsed
+        if self.left_collapsed && col <= 3 {
+            self.active_drag = Some(DragTarget::LeftDivider);
+            return;
+        }
+
+        if self.right_collapsed && self.rect_center.width > 0 {
+            let right_edge = self.rect_center.x + self.rect_center.width;
+            if col >= right_edge.saturating_sub(3) {
                 self.active_drag = Some(DragTarget::RightDivider);
                 return;
             }
@@ -235,16 +286,40 @@ impl AppState {
     }
 
     pub fn handle_mouse_drag(&mut self, col: u16, total_width: u16) {
+        // Detect swipe initiation from mouse down starting point
+        if self.active_drag.is_none() {
+            if let Some((start_x, _)) = self.mouse_down_pos {
+                let dx = (col as i32 - start_x as i32).abs();
+                if dx >= 3 {
+                    if start_x <= self.rect_left.x + self.rect_left.width + 2 {
+                        self.active_drag = Some(DragTarget::LeftDivider);
+                    } else if start_x >= self.rect_right.x.saturating_sub(2) && self.rect_right.width > 0 {
+                        self.active_drag = Some(DragTarget::RightDivider);
+                    }
+                }
+            }
+        }
+
         let max = (total_width / 2).max(20);
         match self.active_drag {
             Some(DragTarget::LeftDivider) => {
-                self.left_width = col.clamp(16, max);
-                self.left_collapsed = false;
+                if col < 10 {
+                    // Swiped all the way left: collapse
+                    self.left_collapsed = true;
+                } else {
+                    self.left_collapsed = false;
+                    self.left_width = col.clamp(16, max);
+                }
             }
             Some(DragTarget::RightDivider) => {
-                let w = total_width.saturating_sub(col);
-                self.right_width = w.clamp(16, max);
-                self.right_collapsed = false;
+                if col > total_width.saturating_sub(10) {
+                    // Swiped all the way right: collapse
+                    self.right_collapsed = true;
+                } else {
+                    self.right_collapsed = false;
+                    let w = total_width.saturating_sub(col);
+                    self.right_width = w.clamp(16, max);
+                }
             }
             None => {}
         }
@@ -252,6 +327,7 @@ impl AppState {
 
     pub fn handle_mouse_up(&mut self) {
         self.active_drag = None;
+        self.mouse_down_pos = None;
     }
 
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
@@ -345,5 +421,28 @@ mod tests {
         assert_eq!(app.left_width, 35);
         app.handle_mouse_up();
         assert_eq!(app.active_drag, None);
+    }
+
+    #[test]
+    fn test_horizontal_swipe() {
+        let mut app = AppState::default();
+        let initial_left = app.left_width;
+
+        // Swiping right on left side expands left sidebar
+        app.handle_horizontal_swipe(false, 10, 120);
+        assert_eq!(app.left_width, initial_left + 2);
+
+        // Swiping left shrinks left sidebar
+        app.handle_horizontal_swipe(true, 10, 120);
+        assert_eq!(app.left_width, initial_left);
+
+        // Swiping left repeatedly collapses it
+        app.left_width = 18;
+        app.handle_horizontal_swipe(true, 10, 120);
+        assert!(app.left_collapsed);
+
+        // Swiping right uncollapses it
+        app.handle_horizontal_swipe(false, 10, 120);
+        assert!(!app.left_collapsed);
     }
 }

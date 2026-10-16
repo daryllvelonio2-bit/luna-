@@ -316,6 +316,12 @@ fn handle_event(app: &mut AppState, event: Event, width: u16) {
             MouseEventKind::ScrollDown => {
                 app.handle_mouse_scroll(false, mouse.column, mouse.row);
             }
+            MouseEventKind::ScrollLeft => {
+                app.handle_horizontal_swipe(true, mouse.column, width);
+            }
+            MouseEventKind::ScrollRight => {
+                app.handle_horizontal_swipe(false, mouse.column, width);
+            }
             _ => {}
         },
 
