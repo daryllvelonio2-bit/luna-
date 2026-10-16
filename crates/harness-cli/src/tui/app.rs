@@ -34,6 +34,12 @@ pub struct SessionSummaryItem {
     pub time: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragTarget {
+    LeftDivider,
+    RightDivider,
+}
+
 pub struct AppState {
     pub theme: Theme,
     pub focus: PanelFocus,
@@ -48,6 +54,13 @@ pub struct AppState {
     pub composer_input: String,
     pub composer_cursor: usize,
     pub model_name: String,
+
+    // Responsive sidebar sizing & toggles
+    pub left_width: u16,
+    pub right_width: u16,
+    pub left_collapsed: bool,
+    pub right_collapsed: bool,
+    pub active_drag: Option<DragTarget>,
 
     // Telemetry & context stats
     pub subagents_count: usize,
@@ -120,6 +133,11 @@ impl Default for AppState {
             composer_input: String::new(),
             composer_cursor: 0,
             model_name: "Gemini 3.8 Flash High".to_string(),
+            left_width: 28,
+            right_width: 30,
+            left_collapsed: false,
+            right_collapsed: false,
+            active_drag: None,
             subagents_count: 0,
             files_changed_count: 3,
             artifacts_count: 0,
@@ -163,6 +181,77 @@ impl AppState {
 
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         self.theme = Theme::for_mode(mode);
+    }
+
+    pub fn toggle_left_sidebar(&mut self) {
+        self.left_collapsed = !self.left_collapsed;
+    }
+
+    pub fn toggle_right_sidebar(&mut self) {
+        self.right_collapsed = !self.right_collapsed;
+    }
+
+    pub fn resize_left(&mut self, delta: i16, max_width: u16) {
+        let max = (max_width / 2).max(20) as i16;
+        let new_w = (self.left_width as i16 + delta).clamp(16, max);
+        self.left_width = new_w as u16;
+        self.left_collapsed = false;
+    }
+
+    pub fn resize_right(&mut self, delta: i16, max_width: u16) {
+        let max = (max_width / 2).max(20) as i16;
+        let new_w = (self.right_width as i16 + delta).clamp(16, max);
+        self.right_width = new_w as u16;
+        self.right_collapsed = false;
+    }
+
+    pub fn handle_mouse_down(&mut self, col: u16, row: u16) {
+        // Divider drag hit testing:
+        // Left divider boundary:
+        if !self.left_collapsed && self.rect_left.width > 0 {
+            let left_edge = self.rect_left.x + self.rect_left.width;
+            if (col == left_edge || col + 1 == left_edge || col == left_edge + 1)
+                && row >= self.rect_left.y
+                && row < self.rect_left.y + self.rect_left.height
+            {
+                self.active_drag = Some(DragTarget::LeftDivider);
+                return;
+            }
+        }
+
+        // Right divider boundary:
+        if !self.right_collapsed && self.rect_right.width > 0 {
+            let right_edge = self.rect_right.x;
+            if (col == right_edge || col + 1 == right_edge || col == right_edge + 1)
+                && row >= self.rect_right.y
+                && row < self.rect_right.y + self.rect_right.height
+            {
+                self.active_drag = Some(DragTarget::RightDivider);
+                return;
+            }
+        }
+
+        self.handle_mouse_click(col, row);
+    }
+
+    pub fn handle_mouse_drag(&mut self, col: u16, total_width: u16) {
+        let max = (total_width / 2).max(20);
+        match self.active_drag {
+            Some(DragTarget::LeftDivider) => {
+                self.left_width = col.clamp(16, max);
+                self.left_collapsed = false;
+            }
+            Some(DragTarget::RightDivider) => {
+                let w = total_width.saturating_sub(col);
+                self.right_width = w.clamp(16, max);
+                self.right_collapsed = false;
+            }
+            None => {}
+        }
+    }
+
+    pub fn handle_mouse_up(&mut self) {
+        self.active_drag = None;
     }
 
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
@@ -221,4 +310,40 @@ impl AppState {
 
 fn is_inside_rect(x: u16, y: u16, r: Rect) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sidebar_toggles() {
+        let mut app = AppState::default();
+        assert!(!app.left_collapsed);
+        assert!(!app.right_collapsed);
+
+        app.toggle_left_sidebar();
+        assert!(app.left_collapsed);
+
+        app.toggle_right_sidebar();
+        assert!(app.right_collapsed);
+    }
+
+    #[test]
+    fn test_sidebar_resizing() {
+        let mut app = AppState::default();
+        let initial_left = app.left_width;
+
+        app.resize_left(4, 120);
+        assert_eq!(app.left_width, initial_left + 4);
+
+        app.resize_left(-100, 120);
+        assert_eq!(app.left_width, 16); // Bounded at minimum 16
+
+        app.active_drag = Some(DragTarget::LeftDivider);
+        app.handle_mouse_drag(35, 120);
+        assert_eq!(app.left_width, 35);
+        app.handle_mouse_up();
+        assert_eq!(app.active_drag, None);
+    }
 }

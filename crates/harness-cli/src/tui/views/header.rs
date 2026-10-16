@@ -40,10 +40,13 @@ pub fn render_header(f: &mut Frame, app: &mut AppState, area: Rect) {
 
     // Right shortcut actions
     let theme_label = format!("[Ctrl+T] {} ", app.theme.mode.name());
+    let left_state = if app.left_collapsed { "[Ctrl+S] +Left " } else { "[Ctrl+S] -Left " };
+    let right_state = if app.right_collapsed { "[Ctrl+B] +Right " } else { "[Ctrl+B] -Right " };
     let actions = Line::from(vec![
         Span::styled("[Tab] Focus ", app.theme.text_muted),
+        Span::styled(left_state, app.theme.text_muted),
+        Span::styled(right_state, app.theme.text_muted),
         Span::styled(theme_label, app.theme.accent_purple),
-        Span::styled("[Ctrl+N] New ", app.theme.accent_cyan),
         Span::styled("[q] Quit", app.theme.accent_amber),
     ]);
     let right_para = Paragraph::new(actions)

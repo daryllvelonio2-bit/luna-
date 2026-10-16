@@ -74,35 +74,69 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
             // 1. Top Header
             render_header(f, &mut app, main_chunks[0]);
 
-            // 2. 3-Column Body
+            // 2. Responsive Multi-Column Body
             let body_area = main_chunks[1];
             let width = body_area.width;
 
-            let (left_w, right_w) = if width >= 140 {
-                (30, 32)
-            } else if width >= 100 {
-                (24, 26)
+            let show_left = !app.left_collapsed && width >= 80;
+            let show_right = !app.right_collapsed && width >= 110;
+
+            let left_w = if show_left {
+                app.left_width.min(width / 3).max(16)
             } else {
-                (20, 22)
+                0
+            };
+            let right_w = if show_right {
+                app.right_width.min(width / 3).max(16)
+            } else {
+                0
             };
 
-            let body_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(left_w),
-                    Constraint::Min(40),
-                    Constraint::Length(right_w),
-                ])
-                .split(body_area);
-
-            render_left_sidebar(f, &mut app, body_chunks[0]);
-            render_center(f, &mut app, body_chunks[1]);
-            render_right_sidebar(f, &mut app, body_chunks[2]);
+            match (show_left, show_right) {
+                (true, true) => {
+                    let body_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(left_w),
+                            Constraint::Min(35),
+                            Constraint::Length(right_w),
+                        ])
+                        .split(body_area);
+                    render_left_sidebar(f, &mut app, body_chunks[0]);
+                    render_center(f, &mut app, body_chunks[1]);
+                    render_right_sidebar(f, &mut app, body_chunks[2]);
+                }
+                (true, false) => {
+                    app.rect_right = ratatui::layout::Rect::default();
+                    let body_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(left_w), Constraint::Min(35)])
+                        .split(body_area);
+                    render_left_sidebar(f, &mut app, body_chunks[0]);
+                    render_center(f, &mut app, body_chunks[1]);
+                }
+                (false, true) => {
+                    app.rect_left = ratatui::layout::Rect::default();
+                    let body_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Min(35), Constraint::Length(right_w)])
+                        .split(body_area);
+                    render_center(f, &mut app, body_chunks[0]);
+                    render_right_sidebar(f, &mut app, body_chunks[1]);
+                }
+                (false, false) => {
+                    app.rect_left = ratatui::layout::Rect::default();
+                    app.rect_right = ratatui::layout::Rect::default();
+                    render_center(f, &mut app, body_area);
+                }
+            }
         })?;
 
         if app.should_quit {
             break;
         }
+
+        let term_width = terminal.size()?.width;
 
         tokio::select! {
             _ = tick_interval.tick() => {
@@ -112,7 +146,7 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
-                        handle_event(&mut app, event);
+                        handle_event(&mut app, event, term_width);
                     }
                     Some(Err(_)) | None => break,
                 }
@@ -123,7 +157,7 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_event(app: &mut AppState, event: Event) {
+fn handle_event(app: &mut AppState, event: Event, width: u16) {
     match event {
         Event::Key(key) => {
             if key.kind != KeyEventKind::Press {
@@ -141,6 +175,22 @@ fn handle_event(app: &mut AppState, event: Event) {
                         app.cycle_theme();
                         return;
                     }
+                    KeyCode::Char('s') => {
+                        app.toggle_left_sidebar();
+                        return;
+                    }
+                    KeyCode::Char('b') => {
+                        app.toggle_right_sidebar();
+                        return;
+                    }
+                    KeyCode::Char('[') => {
+                        app.resize_left(-2, width);
+                        return;
+                    }
+                    KeyCode::Char(']') => {
+                        app.resize_left(2, width);
+                        return;
+                    }
                     KeyCode::Char('n') => {
                         app.sessions.insert(0, app::SessionSummaryItem {
                             id: format!("session_{}", app.sessions.len() + 1),
@@ -153,6 +203,21 @@ fn handle_event(app: &mut AppState, event: Event) {
                         }
                         app.selected_session_idx = 0;
                         app.transcript.clear();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Alt navigation & resizing
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                match key.code {
+                    KeyCode::Left => {
+                        app.resize_left(-2, width);
+                        return;
+                    }
+                    KeyCode::Right => {
+                        app.resize_left(2, width);
                         return;
                     }
                     _ => {}
@@ -237,7 +302,13 @@ fn handle_event(app: &mut AppState, event: Event) {
 
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                app.handle_mouse_click(mouse.column, mouse.row);
+                app.handle_mouse_down(mouse.column, mouse.row);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                app.handle_mouse_drag(mouse.column, width);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                app.handle_mouse_up();
             }
             MouseEventKind::ScrollUp => {
                 app.handle_mouse_scroll(true, mouse.column, mouse.row);
