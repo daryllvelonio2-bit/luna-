@@ -156,6 +156,10 @@ async fn main() -> Result<(), HarnessError> {
         layers.flags.insert("tools.approval".to_string(), "allow".to_string());
     }
 
+    // A CLI `--provider`/`--model` is a deliberate choice for the run; the chat then knows not
+    // to let the session's stored model choice shadow it.
+    let explicit_model = chat_provider.is_some() || chat_model.is_some();
+
     if let Some(Commands::Models { subcommand }) = &cli.command {
         let provider = match subcommand {
             ModelsCommand::List { provider, .. } => provider,
@@ -222,7 +226,7 @@ async fn main() -> Result<(), HarnessError> {
                 (None, true) => SessionSelection::Continue,
                 (None, false) => SessionSelection::New,
             };
-            run_interactive_chat(config, cred_manager, discovery, selection).await?;
+            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
@@ -256,7 +260,7 @@ async fn main() -> Result<(), HarnessError> {
                 (None, true) => SessionSelection::Continue,
                 (None, false) => SessionSelection::New,
             };
-            run_interactive_chat(config, cred_manager, discovery, selection).await?;
+            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
         }
     }
 

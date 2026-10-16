@@ -38,6 +38,11 @@ pub struct SessionRecord {
     pub name: String,
     /// Messages that are still live (not folded into a summary).
     pub message_count: usize,
+    /// The provider and model this session last ran with (`/model` switch, or the model in
+    /// use when the session was created by `/new`). `None` until the session has a model of
+    /// its own, so a session that never picked one resumes on the config default instead of
+    /// resurrecting a stale id.
+    pub model: Option<(String, String)>,
 }
 
 /// A message as it is stored: the row id and sequence number matter, because compaction marks the
@@ -80,6 +85,10 @@ pub trait SessionStore: Send + Sync {
 
     /// Set the user-assigned name (`/name`); an empty string clears it.
     async fn set_name(&self, id: &str, name: &str) -> Result<(), HarnessError>;
+
+    /// Record the provider and model this session runs with (`/model`). Both parts are stored
+    /// together so a resume restores the exact pair, not a half.
+    async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), HarnessError>;
 
     /// Append one message, assigning the next `seq` and updating the session's `updated_at`.
     /// Returns the new row id.

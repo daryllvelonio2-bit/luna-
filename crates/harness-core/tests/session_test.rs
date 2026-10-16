@@ -438,6 +438,89 @@ async fn naming_tolerates_databases_written_before_the_column_existed() {
     assert_eq!(store.get("s1").await.unwrap().name, "migrated");
 }
 
+#[tokio::test]
+async fn set_model_is_persisted_and_reported_by_get_and_list() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+
+    // A session that has not picked a model reports none, not a zero pair.
+    assert_eq!(store.get("s1").await.unwrap().model, None);
+
+    store
+        .set_model("s1", "deepseek", "glm-4.6")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get("s1").await.unwrap().model,
+        Some(("deepseek".to_string(), "glm-4.6".to_string()))
+    );
+
+    let sessions = store.list().await.unwrap();
+    assert_eq!(
+        sessions[0].model,
+        Some(("deepseek".to_string(), "glm-4.6".to_string()))
+    );
+
+    // A second switch overwrites: the row holds the latest pair.
+    store.set_model("s1", "openai", "gpt-5").await.unwrap();
+    assert_eq!(
+        store.get("s1").await.unwrap().model,
+        Some(("openai".to_string(), "gpt-5".to_string()))
+    );
+
+    // Setting on a missing session is an error, same contract as set_name.
+    assert!(store.set_model("nope", "openai", "gpt-5").await.is_err());
+}
+
+#[tokio::test]
+async fn model_persistence_survives_reopening_the_database() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    {
+        let store = SqliteSessionStore::new(Some(path.clone())).unwrap();
+        store.ensure_session("s1").await.unwrap();
+        store.set_model("s1", "zhipu", "glm-4.6").await.unwrap();
+    }
+
+    // A new process opens the same file and reads the pair back — this is the resume path.
+    let reopened = SqliteSessionStore::new(Some(path)).unwrap();
+    assert_eq!(
+        reopened.get("s1").await.unwrap().model,
+        Some(("zhipu".to_string(), "glm-4.6".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn model_tolerates_databases_written_before_the_column_existed() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    // A pre-model-persistence database: the sessions table has neither `name` nor `model`.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id         TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 title      TEXT NOT NULL DEFAULT ''
+             );
+             INSERT INTO sessions (id, created_at, updated_at, title)
+             VALUES ('s1', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00', 'old');",
+        )
+        .unwrap();
+    }
+
+    let store = SqliteSessionStore::new(Some(path)).expect("opening migrates the table");
+    assert_eq!(store.get("s1").await.unwrap().model, None, "backfilled as unset");
+    store.set_model("s1", "deepseek", "glm-4.6").await.unwrap();
+    assert_eq!(
+        store.get("s1").await.unwrap().model,
+        Some(("deepseek".to_string(), "glm-4.6".to_string()))
+    );
+}
+
 // ---------------------------------------------------------------- estimator
 
 /// Characters per token for the estimator's fallback. The provider-reported count for

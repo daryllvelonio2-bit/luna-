@@ -90,8 +90,8 @@ pub async fn handle_sessions_command(
             }
 
             println!(
-                "{:<10} {:<19} {:<19} {:>5}  {:<16}  TITLE",
-                "ID", "CREATED", "UPDATED", "MSGS", "NAME"
+                "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  TITLE",
+                "ID", "CREATED", "UPDATED", "MSGS", "NAME", "MODEL"
             );
             for session in sessions {
                 let name = if session.name.is_empty() {
@@ -99,13 +99,20 @@ pub async fn handle_sessions_command(
                 } else {
                     session.name.as_str()
                 };
+                // The pair the session last ran with; a session that has not picked one yet
+                // (and will resume on the config default) shows a placeholder.
+                let model = match &session.model {
+                    Some((provider, model)) => format!("{} ({})", model, provider),
+                    None => "-".to_string(),
+                };
                 println!(
-                    "{:<10} {:<19} {:<19} {:>5}  {:<16}  {}",
+                    "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  {}",
                     session.id,
                     session.created_at.format("%Y-%m-%d %H:%M:%S"),
                     session.updated_at.format("%Y-%m-%d %H:%M:%S"),
                     session.message_count,
                     name,
+                    model,
                     session.title
                 );
             }

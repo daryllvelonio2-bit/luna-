@@ -19,6 +19,12 @@ const TITLE_MAX_CHARS: usize = 80;
 /// Longest user-assigned session name kept (`/name`).
 const NAME_MAX_CHARS: usize = 64;
 
+/// Field separator inside the `sessions.model` column, which packs `provider` and `model` into
+/// one string. U+001F is the unit-separator control character: it cannot appear in a provider id
+/// or model id (model ids are URL-path segments and provider ids are catalog slugs), so it is an
+/// unambiguous delimiter.
+const MODEL_FIELD_SEPARATOR: char = '\u{1F}';
+
 /// `sessions` + `messages`. `compacted_at` is what makes compaction non-destructive: folded rows
 /// stay in the table and are simply excluded from replay.
 const SCHEMA: &str = r#"
@@ -30,7 +36,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     title       TEXT NOT NULL DEFAULT '',
-    name        TEXT NOT NULL DEFAULT ''
+    name        TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -116,26 +123,34 @@ impl SqliteSessionStore {
         Self::migrate(conn)
     }
 
-    /// Databases written before `/name` existed lack the `name` column. `CREATE TABLE IF NOT
-    /// EXISTS` cannot widen an existing table, so widen it here when the column is absent.
+    /// Databases written before `/name` existed lack the `name` column, and databases written
+    /// before per-session model persistence existed lack `model`. `CREATE TABLE IF NOT EXISTS`
+    /// cannot widen an existing table, so widen it here when a column is absent.
     fn migrate(conn: &Connection) -> Result<(), HarnessError> {
-        let has_name = conn
+        let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(sessions)")
             .and_then(|mut stmt| {
                 let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                Ok(columns
-                    .collect::<Result<Vec<_>, _>>()?
-                    .iter()
-                    .any(|column| column == "name"))
+                Ok(columns.collect::<Result<Vec<_>, _>>()?)
             })
             .map_err(|error| session_error("failed to inspect the sessions schema", error))?;
 
+        let has_name = columns.iter().any(|column| column == "name");
         if !has_name {
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''",
                 [],
             )
             .map_err(|error| session_error("failed to add the session name column", error))?;
+        }
+
+        let has_model = columns.iter().any(|column| column == "model");
+        if !has_model {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| session_error("failed to add the session model column", error))?;
         }
         Ok(())
     }
@@ -275,11 +290,19 @@ fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title, name): (String, String, String, String) = conn
+    let (created_at, updated_at, title, name, model): (String, String, String, String, String) = conn
         .query_row(
-            "SELECT created_at, updated_at, title, name FROM sessions WHERE id = ?1",
+            "SELECT created_at, updated_at, title, name, model FROM sessions WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|error| session_error(&format!("session '{}' not found", id), error))?;
 
@@ -290,6 +313,12 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         title,
         name,
         message_count: count_live(conn, id)?,
+        // The column stores `provider\x1Fmodel` when the session has a model of its own and an
+        // empty string otherwise; a legacy or never-switched row resumes on the config default.
+        model: model
+            .split_once(MODEL_FIELD_SEPARATOR)
+            .filter(|(provider, m)| !provider.is_empty() && !m.is_empty())
+            .map(|(provider, m)| (provider.to_string(), m.to_string())),
     })
 }
 
@@ -320,6 +349,24 @@ impl SessionStore for SqliteSessionStore {
                 params![name, id],
             )
             .map_err(|error| session_error("failed to set the session name", error))?;
+        if updated == 0 {
+            return Err(HarnessError::SessionError(format!(
+                "session '{}' not found",
+                id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), HarnessError> {
+        let conn = self.conn.lock().await;
+        let packed = format!("{}{}{}", provider, MODEL_FIELD_SEPARATOR, model);
+        let updated = conn
+            .execute(
+                "UPDATE sessions SET model = ?1 WHERE id = ?2",
+                params![packed, id],
+            )
+            .map_err(|error| session_error("failed to set the session model", error))?;
         if updated == 0 {
             return Err(HarnessError::SessionError(format!(
                 "session '{}' not found",
