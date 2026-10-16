@@ -34,3 +34,5 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 futures-util = { workspace = true }
 libc = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

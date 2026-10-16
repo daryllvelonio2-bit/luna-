@@ -332,11 +332,30 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
     }
 }
 
-/// Render a tool call as one transcript line that names the tool *and* the operation it is
-/// performing. A search spells out its mode (`search_files(content)`) so the reader never has
-/// to guess whether a scan went over file contents or file names.
+/// How wide the verb column of a tool-call line is, so targets line up across calls.
+const VERB_COLUMN: usize = 12;
+
+/// Emoji glyph and short verb per tool: the transcript reads as an action log
+/// (`📖 read      chat.rs L500-524`) instead of a JSON argument dump.
+fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "read_file" => ("📖", "read"),
+        "write_file" => ("📝", "write"),
+        "patch" => ("✏️", "patch"),
+        "search_files" => ("🔍", "search"),
+        "list_files" => ("📂", "list"),
+        "terminal" | "shell" | "bash" => ("💻", "run"),
+        "save_note" | "read_note" | "update_note" | "delete_note" => ("📑", "note"),
+        "search_notes" => ("🔍", "notes"),
+        "save_memory" | "update_memory" | "forget_memory" => ("🧠", "memory"),
+        "apply_harness_update" => ("🚀", "update"),
+        _ => ("🔧", ""),
+    }
+}
+
+/// Render a tool call as one transcript line: glyph, a padded short verb, the target, and the
+/// secondary detail the call itself implies (a read's line range, a patch's edit size).
 pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
-    let bullet = "•".cyan();
     // Absent and empty are the same thing to a reader: a model that sends `"path": ""` means
     // "no path given", not "a path called nothing".
     let text = |key: &str| {
@@ -349,6 +368,10 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
     let suffix = |detail: String| format!(" {}", detail.dimmed());
     let quoted = |value: &str| format!("\"{}\"", truncate_visible(value, MAX_TOOL_ARG_CHARS)).cyan();
 
+    let (glyph, verb) = tool_glyph_and_verb(name);
+    // `{:width$}` pads but never cuts, so a long fallback name still renders in full.
+    let verb_col = |label: &str| format!("{:<w$}", label, w = VERB_COLUMN).bold().to_string();
+
     match name {
         "terminal" | "shell" | "bash" => {
             if let Some(command) = text("command") {
@@ -358,8 +381,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                     .unwrap_or_default();
                 return format!(
                     "{} {} {}{}",
-                    bullet,
-                    "$".bold().cyan(),
+                    glyph,
+                    verb_col(verb),
                     truncate_visible(first_line, MAX_TOOL_ARG_CHARS).bold(),
                     cwd
                 );
@@ -369,22 +392,31 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             if let Some(path) = text("path") {
                 let range = match (number("offset"), number("limit")) {
                     (Some(offset), Some(limit)) => {
-                        suffix(format!("lines {}-{}", offset, offset + limit.saturating_sub(1)))
+                        suffix(format!("L{}-{}", offset, offset + limit.saturating_sub(1)))
                     }
-                    (Some(offset), None) => suffix(format!("from line {}", offset)),
-                    (None, Some(limit)) => suffix(format!("first {} lines", limit)),
+                    (Some(offset), None) => suffix(format!("L{}+", offset)),
+                    (None, Some(limit)) => suffix(format!("L1-{}", limit)),
                     _ => String::new(),
                 };
-                return format!("{} {} {}{}", bullet, "read".bold(), path.cyan(), range);
+                return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), range);
             }
+        }
+        "list_files" => {
+            let path = text("path").unwrap_or(".");
+            let glob = text("glob")
+                // `*` filters nothing, so it carries no information for the reader.
+                .filter(|g| *g != "*")
+                .map(|g| suffix(format!("matching {}", g)))
+                .unwrap_or_default();
+            return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), glob);
         }
         "write_file" => {
             if let Some(path) = text("path") {
                 let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
                     "{} {} {}{}",
-                    bullet,
-                    "write".bold(),
+                    glyph,
+                    verb_col(verb),
                     path.cyan(),
                     suffix(format!("{} lines", lines))
                 );
@@ -392,29 +424,38 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "patch" => {
             if let Some(path) = text("path") {
-                let every = match arguments.get("replace_all").and_then(|v| v.as_bool()) {
-                    Some(true) => suffix("all occurrences".to_string()),
-                    _ => String::new(),
-                };
-                return format!("{} {} {}{}", bullet, "patch".bold(), path.cyan(), every);
+                let mut extra = tool_activity_detail("patch", arguments)
+                    .map(suffix)
+                    .unwrap_or_default();
+                if matches!(
+                    arguments.get("replace_all").and_then(|v| v.as_bool()),
+                    Some(true)
+                ) {
+                    extra.push_str(&suffix("all occurrences".to_string()));
+                }
+                return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), extra);
             }
         }
         "search_files" => {
             let pattern = text("pattern").unwrap_or("");
             let path = text("path").unwrap_or(".");
             let mode = text("output_mode").unwrap_or("content");
+            let mode_tag = if mode == "content" {
+                String::new()
+            } else {
+                suffix(format!("({})", mode))
+            };
             let include = text("file_glob")
-                // `*` filters nothing, so it carries no information for the reader.
                 .filter(|glob| *glob != "*")
                 .map(|g| suffix(format!("matching {}", g)))
                 .unwrap_or_default();
             return format!(
-                "{} {} {} {} {}{}",
-                bullet,
-                format!("search_files({})", mode).bold(),
+                "{} {} {} in {}{}{}",
+                glyph,
+                verb_col(verb),
                 quoted(pattern),
-                "in".dimmed(),
                 path.cyan(),
+                mode_tag,
                 include
             );
         }
@@ -424,8 +465,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             let object = text("object").unwrap_or("?");
             return format!(
                 "{} {} {}{}{}",
-                bullet,
-                "save_memory".bold(),
+                glyph,
+                verb_col(verb),
                 format!("{}.{}", subject, predicate).cyan(),
                 " = ".dimmed(),
                 quoted(object)
@@ -433,7 +474,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "update_memory" | "forget_memory" => {
             if let Some(id) = text("memory_id") {
-                return format!("{} {} {}", bullet, name.bold(), id.cyan());
+                return format!("{} {} {}", glyph, verb_col(verb), id.cyan());
             }
         }
         "save_note" => {
@@ -441,8 +482,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
             return format!(
                 "{} {} {}{}",
-                bullet,
-                "save_note".bold(),
+                glyph,
+                verb_col(verb),
                 quoted(title),
                 suffix(format!("{} lines", lines))
             );
@@ -452,16 +493,21 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             let limit = number("limit")
                 .map(|l| suffix(format!("limit {}", l)))
                 .unwrap_or_default();
-            return format!("{} {} {}{}", bullet, "search_notes".bold(), quoted(query), limit);
+            return format!("{} {} {}{}", glyph, verb_col(verb), quoted(query), limit);
         }
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
-                return format!("{} {} {}", bullet, name.bold(), quoted(target));
+                let action = match name {
+                    "update_note" => suffix("(update)".to_string()),
+                    "delete_note" => suffix("(delete)".to_string()),
+                    _ => String::new(),
+                };
+                return format!("{} {} {}{}", glyph, verb_col(verb), quoted(target), action);
             }
         }
         "inspect_harness_source" => {
             if let Some(path) = text("path") {
-                return format!("{} {} {}", bullet, name.bold(), path.cyan());
+                return format!("{} {} {}", glyph, verb_col(name), path.cyan());
             }
         }
         "propose_harness_patch" => {
@@ -469,8 +515,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
                     "{} {} {}{}",
-                    bullet,
-                    name.bold(),
+                    glyph,
+                    verb_col(name),
                     path.cyan(),
                     suffix(format!("{} lines", lines))
                 );
@@ -478,7 +524,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "apply_harness_update" => {
             if let Some(id) = text("patch_id") {
-                return format!("{} {} {}", bullet, name.bold(), id.cyan());
+                return format!("{} {} {}", glyph, verb_col(verb), id.cyan());
             }
         }
         _ => {}
@@ -517,7 +563,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         None => format!(" {}", arguments),
     };
 
-    format!("{} {}{}", bullet, display_name.bold(), args_str.dimmed())
+    format!("{} {}{}", glyph, verb_col(&display_name), args_str.dimmed())
 }
 
 /// Formats the single-line verdict when a human approves or cancels a tool call.
@@ -787,8 +833,8 @@ mod tests {
 
     #[test]
     fn read_call_shows_the_line_range() {
-        assert!(call("read_file", json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }))
-            .contains("lines 10-29"));
+        let ranged = call("read_file", json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }));
+        assert!(ranged.contains("L10-29"), "got: {}", ranged);
         assert!(call("read_file", json!({ "path": "src/lib.rs" })).contains("src/lib.rs"));
     }
 
@@ -815,13 +861,13 @@ mod tests {
     #[test]
     fn search_call_names_the_mode_and_defaults_the_path() {
         let content = call("search_files", json!({ "pattern": "needle", "path": "", "file_glob": "*" }));
-        assert!(content.contains("search_files(content)"), "got: {}", content);
         assert!(content.contains("\"needle\""), "got: {}", content);
         assert!(content.contains("in ."), "an empty path renders as the workspace root");
         assert!(!content.contains("matching"), "a `*` glob filters nothing and is hidden");
+        assert!(!content.contains("(content)"), "the default mode carries no tag: {}", content);
 
         let files = call("search_files", json!({ "pattern": "needle", "output_mode": "files_only" }));
-        assert!(files.contains("search_files(files_only)"), "got: {}", files);
+        assert!(files.contains("(files_only)"), "got: {}", files);
 
         let scoped = call("search_files", json!({ "pattern": "needle", "file_glob": "*.rs" }));
         assert!(scoped.contains("matching *.rs"), "got: {}", scoped);
