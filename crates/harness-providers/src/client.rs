@@ -24,6 +24,35 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
 
     let mut events = Vec::new();
 
+    if let Some(err_val) = parsed.get("error") {
+        let msg = if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+            m.to_string()
+        } else {
+            err_val.to_string()
+        };
+        let code = err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+        if code == 429
+            || msg.to_lowercase().contains("exhausted")
+            || msg.to_lowercase().contains("quota")
+            || msg.to_lowercase().contains("rate limit")
+        {
+            return vec![Err(HarnessError::RateLimited {
+                provider: "model".to_string(),
+                retry_after_secs: Some(10),
+            })];
+        } else if code == 503 || msg.to_lowercase().contains("overloaded") {
+            return vec![Err(HarnessError::ProviderError {
+                provider: "model".to_string(),
+                message: format!("Model is overloaded (503): {}", msg),
+            })];
+        } else {
+            return vec![Err(HarnessError::ProviderError {
+                provider: "model".to_string(),
+                message: msg,
+            })];
+        }
+    }
+
     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
             let Some(delta) = choice.get("delta") else {
@@ -429,6 +458,23 @@ impl ModelProvider for GenericProviderClient {
                 .unwrap_or(0) as u32,
         });
 
+        if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
+            if let Some(r) = reasoning {
+                return Ok(Message {
+                    role: Role::Assistant,
+                    content: Some("(Completed reasoning with no text response)".to_string()),
+                    reasoning: Some(r),
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage,
+                });
+            }
+            return Err(HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+            });
+        }
+
         Ok(Message {
             role: Role::Assistant,
             content,
@@ -494,6 +540,26 @@ impl ModelProvider for GenericProviderClient {
                 provider: self.provider_id.clone(),
                 message: format!("HTTP error: {}", e),
             })?;
+
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            return Err(HarnessError::RateLimited {
+                provider: self.provider_id.clone(),
+                retry_after_secs: Some(10),
+            });
+        }
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            let is_overloaded = status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
+            return Err(HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: if is_overloaded {
+                    format!("Model is overloaded (HTTP {}): {}", status, body_text)
+                } else {
+                    format!("HTTP {}: {}", status, body_text)
+                },
+            });
+        }
 
         let event_source = resp.bytes_stream().eventsource();
         let provider_id = self.provider_id.clone();

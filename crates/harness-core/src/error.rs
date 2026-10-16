@@ -80,3 +80,48 @@ impl From<serde_json::Error> for HarnessError {
         Self::SerializationError(err.to_string())
     }
 }
+
+impl HarnessError {
+    /// Returns true if this error represents a rate limit, quota exhaustion, or overloaded model/server.
+    pub fn is_overloaded(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } => true,
+            Self::ProviderError { message, .. } => {
+                let lower = message.to_lowercase();
+                lower.contains("overloaded")
+                    || lower.contains("rate limit")
+                    || lower.contains("too many requests")
+                    || lower.contains("resource_exhausted")
+                    || lower.contains("resource has been exhausted")
+                    || lower.contains("quota")
+                    || lower.contains("503")
+                    || lower.contains("429")
+                    || lower.contains("server_error")
+                    || lower.contains("service unavailable")
+                    || lower.contains("temporarily unavailable")
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns true if this error is transient and can be retried with exponential backoff.
+    pub fn is_retryable(&self) -> bool {
+        if self.is_overloaded() {
+            return true;
+        }
+        match self {
+            Self::ProviderError { message, .. } => {
+                let lower = message.to_lowercase();
+                lower.contains("timeout")
+                    || lower.contains("connection reset")
+                    || lower.contains("connection closed")
+                    || lower.contains("broken pipe")
+                    || lower.contains("empty response")
+                    || lower.contains("502")
+                    || lower.contains("504")
+                    || lower.contains("500")
+            }
+            _ => false,
+        }
+    }
+}

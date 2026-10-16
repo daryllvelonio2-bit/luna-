@@ -173,3 +173,154 @@ async fn test_5_consecutive_failures_halts_agent() {
         other => panic!("Expected ConsecutiveFailuresExceeded, got {:?}", other),
     }
 }
+
+#[test]
+fn test_error_is_overloaded_and_is_retryable_detection() {
+    let err_rate = HarnessError::RateLimited {
+        provider: "antigravity".to_string(),
+        retry_after_secs: Some(10),
+    };
+    assert!(err_rate.is_overloaded());
+    assert!(err_rate.is_retryable());
+
+    let err_503 = HarnessError::ProviderError {
+        provider: "antigravity".to_string(),
+        message: "Model is overloaded (HTTP 503): Service Unavailable".to_string(),
+    };
+    assert!(err_503.is_overloaded());
+    assert!(err_503.is_retryable());
+
+    let err_quota = HarnessError::ProviderError {
+        provider: "openai".to_string(),
+        message: "Resource has been exhausted (check quota)".to_string(),
+    };
+    assert!(err_quota.is_overloaded());
+    assert!(err_quota.is_retryable());
+
+    let err_timeout = HarnessError::ProviderError {
+        provider: "antigravity".to_string(),
+        message: "Connection timeout waiting for server response".to_string(),
+    };
+    assert!(!err_timeout.is_overloaded());
+    assert!(err_timeout.is_retryable());
+
+    let err_auth = HarnessError::AuthenticationFailed {
+        provider: "antigravity".to_string(),
+        message: "Unauthorized".to_string(),
+    };
+    assert!(!err_auth.is_overloaded());
+    assert!(!err_auth.is_retryable());
+}
+
+struct OverloadedMockProvider {
+    attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for OverloadedMockProvider {
+    fn provider_id(&self) -> &str {
+        "overloaded-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let n = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if n < 2 {
+            Err(HarnessError::ProviderError {
+                provider: "overloaded-mock".to_string(),
+                message: "Model is overloaded (HTTP 503)".to_string(),
+            })
+        } else {
+            Ok(Message::assistant("Recovered after overload!"))
+        }
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn test_agent_retries_transient_overloaded_error_and_succeeds() {
+    let provider = Arc::new(OverloadedMockProvider {
+        attempts: AtomicUsize::new(0),
+    });
+    let memory = Arc::new(MockMemory);
+    let notes = Arc::new(MockNotes);
+    let evolver = Arc::new(MockEvolver);
+    let registry = Arc::new(DefaultToolRegistry::new());
+
+    let agent = Agent::new(
+        provider.clone(),
+        memory,
+        notes,
+        evolver,
+        registry,
+        AgentConfig::default(),
+    );
+
+    let cancel = CancellationToken::new();
+    let result = agent.run_task("Hello", cancel).await;
+    assert!(result.is_ok(), "Expected retry success, got: {:?}", result);
+    assert_eq!(result.unwrap(), "Recovered after overload!");
+    assert_eq!(provider.attempts.load(Ordering::SeqCst), 3);
+}
+
+struct EmptyMockProvider;
+
+#[async_trait]
+impl ModelProvider for EmptyMockProvider {
+    fn provider_id(&self) -> &str {
+        "empty-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        Ok(Message::assistant(""))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn test_agent_handles_empty_response_without_getting_stuck() {
+    let provider = Arc::new(EmptyMockProvider);
+    let memory = Arc::new(MockMemory);
+    let notes = Arc::new(MockNotes);
+    let evolver = Arc::new(MockEvolver);
+    let registry = Arc::new(DefaultToolRegistry::new());
+
+    let agent = Agent::new(
+        provider,
+        memory,
+        notes,
+        evolver,
+        registry,
+        AgentConfig::default(),
+    );
+
+    let cancel = CancellationToken::new();
+    let result = agent.run_task("Hello", cancel).await;
+    assert!(result.is_ok());
+    let reply = result.unwrap();
+    assert!(!reply.trim().is_empty());
+    assert!(reply.contains("empty response") || reply.contains("overloaded"));
+}

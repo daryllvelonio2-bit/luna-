@@ -539,13 +539,25 @@ async fn post_antigravity_turn(
         }),
         429 => Err(HarnessError::RateLimited {
             provider: "antigravity".to_string(),
-            retry_after_secs: Some(30),
+            retry_after_secs: Some(10),
         }),
-        status if !resp.status().is_success() => {
+        503 => {
             let body = resp.text().await.unwrap_or_default();
             Err(HarnessError::ProviderError {
                 provider: "antigravity".to_string(),
-                message: format!("Code Assist API error (HTTP {}): {}", status, body),
+                message: format!("Model is overloaded (HTTP 503): {}", body),
+            })
+        }
+        status if !resp.status().is_success() => {
+            let body = resp.text().await.unwrap_or_default();
+            let is_overloaded = status == 503 || body.to_lowercase().contains("overloaded");
+            Err(HarnessError::ProviderError {
+                provider: "antigravity".to_string(),
+                message: if is_overloaded {
+                    format!("Model is overloaded (HTTP {}): {}", status, body)
+                } else {
+                    format!("Code Assist API error (HTTP {}): {}", status, body)
+                },
             })
         }
         _ => Ok(resp),
@@ -573,8 +585,42 @@ pub async fn stream_antigravity_completion(
                     Vec::new()
                 } else {
                     match serde_json::from_str::<serde_json::Value>(&event.data) {
-                        Ok(parsed) => parse_antigravity_chunk(&parsed).into_iter().map(Ok).collect(),
-                        Err(_) => Vec::new(),
+                        Ok(parsed) => {
+                            if let Some(err_val) = parsed.get("error") {
+                                let msg = if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+                                    m.to_string()
+                                } else {
+                                    err_val.to_string()
+                                };
+                                let code = err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                                if code == 429
+                                    || msg.to_lowercase().contains("exhausted")
+                                    || msg.to_lowercase().contains("quota")
+                                    || msg.to_lowercase().contains("rate limit")
+                                {
+                                    vec![Err(HarnessError::RateLimited {
+                                        provider: "antigravity".to_string(),
+                                        retry_after_secs: Some(10),
+                                    })]
+                                } else if code == 503 || msg.to_lowercase().contains("overloaded") {
+                                    vec![Err(HarnessError::ProviderError {
+                                        provider: "antigravity".to_string(),
+                                        message: format!("Model is overloaded (503): {}", msg),
+                                    })]
+                                } else {
+                                    vec![Err(HarnessError::ProviderError {
+                                        provider: "antigravity".to_string(),
+                                        message: format!("Code Assist API error: {}", msg),
+                                    })]
+                                }
+                            } else {
+                                parse_antigravity_chunk(&parsed).into_iter().map(Ok).collect()
+                            }
+                        }
+                        Err(e) => vec![Err(HarnessError::SerializationError(format!(
+                            "Failed to parse SSE JSON: {}",
+                            e
+                        )))],
                     }
                 }
             }
@@ -656,6 +702,23 @@ pub async fn execute_antigravity_completion(
     } else {
         Some(thought_buf)
     };
+
+    if full_text.trim().is_empty() && tool_calls.is_empty() {
+        if let Some(r) = reasoning {
+            return Ok(Message {
+                role: Role::Assistant,
+                content: Some("(Completed reasoning with no text response)".to_string()),
+                reasoning: Some(r),
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage,
+            });
+        }
+        return Err(HarnessError::ProviderError {
+            provider: "antigravity".to_string(),
+            message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+        });
+    }
 
     let mut res_msg = Message::assistant(full_text);
     res_msg.reasoning = reasoning;

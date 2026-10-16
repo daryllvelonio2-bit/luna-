@@ -412,9 +412,40 @@ where
             let mut options = CompletionOptions::default();
             options.reasoning_effort = self.reasoning_effort;
 
-            let response = self
-                .stream_completion(&messages, &tools, &options, &cancel_token)
-                .await?;
+            // Retrying on transient / overloaded errors with backoff
+            let max_retries = 3;
+            let mut response = None;
+            for attempt in 0..=max_retries {
+                match self.stream_completion(&messages, &tools, &options, &cancel_token).await {
+                    Ok(res) => {
+                        response = Some(res);
+                        break;
+                    }
+                    Err(e) if e.is_retryable() && attempt < max_retries => {
+                        let delay_secs = 2u64.pow(attempt as u32);
+                        warn!(
+                            "Model request failed ({}), retrying attempt {}/{} in {}s...",
+                            e, attempt + 1, max_retries, delay_secs
+                        );
+                        if let Some(ref observer) = self.observer {
+                            observer(AgentEvent::ReasoningDelta(format!(
+                                "\n[Model busy/overloaded: {}. Retrying in {}s (attempt {}/{})]…\n",
+                                e, delay_secs, attempt + 1, max_retries
+                            )));
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)) => {},
+                            _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let response = response.ok_or_else(|| HarnessError::ProviderError {
+                provider: self.provider.provider_id().to_string(),
+                message: "Model request failed after retries".to_string(),
+            })?;
 
             if let Some(ref r) = response.reasoning {
                 last_reasoning = Some(r.clone());
@@ -423,9 +454,22 @@ where
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
                 debug!("Task successfully completed without further tool calls");
-                self.append(&response, false).await?;
+                let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                let final_reply = if reply_text.is_empty() {
+                    if last_reasoning.is_some() {
+                        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
+                    } else {
+                        "✖ Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string()
+                    }
+                } else {
+                    reply_text
+                };
+
+                let mut final_response = response.clone();
+                final_response.content = Some(final_reply.clone());
+                self.append(&final_response, false).await?;
                 return Ok(TurnOutcome {
-                    reply: response.content.unwrap_or_default(),
+                    reply: final_reply,
                     reasoning: last_reasoning,
                     tool_calls: executed_tools,
                     replayed: replay_notice,
@@ -647,7 +691,7 @@ where
         }
 
         calls.sort_by_key(|(index, _)| *index);
-        let tool_calls = calls
+        let tool_calls: Vec<ToolCall> = calls
             .into_iter()
             .enumerate()
             .map(|(position, (_, mut call))| {
@@ -661,6 +705,28 @@ where
                 call
             })
             .collect();
+
+        if content.trim().is_empty() && tool_calls.is_empty() {
+            debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
+            let buffered = self.provider.complete(messages, tools, options).await?;
+            if buffered.content.as_deref().unwrap_or("").trim().is_empty() && buffered.tool_calls.is_empty() {
+                if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() { None } else { Some(reasoning) }) {
+                    return Ok(Message {
+                        role: Role::Assistant,
+                        content: Some("(Completed reasoning with no text response)".to_string()),
+                        reasoning: Some(r),
+                        tool_calls: Vec::new(),
+                        tool_result: None,
+                        usage,
+                    });
+                }
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider.provider_id().to_string(),
+                    message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+                });
+            }
+            return Ok(buffered);
+        }
 
         let mut response = Message::assistant(content);
         response.reasoning = if reasoning.is_empty() { None } else { Some(reasoning) };
