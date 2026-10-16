@@ -1238,28 +1238,39 @@ pub async fn run_interactive_chat(
                         let turn_dur = turn_start.elapsed();
                         let had_tools = !current_tools.is_empty();
 
-                        let record = TurnRecord {
-                            user_query: current_query.clone(),
-                            reasoning: None,
-                            tools: Vec::new(),
-                            tool_items: current_tools,
-                            duration: turn_dur,
-                            reply: format!("✖ Error: {}", e),
-                        };
-                        turns.push(record);
-
                         if had_tools {
+                            let record = TurnRecord {
+                                user_query: current_query.clone(),
+                                reasoning: None,
+                                tools: Vec::new(),
+                                tool_items: current_tools,
+                                duration: turn_dur,
+                                reply: format!("✖ Error: {}", e),
+                            };
+                            turns.push(record);
                             *ui.input_buf.lock().unwrap() = "continue".to_string();
-                        } else if !current_query.is_empty() {
-                            *ui.input_buf.lock().unwrap() = current_query.clone();
-                        }
 
-                        if ui.is_attended {
-                            crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
-                            ui.draw_initial_box();
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{} Error: {}", "✖".red().bold(), e);
+                            }
                         } else {
-                            println!("{} Error: {}", "✖".red().bold(), e);
+                            if !current_query.is_empty() {
+                                *ui.input_buf.lock().unwrap() = current_query.clone();
+                            }
+
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                println!();
+                                println!("{} Error: {}", "✖".red().bold(), e);
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{} Error: {}", "✖".red().bold(), e);
+                            }
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -1273,28 +1284,39 @@ pub async fn run_interactive_chat(
                         let turn_dur = turn_start.elapsed();
                         let had_tools = !current_tools.is_empty();
 
-                        let record = TurnRecord {
-                            user_query: current_query.clone(),
-                            reasoning: None,
-                            tools: Vec::new(),
-                            tool_items: current_tools,
-                            duration: turn_dur,
-                            reply: format!("✖ Task join error: {}", join_err),
-                        };
-                        turns.push(record);
-
                         if had_tools {
+                            let record = TurnRecord {
+                                user_query: current_query.clone(),
+                                reasoning: None,
+                                tools: Vec::new(),
+                                tool_items: current_tools,
+                                duration: turn_dur,
+                                reply: format!("✖ Task join error: {}", join_err),
+                            };
+                            turns.push(record);
                             *ui.input_buf.lock().unwrap() = "continue".to_string();
-                        } else if !current_query.is_empty() {
-                            *ui.input_buf.lock().unwrap() = current_query.clone();
-                        }
 
-                        if ui.is_attended {
-                            crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
-                            ui.draw_initial_box();
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                            }
                         } else {
-                            println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                            if !current_query.is_empty() {
+                                *ui.input_buf.lock().unwrap() = current_query.clone();
+                            }
+
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                println!();
+                                println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                                ui.draw_initial_box();
+                            } else {
+                                println!("{} Task join error: {}", "✖".red().bold(), join_err);
+                            }
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);

@@ -389,10 +389,8 @@ where
         // or fails and leaves the transcript alone. No retry inside the turn.
         let compaction = self.compact_once(&history, &system_text, &mut messages).await?;
 
-        // 3. Persist the user line before the model call, so a failed call still costs the session
-        //    nothing (and the row count in the criteria reflects turns actually attempted).
         let user_message = Message::user(user_input);
-        self.append(&user_message, false).await?;
+        let mut user_appended = false;
 
         let mut consecutive_failures = 0;
         let mut executed_tools = Vec::new();
@@ -467,6 +465,10 @@ where
                     reply_text
                 };
 
+                if !user_appended {
+                    self.append(&user_message, false).await?;
+                }
+
                 let mut final_response = response.clone();
                 final_response.content = Some(final_reply.clone());
                 self.append(&final_response, false).await?;
@@ -477,6 +479,11 @@ where
                     replayed: replay_notice,
                     compaction,
                 });
+            }
+
+            if !user_appended {
+                self.append(&user_message, false).await?;
+                user_appended = true;
             }
 
             // Append assistant response with tool calls to conversation history
