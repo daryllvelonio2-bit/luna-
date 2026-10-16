@@ -490,7 +490,7 @@ pub async fn run_interactive_chat(
 
     // Every turn is appended to this session; a resumed one replays its recent transcript.
     let store = Arc::new(open_store(&config)?);
-    let session_id = resolve_session(store.as_ref(), selection).await?;
+    let mut session_id = resolve_session(store.as_ref(), selection).await?;
 
     // The compaction call is a plain model call: one provider, one model, resolved from
     // `agent.compaction_provider` / `agent.compaction_model` (both default to the session's).
@@ -670,6 +670,22 @@ pub async fn run_interactive_chat(
                 let arg = query.strip_prefix("/name").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
                 handle_name_command(&ui, store.as_ref(), &session_id, arg_opt).await?;
+                continue;
+            }
+            if query.starts_with("/new") {
+                let arg = query.strip_prefix("/new").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_new_command(
+                    &ui,
+                    &store,
+                    &config,
+                    &agent,
+                    &mut session_id,
+                    &current_provider,
+                    &current_model,
+                    arg_opt,
+                )
+                .await?;
                 continue;
             }
             let ag_ref = agent.clone();
@@ -920,6 +936,26 @@ pub async fn run_interactive_chat(
                             ).await {
                                 ui.draw_initial_box();
                                 ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
+                            }
+                            continue;
+                        }
+
+                        if query.starts_with("/new") {
+                            let arg = query.strip_prefix("/new").unwrap().trim();
+                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                            ui.clear_box_on_exit();
+                            if let Err(e) = handle_new_command(
+                                &ui,
+                                &store,
+                                &config,
+                                &agent,
+                                &mut session_id,
+                                &current_provider,
+                                &current_model,
+                                arg_opt,
+                            ).await {
+                                ui.draw_initial_box();
+                                ui.emit_above(&format!("{} Failed to start new session: {}", "✖".red().bold(), e));
                             }
                             continue;
                         }
@@ -1536,6 +1572,70 @@ async fn handle_name_command(
         ));
     } else {
         ui.emit_above(&format!("{} Session name: {}", "•".cyan(), name.cyan()));
+    }
+
+    Ok(())
+}
+
+/// `/new [name]`: start a fresh chat session, rebinding the agent and clearing the screen.
+async fn handle_new_command(
+    ui: &ChatUi,
+    store: &Arc<SqliteSessionStore>,
+    config: &Config,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    session_id: &mut String,
+    current_provider: &str,
+    current_model: &str,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let new_id = resolve_session(store.as_ref(), SessionSelection::New).await?;
+    let name = arg.map(|s| s.trim()).unwrap_or("");
+    if !name.is_empty() {
+        store.set_name(&new_id, name).await?;
+    }
+
+    *session_id = new_id.clone();
+    agent.lock().await.set_session(SessionBinding {
+        store: store.clone(),
+        session_id: new_id.clone(),
+        resume_max_messages: config.session.resume_max_messages,
+    });
+
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    ui.set_status(current_model, 0, context_max);
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        ui.draw_initial_box();
+        if name.is_empty() {
+            ui.emit_above(&format!(
+                "{} Started new session {}",
+                "✔".green().bold(),
+                session_id.cyan()
+            ));
+        } else {
+            ui.emit_above(&format!(
+                "{} Started new session '{}' ({})",
+                "✔".green().bold(),
+                name.cyan(),
+                session_id.dimmed()
+            ));
+        }
+    } else {
+        if name.is_empty() {
+            println!(
+                "{} Started new session {}",
+                "✔".green().bold(),
+                session_id.cyan()
+            );
+        } else {
+            println!(
+                "{} Started new session '{}' ({})",
+                "✔".green().bold(),
+                name.cyan(),
+                session_id.dimmed()
+            );
+        }
     }
 
     Ok(())

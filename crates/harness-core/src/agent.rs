@@ -220,6 +220,11 @@ where
         self
     }
 
+    /// Rebind this agent to a new or different session.
+    pub fn set_session(&mut self, binding: SessionBinding) {
+        self.session = Some(binding);
+    }
+
     /// Serve the summarising call through a provider other than the session's.
     pub fn with_compaction(mut self, setup: CompactionSetup) -> Self {
         self.compaction = Some(setup);
