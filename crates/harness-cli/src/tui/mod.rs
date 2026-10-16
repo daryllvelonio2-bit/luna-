@@ -55,6 +55,13 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
         // Render UI
         terminal.draw(|f| {
             let full_area = f.area();
+            if app.theme.bg != ratatui::style::Color::Reset {
+                f.render_widget(
+                    ratatui::widgets::Block::default()
+                        .style(ratatui::style::Style::default().bg(app.theme.bg)),
+                    full_area,
+                );
+            }
 
             let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -128,6 +135,10 @@ fn handle_event(app: &mut AppState, event: Event) {
                 match key.code {
                     KeyCode::Char('c') | KeyCode::Char('q') => {
                         app.should_quit = true;
+                        return;
+                    }
+                    KeyCode::Char('t') => {
+                        app.cycle_theme();
                         return;
                     }
                     KeyCode::Char('n') => {

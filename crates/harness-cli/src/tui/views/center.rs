@@ -29,11 +29,14 @@ pub fn render_center(f: &mut Frame, app: &mut AppState, area: Rect) {
         app.theme.border
     };
 
-    let transcript_block = Block::default()
+    let mut transcript_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(transcript_border_style)
         .title(Span::styled(" Workspace & Transcript ", app.theme.title));
+    if app.theme.card_bg != ratatui::style::Color::Reset {
+        transcript_block = transcript_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+    }
 
     let mut lines = Vec::new();
 
@@ -80,10 +83,13 @@ pub fn render_center(f: &mut Frame, app: &mut AppState, area: Rect) {
         app.theme.border
     };
 
-    let composer_block = Block::default()
+    let mut composer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(composer_border_style);
+    if app.theme.card_bg != ratatui::style::Color::Reset {
+        composer_block = composer_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+    }
 
     let composer_inner = composer_block.inner(composer_area);
     f.render_widget(composer_block, composer_area);

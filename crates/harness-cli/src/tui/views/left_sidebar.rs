@@ -16,11 +16,14 @@ pub fn render_left_sidebar(f: &mut Frame, app: &mut AppState, area: Rect) {
         app.theme.border
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(border_style)
         .title(Span::styled(" Navigation ", app.theme.title));
+    if app.theme.card_bg != ratatui::style::Color::Reset {
+        block = block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -40,10 +43,13 @@ pub fn render_left_sidebar(f: &mut Frame, app: &mut AppState, area: Rect) {
         Span::styled("+ ", app.theme.accent_cyan.add_modifier(Modifier::BOLD)),
         Span::styled("New Conversation", app.theme.text_bold),
     ]);
-    let new_chat_block = Block::default()
+    let mut new_chat_block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(app.theme.border);
+    if app.theme.card_bg != ratatui::style::Color::Reset {
+        new_chat_block = new_chat_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+    }
     let new_chat_para = Paragraph::new(new_chat_line).block(new_chat_block);
     f.render_widget(new_chat_para, chunks[0]);
 

@@ -16,11 +16,14 @@ pub fn render_right_sidebar(f: &mut Frame, app: &mut AppState, area: Rect) {
         app.theme.border
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(app.theme.border_type)
         .border_style(border_style)
         .title(Span::styled(" Telemetry & Context ", app.theme.title));
+    if app.theme.card_bg != ratatui::style::Color::Reset {
+        block = block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);

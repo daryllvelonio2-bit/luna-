@@ -10,6 +10,8 @@
 
 **No magic numbers.** A bare number in logic must either be a named constant explaining *why* that value was chosen, or a configurable field in `Config`. This applies to timeouts, retry counts, buffer capacities, and token thresholds.
 
+**Global TUI theme:** Any TUI view, widget, dialog, or component must use the centralized `Theme` (`crate::tui::theme::Theme`) and respect the global `ThemeMode` (`Transparent`, `Dark`, `Light`). Never hardcode terminal colors (raw ANSI escape codes, hardcoded RGB values, or fixed background fills) directly inside views or widgets. All UI colors, card backgrounds, borders, badges, and accents must resolve through the active theme.
+
 ## 2. Rust Code & Structure Rules
 
 - **File size & modular decomposition:** Hard limit of 2,000 lines of code per file (target <1,000 lines). When a file grows beyond ~1,000 lines or handles multiple distinct responsibilities, decompose it into focused topical submodules under a module directory with a clean facade.

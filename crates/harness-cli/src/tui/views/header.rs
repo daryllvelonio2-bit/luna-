@@ -14,7 +14,7 @@ pub fn render_header(f: &mut Frame, app: &mut AppState, area: Rect) {
         .constraints([
             Constraint::Length(28),
             Constraint::Min(20),
-            Constraint::Length(32),
+            Constraint::Length(48),
         ])
         .split(area);
 
@@ -39,8 +39,10 @@ pub fn render_header(f: &mut Frame, app: &mut AppState, area: Rect) {
     f.render_widget(center_para, chunks[1]);
 
     // Right shortcut actions
+    let theme_label = format!("[Ctrl+T] {} ", app.theme.mode.name());
     let actions = Line::from(vec![
         Span::styled("[Tab] Focus ", app.theme.text_muted),
+        Span::styled(theme_label, app.theme.accent_purple),
         Span::styled("[Ctrl+N] New ", app.theme.accent_cyan),
         Span::styled("[q] Quit", app.theme.accent_amber),
     ]);

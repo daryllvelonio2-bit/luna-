@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use super::theme::Theme;
+use super::theme::{Theme, ThemeMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
@@ -154,6 +154,15 @@ impl AppState {
             PanelFocus::Composer => PanelFocus::RightSidebar,
             PanelFocus::RightSidebar => PanelFocus::LeftSidebar,
         };
+    }
+
+    pub fn cycle_theme(&mut self) {
+        let next_mode = self.theme.mode.next();
+        self.theme = Theme::for_mode(next_mode);
+    }
+
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        self.theme = Theme::for_mode(mode);
     }
 
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
