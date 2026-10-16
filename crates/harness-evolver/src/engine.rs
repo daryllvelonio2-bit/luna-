@@ -178,12 +178,40 @@ impl CodebaseEvolver {
         let repo_root = discover_harness_repo_root(repo_root);
         let _ = fs::create_dir_all(&jobs_dir);
         let (event_tx, _) = tokio::sync::broadcast::channel(128);
-        Self {
+        let evolver = Self {
             repo_root,
             jobs_dir,
             provider: RwLock::new(None),
             jobs: RwLock::new(HashMap::new()),
             event_tx,
+        };
+        evolver.reconcile_orphaned_jobs();
+        evolver
+    }
+
+    /// Reconcile stale jobs on disk from previous process runs that were left in Running or Queued state.
+    pub fn reconcile_orphaned_jobs(&self) {
+        if let Ok(entries) = fs::read_dir(&self.jobs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json")
+                    && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with("job_"))
+                {
+                    if let Ok(data) = fs::read_to_string(&path) {
+                        if let Ok(mut record) = serde_json::from_str::<JobRecord>(&data) {
+                            if matches!(record.status, JobStatus::Running | JobStatus::Queued) {
+                                record.status = JobStatus::FailedTest {
+                                    error: "Interrupted: harness process exited while job was running".to_string(),
+                                };
+                                record.updated_at = Utc::now();
+                                record.logs.push("Job interrupted: process exited before job completed.".to_string());
+                                let _ = fs::write(&path, serde_json::to_string_pretty(&record).unwrap_or_default());
+                                cleanup_worktree(&self.repo_root, Path::new(&record.worktree_dir), Some(&record.branch));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -196,8 +224,10 @@ impl CodebaseEvolver {
     }
 
     pub async fn active_job(&self) -> Option<JobRecord> {
-        let jobs = self.list_jobs().await.ok()?;
-        jobs.into_iter().find(|j| matches!(j.status, JobStatus::Running | JobStatus::Queued))
+        let jobs = self.jobs.read().await;
+        jobs.values()
+            .find(|j| matches!(j.status, JobStatus::Running | JobStatus::Queued))
+            .cloned()
     }
 
     pub async fn latest_job(&self) -> Result<JobRecord, HarnessError> {
