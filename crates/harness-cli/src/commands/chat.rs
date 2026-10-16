@@ -135,6 +135,8 @@ struct ChatStatus {
     context_max: u32,
     /// Mutating calls run without asking; toggled with Shift+Tab, shown as a `yolo` badge.
     yolo: bool,
+    /// The session's human-readable name, centered in the status bar; empty means unnamed.
+    session_name: String,
 }
 
 #[derive(Clone)]
@@ -237,12 +239,16 @@ impl ChatUi {
 
     fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
-        let yolo = status.as_ref().map(|s| s.yolo).unwrap_or(false);
+        let (yolo, session_name) = match status.as_ref() {
+            Some(s) => (s.yolo, s.session_name.clone()),
+            None => (false, String::new()),
+        };
         *status = Some(ChatStatus {
             model: model.to_string(),
             context_used,
             context_max,
             yolo,
+            session_name,
         });
     }
 
@@ -253,6 +259,17 @@ impl ChatUi {
             s.context_used = context_used;
             s.context_max = context_max;
         }
+    }
+
+    /// Show the session's name centered in the status bar (empty string hides it).
+    fn set_session_name(&self, name: &str) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.session_name = name.to_string();
+            }
+        }
+        self.redraw_status_line();
     }
 
     fn update_status(&self, context_used: u32, context_max: u32) {
@@ -277,13 +294,18 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
-    /// Status line above the input box: model name on the left, yolo badge and context usage
-    /// on the right.
+    /// Status line above the input box: model name on the left, session name centered, yolo
+    /// badge and context usage on the right.
     fn format_status_line(&self, width: usize) -> Option<String> {
         let status = self.status.lock().unwrap();
         let s = status.as_ref()?;
 
         let left = s.model.clone();
+        let center = if s.session_name.is_empty() {
+            String::new()
+        } else {
+            format!("[{}]", s.session_name)
+        };
         let mut right = format!("ctx: {}/{}", s.context_used, s.context_max);
         if s.yolo {
             right = format!("{} {}", "yolo".yellow().bold(), right);
@@ -293,7 +315,10 @@ impl ChatUi {
         let right_visible = dialoguer::console::strip_ansi_codes(&right).to_string();
         let left_len = left.chars().count();
         let right_len = right_visible.chars().count();
+        let center_len = center.chars().count();
 
+        // Left and right anchored, the name centered in what remains. When the three segments
+        // cannot fit, drop the center first, then truncate the model name.
         if left_len + right_len + 4 > width {
             let available = width.saturating_sub(right_len + 4);
             let left_truncated = if left_len > available {
@@ -310,12 +335,24 @@ impl ChatUi {
                 " ".repeat(spaces),
                 right.dimmed()
             ))
-        } else {
+        } else if left_len + right_len + center_len + 8 > width {
             let spaces = width - left_len - right_len;
             Some(format!(
                 "{}{}{}",
                 left.dimmed(),
                 " ".repeat(spaces),
+                right.dimmed()
+            ))
+        } else {
+            let free = width - left_len - right_len;
+            let left_gap = ((free - center_len) / 2).max(1);
+            let right_gap = free - center_len - left_gap;
+            Some(format!(
+                "{}{}{}{}{}",
+                left.dimmed(),
+                " ".repeat(left_gap),
+                center.dimmed().bold(),
+                " ".repeat(right_gap),
                 right.dimmed()
             ))
         }
@@ -933,6 +970,9 @@ pub async fn run_interactive_chat(
     // reporting "0 used" made the continuation look like a fresh start.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     ui.set_status(&current_model, context_used, context_max);
+    // A resumed named session shows its name centered in the status bar from the first frame.
+    let stored_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
+    ui.set_session_name(&stored_name);
     ui.draw_initial_box();
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
@@ -1875,6 +1915,10 @@ async fn select_slash_command(
             Key::Enter => {
                 if !filtered.is_empty() && selected < filtered.len() {
                     result = Some(filtered[selected].1.name.to_string());
+                } else if filter_str.starts_with('/') {
+                    // Enter on a filter with no menu match falls through to the typed command
+                    // itself, so typing "/name luna" straight through still executes.
+                    result = Some(filter_str.clone());
                 }
                 break;
             }
@@ -2562,6 +2606,7 @@ async fn handle_name_command(
     }
 
     let name = store.get(session_id).await?.name;
+    ui.set_session_name(&name);
     ui.draw_initial_box();
 
     if name.is_empty() {
@@ -2618,6 +2663,7 @@ async fn handle_new_command(
 
     let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
     ui.set_status(current_model, 0, context_max);
+    ui.set_session_name(name);
 
     if ui.is_attended {
         crate::commands::clear_screen();
@@ -2735,6 +2781,7 @@ async fn handle_summarize_and_new_command(
     let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
     let summary_tokens = harness_core::heuristic_tokens(&[summary_msg]);
     ui.set_status(current_model, summary_tokens, context_max);
+    ui.set_session_name(name);
 
     if ui.is_attended {
         crate::commands::clear_screen();
