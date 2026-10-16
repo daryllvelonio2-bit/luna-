@@ -173,13 +173,18 @@ async fn main() -> Result<(), HarnessError> {
         _ => false,
     };
 
-    let log_level = if is_interactive_chat && std::env::var("RUST_LOG").is_err() && !cli.json {
-        "harness=warn,harness_cli=warn"
+    let log_file_path = if is_interactive_chat {
+        let luna_dir = config.paths.sessions_db.parent().unwrap_or(std::path::Path::new("."));
+        Some(luna_dir.join("luna.log"))
     } else {
-        &config.telemetry.level
+        None
     };
 
-    init_telemetry(cli.json || config.telemetry.json, log_level);
+    init_telemetry(
+        cli.json || config.telemetry.json,
+        &config.telemetry.level,
+        log_file_path.as_deref(),
+    );
 
     // The credential manager's own error (unreadable/corrupt store) must reach the user: the
     // corrupt-store defect this merge fixes is exactly a `CredentialManager::new` that used to

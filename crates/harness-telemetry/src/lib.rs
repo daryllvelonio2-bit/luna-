@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -50,9 +51,55 @@ impl TokenTracker {
 /// Initialize tracing. `env_filter` is the resolved `telemetry.level` config value (a
 /// `tracing_subscriber::EnvFilter` directive string); `RUST_LOG` still wins when it is set,
 /// because that is the ecosystem-wide env layer.
-pub fn init_telemetry(json_format: bool, env_filter: &str) {
+///
+/// When `log_file` is provided (e.g. in interactive chat mode), tracing events are written
+/// to the file instead of stdout/stderr so that log lines never interleave with or corrupt
+/// the terminal UI.
+pub fn init_telemetry(json_format: bool, env_filter: &str, log_file: Option<&Path>) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(env_filter));
+
+    if let Some(path) = log_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            if json_format {
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer().json().with_writer(file))
+                    .try_init()
+                    .ok();
+            } else {
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer().compact().with_writer(file))
+                    .try_init()
+                    .ok();
+            }
+            return;
+        } else {
+            let sink = std::io::sink;
+            if json_format {
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer().json().with_writer(sink))
+                    .try_init()
+                    .ok();
+            } else {
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer().compact().with_writer(sink))
+                    .try_init()
+                    .ok();
+            }
+            return;
+        }
+    }
 
     if json_format {
         tracing_subscriber::registry()
