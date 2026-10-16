@@ -226,3 +226,48 @@ pub async fn compact(
             .count(),
     }))
 }
+
+/// Summarise the entire `history` of a session into a concise context summary.
+pub async fn summarize_session(
+    provider: &dyn ModelProvider,
+    model: &str,
+    history: &[StoredMessage],
+) -> Result<String, HarnessError> {
+    if history.is_empty() {
+        return Err(HarnessError::SessionError(
+            "cannot summarize an empty session".to_string(),
+        ));
+    }
+
+    let transcript = render_transcript(history);
+    debug!(
+        "Summarizing session with {} messages using model '{}'",
+        history.len(),
+        model
+    );
+
+    let request = vec![
+        Message::system(crate::prompts::section(
+            crate::prompts::COMPACTION_INSTRUCTION,
+        )?),
+        Message::user(transcript),
+    ];
+    let options = CompletionOptions {
+        model: Some(model.to_string()),
+        temperature: Some(0.0),
+        max_tokens: Some(COMPACTION_MAX_TOKENS),
+        ..CompletionOptions::default()
+    };
+
+    let response = provider.complete(&request, &[], &options).await?;
+    let summary = response
+        .content
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| HarnessError::ProviderError {
+            provider: provider.provider_id().to_string(),
+            message: "session summary returned empty content".to_string(),
+        })?;
+
+    Ok(summary)
+}

@@ -24,7 +24,7 @@ pub use config::{
 pub use error::HarnessError;
 pub use registry::DefaultToolRegistry;
 pub use session::{
-    compact, estimate_tokens, fold_boundary, heuristic_tokens, CompactionOutcome, Estimate,
+    compact, estimate_tokens, fold_boundary, heuristic_tokens, summarize_session, CompactionOutcome, Estimate,
     EstimateSource, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE, ReplayOutcome, SessionRecord,
     SessionStore, SqliteSessionStore, StoredMessage,
 };

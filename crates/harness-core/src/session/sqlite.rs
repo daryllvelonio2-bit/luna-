@@ -234,7 +234,9 @@ fn query_rows(
          ORDER BY seq DESC"
     );
     if let Some(limit) = limit {
-        sql.push_str(&format!(" LIMIT {}", limit));
+        if limit < usize::MAX {
+            sql.push_str(&format!(" LIMIT {}", limit.min(i64::MAX as usize)));
+        }
     }
 
     let mut stmt = conn

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
+    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, Message, ModelProvider,
     ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{
@@ -660,6 +660,12 @@ pub async fn run_interactive_chat(
                 .await?;
                 continue;
             }
+            if query == "/" || query.eq_ignore_ascii_case("/help") {
+                for cmd in SLASH_COMMANDS {
+                    println!("  {:<12} {}", cmd.name.cyan(), cmd.details.dimmed());
+                }
+                continue;
+            }
             if query.starts_with("/reasoning") {
                 let arg = query.strip_prefix("/reasoning").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
@@ -672,10 +678,15 @@ pub async fn run_interactive_chat(
                 handle_name_command(&ui, store.as_ref(), &session_id, arg_opt).await?;
                 continue;
             }
-            if query.starts_with("/new") {
-                let arg = query.strip_prefix("/new").unwrap().trim();
+            if query.starts_with("/summarize") || query.starts_with("/compact") {
+                let prefix = if query.starts_with("/summarize") {
+                    "/summarize"
+                } else {
+                    "/compact"
+                };
+                let arg = query.strip_prefix(prefix).unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                handle_new_command(
+                handle_summarize_and_new_command(
                     &ui,
                     &store,
                     &config,
@@ -686,6 +697,45 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                continue;
+            }
+            if query.starts_with("/new") {
+                let arg = query.strip_prefix("/new").unwrap().trim();
+                let (is_summarize, remaining_arg) = if arg.starts_with("-s ") || arg == "-s" {
+                    (true, arg.strip_prefix("-s").unwrap().trim())
+                } else if arg.starts_with("--summarize ") || arg == "--summarize" {
+                    (true, arg.strip_prefix("--summarize").unwrap().trim())
+                } else if arg.starts_with("--summary ") || arg == "--summary" {
+                    (true, arg.strip_prefix("--summary").unwrap().trim())
+                } else {
+                    (false, arg)
+                };
+                let arg_opt = if remaining_arg.is_empty() { None } else { Some(remaining_arg) };
+                if is_summarize {
+                    handle_summarize_and_new_command(
+                        &ui,
+                        &store,
+                        &config,
+                        &agent,
+                        &mut session_id,
+                        &current_provider,
+                        &current_model,
+                        arg_opt,
+                    )
+                    .await?;
+                } else {
+                    handle_new_command(
+                        &ui,
+                        &store,
+                        &config,
+                        &agent,
+                        &mut session_id,
+                        &current_provider,
+                        &current_model,
+                        arg_opt,
+                    )
+                    .await?;
+                }
                 continue;
             }
             let ag_ref = agent.clone();
@@ -774,7 +824,10 @@ pub async fn run_interactive_chat(
                 Role::Assistant if !content.trim().is_empty() => {
                     println!("{}\n{}", LUNA_LABEL.bold().green(), content)
                 }
-                // Tool traffic and compaction summaries are noise when the transcript is read
+                Role::System if stored.is_summary => {
+                    println!("{}\n{}\n", "• Previous Session Summary:".dimmed().bold(), content.dimmed());
+                }
+                // Tool traffic and ordinary system messages are noise when the transcript is read
                 // back: the user cares what was said, not which calls produced it.
                 Role::Assistant | Role::Tool | Role::System => {}
             }
@@ -862,6 +915,31 @@ pub async fn run_interactive_chat(
                 };
 
                 match key {
+                    Key::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
+                        ui.input_buf.lock().unwrap().push('/');
+                        ui.redraw_input_line();
+                        if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
+                            ui.input_buf.lock().unwrap().clear();
+                            ui.redraw_input_line();
+                            if execute_slash_command(
+                                &cmd,
+                                &mut key_rx,
+                                &ui,
+                                &config,
+                                &cred_manager,
+                                &discovery,
+                                &agent,
+                                &store,
+                                &mut session_id,
+                                &mut current_provider,
+                                &mut current_model,
+                            )
+                            .await?
+                            {
+                                break;
+                            }
+                        }
+                    }
                     Key::Char(c) => {
                         ui.input_buf.lock().unwrap().push(c);
                         ui.redraw_input_line();
@@ -883,79 +961,51 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        if query.eq_ignore_ascii_case("exit") || query.eq_ignore_ascii_case("quit") {
-                            ui.clear_box_on_exit();
-                            clear_on_exit();
-                            break;
+                        if query == "/" || query.eq_ignore_ascii_case("/help") {
+                            if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
+                                ui.input_buf.lock().unwrap().clear();
+                                ui.redraw_input_line();
+                                if execute_slash_command(
+                                    &cmd,
+                                    &mut key_rx,
+                                    &ui,
+                                    &config,
+                                    &cred_manager,
+                                    &discovery,
+                                    &agent,
+                                    &store,
+                                    &mut session_id,
+                                    &mut current_provider,
+                                    &mut current_model,
+                                )
+                                .await?
+                                {
+                                    break;
+                                }
+                            }
+                            continue;
                         }
 
-                        if query.eq_ignore_ascii_case("/model")
-                            || query.eq_ignore_ascii_case("/models")
-                            || query.eq_ignore_ascii_case("/provider")
+                        if query.starts_with('/')
+                            || query.eq_ignore_ascii_case("exit")
+                            || query.eq_ignore_ascii_case("quit")
                         {
-                            ui.redraw_input_line();
-                            if let Err(e) = handle_model_switch(
-                                Some(&mut key_rx),
+                            if execute_slash_command(
+                                &query,
+                                &mut key_rx,
                                 &ui,
                                 &config,
                                 &cred_manager,
                                 &discovery,
                                 &agent,
+                                &store,
+                                &mut session_id,
                                 &mut current_provider,
                                 &mut current_model,
-                            ).await {
-                                ui.emit_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
-                            }
-                            continue;
-                        }
-
-                        if query.starts_with("/reasoning") {
-                            let arg = query.strip_prefix("/reasoning").unwrap().trim();
-                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                            ui.redraw_input_line();
-                            if let Err(e) = handle_reasoning_switch(
-                                Some(&mut key_rx),
-                                &ui,
-                                &agent,
-                                arg_opt,
-                            ).await {
-                                ui.emit_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
-                            }
-                            continue;
-                        }
-
-                        if query.starts_with("/name") {
-                            let arg = query.strip_prefix("/name").unwrap().trim();
-                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                            ui.clear_box_on_exit();
-                            if let Err(e) = handle_name_command(
-                                &ui,
-                                store.as_ref(),
-                                &session_id,
-                                arg_opt,
-                            ).await {
-                                ui.draw_initial_box();
-                                ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
-                            }
-                            continue;
-                        }
-
-                        if query.starts_with("/new") {
-                            let arg = query.strip_prefix("/new").unwrap().trim();
-                            let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                            ui.clear_box_on_exit();
-                            if let Err(e) = handle_new_command(
-                                &ui,
-                                &store,
-                                &config,
-                                &agent,
-                                &mut session_id,
-                                &current_provider,
-                                &current_model,
-                                arg_opt,
-                            ).await {
-                                ui.draw_initial_box();
-                                ui.emit_above(&format!("{} Failed to start new session: {}", "✖".red().bold(), e));
+                            )
+                            .await?
+                            {
+                                break;
                             }
                             continue;
                         }
@@ -1075,6 +1125,386 @@ pub async fn run_interactive_chat(
         println!("Resume: luna --session {}    (name: {})", session_id, session_name);
     }
     Ok(())
+}
+
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub details: &'static str,
+}
+
+pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/model",
+        details: "Switch provider and model",
+    },
+    SlashCommand {
+        name: "/reasoning",
+        details: "Set reasoning effort (off, low, medium, high)",
+    },
+    SlashCommand {
+        name: "/name",
+        details: "Set or view session name",
+    },
+    SlashCommand {
+        name: "/new",
+        details: "Start a fresh chat session",
+    },
+    SlashCommand {
+        name: "/clear",
+        details: "Clear terminal screen",
+    },
+    SlashCommand {
+        name: "/exit",
+        details: "Exit Luna chat session",
+    },
+];
+
+async fn execute_slash_command(
+    cmd: &str,
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &Arc<SqliteSessionStore>,
+    session_id: &mut String,
+    current_provider: &mut String,
+    current_model: &mut String,
+) -> Result<bool, HarnessError> {
+    let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
+    let name = parts[0];
+    let arg = parts.get(1).copied().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    match name {
+        "/model" | "/models" | "/provider" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_model_switch(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                agent,
+                current_provider,
+                current_model,
+            )
+            .await
+            {
+                ui.emit_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/reasoning" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_reasoning_switch(Some(key_rx), ui, agent, arg).await {
+                ui.emit_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/name" => {
+            if let Some(a) = arg {
+                ui.clear_box_on_exit();
+                if let Err(e) = handle_name_command(ui, store.as_ref(), session_id, Some(a)).await {
+                    ui.draw_initial_box();
+                    ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
+                }
+            } else {
+                ui.input_buf.lock().unwrap().clear();
+                ui.input_buf.lock().unwrap().push_str("/name ");
+                ui.redraw_input_line();
+            }
+            Ok(false)
+        }
+        "/summarize" | "/compact" => {
+            ui.clear_box_on_exit();
+            if let Err(e) = handle_summarize_and_new_command(
+                ui,
+                store,
+                config,
+                agent,
+                session_id,
+                current_provider,
+                current_model,
+                arg,
+            )
+            .await
+            {
+                ui.draw_initial_box();
+                ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/new" => {
+            let (is_summarize, remaining_arg) = if let Some(a) = arg {
+                if a.starts_with("-s ") || a == "-s" {
+                    (true, a.strip_prefix("-s").unwrap().trim())
+                } else if a.starts_with("--summarize ") || a == "--summarize" {
+                    (true, a.strip_prefix("--summarize").unwrap().trim())
+                } else if a.starts_with("--summary ") || a == "--summary" {
+                    (true, a.strip_prefix("--summary").unwrap().trim())
+                } else {
+                    (false, a)
+                }
+            } else {
+                (false, "")
+            };
+            let rem_opt = if remaining_arg.is_empty() { None } else { Some(remaining_arg) };
+            ui.clear_box_on_exit();
+            if is_summarize {
+                if let Err(e) = handle_summarize_and_new_command(
+                    ui,
+                    store,
+                    config,
+                    agent,
+                    session_id,
+                    current_provider,
+                    current_model,
+                    rem_opt,
+                )
+                .await
+                {
+                    ui.draw_initial_box();
+                    ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+                }
+            } else {
+                if let Err(e) = handle_new_command(
+                    ui,
+                    store,
+                    config,
+                    agent,
+                    session_id,
+                    current_provider,
+                    current_model,
+                    rem_opt,
+                )
+                .await
+                {
+                    ui.draw_initial_box();
+                    ui.emit_above(&format!("{} Failed to start new session: {}", "✖".red().bold(), e));
+                }
+            }
+            Ok(false)
+        }
+        "/clear" => {
+            crate::commands::clear_screen();
+            ui.draw_initial_box();
+            Ok(false)
+        }
+        "exit" | "quit" | "/exit" | "/quit" => {
+            ui.clear_box_on_exit();
+            clear_on_exit();
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn select_slash_command(
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    ui: &ChatUi,
+) -> Option<String> {
+    if !ui.is_attended {
+        return None;
+    }
+
+    const PAGE_SIZE: usize = 5;
+    const BOX_ROWS: usize = PAGE_SIZE + 2;
+
+    let mut selected: usize = 0;
+
+    let get_filtered = |filter: &str| -> Vec<(usize, &'static SlashCommand)> {
+        let f = filter.strip_prefix('/').unwrap_or(filter).trim().to_lowercase();
+        if f.is_empty() {
+            SLASH_COMMANDS.iter().enumerate().collect()
+        } else {
+            SLASH_COMMANDS
+                .iter()
+                .enumerate()
+                .filter(|(_, cmd)| {
+                    cmd.name.to_lowercase().contains(&f)
+                        || cmd.details.to_lowercase().contains(&f)
+                })
+                .collect()
+        }
+    };
+
+    let render_box = |sel: usize, filt: &str| -> Vec<String> {
+        let width = get_terminal_width().min(76).max(44);
+        let inner_width = width.saturating_sub(4);
+        let filtered = get_filtered(filt);
+
+        let mut lines = Vec::with_capacity(BOX_ROWS);
+        lines.push(format!("┌{}┐", "─".repeat(width.saturating_sub(2))).dimmed().to_string());
+
+        if filtered.is_empty() {
+            let empty_msg = "(no matching commands)";
+            let pad = inner_width.saturating_sub(empty_msg.chars().count() + 1);
+            lines.push(format!("│ {}{} │", empty_msg.dimmed(), " ".repeat(pad)));
+            for _ in 1..PAGE_SIZE {
+                lines.push(format!("│ {} │", " ".repeat(inner_width)));
+            }
+        } else {
+            let start = if sel >= PAGE_SIZE {
+                (sel + 1 - PAGE_SIZE).min(filtered.len().saturating_sub(PAGE_SIZE))
+            } else {
+                0
+            };
+            let end = (start + PAGE_SIZE).min(filtered.len());
+
+            for idx in start..end {
+                let (_, cmd) = filtered[idx];
+                let is_sel = idx == sel;
+                let pfx = if is_sel { "❯ ".cyan().bold().to_string() } else { "  ".to_string() };
+                let cmd_styled = if is_sel { cmd.name.bold().to_string() } else { cmd.name.cyan().to_string() };
+
+                let pfx_len = 2;
+                let name_len = cmd.name.chars().count();
+                let gap_len = 2;
+                let remaining_width = inner_width.saturating_sub(pfx_len + name_len + gap_len);
+
+                let details_disp = if cmd.details.chars().count() > remaining_width {
+                    format!("{}…", cmd.details.chars().take(remaining_width.saturating_sub(1)).collect::<String>())
+                } else {
+                    cmd.details.to_string()
+                };
+                let details_len = details_disp.chars().count();
+                let pad_len = inner_width.saturating_sub(pfx_len + name_len + gap_len + details_len);
+
+                lines.push(format!(
+                    "│ {}{}  {}{}{} │",
+                    pfx,
+                    cmd_styled,
+                    details_disp.dimmed(),
+                    " ".repeat(pad_len),
+                    "".clear()
+                ));
+            }
+
+            for _ in (end - start)..PAGE_SIZE {
+                lines.push(format!("│ {} │", " ".repeat(inner_width)));
+            }
+        }
+
+        lines.push(format!("└{}┘", "─".repeat(width.saturating_sub(2))).dimmed().to_string());
+        lines
+    };
+
+    // Ensure space below: scroll terminal if needed to provide canvas
+    let buf = ui.input_buf.lock().unwrap().clone();
+    print!("\x1b[2B\r");
+    for _ in 0..BOX_ROWS {
+        println!();
+    }
+    print!("\x1b[{}A\r{}", BOX_ROWS + 2, ui.prompt_row(&buf));
+    let _ = io::stdout().flush();
+
+    let draw_menu = |sel: usize, filt: &str, buf_str: &str| {
+        let lines = render_box(sel, filt);
+        print!("\x1b[2B\r");
+        for (i, line) in lines.iter().enumerate() {
+            print!("\x1b[2K{}", line);
+            if i + 1 < lines.len() {
+                print!("\x1b[1B\r");
+            }
+        }
+        print!("\x1b[{}A\r{}", BOX_ROWS + 1, ui.prompt_row(buf_str));
+        let _ = io::stdout().flush();
+    };
+
+    let erase_menu = |buf_str: &str| {
+        print!("\x1b[2B\r");
+        for i in 0..BOX_ROWS {
+            print!("\x1b[2K");
+            if i + 1 < BOX_ROWS {
+                print!("\x1b[1B\r");
+            }
+        }
+        print!("\x1b[{}A\r{}", BOX_ROWS + 1, ui.prompt_row(buf_str));
+        let _ = io::stdout().flush();
+    };
+
+    let cur_filter = {
+        let b = ui.input_buf.lock().unwrap();
+        b.clone()
+    };
+    draw_menu(selected, &cur_filter, &cur_filter);
+
+    let mut result = None;
+
+    while let Some(key) = key_rx.recv().await {
+        let filter_str = ui.input_buf.lock().unwrap().clone();
+        let filtered = get_filtered(&filter_str);
+
+        match key {
+            Key::ArrowDown => {
+                if !filtered.is_empty() {
+                    selected = (selected + 1) % filtered.len();
+                }
+                draw_menu(selected, &filter_str, &filter_str);
+            }
+            Key::ArrowUp => {
+                if !filtered.is_empty() {
+                    selected = if selected == 0 {
+                        filtered.len().saturating_sub(1)
+                    } else {
+                        selected - 1
+                    };
+                }
+                draw_menu(selected, &filter_str, &filter_str);
+            }
+            Key::Enter => {
+                if !filtered.is_empty() && selected < filtered.len() {
+                    result = Some(filtered[selected].1.name.to_string());
+                }
+                break;
+            }
+            Key::Tab => {
+                if !filtered.is_empty() && selected < filtered.len() {
+                    let cmd = filtered[selected].1.name;
+                    let mut b = ui.input_buf.lock().unwrap();
+                    b.clear();
+                    b.push_str(cmd);
+                    b.push(' ');
+                    drop(b);
+                    break;
+                }
+            }
+            Key::Escape | Key::CtrlC => {
+                ui.input_buf.lock().unwrap().clear();
+                break;
+            }
+            Key::Backspace => {
+                let mut b = ui.input_buf.lock().unwrap();
+                b.pop();
+                let is_empty = b.is_empty();
+                let new_buf = b.clone();
+                drop(b);
+                ui.redraw_input_line();
+
+                if is_empty {
+                    break;
+                } else {
+                    selected = 0;
+                    draw_menu(selected, &new_buf, &new_buf);
+                }
+            }
+            Key::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
+                let mut b = ui.input_buf.lock().unwrap();
+                b.push(c);
+                let new_buf = b.clone();
+                drop(b);
+                ui.redraw_input_line();
+                selected = 0;
+                draw_menu(selected, &new_buf, &new_buf);
+            }
+            _ => continue,
+        }
+    }
+
+    let final_buf = ui.input_buf.lock().unwrap().clone();
+    erase_menu(&final_buf);
+    result
 }
 
 async fn select_from_rx(
@@ -1636,6 +2066,129 @@ async fn handle_new_command(
                 session_id.dimmed()
             );
         }
+    }
+
+    Ok(())
+}
+
+/// `/summarize [name]`, `/compact [name]`, or `/new -s [name]`:
+/// Summarize the current session's history and start a new session seeded with the summary.
+async fn handle_summarize_and_new_command(
+    ui: &ChatUi,
+    store: &Arc<SqliteSessionStore>,
+    config: &Config,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    session_id: &mut String,
+    current_provider: &str,
+    current_model: &str,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let replayed = store.replay(session_id, usize::MAX).await?;
+    let has_content = replayed
+        .history
+        .iter()
+        .any(|s| !s.is_summary && s.message.role != Role::System);
+
+    if !has_content {
+        ui.draw_initial_box();
+        ui.emit_above(&format!(
+            "{} Nothing to summarize in this session",
+            "•".cyan()
+        ));
+        return Ok(());
+    }
+
+    let old_id = session_id.clone();
+    let name = arg.map(|s| s.trim()).unwrap_or("");
+
+    ui.start_activity("summarize", &serde_json::json!({ "session": old_id }));
+
+    let summary_res = {
+        let ag = agent.lock().await;
+        ag.summarize_current_session(current_model).await
+    };
+
+    ui.stop_activity();
+
+    let summary = match summary_res {
+        Ok(s) => s,
+        Err(e) => {
+            ui.draw_initial_box();
+            ui.emit_above(&format!(
+                "{} Failed to summarize session: {}",
+                "✖".red().bold(),
+                e
+            ));
+            return Ok(());
+        }
+    };
+
+    let new_id = resolve_session(store.as_ref(), SessionSelection::New).await?;
+    if !name.is_empty() {
+        store.set_name(&new_id, name).await?;
+    }
+
+    let summary_header = if !name.is_empty() {
+        format!("Context summary from session '{}' ({}):\n{}", name, old_id, summary)
+    } else {
+        format!("Context summary from session {}:\n{}", old_id, summary)
+    };
+    let summary_msg = Message::system(summary_header);
+    store.append(&new_id, &summary_msg, true).await?;
+
+    *session_id = new_id.clone();
+    agent.lock().await.set_session(SessionBinding {
+        store: store.clone(),
+        session_id: new_id.clone(),
+        resume_max_messages: config.session.resume_max_messages,
+    });
+
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    let summary_tokens = harness_core::heuristic_tokens(&[summary_msg]);
+    ui.set_status(current_model, summary_tokens, context_max);
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        ui.draw_initial_box();
+        if name.is_empty() {
+            ui.emit_above(&format!(
+                "{} Started new session {} with summary from {}",
+                "✔".green().bold(),
+                session_id.cyan(),
+                old_id.dimmed()
+            ));
+        } else {
+            ui.emit_above(&format!(
+                "{} Started new session '{}' ({}) with summary from {}",
+                "✔".green().bold(),
+                name.cyan(),
+                session_id.dimmed(),
+                old_id.dimmed()
+            ));
+        }
+        ui.emit_above(&format!(
+            "\n{}\n{}\n",
+            "Summary:".bold(),
+            summary.dimmed()
+        ));
+    } else {
+        if name.is_empty() {
+            println!(
+                "{} Started new session {} with summary from {}",
+                "✔".green().bold(),
+                session_id.cyan(),
+                old_id.dimmed()
+            );
+        } else {
+            println!(
+                "{} Started new session '{}' ({}) with summary from {}",
+                "✔".green().bold(),
+                name.cyan(),
+                session_id.dimmed(),
+                old_id.dimmed()
+            );
+        }
+        println!("\n{}\n{}\n", "Summary:".bold(), summary);
     }
 
     Ok(())

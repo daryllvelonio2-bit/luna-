@@ -22,7 +22,7 @@ use crate::error::HarnessError;
 use crate::types::Message;
 
 pub use compaction::{
-    compact, estimate_tokens, fold_boundary, heuristic_tokens, CompactionOutcome, Estimate,
+    compact, estimate_tokens, fold_boundary, heuristic_tokens, summarize_session, CompactionOutcome, Estimate,
     EstimateSource, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE,
 };
 

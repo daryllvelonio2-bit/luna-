@@ -670,3 +670,57 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
     assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 0);
     assert_eq!(count_rows(&path, "is_summary = 1"), 0);
 }
+
+#[tokio::test]
+async fn summarize_session_produces_compact_summary() {
+    let (_dir, _path, store) = seeded_store(3).await;
+    let replayed = store.replay("s1", usize::MAX).await.unwrap();
+    let provider = CannedProvider::new("The user asked 3 questions and got 3 answers.");
+
+    let summary = summarize_session(&provider, "test-model", &replayed.history)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, "The user asked 3 questions and got 3 answers.");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn agent_summarize_current_session_works_and_rejects_empty() {
+    let (_dir, _path, store) = seeded_store(2).await;
+    let provider = Arc::new(CannedProvider::new("Session summary content"));
+
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    });
+
+    let summary = agent.summarize_current_session("test-model").await.unwrap();
+    assert_eq!(summary, "Session summary content");
+
+    // Fresh empty session
+    let empty_agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "empty_sess".to_string(),
+        resume_max_messages: 200,
+    });
+
+    assert!(empty_agent.summarize_current_session("test-model").await.is_err());
+}

@@ -138,9 +138,10 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
             Some(format!("−{} +{}", removed, added))
         }
         "write_file" => {
-            let added = text("content").map(|s| s.lines().count()).unwrap_or(0);
+            let added = text("content").map(|c| c.lines().count()).unwrap_or(0);
             Some(format!("+{}", added))
         }
+        "summarize" => Some("summarizing session...".to_string()),
         _ => None,
     }
 }

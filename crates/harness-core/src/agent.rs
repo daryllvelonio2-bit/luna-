@@ -247,6 +247,39 @@ where
         &self.registry
     }
 
+    pub fn provider(&self) -> &Arc<P> {
+        &self.provider
+    }
+
+    pub fn compaction(&self) -> Option<&CompactionSetup> {
+        self.compaction.as_ref()
+    }
+
+    /// Summarise the current session's conversation history using the configured
+    /// compaction model (or the session's active provider and `fallback_model`).
+    pub async fn summarize_current_session(&self, fallback_model: &str) -> Result<String, HarnessError> {
+        let Some(binding) = &self.session else {
+            return Err(HarnessError::SessionError(
+                "no session bound to agent".to_string(),
+            ));
+        };
+        let replay = binding
+            .store
+            .replay(&binding.session_id, usize::MAX)
+            .await?;
+        if replay.history.is_empty() {
+            return Err(HarnessError::SessionError(
+                "no messages in current session to summarize".to_string(),
+            ));
+        }
+        let (provider, model): (&dyn ModelProvider, &str) = if let Some(setup) = &self.compaction {
+            (setup.provider.as_ref(), &setup.model)
+        } else {
+            (self.provider.as_ref(), fallback_model)
+        };
+        crate::session::summarize_session(provider, model, &replay.history).await
+    }
+
     /// Get the estimated token count for the current session's conversation history.
     /// This loads the history from the session store and runs the compaction estimator.
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
