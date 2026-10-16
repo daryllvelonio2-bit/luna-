@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::{Key, Term};
@@ -148,6 +149,7 @@ struct ChatUi {
     /// The kind of the last transcript block, so blank lines land only between differing blocks.
     last_block: Arc<Mutex<OutputBlockKind>>,
     transient_error: Arc<Mutex<Option<String>>>,
+    box_drawn: Arc<AtomicBool>,
     is_attended: bool,
 }
 
@@ -159,6 +161,7 @@ impl ChatUi {
             live: Arc::new(Mutex::new(LiveRegion::default())),
             last_block: Arc::new(Mutex::new(OutputBlockKind::None)),
             transient_error: Arc::new(Mutex::new(None)),
+            box_drawn: Arc::new(AtomicBool::new(false)),
             is_attended,
         }
     }
@@ -363,6 +366,7 @@ impl ChatUi {
         if !self.is_attended {
             return;
         }
+        self.box_drawn.store(false, Ordering::SeqCst);
         let total = previous_live_rows + 4;
         print!("\x1b[1B");
         for i in 0..total {
@@ -463,6 +467,7 @@ impl ChatUi {
         println!("{}", divider);
         print!("\x1b[2A\r{}", self.prompt_row(buf));
         let _ = io::stdout().flush();
+        self.box_drawn.store(true, Ordering::SeqCst);
     }
 
     /// The tail of the composer buffer that fits on one terminal row, prefixed with `…` when
@@ -487,7 +492,7 @@ impl ChatUi {
     }
 
     fn redraw_input_line(&self) {
-        if !self.is_attended {
+        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
         let buf = self.input_buf.lock().unwrap();
@@ -507,7 +512,7 @@ impl ChatUi {
     }
 
     fn redraw_status_line(&self) {
-        if !self.is_attended {
+        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
         let width = get_terminal_width();
@@ -1636,9 +1641,7 @@ async fn execute_slash_command(
         }
         "/name" => {
             if let Some(a) = arg {
-                ui.clear_box_on_exit();
                 if let Err(e) = handle_name_command(ui, store.as_ref(), session_id, Some(a)).await {
-                    ui.draw_initial_box();
                     ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
                 }
             } else {
@@ -2607,7 +2610,6 @@ async fn handle_name_command(
 
     let name = store.get(session_id).await?.name;
     ui.set_session_name(&name);
-    ui.draw_initial_box();
 
     if name.is_empty() {
         if arg.is_some() {
@@ -2847,8 +2849,6 @@ async fn handle_compact_command(
 
     match result {
         Ok(notice) => {
-            ui.clear_box_on_exit();
-            ui.draw_initial_box();
             ui.emit_above(&format!(
                 "{} Compacted {} turns into 1 summary",
                 "✔".green().bold(),
@@ -2860,8 +2860,6 @@ async fn handle_compact_command(
             ui.update_status(context_used, context_max);
         }
         Err(e) => {
-            ui.clear_box_on_exit();
-            ui.draw_initial_box();
             ui.emit_above(&format!("{} Failed to compact session: {}", "✖".red().bold(), e));
         }
     }
