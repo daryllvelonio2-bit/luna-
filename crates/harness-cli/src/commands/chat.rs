@@ -133,6 +133,8 @@ struct ChatStatus {
     model: String,
     context_used: u32,
     context_max: u32,
+    /// Mutating calls run without asking; toggled with Shift+Tab, shown as a `yolo` badge.
+    yolo: bool,
 }
 
 #[derive(Clone)]
@@ -235,10 +237,12 @@ impl ChatUi {
 
     fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
+        let yolo = status.as_ref().map(|s| s.yolo).unwrap_or(false);
         *status = Some(ChatStatus {
             model: model.to_string(),
             context_used,
             context_max,
+            yolo,
         });
     }
 
@@ -262,16 +266,33 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
-    /// Status line above the input box: model name on the left, context usage on the right.
+    /// Toggle the yolo badge in the status bar: a bold yellow `yolo` between model and ctx.
+    fn set_yolo(&self, on: bool) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.yolo = on;
+            }
+        }
+        self.redraw_status_line();
+    }
+
+    /// Status line above the input box: model name on the left, yolo badge and context usage
+    /// on the right.
     fn format_status_line(&self, width: usize) -> Option<String> {
         let status = self.status.lock().unwrap();
         let s = status.as_ref()?;
 
         let left = s.model.clone();
-        let right = format!("ctx: {}/{}", s.context_used, s.context_max);
+        let mut right = format!("ctx: {}/{}", s.context_used, s.context_max);
+        if s.yolo {
+            right = format!("{} {}", "yolo".yellow().bold(), right);
+        }
 
+        // The badge carries ANSI codes; measure the visible text so the padding math stays right.
+        let right_visible = dialoguer::console::strip_ansi_codes(&right).to_string();
         let left_len = left.chars().count();
-        let right_len = right.chars().count();
+        let right_len = right_visible.chars().count();
 
         if left_len + right_len + 4 > width {
             let available = width.saturating_sub(right_len + 4);
@@ -299,7 +320,6 @@ impl ChatUi {
             ))
         }
     }
-
     /// Erase the four composer rows plus any live region rows, leaving the cursor at the top row
     /// where the live region started.
     fn erase_live_and_box(&self, previous_live_rows: usize) {
@@ -1005,6 +1025,14 @@ pub async fn run_interactive_chat(
                                 ui.draw_initial_box();
                             }
                         }
+                        continue;
+                    }
+                    Key::BackTab if !allow_all_session.load(std::sync::atomic::Ordering::SeqCst) => {
+                        // Shift+Tab: yolo — mutating tools run without asking for the rest of
+                        // the chat. Pressing it again while yolo is on does nothing: the same
+                        // key must not silently flip a safety gate back off.
+                        allow_all_session.store(true, std::sync::atomic::Ordering::SeqCst);
+                        ui.set_yolo(true);
                         continue;
                     }
                     Key::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
