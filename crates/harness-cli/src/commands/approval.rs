@@ -14,54 +14,87 @@ use harness_core::{
     DenyAll, HarnessError, NonInteractive,
 };
 
-/// Formats the single clean approval box with [ Approve ] and [ Cancel ] choices.
+/// The three answers the approval popup offers, in focus order.
+pub const APPROVAL_ACTIONS: [&str; 3] = [
+    "[y] Approve once",
+    "[a] Approve all for this session",
+    "[n] Deny execution",
+];
+
+/// What the interactive approval prompt resolved to, before it maps onto [`ApprovalDecision`].
+pub enum ApprovalChoice {
+    Once,
+    AllSession,
+    Deny,
+}
+
+/// Renders the approval popup: a rounded box that names the tool, shows the exact command or
+/// path in an inset panel, and lists the three actions with the focused one marked.
 pub fn render_approval_box(
     request: &ApprovalRequest,
-    selected: usize, // 0 = Approve, 1 = Cancel
+    selected: usize, // index into APPROVAL_ACTIONS
     width: usize,
 ) -> (String, usize) {
-    let mut lines = Vec::new();
-    let inner_width = width.saturating_sub(4).max(50);
-    let title = " Approval Required ";
-    let header_dashes = inner_width.saturating_sub(title.len() + 2);
-    let top_border = format!("┌─{}{}{}┐", title.blue().bold(), "─".repeat(header_dashes).blue(), "─".repeat(2).blue());
-    lines.push(top_border);
-
-    let make_line = |content: &str| -> String {
-        let stripped = dialoguer::console::strip_ansi_codes(content);
-        let pad = inner_width.saturating_sub(stripped.len());
-        format!("│ {}{} │", content, " ".repeat(pad))
+    let total = width.clamp(58, 76);
+    let visible_len =
+        |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
+    let cut = |s: &str, room: usize| -> String {
+        if visible_len(s) > room {
+            format!(
+                "{}…",
+                dialoguer::console::strip_ansi_codes(s)
+                    .chars()
+                    .take(room.saturating_sub(1))
+                    .collect::<String>()
+            )
+        } else {
+            s.to_string()
+        }
     };
 
-    lines.push(make_line(&format!("{}:   {}", "Tool".bold(), request.tool.bold())));
+    let row = |content: &str| -> String {
+        let pad = total.saturating_sub(4).saturating_sub(visible_len(content));
+        format!("│ {}{} │", content, " ".repeat(pad))
+    };
+    let blank = row("");
 
-    if let Some(target) = &request.target {
-        let max_target = inner_width.saturating_sub(14);
-        let target_display = if target.len() > max_target {
-            format!("{}…", &target[..max_target.saturating_sub(1)])
-        } else {
-            target.clone()
-        };
-        let (label, colored_target) = match request.tool.as_str() {
-            "write_file" | "patch" => ("File".bold(), target_display.cyan().bold().to_string()),
-            "terminal" | "shell" | "bash" => ("Command".bold(), format!("{} {}", "$".cyan().bold(), target_display.bold())),
-            "update_note" | "save_note" | "delete_note" => ("Note".bold(), target_display.cyan().to_string()),
-            _ => ("Target".bold(), target_display.cyan().to_string()),
-        };
-        lines.push(make_line(&format!("{}: {}", label, colored_target)));
-    }
+    let inner_row = |payload: &str| -> String {
+        let pad = total.saturating_sub(10).saturating_sub(visible_len(payload));
+        row(&format!(" │ {}{} │ ", payload, " ".repeat(pad)))
+    };
+    let inner_top = |label: &str| -> String {
+        let dashes = total.saturating_sub(label.len() + 11);
+        row(&format!(
+            " ┌─ {} {}┐ ",
+            label.cyan(),
+            "─".repeat(dashes)
+        ))
+    };
+    let inner_bottom =
+        || -> String { row(&format!(" └{}┘ ", "─".repeat(total.saturating_sub(8)))) };
+
+    let mut lines = Vec::new();
+    let title = "Tool Execution Approval";
+    lines.push(format!(
+        "╭─ {} {}╮",
+        title.bold(),
+        "─".repeat(total.saturating_sub(title.len() + 5))
+    ));
+
+    lines.push(blank.clone());
+    lines.push(row(&format!(
+        " The agent requested access to: {}",
+        request.tool.bold()
+    )));
+    lines.push(blank.clone());
 
     if let Some(diff) = &request.diff {
-        lines.push(make_line(&format!("{}:", "Diff".bold())));
+        lines.push(inner_top("Diff"));
         let diff_lines: Vec<&str> = diff.lines().collect();
-        let max_diff = 12.min(diff_lines.len());
+        let max_diff = 8.min(diff_lines.len());
         for dl in &diff_lines[..max_diff] {
-            let truncated = if dl.len() > inner_width.saturating_sub(4) {
-                format!("{}...", &dl[..inner_width.saturating_sub(7)])
-            } else {
-                dl.to_string()
-            };
-            let colored_dl = if dl.starts_with('+') {
+            let truncated = cut(dl, total.saturating_sub(12));
+            let colored = if dl.starts_with('+') {
                 truncated.green().to_string()
             } else if dl.starts_with('-') {
                 truncated.red().to_string()
@@ -70,36 +103,54 @@ pub fn render_approval_box(
             } else {
                 truncated.dimmed().to_string()
             };
-            lines.push(make_line(&format!("  {}", colored_dl)));
+            lines.push(inner_row(&format!("  {}", colored)));
         }
         if diff_lines.len() > max_diff {
-            lines.push(make_line(&format!("  {} (+ {} more lines)", "...".dimmed(), diff_lines.len() - max_diff)));
+            lines.push(inner_row(&format!(
+                "  {} (+{} more)",
+                "…".dimmed(),
+                diff_lines.len() - max_diff
+            )));
         }
+        lines.push(inner_bottom());
+    } else if let Some(target) = &request.target {
+        let label = match request.tool.as_str() {
+            "terminal" | "shell" | "bash" => "Command",
+            "write_file" | "patch" => "File",
+            "save_note" | "update_note" | "delete_note" => "Note",
+            _ => "Target",
+        };
+        lines.push(inner_top(label));
+        let is_command = matches!(request.tool.as_str(), "terminal" | "shell" | "bash");
+        let room = total.saturating_sub(14); // interior minus indent and "$ "
+        let plain = cut(target, room);
+        let payload = if is_command {
+            format!("{} {}", "$".cyan().bold(), plain.bold())
+        } else {
+            plain.cyan().to_string()
+        };
+        lines.push(inner_row(&payload));
+        lines.push(inner_bottom());
     }
 
-    lines.push(make_line(""));
-
-    let approve_btn = if selected == 0 {
-        format!("❯ {}", "[ Approve ]".blue().bold())
-    } else {
-        format!("  {}", "[ Approve ]".dimmed())
-    };
-
-    let cancel_btn = if selected == 1 {
-        format!("❯ {}", "[ Cancel ]".red().bold())
-    } else {
-        format!("  {}", "[ Cancel ]".dimmed())
-    };
-
-    let btn_row = format!("      {}        {}", approve_btn, cancel_btn);
-    lines.push(make_line(&btn_row));
-
-    let bot_border = format!("└{}┘", "─".repeat(inner_width + 2).blue());
-    lines.push(bot_border);
+    lines.push(blank.clone());
+    lines.push(row(" Action"));
+    for (idx, action) in APPROVAL_ACTIONS.iter().enumerate() {
+        if idx == selected {
+            lines.push(row(&format!(" {} {}", "❯".cyan().bold(), action.bold())));
+        } else {
+            lines.push(row(&format!(" {} {}", " ", action.dimmed())));
+        }
+    }
+    lines.push(blank.clone());
+    lines.push(row(&format!(
+        " {}",
+        "Navigate with ↑/↓ • Press Enter or key to confirm".dimmed()
+    )));
+    lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
 
     let count = lines.len();
-    let full = lines.join("\n") + "\n";
-    (full, count)
+    (lines.join("\n") + "\n", count)
 }
 
 /// Approver for interactive Chat mode: routes approval requests through a channel to the UI loop.
@@ -225,5 +276,55 @@ mod tests {
         let settings = approval_settings(&config);
         assert_eq!(settings.timeout, Duration::from_secs(7));
         assert_eq!(settings.mutating_overrides, vec!["save_note".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn command_popup_matches_the_design() {
+        let request = ApprovalRequest {
+            tool: "terminal".to_string(),
+            call_id: "c1".to_string(),
+            target: Some("ls -la && head -100 README.md agents.md 2>/dev/null".to_string()),
+            diff: None,
+            arguments: serde_json::json!({"command": "ls -la"}),
+        };
+        let (text, lines) = render_approval_box(&request, 0, 74);
+        print!("\n{}", text);
+        assert_eq!(lines, text.lines().count());
+        assert!(text.contains("Tool Execution Approval"));
+        assert!(text.contains("The agent requested access to: terminal"));
+        assert!(text.contains("$ ls -la && head -100 README.md"));
+        assert!(text.contains("[y] Approve once"));
+        assert!(text.contains("[a] Approve all for this session"));
+        assert!(text.contains("[n] Deny execution"));
+        // Every visible row is the same display width: the box must not wobble.
+        let widths: Vec<usize> = text
+            .lines()
+            .map(|l| dialoguer::console::strip_ansi_codes(l).chars().count())
+            .collect();
+        assert!(widths.iter().all(|&w| w == widths[0]), "widths: {:?}", widths);
+    }
+
+    #[test]
+    fn focus_moves_mark_the_selected_action() {
+        let request = ApprovalRequest {
+            tool: "write_file".to_string(),
+            call_id: "c2".to_string(),
+            target: Some("/tmp/report.md".to_string()),
+            diff: Some("--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+new\n".to_string()),
+            arguments: serde_json::json!({}),
+        };
+        for selected in 0..3 {
+            let (text, _) = render_approval_box(&request, selected, 74);
+            let plain = dialoguer::console::strip_ansi_codes(&text).to_string();
+            let focused = plain.lines().filter(|l| l.contains('❯')).count();
+            assert_eq!(focused, 1, "selected={} must mark exactly one action", selected);
+            assert!(plain.contains("Diff"), "diff panel must render");
+            assert!(plain.contains("+new"));
+        }
     }
 }

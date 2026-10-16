@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, Message, ModelProvider,
-    ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry, TurnOutcome,
+    Agent, AllowAll, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, Message,
+    ModelProvider, ReasoningEffort, Role, SessionBinding, SessionStore, SqliteSessionStore,
+    ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{
     apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
@@ -25,7 +26,10 @@ use harness_providers::{
     ModelDiscovery,
 };
 
-use super::approval::{approval_settings, build_approver, render_approval_box, ChatApprover};
+use super::approval::{
+    approval_settings, build_approver, render_approval_box, ApprovalChoice, ChatApprover,
+    APPROVAL_ACTIONS,
+};
 use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
@@ -898,8 +902,17 @@ pub async fn run_interactive_chat(
                 };
 
                 ui.clear_live_and_box();
-                let decision = prompt_approval_box(&mut key_rx, &request).await;
-                let is_run = decision == harness_core::ApprovalDecision::Run;
+                let choice = prompt_approval_choice(&mut key_rx, &request, &ui).await;
+                if matches!(choice, ApprovalChoice::AllSession) {
+                    // Sticky "approve all": flip the gate once and it stays for this chat.
+                    agent.lock().await.set_approval(Arc::new(AllowAll));
+                }
+                let is_run = matches!(choice, ApprovalChoice::Once | ApprovalChoice::AllSession);
+                let decision = if is_run {
+                    harness_core::ApprovalDecision::Run
+                } else {
+                    harness_core::ApprovalDecision::Deny
+                };
                 ui.emit_above(&format_approval_verdict(is_run, &request));
                 if is_run {
                     let args = request.arguments.clone();
@@ -2270,39 +2283,61 @@ async fn handle_reasoning_switch(
     Ok(())
 }
 
-async fn prompt_approval_box(
+async fn prompt_approval_choice(
     key_rx: &mut mpsc::UnboundedReceiver<Key>,
     request: &ApprovalRequest,
-) -> harness_core::ApprovalDecision {
-    let width = get_terminal_width().min(76).max(50);
-    let mut selected = 0; // 0 = Approve, 1 = Cancel
+    ui: &ChatUi,
+) -> ApprovalChoice {
+    let width = get_terminal_width();
+    let mut selected = 0; // index into APPROVAL_ACTIONS
 
     // Drain any leftover keys in channel
     while key_rx.try_recv().is_ok() {}
+
+    // The popup renders above the composer: erase box + live region, draw the popup, redraw
+    // the composer beneath it once the answer lands.
+    ui.clear_box_on_exit();
 
     let (initial_text, mut line_count) = render_approval_box(request, selected, width);
     print!("{}", initial_text);
     let _ = io::stdout().flush();
 
     while let Some(key) = key_rx.recv().await {
-        match key {
-            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown | Key::Tab | Key::BackTab => {
-                selected = 1 - selected;
+        let chosen = match key {
+            Key::ArrowUp | Key::ArrowLeft | Key::BackTab => {
+                selected = (selected + APPROVAL_ACTIONS.len() - 1) % APPROVAL_ACTIONS.len();
+                None
             }
-            Key::Char('y') | Key::Char('Y') | Key::Char('a') | Key::Char('A') => {
-                selected = 0;
-                break;
+            Key::ArrowDown | Key::ArrowRight | Key::Tab => {
+                selected = (selected + 1) % APPROVAL_ACTIONS.len();
+                None
             }
+            Key::Char('y') | Key::Char('Y') => Some(ApprovalChoice::Once),
+            Key::Char('a') | Key::Char('A') => Some(ApprovalChoice::AllSession),
             Key::Char('n') | Key::Char('N') | Key::Char('c') | Key::Char('C') | Key::Escape => {
-                selected = 1;
-                break;
+                Some(ApprovalChoice::Deny)
             }
-            Key::Enter => {
-                break;
-            }
+            Key::Enter => match selected {
+                0 => Some(ApprovalChoice::Once),
+                1 => Some(ApprovalChoice::AllSession),
+                _ => Some(ApprovalChoice::Deny),
+            },
             _ => continue,
+        };
+
+        if let Some(choice) = chosen {
+            // Erase the popup and restore the composer before returning.
+            print!("\r\x1b[{}A", line_count);
+            for _ in 0..line_count {
+                print!("\x1b[2K\x1b[1B");
+            }
+            print!("\r\x1b[{}A", line_count);
+            let _ = io::stdout().flush();
+            ui.draw_initial_box();
+            return choice;
         }
 
+        // Repaint in place: jump to the first popup row and overwrite every line.
         print!("\r\x1b[{}A", line_count);
         let (new_text, new_count) = render_approval_box(request, selected, width);
         print!("{}", new_text);
@@ -2310,18 +2345,7 @@ async fn prompt_approval_box(
         let _ = io::stdout().flush();
     }
 
-    // Erase the approval box from screen
-    print!("\r\x1b[{}A", line_count);
-    for _ in 0..line_count {
-        print!("\x1b[2K\x1b[1B");
-    }
-    print!("\r\x1b[{}A", line_count);
-    let _ = io::stdout().flush();
-
-    if selected == 0 {
-        harness_core::ApprovalDecision::Run
-    } else {
-        harness_core::ApprovalDecision::Deny
-    }
+    ui.draw_initial_box();
+    ApprovalChoice::Deny
 }
 

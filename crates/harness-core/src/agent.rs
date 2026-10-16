@@ -225,6 +225,12 @@ where
         self.session = Some(binding);
     }
 
+    /// Swap the approver at runtime — the interactive chat's "approve all for this session"
+    /// answer replaces the ask-every-time approver with an allow-all one.
+    pub fn set_approval(&mut self, approver: Arc<dyn Approver>) {
+        self.approver = approver;
+    }
+
     /// Serve the summarising call through a provider other than the session's.
     pub fn with_compaction(mut self, setup: CompactionSetup) -> Self {
         self.compaction = Some(setup);
