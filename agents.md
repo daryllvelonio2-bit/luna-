@@ -12,7 +12,7 @@
 
 ## 2. Rust Code & Structure Rules
 
-- **Modular decomposition:** When a module grows beyond ~1,000 lines or handles multiple responsibilities, split it into topical submodules (`<stem>/<topic>.rs` or `<topic>.rs` under a module directory) with a clean facade.
+- **File size & modular decomposition:** Hard limit of 2,000 lines of code per file (target <1,000 lines). When a file grows beyond ~1,000 lines or handles multiple distinct responsibilities, decompose it into focused topical submodules under a module directory with a clean facade.
 - **Idiomatic pattern matching:** Use `match` or dispatch tables over `if/else` ladders when branching across 4+ variants or commands.
 - **No speculative abstraction:** No trait with only one implementation, no wrapper struct that does nothing, no unused re-exports, no flags nobody sets.
 - **Fail closed & propagate errors:**
