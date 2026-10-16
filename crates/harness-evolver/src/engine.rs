@@ -31,6 +31,25 @@ pub enum JobStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EvolverEvent {
+    JobStarted {
+        job_id: String,
+        task: String,
+    },
+    JobProgress {
+        job_id: String,
+        task: String,
+        current_tool: String,
+    },
+    JobCompleted {
+        job_id: String,
+        task: String,
+        status: JobStatus,
+        summary: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRecord {
     pub id: String,
     pub task: String,
@@ -151,18 +170,41 @@ pub struct CodebaseEvolver {
     jobs_dir: PathBuf,
     provider: RwLock<Option<Arc<dyn ModelProvider>>>,
     jobs: RwLock<HashMap<String, JobRecord>>,
+    event_tx: tokio::sync::broadcast::Sender<EvolverEvent>,
 }
 
 impl CodebaseEvolver {
     pub fn new(repo_root: PathBuf, jobs_dir: PathBuf) -> Self {
         let repo_root = discover_harness_repo_root(repo_root);
         let _ = fs::create_dir_all(&jobs_dir);
+        let (event_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             repo_root,
             jobs_dir,
             provider: RwLock::new(None),
             jobs: RwLock::new(HashMap::new()),
+            event_tx,
         }
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EvolverEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn event_sender(&self) -> tokio::sync::broadcast::Sender<EvolverEvent> {
+        self.event_tx.clone()
+    }
+
+    pub async fn active_job(&self) -> Option<JobRecord> {
+        let jobs = self.list_jobs().await.ok()?;
+        jobs.into_iter().find(|j| matches!(j.status, JobStatus::Running | JobStatus::Queued))
+    }
+
+    pub async fn latest_job(&self) -> Result<JobRecord, HarnessError> {
+        let jobs = self.list_jobs().await?;
+        jobs.into_iter()
+            .max_by_key(|j| j.created_at)
+            .ok_or_else(|| HarnessError::EvolverError("No jobs found".to_string()))
     }
 
     pub fn repo_root(&self) -> &Path {
@@ -210,6 +252,11 @@ impl CodebaseEvolver {
         self.save_job(&record).await?;
         self.jobs.write().await.insert(job_id.clone(), record);
 
+        let _ = self.event_tx.send(EvolverEvent::JobStarted {
+            job_id: job_id.clone(),
+            task: task.to_string(),
+        });
+
         // Spawn background task
         let repo_root = self.repo_root.clone();
         let jobs_dir = self.jobs_dir.clone();
@@ -218,6 +265,7 @@ impl CodebaseEvolver {
         let j_id = job_id.clone();
         let b_name = branch.clone();
         let wt_path = worktree_dir.clone();
+        let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
             if let Err(e) = run_engineer_job(
@@ -229,6 +277,7 @@ impl CodebaseEvolver {
                 wt_path,
                 task_str,
                 evidence_opt,
+                event_tx,
             )
             .await
             {
@@ -416,6 +465,7 @@ async fn run_engineer_job(
     worktree_dir: PathBuf,
     task: String,
     evidence: Option<String>,
+    event_tx: tokio::sync::broadcast::Sender<EvolverEvent>,
 ) -> Result<(), HarnessError> {
     let job_file = jobs_dir.join(format!("{}.json", job_id));
     let mut record: JobRecord = {
@@ -429,6 +479,12 @@ async fn run_engineer_job(
     record.updated_at = Utc::now();
     record.logs.push(format!("Creating git worktree at {} on branch {}", worktree_dir.display(), branch));
     let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+
+    let _ = event_tx.send(EvolverEvent::JobProgress {
+        job_id: job_id.clone(),
+        task: task.clone(),
+        current_tool: "Setting up git worktree".to_string(),
+    });
 
     // 1. Create worktree
     let wt_parent = worktree_dir.parent().unwrap_or(&repo_root);
@@ -459,6 +515,12 @@ async fn run_engineer_job(
             };
             record.updated_at = Utc::now();
             let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            let _ = event_tx.send(EvolverEvent::JobCompleted {
+                job_id: job_id.clone(),
+                task: task.clone(),
+                status: record.status.clone(),
+                summary: format!("git worktree add failed: {}", err),
+            });
             return Err(HarnessError::EvolverError(err));
         }
         Err(e) => {
@@ -468,6 +530,12 @@ async fn run_engineer_job(
             };
             record.updated_at = Utc::now();
             let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            let _ = event_tx.send(EvolverEvent::JobCompleted {
+                job_id: job_id.clone(),
+                task: task.clone(),
+                status: record.status.clone(),
+                summary: format!("Failed to run git: {}", e),
+            });
             return Err(HarnessError::Io(e.to_string()));
         }
     }
@@ -520,6 +588,55 @@ async fn run_engineer_job(
         agent_config,
     );
 
+    let j_id_obs = job_id.clone();
+    let task_obs = task.clone();
+    let event_tx_obs = event_tx.clone();
+    let shared_logs = Arc::new(std::sync::Mutex::new(record.logs.clone()));
+    let shared_logs_obs = shared_logs.clone();
+
+    let engineer_agent = engineer_agent.with_observer(Arc::new(move |event| {
+        match event {
+            harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+                let args_str = arguments.to_string();
+                let brief_args = if args_str.chars().count() > 60 {
+                    format!("{}…", args_str.chars().take(59).collect::<String>())
+                } else {
+                    args_str
+                };
+                let tool_desc = format!("{}({})", name, brief_args);
+                let _ = event_tx_obs.send(EvolverEvent::JobProgress {
+                    job_id: j_id_obs.clone(),
+                    task: task_obs.clone(),
+                    current_tool: tool_desc.clone(),
+                });
+                if let Ok(mut logs) = shared_logs_obs.lock() {
+                    logs.push(format!("• Tool: {}", tool_desc));
+                }
+            }
+            harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
+                let out_brief = if output.chars().count() > 120 {
+                    format!("{}…", output.chars().take(119).collect::<String>())
+                } else {
+                    output.clone()
+                };
+                if let Ok(mut logs) = shared_logs_obs.lock() {
+                    if is_error {
+                        logs.push(format!("  ✖ Error: {}", out_brief));
+                    } else {
+                        logs.push(format!("  ✔ Output: {}", out_brief));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }));
+
+    let _ = event_tx.send(EvolverEvent::JobProgress {
+        job_id: job_id.clone(),
+        task: task.clone(),
+        current_tool: "Engineer investigating code".to_string(),
+    });
+
     // Initial prompt
     let user_prompt = format!(
         "Task to implement in Luna harness codebase:\n{}\n\nEvidence and reproduction context:\n{}\n\nInspect code, make surgical modifications, and run `cargo test --workspace` via the terminal tool to verify. Report your conclusion when done.",
@@ -529,6 +646,10 @@ async fn run_engineer_job(
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let turn_res = engineer_agent.run_turn(&user_prompt, cancel_token).await;
+
+    if let Ok(logs) = shared_logs.lock() {
+        record.logs = logs.clone();
+    }
 
     match turn_res {
         Ok(outcome) => {
@@ -540,6 +661,11 @@ async fn run_engineer_job(
     }
 
     // 3. Dual-gate Gate 1: cargo test --workspace inside worktree
+    let _ = event_tx.send(EvolverEvent::JobProgress {
+        job_id: job_id.clone(),
+        task: task.clone(),
+        current_tool: "cargo test --workspace (Gate 1)".to_string(),
+    });
     record.logs.push("Running `cargo test --workspace` verification gate...".to_string());
     let test_res = Command::new("cargo")
         .args(["test", "--workspace"])
@@ -567,6 +693,12 @@ async fn run_engineer_job(
     if !tests_passed {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        let _ = event_tx.send(EvolverEvent::JobCompleted {
+            job_id: job_id.clone(),
+            task: task.clone(),
+            status: record.status.clone(),
+            summary: "Gate 1 verification failed (`cargo test --workspace` errors)".to_string(),
+        });
         // Clean up worktree and branch
         cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
         return Ok(());
@@ -575,6 +707,11 @@ async fn run_engineer_job(
     record.logs.push("Gate 1 passed: `cargo test --workspace` clean.".to_string());
 
     // Build release binary
+    let _ = event_tx.send(EvolverEvent::JobProgress {
+        job_id: job_id.clone(),
+        task: task.clone(),
+        current_tool: "cargo build --release in worktree".to_string(),
+    });
     record.logs.push("Compiling release binary in worktree...".to_string());
     let build_res = Command::new("cargo")
         .args(["build", "--release"])
@@ -601,21 +738,47 @@ async fn run_engineer_job(
     if !build_ok {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        let _ = event_tx.send(EvolverEvent::JobCompleted {
+            job_id: job_id.clone(),
+            task: task.clone(),
+            status: record.status.clone(),
+            summary: "Worktree release compilation failed".to_string(),
+        });
         cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
         return Ok(());
     }
 
     let binary_path = worktree_dir.join("target/release/luna");
-    record.status = JobStatus::ReadyForReenactment {
+    let pending = PendingUpdate {
+        job_id: record.id.clone(),
+        task: record.task.clone(),
+        branch: record.branch.clone(),
+        worktree_dir: record.worktree_dir.clone(),
+        binary_path: binary_path.to_string_lossy().to_string(),
+        staged_at: Utc::now(),
+    };
+    if let Ok(pending_json) = serde_json::to_string_pretty(&pending) {
+        let _ = fs::write(jobs_dir.join("pending_update.json"), pending_json);
+    }
+
+    record.status = JobStatus::ScheduledUpdate {
         binary_path: binary_path.to_string_lossy().to_string(),
     };
     record.updated_at = Utc::now();
     record.logs.push(format!(
-        "Worktree binary built at {}. Ready for scenario re-enactment.",
+        "Worktree binary built at {}. Pending update staged for next startup.",
         binary_path.display()
     ));
 
     let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+
+    let _ = event_tx.send(EvolverEvent::JobCompleted {
+        job_id: job_id.clone(),
+        task: task.clone(),
+        status: record.status.clone(),
+        summary: "Dual-gate passed (`cargo test` clean, release binary built). Pending update staged.".to_string(),
+    });
+
     Ok(())
 }
 
