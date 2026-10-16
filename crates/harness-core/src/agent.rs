@@ -455,12 +455,14 @@ where
             if response.tool_calls.is_empty() {
                 debug!("Task successfully completed without further tool calls");
                 let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                if reply_text.is_empty() && last_reasoning.is_none() {
+                    return Err(HarnessError::ProviderError {
+                        provider: self.provider.provider_id().to_string(),
+                        message: "Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string(),
+                    });
+                }
                 let final_reply = if reply_text.is_empty() {
-                    if last_reasoning.is_some() {
-                        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
-                    } else {
-                        "✖ Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string()
-                    }
+                    "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
                 } else {
                     reply_text
                 };

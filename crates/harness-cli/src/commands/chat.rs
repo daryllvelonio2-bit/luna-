@@ -1168,6 +1168,7 @@ pub async fn run_interactive_chat(
                 }
             } => {
                 active_turn = None;
+                let turn_succeeded = matches!(turn_res, Ok(Ok(_)));
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
@@ -1233,6 +1234,7 @@ pub async fn run_interactive_chat(
                         ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
+                        let had_tools = !current_tools.is_empty();
 
                         let record = TurnRecord {
                             user_query: current_query.clone(),
@@ -1243,6 +1245,12 @@ pub async fn run_interactive_chat(
                             reply: format!("✖ Error: {}", e),
                         };
                         turns.push(record);
+
+                        if had_tools {
+                            *ui.input_buf.lock().unwrap() = "continue".to_string();
+                        } else if !current_query.is_empty() {
+                            *ui.input_buf.lock().unwrap() = current_query.clone();
+                        }
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
@@ -1261,6 +1269,7 @@ pub async fn run_interactive_chat(
                         ui.clear_live_state();
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
+                        let had_tools = !current_tools.is_empty();
 
                         let record = TurnRecord {
                             user_query: current_query.clone(),
@@ -1271,6 +1280,12 @@ pub async fn run_interactive_chat(
                             reply: format!("✖ Task join error: {}", join_err),
                         };
                         turns.push(record);
+
+                        if had_tools {
+                            *ui.input_buf.lock().unwrap() = "continue".to_string();
+                        } else if !current_query.is_empty() {
+                            *ui.input_buf.lock().unwrap() = current_query.clone();
+                        }
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
@@ -1286,17 +1301,19 @@ pub async fn run_interactive_chat(
                     }
                 }
 
-                if let Some(next_query) = queue.pop_front() {
-                    current_cancel = CancellationToken::new();
-                    let cancel_child = current_cancel.child_token();
-                    let ag_ref = agent.clone();
-                    current_query = next_query.clone();
-                    turn_start = std::time::Instant::now();
-                    in_flight_tools.lock().unwrap().clear();
-                    active_turn = Some(tokio::spawn(async move {
-                        let ag = ag_ref.lock().await;
-                        ag.run_turn(&next_query, cancel_child).await
-                    }));
+                if turn_succeeded {
+                    if let Some(next_query) = queue.pop_front() {
+                        current_cancel = CancellationToken::new();
+                        let cancel_child = current_cancel.child_token();
+                        let ag_ref = agent.clone();
+                        current_query = next_query.clone();
+                        turn_start = std::time::Instant::now();
+                        in_flight_tools.lock().unwrap().clear();
+                        active_turn = Some(tokio::spawn(async move {
+                            let ag = ag_ref.lock().await;
+                            ag.run_turn(&next_query, cancel_child).await
+                        }));
+                    }
                 }
             }
         }

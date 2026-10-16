@@ -319,8 +319,7 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
 
     let cancel = CancellationToken::new();
     let result = agent.run_task("Hello", cancel).await;
-    assert!(result.is_ok());
-    let reply = result.unwrap();
-    assert!(!reply.trim().is_empty());
-    assert!(reply.contains("empty response") || reply.contains("overloaded"));
+    assert!(result.is_err(), "Expected error on empty response, got: {:?}", result);
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("empty response") || err.to_string().contains("overloaded"));
 }
