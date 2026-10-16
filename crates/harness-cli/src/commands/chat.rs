@@ -13,7 +13,7 @@ use harness_core::{
 };
 use harness_evolver::{
     apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
-    InspectSourceTool, ListImprovementJobsTool, PtyScreenCaptureTool, VerifyAndStageUpdateTool,
+    ListImprovementJobsTool,
 };
 use harness_memory::{
     ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
@@ -579,13 +579,10 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
     registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
 
-    // Register self-improvement evolver tools
-    registry.register(Arc::new(InspectSourceTool::new(evolver.clone()))).await?;
+    // Register self-improvement evolver tools (delegated background engineer)
     registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(PtyScreenCaptureTool::new(config.paths.workspace_root.clone()))).await?;
+    registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
 
     // Register skills from skills_dir
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
@@ -742,13 +739,8 @@ pub async fn run_interactive_chat(
                 handle_name_command(&ui, store.as_ref(), &session_id, arg_opt).await?;
                 continue;
             }
-            if query.starts_with("/summarize") || query.starts_with("/compact") {
-                let prefix = if query.starts_with("/summarize") {
-                    "/summarize"
-                } else {
-                    "/compact"
-                };
-                let arg = query.strip_prefix(prefix).unwrap().trim();
+            if query.starts_with("/summarize") {
+                let arg = query.strip_prefix("/summarize").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
                 handle_summarize_and_new_command(
                     &ui,
@@ -761,6 +753,10 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                continue;
+            }
+            if query.starts_with("/compact") {
+                handle_compact_command(&ui, &agent, &current_provider, &current_model).await?;
                 continue;
             }
             if query.starts_with("/new") {
@@ -1450,6 +1446,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Summarize and start a new session with it",
     },
     SlashCommand {
+        name: "/compact",
+        details: "Fold oldest turns into a summary in this session",
+    },
+    SlashCommand {
         name: "/expand",
         details: "Expand intermediate tool and reasoning processes (or Ctrl+O)",
     },
@@ -1550,7 +1550,7 @@ async fn execute_slash_command(
             }
             Ok(false)
         }
-        "/summarize" | "/compact" => {
+        "/summarize" => {
             turns.clear();
             ui.clear_box_on_exit();
             if let Err(e) = handle_summarize_and_new_command(
@@ -1567,6 +1567,12 @@ async fn execute_slash_command(
             {
                 ui.draw_initial_box();
                 ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/compact" => {
+            if let Err(e) = handle_compact_command(ui, agent, current_provider, current_model).await {
+                ui.emit_above(&format!("{} Failed to compact session: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
@@ -2692,6 +2698,45 @@ async fn handle_summarize_and_new_command(
             );
         }
         println!("\n{}\n{}\n", "Summary:".bold(), summary);
+    }
+
+    Ok(())
+}
+
+/// `/compact`: fold the current session's oldest turns into a summary in place — the session
+/// keeps its id and name, only the context shrinks.
+async fn handle_compact_command(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    current_provider: &str,
+    current_model: &str,
+) -> Result<(), HarnessError> {
+    ui.start_activity("compact", &serde_json::json!({}));
+    let result = {
+        let ag = agent.lock().await;
+        ag.compact_current_session().await
+    };
+    ui.stop_activity();
+
+    match result {
+        Ok(notice) => {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            ui.emit_above(&format!(
+                "{} Compacted {} turns into 1 summary",
+                "✔".green().bold(),
+                notice.turns
+            ));
+            // The summary replaced the folded turns, so the gauge drops for real.
+            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+            let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+            ui.update_status(context_used, context_max);
+        }
+        Err(e) => {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            ui.emit_above(&format!("{} Failed to compact session: {}", "✖".red().bold(), e));
+        }
     }
 
     Ok(())

@@ -301,6 +301,26 @@ where
         Ok(estimate.tokens)
     }
 
+    /// Fold the oldest turns of the current session into a summary, ignoring
+    /// `agent.compact_at_tokens` — this is the `/compact` command. Nothing to fold (the session
+    /// holds no more turns than `agent.keep_recent_turns`) or no compaction setup is an error,
+    /// because the user asked for the fold explicitly.
+    pub async fn compact_current_session(&self) -> Result<CompactionNotice, HarnessError> {
+        let (history, _) = self.load_history().await?;
+        let system_text = self.system_prompt("").await?;
+        let mut messages = Vec::new();
+        let notice = self
+            .compact_once(&history, &system_text, &mut messages, true)
+            .await?
+            .ok_or_else(|| {
+                HarnessError::SessionError(
+                    "nothing to compact: the session holds no more turns than agent.keep_recent_turns"
+                        .to_string(),
+                )
+            })?;
+        Ok(notice)
+    }
+
     /// Whether this call must be put to the human: the flag is on *and* the tool mutates (or
     /// `tools.mutating_overrides` names it).
     async fn needs_approval(&self, name: &str) -> bool {
@@ -392,7 +412,7 @@ where
 
         // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
         // or fails and leaves the transcript alone. No retry inside the turn.
-        let compaction = self.compact_once(&history, &system_text, &mut messages).await?;
+        let compaction = self.compact_once(&history, &system_text, &mut messages, false).await?;
 
         let user_message = Message::user(user_input);
         let mut user_appended = false;
@@ -822,24 +842,27 @@ where
         history: &[StoredMessage],
         system_text: &str,
         messages: &mut Vec<Message>,
+        force: bool,
     ) -> Result<Option<CompactionNotice>, HarnessError> {
         let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
             return Ok(None);
         };
 
-        let estimate = estimate_tokens(messages);
-        if estimate.tokens as usize <= self.config.compact_at_tokens {
-            debug!(
-                "Transcript estimate {} tokens ({:?}) is within agent.compact_at_tokens = {}",
-                estimate.tokens, estimate.source, self.config.compact_at_tokens
-            );
-            return Ok(None);
-        }
+        if !force {
+            let estimate = estimate_tokens(messages);
+            if estimate.tokens as usize <= self.config.compact_at_tokens {
+                debug!(
+                    "Transcript estimate {} tokens ({:?}) is within agent.compact_at_tokens = {}",
+                    estimate.tokens, estimate.source, self.config.compact_at_tokens
+                );
+                return Ok(None);
+            }
 
-        debug!(
-            "Transcript estimate {} tokens exceeds agent.compact_at_tokens = {}; compacting",
-            estimate.tokens, self.config.compact_at_tokens
-        );
+            debug!(
+                "Transcript estimate {} tokens exceeds agent.compact_at_tokens = {}; compacting",
+                estimate.tokens, self.config.compact_at_tokens
+            );
+        }
 
         let outcome: CompactionOutcome =
             match compact(setup.provider.as_ref(), &setup.model, history, self.config.keep_recent_turns)

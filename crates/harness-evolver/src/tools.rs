@@ -105,7 +105,7 @@ impl Tool for DelegateImprovementTool {
                     "status": "queued",
                     "job_id": job_id,
                     "branch": format!("eng/{}", job_id),
-                    "message": "Specialized engineer agent spawned in isolated background worktree. Use `check_improvement_job` with this job_id to monitor progress, and `verify_and_stage_update` to verify with scenario PTY re-enactment."
+                    "message": "Specialized engineer agent spawned in isolated background worktree. Use `check_improvement_job` with this job_id to monitor progress."
                 });
                 Ok(ToolResult::success(call_id, out.to_string()))
             }
