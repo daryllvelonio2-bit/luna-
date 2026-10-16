@@ -2151,6 +2151,7 @@ async fn pick_provider_and_model(
     discovery: &Arc<ModelDiscovery>,
     current_provider: &str,
     current_model: &str,
+    chain_next: bool,
 ) -> Result<Option<(String, String)>, HarnessError> {
     let catalog = get_provider_catalog();
     let loaded = cred_manager.get_loaded_providers().await;
@@ -2223,7 +2224,17 @@ async fn pick_provider_and_model(
 
     let model_sel = if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
-        match select_from_rx(rx, ui, &format!("Select Model [{}]", chosen_provider), &model_items, default_model_idx, true, true).await {
+        match select_from_rx(
+            rx,
+            ui,
+            &format!("Select Model [{}]", chosen_provider),
+            &model_items,
+            default_model_idx,
+            true,
+            chain_next,
+        )
+        .await
+        {
             Some(i) => i,
             None => {
                 return Ok(None);
@@ -2237,6 +2248,14 @@ async fn pick_provider_and_model(
         model_items[model_sel].clone()
     } else if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
+        if chain_next && ui.is_attended {
+            print!("\r\x1b[10A");
+            for _ in 0..12 {
+                print!("\r\x1b[2K\x1b[1B");
+            }
+            print!("\r\x1b[12A");
+            ui.draw_initial_box();
+        }
         match input_from_rx(rx, "Enter custom model name").await {
             Some(name) => name,
             None => {
@@ -2272,6 +2291,7 @@ async fn handle_model_switch(
         discovery,
         current_provider,
         current_model,
+        true,
     )
     .await?
     else {
@@ -2420,11 +2440,10 @@ async fn handle_compact_model_switch(
         discovery,
         initial_p,
         initial_m,
+        false,
     )
     .await?
     else {
-        ui.clear_box_on_exit();
-        ui.draw_initial_box();
         return Ok(());
     };
 
@@ -2444,8 +2463,6 @@ async fn handle_compact_model_switch(
     *compact_provider = Some(chosen_provider.clone());
     *compact_model = Some(chosen_model.clone());
 
-    ui.clear_box_on_exit();
-    ui.draw_initial_box();
     ui.emit_above(&format!(
         "{} Compaction model set to {} ({})",
         "✓".green(),
