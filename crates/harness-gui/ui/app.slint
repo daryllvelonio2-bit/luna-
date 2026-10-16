@@ -211,20 +211,15 @@ export component AppWindow inherits Window {
                     padding: 10px;
                     spacing: 8px;
 
-                    // Header with title and collapse button
+                    // Header with title
                     HorizontalLayout {
-                        alignment: space-between;
+                        alignment: start;
                         Text {
                             text: "EXPLORER";
                             color: #71717a;
                             font-size: 10px;
                             font-weight: 700;
                             vertical-alignment: center;
-                        }
-                        IconButton {
-                            icon: "◀";
-                            tip: "Collapse sidebar";
-                            clicked => { root.left_sidebar_open = false; }
                         }
                     }
 
