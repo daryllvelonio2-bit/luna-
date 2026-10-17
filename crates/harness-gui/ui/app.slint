@@ -60,6 +60,72 @@ component Splitter inherits Rectangle {
     }
 }
 
+component ProviderRow inherits Rectangle {
+    in-out property <string> provider_name: "";
+    in-out property <bool> is_active: false;
+    in-out property <bool> is_current: false;
+    callback clicked();
+    callback scrolled(int);
+
+    height: 34px;
+    border-radius: 6px;
+    background: touch.pressed ? #2c2c40 : (touch.has-hover ? #222234 : (root.is_current ? #1a1a28 : transparent));
+    border-width: root.is_current ? 1px : 0px;
+    border-color: root.is_current ? #2e2e46 : transparent;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: center;
+
+            Text {
+                text: root.is_active ? "●" : "";
+                color: root.is_current ? #22c55e : #71717a;
+                font-size: 8px;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: root.is_active ? root.provider_name : "";
+                color: root.is_current ? #38bdf8 : #f4f4f5;
+                font-size: 13px;
+                font-weight: root.is_current ? 700 : 500;
+                vertical-alignment: center;
+            }
+
+            if root.is_active && root.is_current : Text {
+                text: "(active)";
+                color: #52525b;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.is_active ? "›" : "";
+            color: #71717a;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.is_active;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        scroll-event(event) => {
+            let step = event.delta_y < 0 ? 2 : -2;
+            root.scrolled(step);
+            return accept;
+        }
+    }
+}
+
 component ModelRow inherits Rectangle {
     in-out property <string> model_name: "";
     in-out property <bool> is_active: false;
@@ -127,8 +193,10 @@ export component AppWindow inherits Window {
     in-out property <bool> is_sandboxed: true;
 
     in-out property <bool> model_picker_open: false;
+    in-out property <int> picker_step: 0;
     in-out property <string> model_filter: "";
     in-out property <int> model_scroll_index: 0;
+    in-out property <int> provider_scroll_index: 0;
 
     in-out property <[string]> available_providers: ["antigravity", "nvidia"];
     in-out property <[string]> available_models: ["gemini-3.8-flash", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b"];
@@ -455,9 +523,11 @@ export component AppWindow inherits Window {
                                         clicked => {
                                             root.model_picker_open = !root.model_picker_open;
                                             if root.model_picker_open {
+                                                root.picker_step = 0;
                                                 root.model_filter = "";
                                                 root.filter_models("");
                                                 root.model_scroll_index = 0;
+                                                root.provider_scroll_index = 0;
                                             }
                                         }
                                     }
@@ -576,7 +646,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Anchored Dropdown Menu for Model Changing (Instant Single-View)
+                // Anchored Dropdown Menu for Provider -> Model Selection
                 Rectangle {
                     visible: root.model_picker_open;
                     x: max(16px, min(parent.width - self.width - 16px, chat_box.x + 12px));
@@ -589,70 +659,175 @@ export component AppWindow inherits Window {
                     border-color: #38384c;
                     clip: true;
 
-                    VerticalLayout {
+                    // STEP 0: Provider Picker
+                    if root.picker_step == 0 : VerticalLayout {
                         padding: 10px;
                         spacing: 8px;
 
-                        // Header & Provider Tabs Strip
-                        VerticalLayout {
-                            spacing: 6px;
+                        // Header
+                        HorizontalLayout {
+                            alignment: space-between;
+                            padding-left: 2px;
+                            padding-right: 2px;
+
+                            Text {
+                                text: "SELECT PROVIDER";
+                                color: #71717a;
+                                font-size: 10px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.available_providers.length + " available";
+                                color: #52525b;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #262634; }
+
+                        // Provider List (handles any number of providers cleanly with wheel & drag scroll)
+                        Rectangle {
+                            vertical-stretch: 1;
+
+                            prov_wheel_touch := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                scroll-event(event) => {
+                                    let max_scroll = max(0, root.available_providers.length - 7);
+                                    let step = event.delta_y < 0 ? 2 : -2;
+                                    root.provider_scroll_index = max(0, min(max_scroll, root.provider_scroll_index + step));
+                                    return accept;
+                                }
+                            }
 
                             HorizontalLayout {
-                                alignment: space-between;
+                                width: 100%;
+                                height: 100%;
+                                spacing: 4px;
 
-                                Text {
-                                    text: "PROVIDERS";
-                                    color: #71717a;
-                                    font-size: 10px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+
+                                    for offset in 7 : ProviderRow {
+                                        property <int> item_idx: root.provider_scroll_index + offset;
+                                        is_active: item_idx >= 0 && item_idx < root.available_providers.length;
+                                        provider_name: self.is_active ? root.available_providers[item_idx] : "";
+                                        is_current: self.is_active && root.current_provider == self.provider_name;
+                                        clicked => {
+                                            if self.is_active {
+                                                root.select_provider(self.provider_name);
+                                                root.model_filter = "";
+                                                root.filter_models("");
+                                                root.model_scroll_index = 0;
+                                                root.picker_step = 1;
+                                            }
+                                        }
+                                        scrolled(step) => {
+                                            let max_scroll = max(0, root.available_providers.length - 7);
+                                            root.provider_scroll_index = max(0, min(max_scroll, root.provider_scroll_index + step));
+                                        }
+                                    }
                                 }
 
-                                Text {
-                                    text: root.available_models.length + " models";
-                                    color: #52525b;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
+                                if root.available_providers.length > 7 : Rectangle {
+                                    width: 6px;
+                                    background: #14141e;
+                                    border-radius: 3px;
+
+                                    prov_thumb := Rectangle {
+                                        width: 6px;
+                                        y: (parent.height - self.height) * root.provider_scroll_index / max(1, root.available_providers.length - 7);
+                                        height: max(24px, parent.height * 7 / max(1, root.available_providers.length));
+                                        border-radius: 3px;
+                                        background: prov_scroll_touch.pressed ? #38bdf8 : #4a4a62;
+                                    }
+
+                                    prov_scroll_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        moved => {
+                                            let max_scroll = max(0, root.available_providers.length - 7);
+                                            let avail_h = max(1px, parent.height - prov_thumb.height);
+                                            let pos = max(0px, min(avail_h, self.mouse-y));
+                                            root.provider_scroll_index = min(max_scroll, max(0, round(pos / avail_h * max_scroll)));
+                                        }
+                                        clicked => {
+                                            let max_scroll = max(0, root.available_providers.length - 7);
+                                            let avail_h = max(1px, parent.height - prov_thumb.height);
+                                            let pos = max(0px, min(avail_h, self.mouse-y));
+                                            root.provider_scroll_index = min(max_scroll, max(0, round(pos / avail_h * max_scroll)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // STEP 1: Model Picker
+                    if root.picker_step == 1 : VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        // Header with Back to Providers navigation & Provider info
+                        HorizontalLayout {
+                            alignment: space-between;
+                            height: 24px;
+
+                            back_btn := Rectangle {
+                                border-radius: 4px;
+                                background: back_touch.has-hover ? #252538 : transparent;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 8px;
+                                    spacing: 4px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "‹";
+                                        color: back_touch.has-hover ? #38bdf8 : #a1a1aa;
+                                        font-size: 14px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Providers";
+                                        color: back_touch.has-hover ? #38bdf8 : #a1a1aa;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                back_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.picker_step = 0;
+                                    }
                                 }
                             }
 
                             HorizontalLayout {
                                 spacing: 6px;
+                                alignment: center;
 
-                                for prov in root.available_providers : Rectangle {
-                                    height: 24px;
-                                    border-radius: 4px;
-                                    background: p_touch.has-hover ? #252536 : (root.selected_provider == prov ? #28283c : transparent);
-                                    border-width: 1px;
-                                    border-color: root.selected_provider == prov ? #38bdf8 : #2e2e40;
+                                Text {
+                                    text: root.selected_provider;
+                                    color: #38bdf8;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
 
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 5px;
-                                        alignment: center;
-
-                                        Text {
-                                            text: "●";
-                                            color: root.selected_provider == prov ? #22c55e : #52525b;
-                                            font-size: 7px;
-                                            vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: prov;
-                                            color: root.selected_provider == prov ? #38bdf8 : #d4d4d8;
-                                            font-size: 11px;
-                                            font-weight: root.selected_provider == prov ? 700 : 500;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    p_touch := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.select_provider(prov);
-                                        }
-                                    }
+                                Text {
+                                    text: "• " + root.available_models.length + " models";
+                                    color: #52525b;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
