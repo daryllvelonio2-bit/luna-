@@ -105,6 +105,9 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    ContextTokensUpdated {
+        tokens_used: u32,
+    },
 }
 
 pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -431,6 +434,13 @@ where
                 return Err(HarnessError::Cancelled);
             }
 
+            let current_tokens = estimate_tokens(&messages).tokens;
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::ContextTokensUpdated {
+                    tokens_used: current_tokens,
+                });
+            }
+
             debug!("Invoking model completion with {} messages and {} tools", messages.len(), tools.len());
             let mut options = CompletionOptions::default();
             options.reasoning_effort = self.reasoning_effort;
@@ -627,6 +637,13 @@ where
                 let tool_message = Message::tool(execution_result);
                 self.append(&tool_message, false).await?;
                 messages.push(tool_message);
+
+                let current_tokens = estimate_tokens(&messages).tokens;
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ContextTokensUpdated {
+                        tokens_used: current_tokens,
+                    });
+                }
             }
         }
     }
@@ -676,10 +693,10 @@ where
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
-                    // Nothing arrived, so the transport never worked: the buffered path may still
-                    // succeed, and a silent no-op turn would be the worse failure.
-                    if content.is_empty() && reasoning.is_empty() && calls.is_empty() {
-                        debug!("Stream failed before any output ({}), retrying buffered", error);
+                    // Nothing arrived, or only reasoning arrived without content/tools:
+                    // the buffered path or a clean retry can recover without failing the turn.
+                    if content.is_empty() && calls.is_empty() {
+                        debug!("Stream failed before any content/tool output ({}), retrying buffered", error);
                         return self.provider.complete(messages, tools, options).await;
                     }
                     return Err(error);

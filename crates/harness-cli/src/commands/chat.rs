@@ -233,6 +233,9 @@ pub async fn run_interactive_chat(
         // Reasoning lands in the live region and is settled into the transcript by the animation
         // tick, so it is visible while it is still being produced.
         harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
+        harness_core::AgentEvent::ContextTokensUpdated { tokens_used } => {
+            ui_obs.update_context_used(tokens_used);
+        }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
             ui_obs.finish_reasoning();
             let call_fmt = format_tool_call(&name, &arguments);

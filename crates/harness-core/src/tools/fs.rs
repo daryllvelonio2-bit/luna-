@@ -59,7 +59,8 @@ impl ReadCache {
 
 /// Resolves a user-supplied path relative to workspace_root and asserts it does not escape.
 pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, String> {
-    let p = Path::new(user_path);
+    let expanded_str = crate::config::expand_tilde(user_path.trim());
+    let p = Path::new(&expanded_str);
     let resolved = if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -1087,7 +1088,20 @@ mod tests {
         assert!(glob_matches("*_test.rs", "helper_test.rs", &file, root));
         // Path-shaped pattern: matched against the workspace-relative path.
         assert!(glob_matches("src/*.rs", "helper_test.rs", &file, root));
-        assert!(glob_matches("*helper*", "helper_test.rs", &file, root));
+        assert_matches_contains(&file, root);
         assert!(!glob_matches("tests/*.rs", "helper_test.rs", &file, root));
+    }
+
+    fn assert_matches_contains(file: &std::path::Path, root: &std::path::Path) {
+        assert!(glob_matches("*helper*", "helper_test.rs", file, root));
+    }
+
+    #[test]
+    fn resolve_path_expands_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            let home_path = PathBuf::from(&home);
+            let resolved = resolve_path(&home_path, "~/").unwrap();
+            assert_eq!(resolved, home_path.canonicalize().unwrap_or(home_path));
+        }
     }
 }

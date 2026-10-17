@@ -282,6 +282,16 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
+    pub fn update_context_used(&self, context_used: u32) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.context_used = context_used;
+            }
+        }
+        self.redraw_status_line();
+    }
+
     pub fn set_yolo(&self, on: bool) {
         {
             let mut status = self.status.lock().unwrap();

@@ -5,7 +5,7 @@ use harness_core::HarnessError;
 
 /// Built-in per-request HTTP timeout for provider calls. Overridable per provider through
 /// `providers.<id>.timeout_secs` in `~/.luna/config.yaml`.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderDescriptor {
@@ -186,6 +186,9 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
                 ("deepseek-ai/deepseek-v4-flash", 1_000_000),
                 ("deepseek-ai/deepseek-v4-pro", 262_144),
+                ("z-ai/glm-5.3-flash", 1_000_000),
+                ("z-ai/glm-4-9b-chat", 1_000_000),
+                ("stepfun-ai/step-5-preview", 1_000_000),
                 ("meta/llama-3.1-70b-instruct", 128_000),
                 ("meta/llama-3.1-8b-instruct", 128_000),
                 ("nvidia/nemotron-3-ultra", 128_000),
@@ -211,7 +214,11 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("glm-4-plus", 128_000)]),
+            context_windows: ctx_windows(&[
+                ("glm-4-plus", 1_000_000),
+                ("glm-4-long", 1_000_000),
+                ("glm-5.3-flash", 1_000_000),
+            ]),
         },
         ProviderDescriptor {
             id: "alibaba".to_string(),
@@ -471,7 +478,17 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         return Some(200_000);
     }
 
-    // Llama 3 / GPT-4o / Grok / Qwen / GLM
+    // GLM family (GLM-4 / GLM-5, z-ai/glm-5.3-flash, etc.) is 1,000,000 (1M tokens)
+    if leaf.contains("glm") {
+        return Some(1_000_000);
+    }
+
+    // StepFun family is 1,000,000 (1M tokens)
+    if leaf.contains("step-") || leaf.contains("stepfun") {
+        return Some(1_000_000);
+    }
+
+    // Llama 3 / GPT-4o / Grok / Qwen
     if leaf.contains("gpt-4o")
         || leaf.contains("o1")
         || leaf.contains("o3")
@@ -479,8 +496,6 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         || leaf.contains("llama3")
         || leaf.contains("grok")
         || leaf.contains("qwen")
-        || leaf.contains("glm-4")
-        || leaf.contains("glm-5")
     {
         return Some(128_000);
     }
@@ -494,4 +509,18 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_window_1m_models() {
+        assert_eq!(get_context_window("nvidia", "z-ai/glm-5.3-flash"), Some(1_000_000));
+        assert_eq!(get_context_window("nvidia", "stepfun-ai/step-5-preview"), Some(1_000_000));
+        assert_eq!(get_context_window("zai", "glm-4-plus"), Some(1_000_000));
+        assert_eq!(get_context_window("other", "glm-4-long"), Some(1_000_000));
+        assert_eq!(get_context_window("other", "step-2"), Some(1_000_000));
+    }
 }

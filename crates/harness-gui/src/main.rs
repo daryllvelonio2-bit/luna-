@@ -1037,6 +1037,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
+                        harness_core::AgentEvent::ContextTokensUpdated { .. } => {}
                         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
                             tool_names_obs.lock().unwrap().push(name.clone());
                             let detail = format_tool_call_detail(&name, &arguments);
