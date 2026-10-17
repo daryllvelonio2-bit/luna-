@@ -803,198 +803,240 @@ export component AppWindow inherits Window {
                 background: #101014;
                 clip: true;
 
-                VerticalLayout {
-                    width: 100%;
-                    height: 100%;
-                    padding: 0px;
-                    spacing: 0px;
+// Floating Chat Box in Lower Part
+                chat_box := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 20px;
+                    width: min(720px, parent.width - 40px);
+                    height: 84px;
+                    border-radius: 12px;
+                    background: #181822;
+                    border-width: 1px;
+                    border-color: #2e2e40;
 
-                    // Scrollable Chat Message History (strictly bounded above composer)
-                    ScrollView {
-                        vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 10px;
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 8px;
 
-                        VerticalLayout {
-                            padding: 24px;
-                            padding-top: 16px;
-                            padding-bottom: 20px;
-                            spacing: 16px;
-                            alignment: start;
+                        // Top: Text Input Area
+                        HorizontalLayout {
+                            vertical-stretch: 1;
 
-                            for msg in root.transcript : VerticalLayout {
+                            Rectangle {
+                                horizontal-stretch: 1;
+
+                                if root.composer_text == "" : Text {
+                                    text: "Ask Luna anything or run tasks...";
+                                    color: #52525b;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    x: 0px;
+                                }
+
+                                input := TextInput {
+                                    width: 100%;
+                                    height: 100%;
+                                    text <=> root.composer_text;
+                                    color: #f4f4f5;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    enabled: !root.is_generating;
+                                    accepted => {
+                                        if (root.composer_text != "" && !root.is_generating) {
+                                            root.submit_message(root.composer_text);
+                                            root.composer_text = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Bottom Row: Model button on the left, Send button on the right
+                        HorizontalLayout {
+                            height: 26px;
+                            alignment: space-between;
+
+                            // Lower Left Cluster
+                            HorizontalLayout {
                                 spacing: 8px;
+                                alignment: start;
 
-                                // User message: Sleek card box
-                                if msg.role == "user" : Rectangle {
-                                    background: #1b1b26;
-                                    border-radius: 12px;
+                                model_btn := Rectangle {
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: model_touch.pressed ? #2c2c3e : (model_touch.has-hover ? #242434 : #1e1e2c);
                                     border-width: 1px;
-                                    border-color: #2b2b3d;
+                                    border-color: root.model_picker_open ? #38bdf8 : #2e2e42;
 
-                                    VerticalLayout {
-                                        padding: 12px;
-                                        padding-left: 16px;
-                                        padding-right: 16px;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
                                         spacing: 6px;
+                                        alignment: center;
 
-                                        HorizontalLayout {
-                                            alignment: space-between;
-
-                                            Text {
-                                                text: "You";
-                                                color: #38bdf8;
-                                                font-weight: 700;
-                                                font-size: 11px;
-                                            }
-
-                                            Text {
-                                                text: msg.timestamp;
-                                                color: #52525b;
-                                                font-size: 10px;
-                                            }
+                                        Text {
+                                            text: "⚡ " + (root.current_provider != "" ? root.current_provider + " : " : "") + root.model_name;
+                                            color: root.model_picker_open ? #38bdf8 : #e4e4e7;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
                                         }
 
                                         Text {
-                                            text: msg.content;
-                                            color: #f4f4f5;
-                                            font-size: 13px;
-                                            wrap: word-wrap;
+                                            text: root.model_picker_open ? "▴" : "▾";
+                                            color: #71717a;
+                                            font-size: 9px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    model_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.model_picker_open = !root.model_picker_open;
+                                            if root.model_picker_open {
+                                                root.picker_step = 0;
+                                                root.model_filter = "";
+                                                root.filter_models("");
+                                                root.model_scroll_index = 0;
+                                                root.provider_scroll_index = 0;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Lower Right: Reasoning Effort + Send button
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: end;
+
+                                effort_btn := Rectangle {
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: effort_touch.pressed ? #2c2c3e : (effort_touch.has-hover ? #242434 : #1e1e2c);
+                                    border-width: 1px;
+                                    border-color: root.effort_picker_open ? #38bdf8 : #2e2e42;
+
+                                    HorizontalLayout {
+                                        padding-left: 7px;
+                                        padding-right: 7px;
+                                        spacing: 4px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: "🧠";
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: root.reasoning_effort;
+                                            color: root.effort_picker_open ? #38bdf8 : #e4e4e7;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: root.effort_picker_open ? "▴" : "▾";
+                                            color: #71717a;
+                                            font-size: 8px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    effort_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            effort_popup.show();
+                                        }
+                                    }
+
+                                    effort_popup := PopupWindow {
+                                        width: 110px;
+                                        height: 124px;
+                                        x: -(self.width - effort_btn.width);
+                                        y: -(self.height + 6px);
+                                        close-policy: close-on-click-outside;
+
+                                        Rectangle {
+                                            width: 100%;
+                                            height: 100%;
+                                            border-radius: 8px;
+                                            background: #181824;
+                                            border-width: 1px;
+                                            border-color: #38384c;
+
+                                            VerticalLayout {
+                                                padding: 4px;
+                                                spacing: 2px;
+
+                                                for level in ["low", "medium", "high", "xhigh"] : Rectangle {
+                                                    height: 26px;
+                                                    border-radius: 4px;
+                                                    background: l_touch.pressed ? #2c2c40 : (l_touch.has-hover ? #242434 : (root.reasoning_effort == level ? #1f1f30 : transparent));
+
+                                                    HorizontalLayout {
+                                                        padding-left: 8px;
+                                                        padding-right: 8px;
+                                                        alignment: space-between;
+
+                                                        Text {
+                                                            text: level;
+                                                            color: root.reasoning_effort == level ? #38bdf8 : #e4e4e7;
+                                                            font-size: 11px;
+                                                            font-weight: root.reasoning_effort == level ? 700 : 500;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        if root.reasoning_effort == level : Text {
+                                                            text: "✓";
+                                                            color: #38bdf8;
+                                                            font-size: 10px;
+                                                            font-weight: 700;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+
+                                                    l_touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            effort_popup.close();
+                                                            root.reasoning_effort = level;
+                                                            root.select_reasoning_effort(level);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
 
-                                // Assistant message: Clean unboxed layout with collapsible 1-line process
-                                if msg.role != "user" && (msg.content != "" || msg.process_summary != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : AssistantMessage {
-                                    msg: msg;
-                                }
-                            }
-                        }
-                    }
+                                // Send button
+                                send_btn := Rectangle {
+                                    width: 26px;
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: (root.composer_text != "" && !root.is_generating) ? #38bdf8 : #242434;
 
-                    // Bottom Composer Area: Physical barrier that strictly prevents chat from rendering below text box
-                    composer_wrap := Rectangle {
-                        height: root.transcript.length == 0 ? 128px : 96px;
-                        background: #101014;
-
-                        Rectangle {
-                            width: min(720px, parent.width - 40px);
-                            height: 100%;
-                            x: (parent.width - self.width) / 2;
-
-                            VerticalLayout {
-                                width: 100%;
-                                spacing: 6px;
-                                alignment: center;
-
-                                // Folder picker: ONLY visible when no conversation has started in this session!
-                                if root.transcript.length == 0 : HorizontalLayout {
-                                    alignment: start;
-
-                    dir_btn := Rectangle {
-                                        width: 108px;
-                                        height: 26px;
-                        border-radius: 6px;
-                        background: dir_touch.pressed ? #2c2c3e : (dir_touch.has-hover ? #242434 : #181822);
-                        border-width: 1px;
-                        border-color: dir_touch.has-hover ? #38bdf8 : #2e2e42;
-
-                        HorizontalLayout {
-                            padding-left: 9px;
-                            padding-right: 9px;
-                            spacing: 6px;
-                            alignment: center;
-
-                            // Crisp vector folder icon
-                            Rectangle {
-                                width: 13px;
-                                height: 11px;
-                                y: 7px;
-
-                                // Folder tab
-                                Rectangle {
-                                    x: 0px;
-                                    y: 0px;
-                                    width: 5px;
-                                    height: 3px;
-                                    background: dir_touch.has-hover ? #38bdf8 : #a1a1aa;
-                                    border-top-left-radius: 1px;
-                                    border-top-right-radius: 1px;
-                                }
-                                // Folder body
-                                Rectangle {
-                                    x: 0px;
-                                    y: 2px;
-                                    width: 13px;
-                                    height: 9px;
-                                    border-radius: 2px;
-                                    background: dir_touch.has-hover ? #38bdf8 : #a1a1aa;
-                                }
-                            }
-
-                            Text {
-                                text: root.workspace_name;
-                                color: dir_touch.has-hover ? #38bdf8 : #f4f4f5;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                max-width: 65px;
-                            }
-
-                            Text {
-                                text: "▾";
-                                color: #71717a;
-                                font-size: 9px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        dir_touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.select_directory();
-                            }
-                        }
-                    }
-                                }
-
-    chat_box := Rectangle {
-                                    width: 100%;
-                                    height: 84px;
-                        border-radius: 12px;
-                        background: #181822;
-                        border-width: 1px;
-                        border-color: #2e2e40;
-
-                        VerticalLayout {
-                            padding: 10px;
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            spacing: 8px;
-
-                            // Top: Text Input Area
-                            HorizontalLayout {
-                                vertical-stretch: 1;
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-
-                                    if root.composer_text == "" : Text {
-                                        text: "Ask Luna anything or run tasks...";
-                                        color: #52525b;
+                                    Text {
+                                        text: root.is_generating ? "…" : "↑";
+                                        color: (root.composer_text != "" && !root.is_generating) ? #000000 : #71717a;
                                         font-size: 13px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
                                         vertical-alignment: center;
-                                        x: 0px;
-                                    }
-
-                                    input := TextInput {
                                         width: 100%;
                                         height: 100%;
-                                        text <=> root.composer_text;
-                                        color: #f4f4f5;
-                                        font-size: 13px;
-                                        vertical-alignment: center;
+                                    }
+
+                                    TouchArea {
                                         enabled: !root.is_generating;
-                                        accepted => {
+                                        mouse-cursor: pointer;
+                                        clicked => {
                                             if (root.composer_text != "" && !root.is_generating) {
                                                 root.submit_message(root.composer_text);
                                                 root.composer_text = "";
@@ -1003,202 +1045,139 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
 
-                            // Bottom Row: Model button on the left, Send button on the right
-                            HorizontalLayout {
-                                height: 26px;
-                                alignment: space-between;
+// Floating Directory Selector (Outside & Above Chat Box)
+                dir_btn := Rectangle {
+                    visible: root.transcript.length == 0;
+                    x: chat_box.x;
+                    y: chat_box.y - self.height - 8px;
+                    width: 108px;
+                    height: 26px;
+                    border-radius: 6px;
+                    background: dir_touch.pressed ? #2c2c3e : (dir_touch.has-hover ? #242434 : #181822);
+                    border-width: 1px;
+                    border-color: dir_touch.has-hover ? #38bdf8 : #2e2e42;
 
-                                // Lower Left Cluster
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    alignment: start;
+                    HorizontalLayout {
+                        padding-left: 9px;
+                        padding-right: 9px;
+                        spacing: 6px;
+                        alignment: center;
 
-                                    model_btn := Rectangle {
-                                        height: 24px;
-                                        border-radius: 6px;
-                                        background: model_touch.pressed ? #2c2c3e : (model_touch.has-hover ? #242434 : #1e1e2c);
-                                        border-width: 1px;
-                                        border-color: root.model_picker_open ? #38bdf8 : #2e2e42;
+                        // Crisp vector folder icon
+                        Rectangle {
+                            width: 13px;
+                            height: 11px;
+                            y: 7px;
 
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            spacing: 6px;
-                                            alignment: center;
+                            // Folder tab
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: 5px;
+                                height: 3px;
+                                background: dir_touch.has-hover ? #38bdf8 : #a1a1aa;
+                                border-top-left-radius: 1px;
+                                border-top-right-radius: 1px;
+                            }
+                            // Folder body
+                            Rectangle {
+                                x: 0px;
+                                y: 2px;
+                                width: 13px;
+                                height: 9px;
+                                border-radius: 2px;
+                                background: dir_touch.has-hover ? #38bdf8 : #a1a1aa;
+                            }
+                        }
 
-                                            Text {
-                                                text: "⚡ " + (root.current_provider != "" ? root.current_provider + " : " : "") + root.model_name;
-                                                color: root.model_picker_open ? #38bdf8 : #e4e4e7;
-                                                font-size: 11px;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
+                        Text {
+                            text: root.workspace_name;
+                            color: dir_touch.has-hover ? #38bdf8 : #f4f4f5;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            max-width: 65px;
+                        }
 
-                                            Text {
-                                                text: root.model_picker_open ? "▴" : "▾";
-                                                color: #71717a;
-                                                font-size: 9px;
-                                                vertical-alignment: center;
-                                            }
-                                        }
+                        Text {
+                            text: "▾";
+                            color: #71717a;
+                            font-size: 9px;
+                            vertical-alignment: center;
+                        }
+                    }
 
-                                        model_touch := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                root.model_picker_open = !root.model_picker_open;
-                                                if root.model_picker_open {
-                                                    root.picker_step = 0;
-                                                    root.model_filter = "";
-                                                    root.filter_models("");
-                                                    root.model_scroll_index = 0;
-                                                    root.provider_scroll_index = 0;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                    dir_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.select_directory();
+                        }
+                    }
+                }
 
-                                // Lower Right: Reasoning Effort + Send button
-                                HorizontalLayout {
+// Scrollable Chat Message History (bounded cleanly above floating controls)
+                ScrollView {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: (root.transcript.length == 0 ? dir_btn.y : chat_box.y) - 16px;
+
+                    VerticalLayout {
+                        padding: 24px;
+                        padding-bottom: 24px;
+                        spacing: 16px;
+                        alignment: start;
+
+                        for msg in root.transcript : VerticalLayout {
+                            spacing: 8px;
+
+                            // User message: Sleek card box
+                            if msg.role == "user" : Rectangle {
+                                background: #1b1b26;
+                                border-radius: 12px;
+                                border-width: 1px;
+                                border-color: #2b2b3d;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    padding-left: 16px;
+                                    padding-right: 16px;
                                     spacing: 6px;
-                                    alignment: end;
 
-                                    effort_btn := Rectangle {
-                                        height: 24px;
-                                        border-radius: 6px;
-                                        background: effort_touch.pressed ? #2c2c3e : (effort_touch.has-hover ? #242434 : #1e1e2c);
-                                        border-width: 1px;
-                                        border-color: root.effort_picker_open ? #38bdf8 : #2e2e42;
-
-                                        HorizontalLayout {
-                                            padding-left: 7px;
-                                            padding-right: 7px;
-                                            spacing: 4px;
-                                            alignment: center;
-
-                                            Text {
-                                                text: "🧠";
-                                                font-size: 11px;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Text {
-                                                text: root.reasoning_effort;
-                                                color: root.effort_picker_open ? #38bdf8 : #e4e4e7;
-                                                font-size: 11px;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Text {
-                                                text: root.effort_picker_open ? "▴" : "▾";
-                                                color: #71717a;
-                                                font-size: 8px;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        effort_touch := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                effort_popup.show();
-                                            }
-                                        }
-
-                                        effort_popup := PopupWindow {
-                                            width: 110px;
-                                            height: 124px;
-                                            x: -(self.width - effort_btn.width);
-                                            y: -(self.height + 6px);
-                                            close-policy: close-on-click-outside;
-
-                                            Rectangle {
-                                                width: 100%;
-                                                height: 100%;
-                                                border-radius: 8px;
-                                                background: #181824;
-                                                border-width: 1px;
-                                                border-color: #38384c;
-
-                                                VerticalLayout {
-                                                    padding: 4px;
-                                                    spacing: 2px;
-
-                                                    for level in ["low", "medium", "high", "xhigh"] : Rectangle {
-                                                        height: 26px;
-                                                        border-radius: 4px;
-                                                        background: l_touch.pressed ? #2c2c40 : (l_touch.has-hover ? #242434 : (root.reasoning_effort == level ? #1f1f30 : transparent));
-
-                                                        HorizontalLayout {
-                                                            padding-left: 8px;
-                                                            padding-right: 8px;
-                                                            alignment: space-between;
-
-                                                            Text {
-                                                                text: level;
-                                                                color: root.reasoning_effort == level ? #38bdf8 : #e4e4e7;
-                                                                font-size: 11px;
-                                                                font-weight: root.reasoning_effort == level ? 700 : 500;
-                                                                vertical-alignment: center;
-                                                            }
-
-                                                            if root.reasoning_effort == level : Text {
-                                                                text: "✓";
-                                                                color: #38bdf8;
-                                                                font-size: 10px;
-                                                                font-weight: 700;
-                                                                vertical-alignment: center;
-                                                            }
-                                                        }
-
-                                                        l_touch := TouchArea {
-                                                            mouse-cursor: pointer;
-                                                            clicked => {
-                                                                effort_popup.close();
-                                                                root.reasoning_effort = level;
-                                                                root.select_reasoning_effort(level);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Send button
-                                    send_btn := Rectangle {
-                                        width: 26px;
-                                        height: 24px;
-                                        border-radius: 6px;
-                                        background: (root.composer_text != "" && !root.is_generating) ? #38bdf8 : #242434;
+                                    HorizontalLayout {
+                                        alignment: space-between;
 
                                         Text {
-                                            text: root.is_generating ? "…" : "↑";
-                                            color: (root.composer_text != "" && !root.is_generating) ? #000000 : #71717a;
-                                            font-size: 13px;
+                                            text: "You";
+                                            color: #38bdf8;
                                             font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            width: 100%;
-                                            height: 100%;
+                                            font-size: 11px;
                                         }
 
-                                        TouchArea {
-                                            enabled: !root.is_generating;
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                if (root.composer_text != "" && !root.is_generating) {
-                                                    root.submit_message(root.composer_text);
-                                                    root.composer_text = "";
-                                                }
-                                            }
+                                        Text {
+                                            text: msg.timestamp;
+                                            color: #52525b;
+                                            font-size: 10px;
                                         }
+                                    }
+
+                                    Text {
+                                        text: msg.content;
+                                        color: #f4f4f5;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
-                        }
-                    }
+
+                            // Assistant message: Clean unboxed layout with collapsible 1-line process
+                            if msg.role != "user" && (msg.content != "" || msg.process_summary != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : AssistantMessage {
+                                msg: msg;
                             }
                         }
                     }
@@ -1213,11 +1192,12 @@ export component AppWindow inherits Window {
                         root.model_picker_open = false;
                     }
                 }
+
                 // Anchored Dropdown Menu for Provider -> Model Selection
                 Rectangle {
                     visible: root.model_picker_open;
-                    x: max(16px, min(parent.width - self.width - 16px, (parent.width - min(720px, parent.width - 40px)) / 2 + 12px));
-                    y: max(16px, parent.height - self.height - 100px);
+                    x: max(16px, min(parent.width - self.width - 16px, chat_box.x + 12px));
+                    y: max(16px, chat_box.y - self.height - 8px);
                     width: 300px;
                     height: 250px;
                     border-radius: 10px;
