@@ -1125,11 +1125,11 @@ export component AppWindow inherits Window {
                     x: 0px;
                     y: 0px;
                     width: 100%;
-                    height: (root.transcript.length == 0 ? dir_btn.y : chat_box.y) - 16px;
+                    height: (root.transcript.length == 0 ? dir_btn.y : chat_box.y) - 20px;
 
                     VerticalLayout {
                         padding: 24px;
-                        padding-bottom: 24px;
+                        padding-bottom: 60px;
                         spacing: 16px;
                         alignment: start;
 
@@ -1179,6 +1179,12 @@ export component AppWindow inherits Window {
                             if msg.role != "user" && (msg.content != "" || msg.process_summary != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : AssistantMessage {
                                 msg: msg;
                             }
+                        }
+
+                        // Bottom spacer to ensure the final message and action buttons can be scrolled fully into clear view
+                        Rectangle {
+                            height: 48px;
+                            background: transparent;
                         }
                     }
                 }
