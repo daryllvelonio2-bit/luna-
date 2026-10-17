@@ -292,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox_submit = sandbox.clone();
     app.on_submit_message(move |text| {
         if let Some(app) = app_weak.upgrade() {
-            let active_root = sandbox_submit.get_root();
+            let _active_root = sandbox_submit.get_root();
             let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
             msgs.push(ChatMsg {
                 role: "user".into(),
@@ -304,8 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 role: "assistant".into(),
                 author: "Luna".into(),
                 content: format!(
-                    "[🔒 Sandboxed: {}] [{} / {}] Message received: {}",
-                    active_root.display(),
+                    "[{} / {}] Message received: {}",
                     app.get_current_provider(),
                     app.get_model_name(),
                     text
