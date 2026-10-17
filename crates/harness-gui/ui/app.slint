@@ -338,6 +338,9 @@ export component AppWindow inherits Window {
     in-out property <int> model_scroll_index: 0;
     in-out property <int> provider_scroll_index: 0;
 
+    in-out property <string> reasoning_effort: "high";
+    in-out property <bool> effort_picker_open: false;
+
     in-out property <[string]> available_providers: ["antigravity", "nvidia"];
     in-out property <[string]> available_models: ["gemini-3.8-flash", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b"];
 
@@ -356,6 +359,7 @@ export component AppWindow inherits Window {
     callback select_model(string);
     callback filter_models(string);
     callback select_directory();
+    callback select_reasoning_effort(string);
 
     VerticalLayout {
         padding: 0px;
@@ -965,31 +969,139 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // Lower Right: Send button
-                            send_btn := Rectangle {
-                                width: 26px;
-                                height: 24px;
-                                border-radius: 6px;
-                                background: (root.composer_text != "" && !root.is_generating) ? #38bdf8 : #242434;
+                            // Lower Right: Reasoning Effort + Send button
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: end;
 
-                                Text {
-                                    text: root.is_generating ? "…" : "↑";
-                                    color: (root.composer_text != "" && !root.is_generating) ? #000000 : #71717a;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
+                                effort_btn := Rectangle {
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: effort_touch.pressed ? #2c2c3e : (effort_touch.has-hover ? #242434 : #1e1e2c);
+                                    border-width: 1px;
+                                    border-color: root.effort_picker_open ? #38bdf8 : #2e2e42;
+
+                                    HorizontalLayout {
+                                        padding-left: 7px;
+                                        padding-right: 7px;
+                                        spacing: 4px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: "🧠";
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: root.reasoning_effort;
+                                            color: root.effort_picker_open ? #38bdf8 : #e4e4e7;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: root.effort_picker_open ? "▴" : "▾";
+                                            color: #71717a;
+                                            font-size: 8px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    effort_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            effort_popup.show();
+                                        }
+                                    }
+
+                                    effort_popup := PopupWindow {
+                                        width: 110px;
+                                        height: 124px;
+                                        x: -(self.width - effort_btn.width);
+                                        y: -(self.height + 6px);
+                                        close-policy: close-on-click-outside;
+
+                                        Rectangle {
+                                            width: 100%;
+                                            height: 100%;
+                                            border-radius: 8px;
+                                            background: #181824;
+                                            border-width: 1px;
+                                            border-color: #38384c;
+
+                                            VerticalLayout {
+                                                padding: 4px;
+                                                spacing: 2px;
+
+                                                for level in ["low", "medium", "high", "xhigh"] : Rectangle {
+                                                    height: 26px;
+                                                    border-radius: 4px;
+                                                    background: l_touch.pressed ? #2c2c40 : (l_touch.has-hover ? #242434 : (root.reasoning_effort == level ? #1f1f30 : transparent));
+
+                                                    HorizontalLayout {
+                                                        padding-left: 8px;
+                                                        padding-right: 8px;
+                                                        alignment: space-between;
+
+                                                        Text {
+                                                            text: level;
+                                                            color: root.reasoning_effort == level ? #38bdf8 : #e4e4e7;
+                                                            font-size: 11px;
+                                                            font-weight: root.reasoning_effort == level ? 700 : 500;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        if root.reasoning_effort == level : Text {
+                                                            text: "✓";
+                                                            color: #38bdf8;
+                                                            font-size: 10px;
+                                                            font-weight: 700;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+
+                                                    l_touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            effort_popup.close();
+                                                            root.reasoning_effort = level;
+                                                            root.select_reasoning_effort(level);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
-                                TouchArea {
-                                    enabled: !root.is_generating;
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        if (root.composer_text != "" && !root.is_generating) {
-                                            root.submit_message(root.composer_text);
-                                            root.composer_text = "";
+                                // Send button
+                                send_btn := Rectangle {
+                                    width: 26px;
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: (root.composer_text != "" && !root.is_generating) ? #38bdf8 : #242434;
+
+                                    Text {
+                                        text: root.is_generating ? "…" : "↑";
+                                        color: (root.composer_text != "" && !root.is_generating) ? #000000 : #71717a;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+
+                                    TouchArea {
+                                        enabled: !root.is_generating;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            if (root.composer_text != "" && !root.is_generating) {
+                                                root.submit_message(root.composer_text);
+                                                root.composer_text = "";
+                                            }
                                         }
                                     }
                                 }

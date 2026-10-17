@@ -7,7 +7,7 @@ use slint::{Model, VecModel};
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    Agent, Config, DefaultToolRegistry, ProviderOverride,
+    Agent, Config, DefaultToolRegistry, ProviderOverride, ReasoningEffort,
     SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry,
 };
 use harness_evolver::{
@@ -452,6 +452,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let _ = store.ensure_session(&initial_session).await;
     let current_session = Arc::new(RwLock::new(initial_session.clone()));
+    let active_reasoning_effort = Arc::new(RwLock::new(Some(ReasoningEffort::High)));
+    app.set_reasoning_effort("high".into());
 
     // Populate initial sessions and transcript
     let initial_msgs = load_session_msgs(&store, &initial_session).await;
@@ -556,6 +558,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             app.set_model_scroll_index(0);
         }
+    });
+
+    // Reasoning effort selection callback: updates active reasoning effort level (low/medium/high/xhigh)
+    let effort_lock = active_reasoning_effort.clone();
+    app.on_select_reasoning_effort(move |effort_str| {
+        let effort = ReasoningEffort::from_str_loose(&effort_str.to_string());
+        *effort_lock.write().unwrap() = effort;
     });
 
     // Model selection callback: sets active model, updates provider, closes dropdown, and persists into session
@@ -808,6 +817,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let discovery_submit = discovery.clone();
     let store_submit = store.clone();
     let current_session_submit = current_session.clone();
+    let reasoning_effort_submit = active_reasoning_effort.clone();
     let is_generating = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let is_generating_submit = is_generating.clone();
@@ -828,6 +838,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let discovery = discovery_submit.clone();
         let store = store_submit.clone();
         let session_id = current_session_submit.read().unwrap().clone();
+        let active_effort = *reasoning_effort_submit.read().unwrap();
         let is_generating = is_generating_submit.clone();
 
         if let Some(app) = app_weak.upgrade() {
@@ -978,7 +989,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let agent_cfg = config.agent.clone();
 
-                let agent = Agent::new(
+                let mut agent = Agent::new(
                     provider,
                     memory,
                     notes,
@@ -995,6 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_id: session_id.clone(),
                     resume_max_messages: config.session.resume_max_messages,
                 });
+                agent.set_reasoning_effort(active_effort);
 
                 // Attach live observer to report tool execution or reasoning progress in the UI
                 let app_obs = app_weak.clone();
