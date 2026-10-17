@@ -36,7 +36,7 @@ pub fn render_approval_box(
     selected: usize, // index into APPROVAL_ACTIONS
     width: usize,
 ) -> (String, usize) {
-    let total = width.clamp(58, 76);
+    let total = width.clamp(32, 76);
     let visible_len =
         |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
     let cut = |s: &str, room: usize| -> String {
@@ -54,14 +54,24 @@ pub fn render_approval_box(
     };
 
     let row = |content: &str| -> String {
-        let pad = total.saturating_sub(4).saturating_sub(visible_len(content));
-        format!("│ {}{} │", content, " ".repeat(pad))
+        let max_content = total.saturating_sub(4);
+        let vlen = visible_len(content);
+        if vlen > max_content {
+            let truncated = cut(content, max_content);
+            let pad = max_content.saturating_sub(visible_len(&truncated));
+            format!("│ {}{} │", truncated, " ".repeat(pad))
+        } else {
+            let pad = max_content - vlen;
+            format!("│ {}{} │", content, " ".repeat(pad))
+        }
     };
     let blank = row("");
 
     let inner_row = |payload: &str| -> String {
-        let pad = total.saturating_sub(10).saturating_sub(visible_len(payload));
-        row(&format!(" │ {}{} │ ", payload, " ".repeat(pad)))
+        let max_inner = total.saturating_sub(10);
+        let truncated = cut(payload, max_inner);
+        let pad = max_inner.saturating_sub(visible_len(&truncated));
+        row(&format!(" │ {}{} │ ", truncated, " ".repeat(pad)))
     };
     let inner_top = |label: &str| -> String {
         let dashes = total.saturating_sub(label.len() + 11);
@@ -75,18 +85,27 @@ pub fn render_approval_box(
         || -> String { row(&format!(" └{}┘ ", "─".repeat(total.saturating_sub(8)))) };
 
     let mut lines = Vec::new();
-    let title = "Tool Execution Approval";
+    let title = if total >= 44 {
+        "Tool Execution Approval"
+    } else if total >= 34 {
+        "Approval Required"
+    } else {
+        "Approval"
+    };
+    let dashes = total.saturating_sub(title.len() + 5);
     lines.push(format!(
         "╭─ {} {}╮",
         title.bold(),
-        "─".repeat(total.saturating_sub(title.len() + 5))
+        "─".repeat(dashes)
     ));
 
     lines.push(blank.clone());
-    lines.push(row(&format!(
-        " The agent requested access to: {}",
-        request.tool.bold()
-    )));
+    let tool_msg = if total >= 50 {
+        format!(" The agent requested access to: {}", request.tool.bold())
+    } else {
+        format!(" Tool: {}", request.tool.bold())
+    };
+    lines.push(row(&tool_msg));
     lines.push(blank.clone());
 
     if let Some(diff) = &request.diff {
@@ -136,7 +155,16 @@ pub fn render_approval_box(
 
     lines.push(blank.clone());
     lines.push(row(" Action"));
-    for (idx, action) in APPROVAL_ACTIONS.iter().enumerate() {
+    let actions = if total >= 44 {
+        APPROVAL_ACTIONS
+    } else {
+        [
+            "[y] Approve once",
+            "[a] Approve all (session)",
+            "[n] Deny execution",
+        ]
+    };
+    for (idx, action) in actions.iter().enumerate() {
         if idx == selected {
             lines.push(row(&format!(" {} {}", "❯".cyan().bold(), action.bold())));
         } else {
@@ -144,9 +172,14 @@ pub fn render_approval_box(
         }
     }
     lines.push(blank.clone());
+    let hint = if total >= 54 {
+        "Navigate with ↑/↓ • Press Enter or key to confirm"
+    } else {
+        "↑/↓ • Enter or y/a/n to confirm"
+    };
     lines.push(row(&format!(
         " {}",
-        "Navigate with ↑/↓ • Press Enter or key to confirm".dimmed()
+        hint.dimmed()
     )));
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
 
@@ -375,6 +408,27 @@ mod render_tests {
             assert_eq!(focused, 1, "selected={} must mark exactly one action", selected);
             assert!(plain.contains("Diff"), "diff panel must render");
             assert!(plain.contains("+new"));
+        }
+    }
+
+    #[test]
+    fn narrow_terminal_approval_box_does_not_overflow_or_wobble() {
+        let request = ApprovalRequest {
+            tool: "terminal".to_string(),
+            call_id: "c3".to_string(),
+            target: Some("ls -la ~/Downloads/rust-agent-harness 2>/dev/null; echo '---'; ls".to_string()),
+            diff: None,
+            arguments: serde_json::json!({"command": "ls -la"}),
+        };
+        for width in [36, 42, 50, 60] {
+            let (text, lines) = render_approval_box(&request, 0, width);
+            assert_eq!(lines, text.lines().count());
+            let widths: Vec<usize> = text
+                .lines()
+                .map(|l| dialoguer::console::strip_ansi_codes(l).chars().count())
+                .collect();
+            assert!(widths.iter().all(|&w| w == widths[0]), "widths at width={}: {:?}", width, widths);
+            assert!(widths[0] <= width, "box width {} exceeds terminal width {}", widths[0], width);
         }
     }
 }

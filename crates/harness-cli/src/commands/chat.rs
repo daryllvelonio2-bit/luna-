@@ -1112,7 +1112,7 @@ async fn prompt_approval_choice(
     ui: &ChatUi,
     decision_tx: &mut oneshot::Sender<harness_core::ApprovalDecision>,
 ) -> ApprovalChoice {
-    let width = get_terminal_width();
+    let mut width = get_terminal_width().saturating_sub(2);
     let mut selected = 0; // index into APPROVAL_ACTIONS
 
     // Drain any leftover keys in channel
@@ -1157,12 +1157,17 @@ async fn prompt_approval_choice(
                 selected = (selected + 1) % APPROVAL_ACTIONS.len();
                 None
             }
-            Key::Char('y') | Key::Char('Y') => Some(ApprovalChoice::Once),
-            Key::Char('a') | Key::Char('A') => Some(ApprovalChoice::AllSession),
-            Key::Char('n') | Key::Char('N') | Key::Char('c') | Key::Char('C') | Key::Escape | Key::CtrlC => {
+            Key::Char('y') | Key::Char('Y') | Key::Char('1') => Some(ApprovalChoice::Once),
+            Key::Char('a') | Key::Char('A') | Key::Char('2') => Some(ApprovalChoice::AllSession),
+            Key::Char('n') | Key::Char('N') | Key::Char('3') | Key::Char('c') | Key::Char('C') | Key::Char('d') | Key::Char('D') | Key::Escape | Key::CtrlC => {
                 Some(ApprovalChoice::Deny)
             }
             Key::Enter => match selected {
+                0 => Some(ApprovalChoice::Once),
+                1 => Some(ApprovalChoice::AllSession),
+                _ => Some(ApprovalChoice::Deny),
+            },
+            Key::Char(' ') => match selected {
                 0 => Some(ApprovalChoice::Once),
                 1 => Some(ApprovalChoice::AllSession),
                 _ => Some(ApprovalChoice::Deny),
@@ -1182,8 +1187,13 @@ async fn prompt_approval_choice(
             return choice;
         }
 
-        // Repaint in place: jump to the first popup row and overwrite every line.
+        // Repaint in place: jump to the first popup row, clear lines, and overwrite cleanly.
         print!("\r\x1b[{}A", line_count);
+        for _ in 0..line_count {
+            print!("\x1b[2K\x1b[1B");
+        }
+        print!("\r\x1b[{}A", line_count);
+        width = get_terminal_width().saturating_sub(2);
         let (new_text, new_count) = render_approval_box(request, selected, width);
         print!("{}", new_text);
         line_count = new_count;

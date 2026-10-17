@@ -411,7 +411,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Bottom Row: Lower Left has Model Button and Send Icon right next to each other
+                        // Bottom Row: Model button on the left, Send button on the right
                         HorizontalLayout {
                             height: 26px;
                             alignment: space-between;
@@ -462,42 +462,35 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
 
-                                send_btn := Rectangle {
-                                    width: 26px;
-                                    height: 24px;
-                                    border-radius: 6px;
-                                    background: root.composer_text != "" ? #38bdf8 : #242434;
+                            // Lower Right: Send button
+                            send_btn := Rectangle {
+                                width: 26px;
+                                height: 24px;
+                                border-radius: 6px;
+                                background: root.composer_text != "" ? #38bdf8 : #242434;
 
-                                    Text {
-                                        text: "↑";
-                                        color: root.composer_text != "" ? #000000 : #71717a;
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: 100%;
-                                        height: 100%;
-                                    }
+                                Text {
+                                    text: "↑";
+                                    color: root.composer_text != "" ? #000000 : #71717a;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
 
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            if (root.composer_text != "") {
-                                                root.submit_message(root.composer_text);
-                                                root.composer_text = "";
-                                            }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.composer_text != "") {
+                                            root.submit_message(root.composer_text);
+                                            root.composer_text = "";
                                         }
                                     }
                                 }
-                            }
-
-                            // Lower Right: Enter shortcut
-                            Text {
-                                text: "↵ Enter";
-                                color: #52525b;
-                                font-size: 11px;
-                                vertical-alignment: center;
                             }
                         }
                     }
