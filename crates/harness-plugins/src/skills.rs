@@ -13,6 +13,12 @@ use harness_core::{HarnessError, Tool, ToolResult};
 pub struct SkillMetadata {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +27,9 @@ pub struct Skill {
     pub description: String,
     pub instructions: String,
     pub file_path: PathBuf,
+    pub command: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub parameters: Option<serde_json::Value>,
 }
 
 pub struct SkillLoader;
@@ -74,6 +83,9 @@ impl SkillLoader {
             description: meta.description,
             instructions,
             file_path: path.to_path_buf(),
+            command: meta.command,
+            timeout_secs: meta.timeout_secs,
+            parameters: meta.parameters,
         })
     }
 }
@@ -99,12 +111,17 @@ impl Tool for SkillToolAdapter {
     }
 
     fn parameters(&self) -> serde_json::Value {
+        if let Some(ref custom_params) = self.skill.parameters {
+            return custom_params.clone();
+        }
         json!({
             "type": "object",
             "properties": {
-                "input": { "type": "string", "description": "Input parameters or query for this skill" }
-            },
-            "required": ["input"]
+                "action": { "type": "string", "description": "Action to perform (e.g. search, fetch, open)" },
+                "query": { "type": "string", "description": "Search query or target URL" },
+                "url": { "type": "string", "description": "Target website URL" },
+                "input": { "type": "string", "description": "Input parameters or payload for this skill" }
+            }
         })
     }
 
@@ -112,13 +129,130 @@ impl Tool for SkillToolAdapter {
         &self,
         call_id: &str,
         args: &serde_json::Value,
-        _cancel_token: &CancellationToken,
+        cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let input = args.get("input").and_then(|i| i.as_str()).unwrap_or_default();
-        let rendered = format!(
-            "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
-            self.skill.name, self.skill.instructions, input
-        );
-        Ok(ToolResult::success(call_id, rendered))
+        if let Some(ref cmd_template) = self.skill.command {
+            let skill_dir = self
+                .skill
+                .file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_string_lossy();
+
+            let cmd_str = cmd_template.replace("{skill_dir}", &skill_dir);
+            let timeout = self.skill.timeout_secs.unwrap_or(60);
+            let args_json = serde_json::to_string(args).unwrap_or_default();
+
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c")
+                .arg(&cmd_str)
+                .kill_on_drop(true)
+                .current_dir(self.skill.file_path.parent().unwrap_or_else(|| Path::new(".")))
+                .env("SKILL_DIR", skill_dir.as_ref())
+                .env("SKILL_NAME", &self.skill.name)
+                .env("SKILL_ARGS", &args_json)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn().map_err(|e| HarnessError::ToolExecutionFailed {
+                tool: self.skill.name.clone(),
+                reason: format!("Failed to spawn skill command: {}", e),
+            })?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(args_json.as_bytes()).await;
+                let _ = stdin.flush().await;
+            }
+
+            let timeout_duration = std::time::Duration::from_secs(timeout);
+            let output = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(HarnessError::Cancelled);
+                }
+                res = tokio::time::timeout(timeout_duration, child.wait_with_output()) => match res {
+                    Ok(Ok(out)) => out,
+                    Ok(Err(e)) => return Ok(ToolResult::error(call_id, format!("Process error: {}", e))),
+                    Err(_) => {
+                        return Ok(ToolResult::error(call_id, format!("Skill timed out after {}s", timeout)));
+                    }
+                }
+            };
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if output.status.success() {
+                let text = if stdout.trim().is_empty() && !stderr.trim().is_empty() {
+                    stderr
+                } else {
+                    stdout
+                };
+                Ok(ToolResult::success(call_id, text))
+            } else {
+                let err_msg = if !stderr.trim().is_empty() {
+                    stderr
+                } else if !stdout.trim().is_empty() {
+                    stdout
+                } else {
+                    format!("Command exited with status code: {}", output.status)
+                };
+                Ok(ToolResult::error(call_id, err_msg))
+            }
+        } else {
+            let input = args.get("input").and_then(|i| i.as_str()).unwrap_or_default();
+            let rendered = format!(
+                "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
+                self.skill.name, self.skill.instructions, input
+            );
+            Ok(ToolResult::success(call_id, rendered))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_parse_and_execute_command_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_file = dir.path().join("SKILL.md");
+        let content = r#"---
+name: echo-test
+description: "Echo test skill"
+command: "echo 'hello from skill:' $SKILL_NAME"
+---
+Test instructions
+"#;
+        std::fs::write(&skill_file, content).unwrap();
+
+        let skill = SkillLoader::parse_skill_file(&skill_file).unwrap();
+        assert_eq!(skill.name, "echo-test");
+        assert_eq!(skill.description, "Echo test skill");
+        assert_eq!(skill.command, Some("echo 'hello from skill:' $SKILL_NAME".to_string()));
+
+        let adapter = SkillToolAdapter::new(skill);
+        let cancel = CancellationToken::new();
+        let args = serde_json::json!({ "query": "world" });
+        let res = adapter.execute("call-1", &args, &cancel).await.unwrap();
+
+        assert!(!res.is_error);
+        assert!(res.content.contains("hello from skill: echo-test"));
+    }
+
+    #[tokio::test]
+    async fn test_load_browser_skill() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent().unwrap().parent().unwrap();
+        let browser_skill_path = root.join(".harness/skills/browser/SKILL.md");
+        if browser_skill_path.exists() {
+            let skill = SkillLoader::parse_skill_file(&browser_skill_path).unwrap();
+            assert_eq!(skill.name, "browser");
+            assert!(skill.command.is_some());
+            let adapter = SkillToolAdapter::new(skill);
+            assert_eq!(adapter.name(), "browser");
+        }
     }
 }

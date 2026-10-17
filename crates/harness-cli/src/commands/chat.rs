@@ -180,13 +180,23 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
 
-    // Register skills from skills_dir
+    // Register skills from skills_dir and workspace .harness/skills
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
     if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
         for skill in skills {
             registry
                 .register(Arc::new(harness_plugins::SkillToolAdapter::new(skill)))
                 .await?;
+        }
+    }
+    let workspace_skills = config.paths.workspace_root.join(".harness/skills");
+    if workspace_skills.exists() {
+        if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&workspace_skills) {
+            for skill in skills {
+                registry
+                    .register(Arc::new(harness_plugins::SkillToolAdapter::new(skill)))
+                    .await?;
+            }
         }
     }
 
