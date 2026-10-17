@@ -745,101 +745,69 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                // Live in-flight execution status badge
-                                if msg.status != "" : Rectangle {
-                                    height: 28px;
-                                    border-radius: 6px;
-                                    background: #141420;
-                                    border-width: 1px;
-                                    border-color: #2e2e46;
+                                // Live in-flight execution status (no box, clean status line)
+                                if msg.status != "" : HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
 
-                                    HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        spacing: 6px;
-                                        alignment: start;
+                                    Text {
+                                        text: "⚡";
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
 
-                                        Text {
-                                            text: "⚡";
-                                            font-size: 11px;
-                                            vertical-alignment: center;
-                                        }
-
-                                        Text {
-                                            text: msg.status;
-                                            color: #38bdf8;
-                                            font-size: 11px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
+                                    Text {
+                                        text: msg.status;
+                                        color: #38bdf8;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        overflow: elide;
                                     }
                                 }
 
-                                // Tool execution history details box
-                                if msg.tool_calls != "" : Rectangle {
-                                    border-radius: 6px;
-                                    background: #13131c;
-                                    border-width: 1px;
-                                    border-color: #222230;
+                                // Reasoning / Chain-of-thought (no box, clean dimmed thought stream)
+                                if msg.reasoning != "" : VerticalLayout {
+                                    spacing: 2px;
+                                    padding-left: 4px;
 
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        padding-left: 12px;
-                                        padding-right: 12px;
-                                        spacing: 6px;
+                                    Text {
+                                        text: "💭 Thinking";
+                                        color: #71717a;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                    }
 
-                                        HorizontalLayout {
-                                            alignment: space-between;
-
-                                            Text {
-                                                text: "TOOLS EXECUTED";
-                                                color: #71717a;
-                                                font-size: 9px;
-                                                font-weight: 700;
-                                            }
-                                        }
-
-                                        Text {
-                                            text: msg.tool_calls;
-                                            color: #a1a1aa;
-                                            font-size: 11px;
-                                            font-family: "monospace";
-                                            wrap: word-wrap;
-                                        }
+                                    Text {
+                                        text: msg.reasoning;
+                                        color: #828292;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
                                     }
                                 }
 
-                                // Reasoning / Chain-of-thought block
-                                if msg.reasoning != "" : Rectangle {
-                                    border-radius: 6px;
-                                    background: #111116;
-                                    border-width: 1px;
-                                    border-color: #1a1a24;
+                                // Tool execution history details (no box, clean monospace activity text)
+                                if msg.tool_calls != "" : VerticalLayout {
+                                    spacing: 2px;
+                                    padding-left: 4px;
 
-                                    VerticalLayout {
-                                        padding: 8px;
-                                        padding-left: 12px;
-                                        padding-right: 12px;
-                                        spacing: 4px;
+                                    Text {
+                                        text: "⚡ Tools Executed";
+                                        color: #71717a;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                    }
 
-                                        Text {
-                                            text: "💭 Thinking";
-                                            color: #71717a;
-                                            font-size: 9px;
-                                            font-weight: 700;
-                                        }
-
-                                        Text {
-                                            text: msg.reasoning;
-                                            color: #8b8b98;
-                                            font-size: 11px;
-                                            wrap: word-wrap;
-                                        }
+                                    Text {
+                                        text: msg.tool_calls;
+                                        color: #94a3b8;
+                                        font-size: 11px;
+                                        font-family: "monospace";
+                                        wrap: word-wrap;
                                     }
                                 }
 
-                                // Final unboxed reply
+                                // Final unboxed reply (pure typography)
                                 if msg.content != "" : Text {
                                     text: msg.content;
                                     color: #e4e4e7;

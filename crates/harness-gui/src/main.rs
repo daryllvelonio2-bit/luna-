@@ -238,6 +238,76 @@ fn format_tool_result_summary(output: &str, is_error: bool) -> String {
     format!("{icon} {truncated}")
 }
 
+
+/// Strips DeepSeek DSML tool call tokens (<｜tool calls｜>...<｜tool calls end｜>),
+/// stray delimiters, and extracts embedded <think>...</think> blocks.
+fn strip_dsml_and_extract_thinking(raw_content: &str) -> (String, Option<String>) {
+    let mut text = raw_content.to_string();
+    let mut extracted_thinking = None;
+
+    // 1. Extract <think>...</think> or <thought>...</thought>
+    for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+        if let Some(start) = text.find(open_tag) {
+            if let Some(end) = text[start + open_tag.len()..].find(close_tag) {
+                let real_end = start + open_tag.len() + end;
+                let thought = text[start + open_tag.len()..real_end].trim().to_string();
+                if !thought.is_empty() {
+                    extracted_thinking = Some(thought);
+                }
+                text = format!("{}{}", &text[..start], &text[real_end + close_tag.len()..]);
+            } else {
+                let thought = text[start + open_tag.len()..].trim().to_string();
+                if !thought.is_empty() {
+                    extracted_thinking = Some(thought);
+                }
+                text = text[..start].to_string();
+            }
+        }
+    }
+
+    // 2. Strip DSML tool call blocks
+    let block_pairs = [
+        ("<｜tool calls｜>", "<｜tool calls end｜>"),
+        ("<｜tool_calls｜>", "<｜tool_calls_end｜>"),
+        ("<tool_calls>", "</tool_calls>"),
+        ("<tool_call>", "</tool_call>"),
+        ("<｜tool call begin｜>", "<｜tool call end｜>"),
+        ("<｜tool_call_begin｜>", "<｜tool_call_end｜>"),
+    ];
+
+    for (start_tag, end_tag) in &block_pairs {
+        while let Some(start) = text.find(start_tag) {
+            if let Some(end) = text[start + start_tag.len()..].find(end_tag) {
+                let full_end = start + start_tag.len() + end + end_tag.len();
+                text = format!("{}{}", &text[..start], &text[full_end..]);
+            } else {
+                text = text[..start].to_string();
+                break;
+            }
+        }
+    }
+
+    // 3. Remove any remaining stray DSML tokens <｜...｜>
+    let open_tok = "<｜";
+    let close_tok = "｜>";
+    while let Some(start) = text.find(open_tok) {
+        if let Some(end) = text[start + open_tok.len()..].find(close_tok) {
+            let full_end = start + open_tok.len() + end + close_tok.len();
+            text = format!("{}{}", &text[..start], &text[full_end..]);
+        } else {
+            text = text[..start].to_string();
+            break;
+        }
+    }
+
+    // 4. Remove stray XML tool tags
+    for tag in &["<tool_calls>", "</tool_calls>", "<tool_call>", "</tool_call>"] {
+        text = text.replace(tag, "");
+    }
+
+    (text.trim().to_string(), extracted_thinking)
+}
+
 async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<ChatMsg> {
     let mut msgs = Vec::new();
     if let Ok(outcome) = store.replay(session_id, 100).await {
@@ -248,8 +318,13 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
                 harness_core::Role::System | harness_core::Role::Tool => continue,
             };
             let author = if role == "user" { "You" } else { "Luna" };
-            let content = s.message.content.unwrap_or_default();
-            let reasoning = s.message.reasoning.unwrap_or_default();
+            let raw_content = s.message.content.unwrap_or_default();
+            let (content, extracted_think) = if role == "assistant" {
+                strip_dsml_and_extract_thinking(&raw_content)
+            } else {
+                (raw_content, None)
+            };
+            let reasoning = s.message.reasoning.or(extracted_think).unwrap_or_default();
 
             let mut tool_strs = Vec::new();
             for tc in &s.message.tool_calls {
@@ -661,23 +736,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let turn_tools = turn_tools.clone();
                     let turn_reasoning = turn_reasoning.clone();
 
-                    move |reply: String| {
+                    move |raw_reply: String, model_reasoning: Option<String>| {
                         let app_weak = app_weak.clone();
                         let is_generating = is_generating.clone();
+                        let (cleaned_reply, extracted_think) = strip_dsml_and_extract_thinking(&raw_reply);
+
+                        let mut final_think = model_reasoning.or(extracted_think);
+                        if final_think.is_none() {
+                            let streamed_r = turn_reasoning.lock().unwrap().trim().to_string();
+                            if !streamed_r.is_empty() {
+                                final_think = Some(streamed_r);
+                            }
+                        }
+
                         let tools_str = turn_tools.lock().unwrap().join("\n");
-                        let reasoning_str = turn_reasoning.lock().unwrap().clone();
 
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak.upgrade() {
                                 let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
                                 if let Some(last) = msgs.last_mut() {
-                                    last.content = reply.into();
+                                    last.content = cleaned_reply.into();
                                     last.status = String::new().into();
                                     if !tools_str.is_empty() {
                                         last.tool_calls = tools_str.into();
                                     }
-                                    if !reasoning_str.is_empty() {
-                                        last.reasoning = reasoning_str.into();
+                                    if let Some(th) = final_think {
+                                        last.reasoning = th.into();
                                     }
                                 }
                                 app.set_transcript(Rc::new(VecModel::from(msgs)).into());
@@ -697,7 +781,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ) {
                     Ok(client) => client,
                     Err(err) => {
-                        finish(format!("Provider error: {}", err));
+                        finish(format!("Provider error: {}", err), None);
                         return;
                     }
                 };
@@ -836,10 +920,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let cancel_token = CancellationToken::new();
                 match agent.run_turn(&user_text, cancel_token).await {
                     Ok(outcome) => {
-                        finish(outcome.reply);
+                        finish(outcome.reply, outcome.reasoning);
                     }
                     Err(err) => {
-                        finish(format!("Execution error: {}", err));
+                        finish(format!("Execution error: {}", err), None);
                     }
                 }
 
@@ -880,5 +964,18 @@ mod tests {
         // File trying to escape is strictly rejected
         let escape_attempt = sandbox.write_file_sandboxed("../evil.rs", "malicious");
         assert!(escape_attempt.is_err());
+    }
+
+    #[test]
+    fn test_strip_dsml_and_extract_thinking() {
+        let input = "<｜tool calls｜><｜tool call begin｜>function<｜tool sep｜>read_file\n{\"path\": \"src/lib.rs\"}<｜tool call end｜><｜tool calls end｜><think>Inspecting codebase structure</think>Here are the findings.<｜end of sentence｜>";
+        let (cleaned, thinking) = strip_dsml_and_extract_thinking(input);
+        assert_eq!(cleaned, "Here are the findings.");
+        assert_eq!(thinking.as_deref(), Some("Inspecting codebase structure"));
+
+        let standard = "Normal message without any DSML tags.";
+        let (cleaned2, thinking2) = strip_dsml_and_extract_thinking(standard);
+        assert_eq!(cleaned2, "Normal message without any DSML tags.");
+        assert_eq!(thinking2, None);
     }
 }
