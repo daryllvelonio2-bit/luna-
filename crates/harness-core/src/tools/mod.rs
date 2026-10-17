@@ -1,9 +1,11 @@
 pub mod fs;
 pub mod shell;
+pub mod todo;
 
 use std::sync::Arc;
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
 pub use shell::TerminalTool;
+pub use todo::TodoListTool;
 
 use crate::config::Config;
 use crate::error::HarnessError;
@@ -46,6 +48,11 @@ pub async fn register_core_tools(
             "list_files" => {
                 registry
                     .register(Arc::new(ListFilesTool::new(ws.clone())))
+                    .await?;
+            }
+            "todo_list" => {
+                registry
+                    .register(Arc::new(TodoListTool::new(ws.clone())))
                     .await?;
             }
             "terminal" => {

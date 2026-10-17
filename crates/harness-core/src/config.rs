@@ -157,6 +157,7 @@ impl Default for ToolsSettings {
                 "patch".to_string(),
                 "search_files".to_string(),
                 "list_files".to_string(),
+                "todo_list".to_string(),
                 "terminal".to_string(),
             ],
         }
