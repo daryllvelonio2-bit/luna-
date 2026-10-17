@@ -467,10 +467,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         configured_providers = vec!["antigravity".to_string(), "nvidia".to_string()];
     }
 
-    let default_prov = configured_providers.first().cloned().unwrap_or_else(|| "antigravity".to_string());
-    app.set_current_provider(default_prov.clone().into());
-    app.set_selected_provider(default_prov.clone().into());
-
     let prov_slint: Vec<slint::SharedString> = configured_providers.iter().map(|s| s.into()).collect();
     app.set_available_providers(Rc::new(VecModel::from(prov_slint)).into());
 
@@ -482,12 +478,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let prebuilt_models = Arc::new(model_rc_cache);
 
-    // Populate initial models immediately from prebuilt RAM cache
-    if let Some(rc) = prebuilt_models.get(&default_prov) {
+    // Restore the persisted provider & model for the active session, or resolve fallback
+    let saved_session_model = store.get(&initial_session).await.ok().and_then(|r| r.model);
+    let (active_prov, active_model) = if let Some((p, m)) = saved_session_model {
+        (p, m)
+    } else {
+        let p = if !config.model.provider.is_empty() {
+            config.model.provider.clone()
+        } else {
+            configured_providers.first().cloned().unwrap_or_else(|| "antigravity".to_string())
+        };
+        let m = if !config.model.default.is_empty() {
+            config.model.default.clone()
+        } else {
+            model_cache.get(&p).and_then(|list| list.first()).cloned().unwrap_or_else(|| "default".to_string())
+        };
+        let _ = store.set_model(&initial_session, &p, &m).await;
+        (p, m)
+    };
+
+    app.set_current_provider(active_prov.clone().into());
+    app.set_selected_provider(active_prov.clone().into());
+    app.set_model_name(active_model.into());
+
+    if let Some(rc) = prebuilt_models.get(&active_prov) {
         app.set_available_models(rc.clone());
-    }
-    if let Some(first_model) = model_cache.get(&default_prov).and_then(|m| m.first()) {
-        app.set_model_name(first_model.clone().into());
     }
 
     // Provider selection callback: instantaneous synchronous in-memory transition (0ms)
@@ -543,13 +558,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Model selection callback: sets active model, updates provider, closes dropdown
+    // Model selection callback: sets active model, updates provider, closes dropdown, and persists into session
     let app_weak = app.as_weak();
+    let store_model = store.clone();
+    let current_session_model = current_session.clone();
     app.on_select_model(move |model_id| {
         if let Some(app) = app_weak.upgrade() {
-            app.set_current_provider(app.get_selected_provider());
+            let prov = app.get_selected_provider();
+            let prov_str = prov.to_string();
+            let model_str = model_id.to_string();
+            app.set_current_provider(prov);
             app.set_model_name(model_id);
             app.set_model_picker_open(false);
+
+            let sid = current_session_model.read().unwrap().clone();
+            let store = store_model.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.set_model(&sid, &prov_str, &model_str).await {
+                    tracing::warn!("failed to persist model for session '{sid}': {e}");
+                }
+            });
         }
     });
 
@@ -617,18 +645,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_weak = app.as_weak();
     let current_session_sel = current_session.clone();
     let store_sel = store.clone();
+    let model_cache_sel = model_cache.clone();
     app.on_select_session(move |sess_id| {
         let sid = sess_id.to_string();
         *current_session_sel.write().unwrap() = sid.clone();
         let app_weak = app_weak.clone();
         let store = store_sel.clone();
+        let model_cache = model_cache_sel.clone();
         tokio::spawn(async move {
             let msgs = load_session_msgs(&store, &sid).await;
             let list = load_session_items(&store, &sid).await;
+            let saved_model = store.get(&sid).await.ok().and_then(|r| r.model);
+
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
                     app.set_transcript(Rc::new(VecModel::from(msgs)).into());
                     app.set_sessions(Rc::new(VecModel::from(list)).into());
+
+                    if let Some((prov, modl)) = saved_model {
+                        app.set_current_provider(prov.clone().into());
+                        app.set_selected_provider(prov.clone().into());
+                        app.set_model_name(modl.into());
+                        if let Some(list) = model_cache.get(&prov) {
+                            let slint_models: Vec<slint::SharedString> = list.iter().map(|s| s.into()).collect();
+                            app.set_available_models(Rc::new(VecModel::from(slint_models)).into());
+                        }
+                    }
                 }
             });
         });
@@ -644,8 +686,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         *current_session_new.write().unwrap() = new_id.clone();
         let app_weak = app_weak.clone();
         let store = store_new.clone();
+
+        let current_prov = if let Some(app) = app_weak.upgrade() {
+            app.get_current_provider().to_string()
+        } else {
+            String::new()
+        };
+        let current_modl = if let Some(app) = app_weak.upgrade() {
+            app.get_model_name().to_string()
+        } else {
+            String::new()
+        };
+
         tokio::spawn(async move {
             let _ = store.ensure_session(&new_id).await;
+            if !current_prov.is_empty() && !current_modl.is_empty() {
+                let _ = store.set_model(&new_id, &current_prov, &current_modl).await;
+            }
             let list = load_session_items(&store, &new_id).await;
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = app_weak.upgrade() {
