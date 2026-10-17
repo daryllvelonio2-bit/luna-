@@ -309,7 +309,7 @@ fn strip_dsml_and_extract_thinking(raw_content: &str) -> (String, Option<String>
 }
 
 async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<ChatMsg> {
-    let mut msgs = Vec::new();
+    let mut msgs: Vec<ChatMsg> = Vec::new();
     if let Ok(outcome) = store.replay(session_id, 100).await {
         for s in outcome.history {
             let role = match s.message.role {
@@ -331,6 +331,43 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
                 tool_strs.push(format_tool_call_detail(&tc.name, &tc.arguments));
             }
             let tool_calls = tool_strs.join("\n");
+
+            if role == "assistant" {
+                if let Some(last) = msgs.last_mut().filter(|m| m.role == "assistant") {
+                    // Merge consecutive assistant steps in a single turn so "Luna" headers never repeat
+                    if !tool_calls.is_empty() {
+                        if last.tool_calls.is_empty() {
+                            last.tool_calls = tool_calls.into();
+                        } else {
+                            let mut cur = last.tool_calls.to_string();
+                            cur.push('\n');
+                            cur.push_str(&tool_calls);
+                            last.tool_calls = cur.into();
+                        }
+                    }
+                    if !reasoning.is_empty() {
+                        if last.reasoning.is_empty() {
+                            last.reasoning = reasoning.into();
+                        } else {
+                            let mut cur = last.reasoning.to_string();
+                            cur.push('\n');
+                            cur.push_str(&reasoning);
+                            last.reasoning = cur.into();
+                        }
+                    }
+                    if !content.trim().is_empty() {
+                        if last.content.is_empty() {
+                            last.content = content.into();
+                        } else {
+                            let mut cur = last.content.to_string();
+                            cur.push_str("\n\n");
+                            cur.push_str(&content);
+                            last.content = cur.into();
+                        }
+                    }
+                    continue;
+                }
+            }
 
             if !content.trim().is_empty() || !tool_calls.is_empty() || !reasoning.is_empty() {
                 msgs.push(ChatMsg {

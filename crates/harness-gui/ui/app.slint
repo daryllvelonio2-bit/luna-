@@ -665,15 +665,15 @@ export component AppWindow inherits Window {
                 background: #101014;
                 clip: true;
 
-                // Scrollable Chat Message History
+                // Scrollable Chat Message History (bounded cleanly above floating controls)
                 ScrollView {
                     width: 100%;
-                    height: 100%;
+                    height: parent.height - 124px;
 
                     VerticalLayout {
                         padding: 24px;
-                        padding-bottom: 150px;
-                        spacing: 18px;
+                        padding-bottom: 24px;
+                        spacing: 16px;
                         alignment: start;
 
                         for msg in root.transcript : VerticalLayout {
@@ -718,8 +718,8 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // Assistant message: Antigravity unboxed typography
-                            if msg.role != "user" : VerticalLayout {
+                            // Assistant message: Antigravity unboxed typography (zero repeating empty headers)
+                            if msg.role != "user" && (msg.content != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : VerticalLayout {
                                 padding-left: 4px;
                                 padding-right: 4px;
                                 spacing: 8px;
