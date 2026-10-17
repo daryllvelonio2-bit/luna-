@@ -22,3 +22,6 @@ tracing = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.18"
+
+[dev-dependencies]
+tempfile = { workspace = true }
