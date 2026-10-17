@@ -507,6 +507,7 @@ export component AppWindow inherits Window {
                 dir_btn := Rectangle {
                     x: chat_box.x;
                     y: chat_box.y - self.height - 8px;
+                    width: 108px;
                     height: 26px;
                     border-radius: 6px;
                     background: dir_touch.pressed ? #2c2c3e : (dir_touch.has-hover ? #242434 : #181822);
