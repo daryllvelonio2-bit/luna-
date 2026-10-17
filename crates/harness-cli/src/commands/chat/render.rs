@@ -76,21 +76,16 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
             }
             Role::Tool => {
                 if let Some(ref res) = msg.tool_result {
-                    let fmt = format_tool_result(res.is_error, &res.content);
-                    if let Some(last) = current_tools.last_mut() {
-                        if last.result_formatted.is_empty() {
-                            last.result_formatted = fmt;
-                        } else {
-                            current_tools.push(TurnProcessItem {
-                                call_formatted: String::new(),
-                                result_formatted: fmt,
-                            });
-                        }
+                    let status = if res.is_error {
+                        " (failed)".red().to_string()
                     } else {
-                        current_tools.push(TurnProcessItem {
-                            call_formatted: String::new(),
-                            result_formatted: fmt,
-                        });
+                        " (success)".green().to_string()
+                    };
+                    if let Some(last) = current_tools.last_mut() {
+                        if !last.call_formatted.ends_with("(success)") && !last.call_formatted.ends_with("(failed)") {
+                            last.call_formatted.push_str(&status);
+                        }
+                        last.result_formatted.clear();
                     }
                 }
             }
@@ -179,10 +174,17 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                 }
                 for item in &turn.tool_items {
                     if !item.call_formatted.is_empty() {
-                        println!("{}", item.call_formatted);
-                    }
-                    if !item.result_formatted.is_empty() {
-                        println!("{}", item.result_formatted);
+                        let mut call = item.call_formatted.clone();
+                        if !call.ends_with("(success)") && !call.ends_with("(failed)") {
+                            let is_err = item.result_formatted.contains('✖');
+                            let status = if is_err {
+                                " (failed)".red().to_string()
+                            } else {
+                                " (success)".green().to_string()
+                            };
+                            call.push_str(&status);
+                        }
+                        println!("{}", call);
                     }
                 }
             }
@@ -332,6 +334,44 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
     }
 }
 
+/// Shortens any file or directory path to at most 3 path components (e.g. `downloads/rust-agent-harness/agents.md`).
+pub fn shorten_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return trimmed.to_string();
+    }
+    let parts: Vec<&str> = trimmed
+        .split(|c| c == '/' || c == '\\')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "~")
+        .collect();
+    if parts.len() > 3 {
+        parts[parts.len() - 3..].join("/")
+    } else if parts.is_empty() {
+        trimmed.to_string()
+    } else if trimmed.starts_with('/') {
+        format!("/{}", parts.join("/"))
+    } else {
+        parts.join("/")
+    }
+}
+
+/// Scans any string and shortens any embedded path with more than 3 segments to at most 3 segments.
+pub fn shorten_paths_in_text(raw: &str) -> String {
+    let mut out = Vec::new();
+    for token in raw.split(' ') {
+        let clean = token.trim_matches(|c| c == '\'' || c == '"' || c == '`' || c == '(' || c == ')');
+        if (clean.starts_with('/') || clean.starts_with("~/") || clean.contains('/'))
+            && clean.split('/').filter(|s| !s.is_empty() && *s != "~" && *s != ".").count() > 3
+        {
+            let short = shorten_path(clean);
+            out.push(token.replace(clean, &short));
+        } else {
+            out.push(token.to_string());
+        }
+    }
+    out.join(" ")
+}
+
 /// How wide the verb column of a tool-call line is, so targets line up across calls.
 const VERB_COLUMN: usize = 12;
 
@@ -376,20 +416,22 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         "terminal" | "shell" | "bash" => {
             if let Some(command) = text("command") {
                 let first_line = command.lines().next().unwrap_or(command).trim();
+                let short_cmd = shorten_paths_in_text(first_line);
                 let cwd = text("workdir")
-                    .map(|w| suffix(format!("in {}", w)))
+                    .map(|w| suffix(format!("in {}", shorten_path(w))))
                     .unwrap_or_default();
                 return format!(
                     "{} {} {}{}",
                     glyph,
                     verb_col(verb),
-                    truncate_visible(first_line, MAX_TOOL_ARG_CHARS).bold(),
+                    truncate_visible(&short_cmd, MAX_TOOL_ARG_CHARS).bold(),
                     cwd
                 );
             }
         }
         "read_file" => {
             if let Some(path) = text("path") {
+                let short = shorten_path(path);
                 let range = match (number("offset"), number("limit")) {
                     (Some(offset), Some(limit)) => {
                         suffix(format!("L{}-{}", offset, offset + limit.saturating_sub(1)))
@@ -398,32 +440,35 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                     (None, Some(limit)) => suffix(format!("L1-{}", limit)),
                     _ => String::new(),
                 };
-                return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), range);
+                return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), range);
             }
         }
         "list_files" => {
             let path = text("path").unwrap_or(".");
+            let short = shorten_path(path);
             let glob = text("glob")
                 // `*` filters nothing, so it carries no information for the reader.
                 .filter(|g| *g != "*")
                 .map(|g| suffix(format!("matching {}", g)))
                 .unwrap_or_default();
-            return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), glob);
+            return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), glob);
         }
         "write_file" => {
             if let Some(path) = text("path") {
+                let short = shorten_path(path);
                 let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
                     "{} {} {}{}",
                     glyph,
                     verb_col(verb),
-                    path.cyan(),
+                    short.cyan(),
                     suffix(format!("{} lines", lines))
                 );
             }
         }
         "patch" => {
             if let Some(path) = text("path") {
+                let short = shorten_path(path);
                 let mut extra = tool_activity_detail("patch", arguments)
                     .map(suffix)
                     .unwrap_or_default();
@@ -433,12 +478,13 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 ) {
                     extra.push_str(&suffix("all occurrences".to_string()));
                 }
-                return format!("{} {} {}{}", glyph, verb_col(verb), path.cyan(), extra);
+                return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), extra);
             }
         }
         "search_files" => {
             let pattern = text("pattern").unwrap_or("");
             let path = text("path").unwrap_or(".");
+            let short = shorten_path(path);
             let mode = text("output_mode").unwrap_or("content");
             let mode_tag = if mode == "content" {
                 String::new()
@@ -454,7 +500,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 glyph,
                 verb_col(verb),
                 quoted(pattern),
-                path.cyan(),
+                short.cyan(),
                 mode_tag,
                 include
             );
@@ -546,7 +592,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                     let value = match v {
                         serde_json::Value::String(s) => {
                             let first_line = s.lines().next().unwrap_or(s);
-                            format!("\"{}\"", truncate_visible(first_line, MAX_TOOL_ARG_CHARS))
+                            let shortened = shorten_paths_in_text(first_line);
+                            format!("\"{}\"", truncate_visible(&shortened, MAX_TOOL_ARG_CHARS))
                         }
                         other => other.to_string(),
                     };
@@ -818,6 +865,24 @@ pub fn format_tool_result(is_error: bool, output: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shorten_path_keeps_at_most_three_segments() {
+        assert_eq!(
+            shorten_path("~/Downloads/rust-agent-harness/crates/harness-core/src/tools/todo.rs"),
+            "src/tools/todo.rs"
+        );
+        assert_eq!(
+            shorten_path("downloads/rust-agent-harness/agents.md"),
+            "downloads/rust-agent-harness/agents.md"
+        );
+        assert_eq!(
+            shorten_path("/home/janelle/Downloads/rust-agent-harness/crates/harness-core/prompts.md"),
+            "crates/harness-core/prompts.md"
+        );
+        assert_eq!(shorten_path("agents.md"), "agents.md");
+        assert_eq!(shorten_path("."), ".");
+    }
 
     fn call(name: &str, arguments: serde_json::Value) -> String {
         format_tool_call(name, &arguments)

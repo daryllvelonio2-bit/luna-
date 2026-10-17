@@ -250,7 +250,6 @@ pub async fn run_interactive_chat(
             ui_obs.finish_reasoning();
             let call_fmt = format_tool_call(&name, &arguments);
             ui_obs.begin_block(OutputBlockKind::Tool);
-            ui_obs.emit_above(&call_fmt);
             ui_obs.start_activity(&name, &arguments);
             in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
                 call_formatted: call_fmt,
@@ -259,11 +258,22 @@ pub async fn run_interactive_chat(
         }
         harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
             ui_obs.stop_activity();
-            let res_fmt = format_tool_result(is_error, &output);
-            ui_obs.emit_above(&res_fmt);
-            if let Some(last) = in_flight_tools_obs.lock().unwrap().last_mut() {
-                last.result_formatted = res_fmt;
-            }
+            let status = if is_error {
+                " (failed)".red().to_string()
+            } else {
+                " (success)".green().to_string()
+            };
+            let line = {
+                let mut tools = in_flight_tools_obs.lock().unwrap();
+                if let Some(last) = tools.last_mut() {
+                    last.call_formatted.push_str(&status);
+                    last.result_formatted.clear();
+                    last.call_formatted.clone()
+                } else {
+                    format_tool_result(is_error, &output)
+                }
+            };
+            ui_obs.emit_above(&line);
         }
     }));
     if let Some(setup) = compaction {
