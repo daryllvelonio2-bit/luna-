@@ -467,13 +467,15 @@ export component AppWindow inherits Window {
                         alignment: start;
 
                         for msg in root.transcript : Rectangle {
-                            background: msg.role == "user" ? #191924 : #14141d;
-                            border-radius: 8px;
-                            border-width: 1px;
-                            border-color: msg.role == "user" ? #28283a : #20202e;
+                            background: msg.role == "user" ? #191924 : transparent;
+                            border-radius: msg.role == "user" ? 8px : 0px;
+                            border-width: msg.role == "user" ? 1px : 0px;
+                            border-color: msg.role == "user" ? #28283a : transparent;
 
                             VerticalLayout {
-                                padding: 12px;
+                                padding: msg.role == "user" ? 12px : 4px;
+                                padding-left: msg.role == "user" ? 14px : 2px;
+                                padding-right: msg.role == "user" ? 14px : 2px;
                                 spacing: 6px;
 
                                 HorizontalLayout {
@@ -493,7 +495,7 @@ export component AppWindow inherits Window {
 
                                 Text {
                                     text: msg.content;
-                                    color: #e4e4e7;
+                                    color: msg.role == "user" ? #f4f4f5 : #e4e4e7;
                                     font-size: 13px;
                                     wrap: word-wrap;
                                 }
