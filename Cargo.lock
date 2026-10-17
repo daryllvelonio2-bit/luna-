@@ -2150,6 +2150,9 @@ dependencies = [
  "chrono",
  "harness-core",
  "harness-evolver",
+ "harness-memory",
+ "harness-notes",
+ "harness-plugins",
  "harness-providers",
  "serde",
  "serde_json",
@@ -2157,7 +2160,9 @@ dependencies = [
  "slint-build",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

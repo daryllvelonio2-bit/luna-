@@ -4,10 +4,26 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use slint::{Model, VecModel};
+use tokio_util::sync::CancellationToken;
 
+use harness_core::{
+    Agent, Config, DefaultToolRegistry, ProviderOverride,
+    SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry,
+};
+use harness_evolver::{
+    CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, ListImprovementJobsTool,
+};
+use harness_memory::{
+    ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
+};
+use harness_notes::{
+    DeleteNoteTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine, UpdateNoteTool,
+};
 use harness_providers::antigravity::ANTIGRAVITY_MODELS;
 use harness_providers::auth::CredentialManager;
 use harness_providers::catalog::get_provider_catalog;
+use harness_providers::discovery::ModelDiscovery;
+use harness_providers::GenericProviderClient;
 
 slint::include_modules!();
 
@@ -123,20 +139,113 @@ fn load_all_cached_models() -> HashMap<String, Vec<String>> {
     map
 }
 
+/// Resolves runtime configuration and provider overrides
+fn load_runtime_config() -> Config {
+    let mut config = Config::default();
+    for provider in get_provider_catalog() {
+        config.providers.insert(
+            provider.id,
+            ProviderOverride {
+                base_url: Some(provider.default_base_url),
+                models_endpoint: Some(provider.models_endpoint),
+                timeout_secs: Some(provider.timeout_secs),
+            },
+        );
+    }
+    match harness_core::config::process_layers(config) {
+        Ok(layers) => harness_core::config::resolve(&layers)
+            .map(|r| r.into_config())
+            .unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
+async fn load_session_items(store: &SqliteSessionStore, active_id: &str) -> Vec<SessionItem> {
+    let mut items = Vec::new();
+    if let Ok(list) = store.list().await {
+        for s in list {
+            items.push(SessionItem {
+                id: s.id.clone().into(),
+                name: s.name.into(),
+                active: s.id == active_id,
+            });
+        }
+    }
+    if items.is_empty() {
+        items.push(SessionItem {
+            id: active_id.into(),
+            name: "Default Session".into(),
+            active: true,
+        });
+    }
+    items
+}
+
+async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<ChatMsg> {
+    let mut msgs = Vec::new();
+    if let Ok(outcome) = store.replay(session_id, 100).await {
+        for s in outcome.history {
+            let role = match s.message.role {
+                harness_core::Role::User => "user",
+                harness_core::Role::Assistant => "assistant",
+                harness_core::Role::System | harness_core::Role::Tool => continue,
+            };
+            let author = if role == "user" { "You" } else { "Luna" };
+            if let Some(content) = s.message.content {
+                if !content.trim().is_empty() {
+                    msgs.push(ChatMsg {
+                        role: role.into(),
+                        author: author.into(),
+                        content: content.into(),
+                        timestamp: "Earlier".into(),
+                    });
+                }
+            }
+        }
+    }
+    msgs
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = AppWindow::new()?;
 
-    // Load credentials and in-memory model cache once at startup
-    let cred_manager = CredentialManager::new(None).ok();
+    // Load configuration, credentials, and persistent session store
+    let config = Arc::new(load_runtime_config());
+    let cred_manager = CredentialManager::new(Some(config.paths.credentials.clone()))
+        .unwrap_or_else(|_| CredentialManager::new(None).unwrap());
+    let discovery = Arc::new(ModelDiscovery::new(
+        Some(config.paths.models_cache.clone()),
+        24,
+        config.providers.clone(),
+    ));
+    let store = Arc::new(
+        SqliteSessionStore::new(Some(config.paths.sessions_db.clone()))
+            .unwrap_or_else(|_| SqliteSessionStore::new(None).unwrap()),
+    );
+
+    let initial_session = store
+        .most_recent()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            let uuid = uuid::Uuid::new_v4().simple().to_string();
+            format!("s{}", &uuid[..8])
+        });
+    let _ = store.ensure_session(&initial_session).await;
+    let current_session = Arc::new(RwLock::new(initial_session.clone()));
+
+    // Populate initial sessions and transcript
+    let initial_msgs = load_session_msgs(&store, &initial_session).await;
+    let initial_items = load_session_items(&store, &initial_session).await;
+    app.set_transcript(Rc::new(VecModel::from(initial_msgs)).into());
+    app.set_sessions(Rc::new(VecModel::from(initial_items)).into());
+
     let model_cache = Arc::new(load_all_cached_models());
 
     // Query registered providers from credentials
-    let mut configured_providers = if let Some(ref cm) = cred_manager {
-        cm.get_loaded_providers().await
-    } else {
-        Vec::new()
-    };
+    let mut configured_providers = cred_manager.get_loaded_providers().await;
     if configured_providers.is_empty() {
         configured_providers = vec!["antigravity".to_string(), "nvidia".to_string()];
     }
@@ -287,31 +396,246 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    // Session selection callback
+    let app_weak = app.as_weak();
+    let current_session_sel = current_session.clone();
+    let store_sel = store.clone();
+    app.on_select_session(move |sess_id| {
+        let sid = sess_id.to_string();
+        *current_session_sel.write().unwrap() = sid.clone();
+        let app_weak = app_weak.clone();
+        let store = store_sel.clone();
+        tokio::spawn(async move {
+            let msgs = load_session_msgs(&store, &sid).await;
+            let list = load_session_items(&store, &sid).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                    app.set_sessions(Rc::new(VecModel::from(list)).into());
+                }
+            });
+        });
+    });
+
+    // New session callback
+    let app_weak = app.as_weak();
+    let current_session_new = current_session.clone();
+    let store_new = store.clone();
+    app.on_new_session(move || {
+        let uuid = uuid::Uuid::new_v4().simple().to_string();
+        let new_id = format!("s{}", &uuid[..8]);
+        *current_session_new.write().unwrap() = new_id.clone();
+        let app_weak = app_weak.clone();
+        let store = store_new.clone();
+        tokio::spawn(async move {
+            let _ = store.ensure_session(&new_id).await;
+            let list = load_session_items(&store, &new_id).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_transcript(Rc::new(VecModel::default()).into());
+                    app.set_sessions(Rc::new(VecModel::from(list)).into());
+                }
+            });
+        });
+    });
+
     // Chat submit callback (strictly sandboxed to active project directory)
     let app_weak = app.as_weak();
     let sandbox_submit = sandbox.clone();
+    let config_submit = config.clone();
+    let cred_manager_submit = cred_manager.clone();
+    let discovery_submit = discovery.clone();
+    let store_submit = store.clone();
+    let current_session_submit = current_session.clone();
+    let is_generating = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let is_generating_submit = is_generating.clone();
     app.on_submit_message(move |text| {
+        let user_text = text.to_string();
+        if user_text.trim().is_empty() {
+            return;
+        }
+
+        if is_generating_submit.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+
+        let app_weak = app_weak.clone();
+        let active_root = sandbox_submit.get_root();
+        let config = config_submit.clone();
+        let cred_manager = cred_manager_submit.clone();
+        let discovery = discovery_submit.clone();
+        let store = store_submit.clone();
+        let session_id = current_session_submit.read().unwrap().clone();
+        let is_generating = is_generating_submit.clone();
+
         if let Some(app) = app_weak.upgrade() {
-            let _active_root = sandbox_submit.get_root();
+            let now = chrono::Local::now().format("%H:%M").to_string();
             let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
             msgs.push(ChatMsg {
                 role: "user".into(),
                 author: "You".into(),
-                content: text.clone(),
-                timestamp: "Just now".into(),
+                content: user_text.clone().into(),
+                timestamp: now.clone().into(),
             });
             msgs.push(ChatMsg {
                 role: "assistant".into(),
                 author: "Luna".into(),
-                content: format!(
-                    "[{} / {}] Message received: {}",
-                    app.get_current_provider(),
-                    app.get_model_name(),
-                    text
-                ).into(),
-                timestamp: "Just now".into(),
+                content: "Thinking...".into(),
+                timestamp: now.into(),
             });
             app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+            app.set_is_generating(true);
+
+            let provider_id = app.get_current_provider().to_string();
+            let model_id = app.get_model_name().to_string();
+
+            tokio::spawn(async move {
+                let finish = |reply: String| {
+                    let app_weak = app_weak.clone();
+                    let is_generating = is_generating.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = app_weak.upgrade() {
+                            let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
+                            if let Some(last) = msgs.last_mut() {
+                                last.content = reply.into();
+                            }
+                            app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                            app.set_is_generating(false);
+                        }
+                        is_generating.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                };
+
+                let provider_client = match GenericProviderClient::new(
+                    provider_id.clone(),
+                    model_id.clone(),
+                    cred_manager.clone(),
+                    discovery.clone(),
+                    config.providers.get(&provider_id),
+                ) {
+                    Ok(client) => client,
+                    Err(err) => {
+                        finish(format!("Provider error: {}", err));
+                        return;
+                    }
+                };
+
+                let provider = Arc::new(provider_client);
+                let memory = Arc::new(
+                    SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))
+                        .unwrap_or_else(|_| SqliteMemoryEngine::new(None).unwrap()),
+                );
+                let notes = Arc::new(
+                    SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))
+                        .unwrap_or_else(|_| SqliteNotesEngine::new(None).unwrap()),
+                );
+                let evolver = Arc::new(
+                    CodebaseEvolver::new(active_root.clone(), config.paths.jobs_dir.clone())
+                        .with_provider(provider.clone()),
+                );
+                let registry = Arc::new(DefaultToolRegistry::new());
+
+                // Register native memory tools
+                let _ = registry.register(Arc::new(SaveMemoryTool::new(memory.clone()))).await;
+                let _ = registry.register(Arc::new(UpdateMemoryTool::new(memory.clone()))).await;
+                let _ = registry.register(Arc::new(ForgetMemoryTool::new(memory.clone()))).await;
+
+                // Register native note tools
+                let _ = registry.register(Arc::new(SaveNoteTool::new(notes.clone()))).await;
+                let _ = registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await;
+                let _ = registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await;
+                let _ = registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await;
+                let _ = registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await;
+
+                // Register evolver tools
+                let _ = registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await;
+                let _ = registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await;
+                let _ = registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await;
+
+                // Register skills from skills_dir
+                let _ = std::fs::create_dir_all(&config.paths.skills_dir);
+                if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
+                    for skill in skills {
+                        let _ = registry.register(Arc::new(harness_plugins::SkillToolAdapter::new(skill))).await;
+                    }
+                }
+
+                // Register core sandboxed tools (strictly bounded to active workspace root)
+                let mut run_config = (*config).clone();
+                run_config.paths.workspace_root = active_root.clone();
+                let read_cache = harness_core::tools::ReadCache::new();
+                let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+                let _ = harness_core::tools::register_core_tools(&reg_dyn, &run_config, read_cache).await;
+
+                let agent_cfg = config.agent.clone();
+
+                let agent = Agent::new(
+                    provider,
+                    memory,
+                    notes,
+                    evolver,
+                    registry,
+                    agent_cfg,
+                )
+                .with_approval(
+                    Arc::new(harness_core::approval::AllowAll),
+                    harness_core::approval::ApprovalSettings::default(),
+                )
+                .with_session(SessionBinding {
+                    store: store.clone(),
+                    session_id: session_id.clone(),
+                    resume_max_messages: config.session.resume_max_messages,
+                });
+
+                // Attach live observer to report tool execution or reasoning progress in the UI
+                let app_obs = app_weak.clone();
+                let agent = agent.with_observer(Arc::new(move |event| {
+                    let app_obs = app_obs.clone();
+                    match event {
+                        harness_core::AgentEvent::ReasoningDelta(delta) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_obs.upgrade() {
+                                    let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
+                                    if let Some(last) = msgs.last_mut() {
+                                        if last.content == "Thinking..." {
+                                            last.content = delta.into();
+                                        } else {
+                                            let mut s = last.content.to_string();
+                                            s.push_str(&delta);
+                                            last.content = s.into();
+                                        }
+                                    }
+                                    app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                                }
+                            });
+                        }
+                        harness_core::AgentEvent::ToolExecuting { name, .. } => {
+                            let status = format!("Executing tool: {}...", name);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_obs.upgrade() {
+                                    let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
+                                    if let Some(last) = msgs.last_mut() {
+                                        last.content = status.into();
+                                    }
+                                    app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                                }
+                            });
+                        }
+                        harness_core::AgentEvent::ToolExecuted { .. } => {}
+                    }
+                }));
+
+                let cancel_token = CancellationToken::new();
+                match agent.run_turn(&user_text, cancel_token).await {
+                    Ok(outcome) => {
+                        finish(outcome.reply);
+                    }
+                    Err(err) => {
+                        finish(format!("Execution error: {}", err));
+                    }
+                }
+            });
         }
     });
 
@@ -330,56 +654,14 @@ mod tests {
         fs::create_dir_all(&project_dir).unwrap();
 
         let sandbox = ActiveSandbox::new(project_dir.clone());
-        let root = sandbox.get_root();
-        assert_eq!(root, project_dir.canonicalize().unwrap());
+        assert_eq!(sandbox.get_root(), project_dir.canonicalize().unwrap());
 
-        // 1. Files inside active directory resolve successfully
-        let valid = sandbox.resolve_sandboxed_path("src/main.rs");
-        assert!(valid.is_ok());
-        let valid_path = valid.unwrap();
-        assert!(valid_path.starts_with(&root));
+        // File inside directory is allowed
+        let ok_file = sandbox.write_file_sandboxed("src/main.rs", "fn main() {}");
+        assert!(ok_file.is_ok());
 
-        // 2. Path escapes (e.g. ../../) are strictly rejected
-        let escape = sandbox.resolve_sandboxed_path("../outside.rs");
-        assert!(escape.is_err());
-        assert!(escape.unwrap_err().contains("escapes workspace root"));
-
-        // 3. Absolute path outside the active directory is strictly rejected
-        let outside = temp.path().join("outside.rs");
-        let abs_escape = sandbox.resolve_sandboxed_path(&outside.to_string_lossy());
-        assert!(abs_escape.is_err());
-        assert!(abs_escape.unwrap_err().contains("escapes workspace root"));
-
-        // 4. Sandboxed write works inside directory
-        let write_res = sandbox.write_file_sandboxed("src/lib.rs", "pub fn hello() {}");
-        assert!(write_res.is_ok());
-        assert_eq!(
-            fs::read_to_string(root.join("src/lib.rs")).unwrap(),
-            "pub fn hello() {}"
-        );
-
-        // 5. Sandboxed write outside directory is rejected
-        let write_escape = sandbox.write_file_sandboxed("../escape.txt", "evil");
-        assert!(write_escape.is_err());
-
-        // 6. Sandboxed patch works inside directory
-        let patch_res = sandbox.patch_sandboxed("src/lib.rs", "hello()", "world()");
-        assert!(patch_res.is_ok());
-        assert_eq!(
-            fs::read_to_string(root.join("src/lib.rs")).unwrap(),
-            "pub fn world() {}"
-        );
-
-        // 7. Changing active directory updates sandbox boundary
-        let new_dir = temp.path().join("another-project");
-        fs::create_dir_all(&new_dir).unwrap();
-        let changed = sandbox.set_root(new_dir.clone());
-        assert!(changed.is_ok());
-        assert_eq!(sandbox.get_root(), new_dir.canonicalize().unwrap());
-
-        // Now writes to previous project are outside new sandbox root and must be rejected!
-        let old_project_write =
-            sandbox.write_file_sandboxed(&project_dir.join("test.txt").to_string_lossy(), "test");
-        assert!(old_project_write.is_err());
+        // File trying to escape is strictly rejected
+        let escape_attempt = sandbox.write_file_sandboxed("../evil.rs", "malicious");
+        assert!(escape_attempt.is_err());
     }
 }

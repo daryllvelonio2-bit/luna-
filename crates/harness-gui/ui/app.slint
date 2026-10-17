@@ -191,6 +191,7 @@ export component AppWindow inherits Window {
     in-out property <string> current_file: "crates/harness-gui/src/main.rs";
     in-out property <string> composer_text: "";
     in-out property <bool> is_sandboxed: true;
+    in-out property <bool> is_generating: false;
 
     in-out property <bool> model_picker_open: false;
     in-out property <int> picker_step: 0;
@@ -326,21 +327,92 @@ export component AppWindow inherits Window {
                     padding: 10px;
                     spacing: 8px;
 
-                    // Header with title
+                    // Header with title and new chat button
                     HorizontalLayout {
-                        alignment: start;
+                        alignment: space-between;
+                        padding-left: 2px;
+                        padding-right: 2px;
+
                         Text {
-                            text: "EXPLORER";
+                            text: "CHATS";
                             color: #71717a;
                             font-size: 10px;
                             font-weight: 700;
                             vertical-alignment: center;
                         }
+
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 4px;
+                            background: new_chat_touch.has-hover ? #252538 : transparent;
+
+                            Text {
+                                text: "+";
+                                color: new_chat_touch.has-hover ? #38bdf8 : #a1a1aa;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+
+                            new_chat_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.new_session();
+                                }
+                            }
+                        }
                     }
 
-                    // Clean empty explorer body
-                    Rectangle {
+                    // Sessions list
+                    ScrollView {
                         vertical-stretch: 1;
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+
+                            for sess in root.sessions : Rectangle {
+                                height: 32px;
+                                border-radius: 6px;
+                                background: s_touch.pressed ? #2c2c40 : (s_touch.has-hover ? #222234 : (sess.active ? #1e1e2c : transparent));
+                                border-width: sess.active ? 1px : 0px;
+                                border-color: sess.active ? #2e2e46 : transparent;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+                                    alignment: start;
+
+                                    Text {
+                                        text: "💬";
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: sess.name != "" ? sess.name : sess.id;
+                                        color: sess.active ? #38bdf8 : (s_touch.has-hover ? #f4f4f5 : #a1a1aa);
+                                        font-size: 12px;
+                                        font-weight: sess.active ? 700 : 500;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                s_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.select_session(sess.id);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Bottom Settings
@@ -469,8 +541,9 @@ export component AppWindow inherits Window {
                                     color: #f4f4f5;
                                     font-size: 13px;
                                     vertical-alignment: center;
+                                    enabled: !root.is_generating;
                                     accepted => {
-                                        if (root.composer_text != "") {
+                                        if (root.composer_text != "" && !root.is_generating) {
                                             root.submit_message(root.composer_text);
                                             root.composer_text = "";
                                         }
@@ -539,11 +612,11 @@ export component AppWindow inherits Window {
                                 width: 26px;
                                 height: 24px;
                                 border-radius: 6px;
-                                background: root.composer_text != "" ? #38bdf8 : #242434;
+                                background: (root.composer_text != "" && !root.is_generating) ? #38bdf8 : #242434;
 
                                 Text {
-                                    text: "↑";
-                                    color: root.composer_text != "" ? #000000 : #71717a;
+                                    text: root.is_generating ? "…" : "↑";
+                                    color: (root.composer_text != "" && !root.is_generating) ? #000000 : #71717a;
                                     font-size: 13px;
                                     font-weight: 700;
                                     horizontal-alignment: center;
@@ -553,9 +626,10 @@ export component AppWindow inherits Window {
                                 }
 
                                 TouchArea {
+                                    enabled: !root.is_generating;
                                     mouse-cursor: pointer;
                                     clicked => {
-                                        if (root.composer_text != "") {
+                                        if (root.composer_text != "" && !root.is_generating) {
                                             root.submit_message(root.composer_text);
                                             root.composer_text = "";
                                         }
