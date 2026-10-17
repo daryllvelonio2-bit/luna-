@@ -231,6 +231,33 @@ fn format_tool_call_detail(name: &str, arguments: &serde_json::Value) -> String 
     }
 }
 
+
+fn format_process_summary(tool_count: usize, tool_names: &[String], duration: std::time::Duration, has_reasoning: bool) -> String {
+    let mut parts = Vec::new();
+    if tool_count > 0 {
+        let mut unique: Vec<String> = Vec::new();
+        for n in tool_names {
+            if !unique.contains(n) {
+                unique.push(n.clone());
+            }
+        }
+        let label = if tool_count == 1 {
+            format!("1 tool: {}", unique.first().cloned().unwrap_or_else(|| "tool".to_string()))
+        } else if unique.len() <= 2 {
+            format!("{} tools: {}", tool_count, unique.join(", "))
+        } else {
+            format!("{} tools: {}, {}, +{}", tool_count, unique[0], unique[1], unique.len() - 2)
+        };
+        parts.push(label);
+    }
+    if duration.as_millis() >= 100 {
+        parts.push(format!("thought for {:.1}s", duration.as_secs_f32()));
+    } else if has_reasoning {
+        parts.push("thinking".to_string());
+    }
+    parts.join(" • ")
+}
+
 fn format_tool_result_summary(output: &str, is_error: bool) -> String {
     let icon = if is_error { "✗" } else { "✓" };
     let first_line = output.lines().find(|l| !l.trim().is_empty()).unwrap_or(output).trim();
@@ -327,10 +354,17 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
             let reasoning = s.message.reasoning.or(extracted_think).unwrap_or_default();
 
             let mut tool_strs = Vec::new();
+            let mut tool_names = Vec::new();
             for tc in &s.message.tool_calls {
+                tool_names.push(tc.name.clone());
                 tool_strs.push(format_tool_call_detail(&tc.name, &tc.arguments));
             }
             let tool_calls = tool_strs.join("\n");
+            let process_summary = if !tool_strs.is_empty() || !reasoning.is_empty() {
+                format_process_summary(tool_strs.len(), &tool_names, std::time::Duration::ZERO, !reasoning.is_empty())
+            } else {
+                String::new()
+            };
 
             if role == "assistant" {
                 if let Some(last) = msgs.last_mut().filter(|m| m.role == "assistant") {
@@ -365,6 +399,9 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
                             last.content = cur.into();
                         }
                     }
+                    if !process_summary.is_empty() {
+                        last.process_summary = process_summary.into();
+                    }
                     continue;
                 }
             }
@@ -376,6 +413,7 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
                     content: content.into(),
                     reasoning: reasoning.into(),
                     tool_calls: tool_calls.into(),
+                    process_summary: process_summary.into(),
                     status: String::new().into(),
                     timestamp: "Earlier".into(),
                 });
@@ -744,6 +782,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 content: user_text.clone().into(),
                 reasoning: String::new().into(),
                 tool_calls: String::new().into(),
+                process_summary: String::new().into(),
                 status: String::new().into(),
                 timestamp: now.clone().into(),
             });
@@ -753,6 +792,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 content: String::new().into(),
                 reasoning: String::new().into(),
                 tool_calls: String::new().into(),
+                process_summary: String::new().into(),
                 status: "Thinking…".into(),
                 timestamp: now.into(),
             });
@@ -763,7 +803,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model_id = app.get_model_name().to_string();
 
             tokio::spawn(async move {
+                let start_time = std::time::Instant::now();
                 let turn_tools: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let turn_tool_names: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
                 let turn_reasoning: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
                 let current_tool_call: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
 
@@ -771,11 +813,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let app_weak = app_weak.clone();
                     let is_generating = is_generating.clone();
                     let turn_tools = turn_tools.clone();
+                    let turn_tool_names = turn_tool_names.clone();
                     let turn_reasoning = turn_reasoning.clone();
 
                     move |raw_reply: String, model_reasoning: Option<String>| {
                         let app_weak = app_weak.clone();
                         let is_generating = is_generating.clone();
+                        let duration = start_time.elapsed();
                         let (cleaned_reply, extracted_think) = strip_dsml_and_extract_thinking(&raw_reply);
 
                         let mut final_think = model_reasoning.or(extracted_think);
@@ -787,6 +831,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         let tools_str = turn_tools.lock().unwrap().join("\n");
+                        let tool_count = turn_tools.lock().unwrap().len();
+                        let tool_names = turn_tool_names.lock().unwrap().clone();
+                        let has_reasoning = final_think.is_some();
+                        let summary = format_process_summary(tool_count, &tool_names, duration, has_reasoning);
 
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = app_weak.upgrade() {
@@ -794,6 +842,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(last) = msgs.last_mut() {
                                     last.content = cleaned_reply.into();
                                     last.status = String::new().into();
+                                    last.process_summary = summary.into();
                                     if !tools_str.is_empty() {
                                         last.tool_calls = tools_str.into();
                                     }
@@ -893,12 +942,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Attach live observer to report tool execution or reasoning progress in the UI
                 let app_obs = app_weak.clone();
                 let tools_obs = turn_tools.clone();
+                let tool_names_obs = turn_tool_names.clone();
                 let reasoning_obs = turn_reasoning.clone();
                 let call_obs = current_tool_call.clone();
 
                 let agent = agent.with_observer(Arc::new(move |event| {
                     let app_obs = app_obs.clone();
                     let tools_obs = tools_obs.clone();
+                    let tool_names_obs = tool_names_obs.clone();
                     let reasoning_obs = reasoning_obs.clone();
                     let call_obs = call_obs.clone();
 
@@ -918,6 +969,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+                            tool_names_obs.lock().unwrap().push(name.clone());
                             let detail = format_tool_call_detail(&name, &arguments);
                             *call_obs.lock().unwrap() = detail.clone();
                             let status = format!("⚡ Executing {detail}…");
@@ -1014,5 +1066,18 @@ mod tests {
         let (cleaned2, thinking2) = strip_dsml_and_extract_thinking(standard);
         assert_eq!(cleaned2, "Normal message without any DSML tags.");
         assert_eq!(thinking2, None);
+    }
+
+    #[test]
+    fn test_format_process_summary() {
+        let tools = vec!["read_file".to_string(), "terminal".to_string()];
+        let summary = format_process_summary(2, &tools, std::time::Duration::from_millis(3200), true);
+        assert_eq!(summary, "2 tools: read_file, terminal • thought for 3.2s");
+
+        let summary_no_tools = format_process_summary(0, &[], std::time::Duration::from_millis(1500), true);
+        assert_eq!(summary_no_tools, "thought for 1.5s");
+
+        let summary_instant = format_process_summary(1, &["search_files".to_string()], std::time::Duration::ZERO, false);
+        assert_eq!(summary_instant, "1 tool: search_files");
     }
 }

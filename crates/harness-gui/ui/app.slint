@@ -6,6 +6,7 @@ export struct ChatMsg {
     content: string,
     reasoning: string,
     tool_calls: string,
+    process_summary: string,
     status: string,
     timestamp: string,
 }
@@ -173,6 +174,139 @@ component ModelRow inherits Rectangle {
             root.scrolled(step);
             return accept;
         }
+    }
+}
+
+component AssistantMessage inherits VerticalLayout {
+    in-out property <ChatMsg> msg;
+    property <bool> expanded: false;
+
+    padding-left: 4px;
+    padding-right: 4px;
+    spacing: 8px;
+
+    // Header
+    HorizontalLayout {
+        alignment: start;
+        spacing: 8px;
+
+        Text {
+            text: "✦ Luna";
+            color: #c084fc;
+            font-weight: 700;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.msg.timestamp;
+            color: #52525b;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+
+    // Live in-flight execution status (when running)
+    if root.msg.status != "" : HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: "⚡";
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.msg.status;
+            color: #38bdf8;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // 1-line collapsed process summary (total tool calls + thoughts time)
+    if root.msg.process_summary != "" : HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: root.expanded ? "▾" : "▸";
+            color: p_touch.has-hover ? #38bdf8 : #71717a;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.msg.process_summary;
+            color: p_touch.has-hover ? #38bdf8 : #828292;
+            font-size: 11px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+
+        p_touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.expanded = !root.expanded;
+            }
+        }
+    }
+
+    // Expanded details: only shown when toggled open
+    if root.expanded : VerticalLayout {
+        spacing: 6px;
+        padding-left: 8px;
+
+        // Reasoning / Chain-of-thought
+        if root.msg.reasoning != "" : VerticalLayout {
+            spacing: 2px;
+
+            Text {
+                text: "💭 Thinking";
+                color: #71717a;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.msg.reasoning;
+                color: #828292;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+
+        // Tool execution history details
+        if root.msg.tool_calls != "" : VerticalLayout {
+            spacing: 2px;
+
+            Text {
+                text: "⚡ Tools Executed";
+                color: #71717a;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.msg.tool_calls;
+                color: #94a3b8;
+                font-size: 11px;
+                font-family: "monospace";
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // Final unboxed reply (pure typography)
+    if root.msg.content != "" : Text {
+        text: root.msg.content;
+        color: #e4e4e7;
+        font-size: 13px;
+        wrap: word-wrap;
     }
 }
 
@@ -718,102 +852,9 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // Assistant message: Antigravity unboxed typography (zero repeating empty headers)
-                            if msg.role != "user" && (msg.content != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : VerticalLayout {
-                                padding-left: 4px;
-                                padding-right: 4px;
-                                spacing: 8px;
-
-                                // Header
-                                HorizontalLayout {
-                                    alignment: start;
-                                    spacing: 8px;
-
-                                    Text {
-                                        text: "✦ Luna";
-                                        color: #c084fc;
-                                        font-weight: 700;
-                                        font-size: 12px;
-                                        vertical-alignment: center;
-                                    }
-
-                                    Text {
-                                        text: msg.timestamp;
-                                        color: #52525b;
-                                        font-size: 10px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Live in-flight execution status (no box, clean status line)
-                                if msg.status != "" : HorizontalLayout {
-                                    spacing: 6px;
-                                    alignment: start;
-
-                                    Text {
-                                        text: "⚡";
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-
-                                    Text {
-                                        text: msg.status;
-                                        color: #38bdf8;
-                                        font-size: 11px;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                    }
-                                }
-
-                                // Reasoning / Chain-of-thought (no box, clean dimmed thought stream)
-                                if msg.reasoning != "" : VerticalLayout {
-                                    spacing: 2px;
-                                    padding-left: 4px;
-
-                                    Text {
-                                        text: "💭 Thinking";
-                                        color: #71717a;
-                                        font-size: 10px;
-                                        font-weight: 700;
-                                    }
-
-                                    Text {
-                                        text: msg.reasoning;
-                                        color: #828292;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-
-                                // Tool execution history details (no box, clean monospace activity text)
-                                if msg.tool_calls != "" : VerticalLayout {
-                                    spacing: 2px;
-                                    padding-left: 4px;
-
-                                    Text {
-                                        text: "⚡ Tools Executed";
-                                        color: #71717a;
-                                        font-size: 10px;
-                                        font-weight: 700;
-                                    }
-
-                                    Text {
-                                        text: msg.tool_calls;
-                                        color: #94a3b8;
-                                        font-size: 11px;
-                                        font-family: "monospace";
-                                        wrap: word-wrap;
-                                    }
-                                }
-
-                                // Final unboxed reply (pure typography)
-                                if msg.content != "" : Text {
-                                    text: msg.content;
-                                    color: #e4e4e7;
-                                    font-size: 13px;
-                                    wrap: word-wrap;
-                                }
+                            // Assistant message: Clean unboxed layout with collapsible 1-line process
+                            if msg.role != "user" && (msg.content != "" || msg.process_summary != "" || msg.tool_calls != "" || msg.reasoning != "" || msg.status != "") : AssistantMessage {
+                                msg: msg;
                             }
                         }
                     }
