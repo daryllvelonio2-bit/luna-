@@ -568,5 +568,26 @@ impl SessionStore for SqliteSessionStore {
             other => Err(session_error("failed to read the most recent session", other)),
         })
     }
+
+    async fn delete_session(&self, id: &str) -> Result<bool, HarnessError> {
+        let conn = self.conn.lock().await;
+        // `messages.session_id` is declared `REFERENCES sessions(id) ON DELETE CASCADE` and the
+        // schema enables foreign keys, so removing the session row is enough to drop its history
+        // without a second statement that could half-succeed.
+        let removed = conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])
+            .map_err(|error| session_error("failed to delete the session", error))?;
+        Ok(removed > 0)
+    }
+
+    async fn delete_all_sessions(&self) -> Result<usize, HarnessError> {
+        let conn = self.conn.lock().await;
+        // One statement, one implicit transaction: the cascade drops every message row, so the
+        // store cannot be left holding messages whose session is already gone.
+        let removed = conn
+            .execute("DELETE FROM sessions", [])
+            .map_err(|error| session_error("failed to delete all sessions", error))?;
+        Ok(removed)
+    }
 }
 

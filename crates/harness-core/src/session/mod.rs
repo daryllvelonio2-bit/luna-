@@ -117,6 +117,16 @@ pub trait SessionStore: Send + Sync {
 
     /// The most recently updated session id, if any.
     async fn most_recent(&self) -> Result<Option<String>, HarnessError>;
+
+    /// Delete a session and every message it holds. Returns `true` when a session row was
+    /// removed, so a caller can tell "deleted" apart from "was already gone".
+    async fn delete_session(&self, id: &str) -> Result<bool, HarnessError>;
+
+    /// Delete every session and every message. Returns how many sessions were removed.
+    /// Bulk-delete in one statement rather than a `list()` + `delete_session()` loop, so a
+    /// caller that has thousands of sessions does not pay a round trip per row, and a
+    /// concurrent append cannot slip a half-cleared store between two deletes.
+    async fn delete_all_sessions(&self) -> Result<usize, HarnessError>;
 }
 
 /// Default `paths.sessions_db`, also used when a caller passes `None`.

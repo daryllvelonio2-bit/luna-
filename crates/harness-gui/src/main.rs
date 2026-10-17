@@ -167,6 +167,7 @@ async fn load_session_items(store: &SqliteSessionStore, active_id: &str) -> Vec<
             items.push(SessionItem {
                 id: s.id.clone().into(),
                 name: s.name.into(),
+                title: s.title.into(),
                 active: s.id == active_id,
             });
         }
@@ -175,10 +176,66 @@ async fn load_session_items(store: &SqliteSessionStore, active_id: &str) -> Vec<
         items.push(SessionItem {
             id: active_id.into(),
             name: "Default Session".into(),
+            title: String::new().into(),
             active: true,
         });
     }
     items
+}
+
+
+fn format_tool_call_detail(name: &str, arguments: &serde_json::Value) -> String {
+    let arg_str = |key: &str| arguments.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    match name {
+        "read_file" => {
+            let path = arg_str("path");
+            let offset = arguments.get("offset").and_then(|v| v.as_u64());
+            let limit = arguments.get("limit").and_then(|v| v.as_u64());
+            let range = match (offset, limit) {
+                (Some(o), Some(l)) => format!(" (L{}-{})", o, o + l.saturating_sub(1)),
+                (Some(o), None) => format!(" (L{}+)", o),
+                (None, Some(l)) => format!(" (L1-{})", l),
+                _ => String::new(),
+            };
+            format!("📖 read_file: {path}{range}")
+        }
+        "write_file" => {
+            let path = arg_str("path");
+            let lines = arg_str("content").lines().count();
+            format!("✍ write_file: {path} ({lines} lines)")
+        }
+        "patch" => {
+            let path = arg_str("path");
+            format!("🩹 patch: {path}")
+        }
+        "terminal" | "shell" | "bash" => {
+            let cmd = arg_str("command");
+            let first_line = cmd.lines().next().unwrap_or(cmd).trim();
+            format!("💻 terminal: $ {first_line}")
+        }
+        "search_files" => {
+            let pat = arg_str("pattern");
+            let path = arg_str("path");
+            let target = arg_str("target");
+            format!("🔍 search_files: \"{pat}\" in {path} ({target})")
+        }
+        "list_files" => {
+            let path = arg_str("path");
+            format!("📂 list_files: {path}")
+        }
+        _ => {
+            let short_args = arguments.to_string();
+            let truncated: String = short_args.chars().take(80).collect();
+            format!("🔧 {name}: {truncated}")
+        }
+    }
+}
+
+fn format_tool_result_summary(output: &str, is_error: bool) -> String {
+    let icon = if is_error { "✗" } else { "✓" };
+    let first_line = output.lines().find(|l| !l.trim().is_empty()).unwrap_or(output).trim();
+    let truncated: String = first_line.chars().take(100).collect();
+    format!("{icon} {truncated}")
 }
 
 async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<ChatMsg> {
@@ -191,15 +248,25 @@ async fn load_session_msgs(store: &SqliteSessionStore, session_id: &str) -> Vec<
                 harness_core::Role::System | harness_core::Role::Tool => continue,
             };
             let author = if role == "user" { "You" } else { "Luna" };
-            if let Some(content) = s.message.content {
-                if !content.trim().is_empty() {
-                    msgs.push(ChatMsg {
-                        role: role.into(),
-                        author: author.into(),
-                        content: content.into(),
-                        timestamp: "Earlier".into(),
-                    });
-                }
+            let content = s.message.content.unwrap_or_default();
+            let reasoning = s.message.reasoning.unwrap_or_default();
+
+            let mut tool_strs = Vec::new();
+            for tc in &s.message.tool_calls {
+                tool_strs.push(format_tool_call_detail(&tc.name, &tc.arguments));
+            }
+            let tool_calls = tool_strs.join("\n");
+
+            if !content.trim().is_empty() || !tool_calls.is_empty() || !reasoning.is_empty() {
+                msgs.push(ChatMsg {
+                    role: role.into(),
+                    author: author.into(),
+                    content: content.into(),
+                    reasoning: reasoning.into(),
+                    tool_calls: tool_calls.into(),
+                    status: String::new().into(),
+                    timestamp: "Earlier".into(),
+                });
             }
         }
     }
@@ -439,6 +506,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    // Delete session callback: drops the chat and its stored messages, then refreshes the sidebar.
+    let app_weak = app.as_weak();
+    let current_session_del = current_session.clone();
+    let store_del = store.clone();
+    app.on_delete_session(move |sess_id| {
+        let sid = sess_id.to_string();
+        let app_weak = app_weak.clone();
+        let current_session = current_session_del.clone();
+        let store = store_del.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store.delete_session(&sid).await {
+                tracing::warn!("failed to delete session '{sid}': {error}");
+                return;
+            }
+
+            // Deleting the chat on screen has to leave *some* chat behind: the most recent
+            // survivor, or a fresh empty one when it was the last.
+            let active = current_session.read().unwrap().clone();
+            let deleted_active = active == sid;
+            let next_active = if deleted_active {
+                match store.most_recent().await.ok().flatten() {
+                    Some(id) => id,
+                    None => {
+                        let uuid = uuid::Uuid::new_v4().simple().to_string();
+                        let id = format!("s{}", &uuid[..8]);
+                        let _ = store.ensure_session(&id).await;
+                        id
+                    }
+                }
+            } else {
+                active
+            };
+            *current_session.write().unwrap() = next_active.clone();
+
+            let msgs = if deleted_active {
+                Some(load_session_msgs(&store, &next_active).await)
+            } else {
+                None
+            };
+            let list = load_session_items(&store, &next_active).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    if let Some(msgs) = msgs {
+                        app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                    }
+                    app.set_sessions(Rc::new(VecModel::from(list)).into());
+                }
+            });
+        });
+    });
+
+    // Delete-all callback: empties the session store, then opens a fresh chat so the window
+    // is never left pointing at a transcript that no longer exists on disk.
+    let app_weak = app.as_weak();
+    let current_session_clear = current_session.clone();
+    let store_clear = store.clone();
+    app.on_delete_all_sessions(move || {
+        let app_weak = app_weak.clone();
+        let current_session = current_session_clear.clone();
+        let store = store_clear.clone();
+        tokio::spawn(async move {
+            match store.delete_all_sessions().await {
+                Ok(removed) => tracing::debug!("deleted {removed} sessions"),
+                Err(error) => {
+                    tracing::warn!("failed to delete all sessions: {error}");
+                    return;
+                }
+            }
+
+            let uuid = uuid::Uuid::new_v4().simple().to_string();
+            let new_id = format!("s{}", &uuid[..8]);
+            if let Err(error) = store.ensure_session(&new_id).await {
+                tracing::warn!("failed to open a session after clearing the store: {error}");
+                return;
+            }
+            *current_session.write().unwrap() = new_id.clone();
+
+            let list = load_session_items(&store, &new_id).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_transcript(Rc::new(VecModel::default()).into());
+                    app.set_sessions(Rc::new(VecModel::from(list)).into());
+                }
+            });
+        });
+    });
+
     // Chat submit callback (strictly sandboxed to active project directory)
     let app_weak = app.as_weak();
     let sandbox_submit = sandbox.clone();
@@ -476,12 +630,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 role: "user".into(),
                 author: "You".into(),
                 content: user_text.clone().into(),
+                reasoning: String::new().into(),
+                tool_calls: String::new().into(),
+                status: String::new().into(),
                 timestamp: now.clone().into(),
             });
             msgs.push(ChatMsg {
                 role: "assistant".into(),
                 author: "Luna".into(),
-                content: "Thinking...".into(),
+                content: String::new().into(),
+                reasoning: String::new().into(),
+                tool_calls: String::new().into(),
+                status: "Thinking…".into(),
                 timestamp: now.into(),
             });
             app.set_transcript(Rc::new(VecModel::from(msgs)).into());
@@ -491,20 +651,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let model_id = app.get_model_name().to_string();
 
             tokio::spawn(async move {
-                let finish = |reply: String| {
+                let turn_tools: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let turn_reasoning: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+                let current_tool_call: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+
+                let finish = {
                     let app_weak = app_weak.clone();
                     let is_generating = is_generating.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(app) = app_weak.upgrade() {
-                            let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
-                            if let Some(last) = msgs.last_mut() {
-                                last.content = reply.into();
+                    let turn_tools = turn_tools.clone();
+                    let turn_reasoning = turn_reasoning.clone();
+
+                    move |reply: String| {
+                        let app_weak = app_weak.clone();
+                        let is_generating = is_generating.clone();
+                        let tools_str = turn_tools.lock().unwrap().join("\n");
+                        let reasoning_str = turn_reasoning.lock().unwrap().clone();
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = app_weak.upgrade() {
+                                let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
+                                if let Some(last) = msgs.last_mut() {
+                                    last.content = reply.into();
+                                    last.status = String::new().into();
+                                    if !tools_str.is_empty() {
+                                        last.tool_calls = tools_str.into();
+                                    }
+                                    if !reasoning_str.is_empty() {
+                                        last.reasoning = reasoning_str.into();
+                                    }
+                                }
+                                app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                                app.set_is_generating(false);
                             }
-                            app.set_transcript(Rc::new(VecModel::from(msgs)).into());
-                            app.set_is_generating(false);
-                        }
-                        is_generating.store(false, std::sync::atomic::Ordering::SeqCst);
-                    });
+                            is_generating.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
+                    }
                 };
 
                 let provider_client = match GenericProviderClient::new(
@@ -590,39 +771,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Attach live observer to report tool execution or reasoning progress in the UI
                 let app_obs = app_weak.clone();
+                let tools_obs = turn_tools.clone();
+                let reasoning_obs = turn_reasoning.clone();
+                let call_obs = current_tool_call.clone();
+
                 let agent = agent.with_observer(Arc::new(move |event| {
                     let app_obs = app_obs.clone();
+                    let tools_obs = tools_obs.clone();
+                    let reasoning_obs = reasoning_obs.clone();
+                    let call_obs = call_obs.clone();
+
                     match event {
                         harness_core::AgentEvent::ReasoningDelta(delta) => {
+                            reasoning_obs.lock().unwrap().push_str(&delta);
+                            let current_r = reasoning_obs.lock().unwrap().clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_obs.upgrade() {
                                     let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
                                     if let Some(last) = msgs.last_mut() {
-                                        if last.content == "Thinking..." {
-                                            last.content = delta.into();
-                                        } else {
-                                            let mut s = last.content.to_string();
-                                            s.push_str(&delta);
-                                            last.content = s.into();
-                                        }
+                                        last.reasoning = current_r.into();
+                                        last.status = "Thinking…".into();
                                     }
                                     app.set_transcript(Rc::new(VecModel::from(msgs)).into());
                                 }
                             });
                         }
-                        harness_core::AgentEvent::ToolExecuting { name, .. } => {
-                            let status = format!("Executing tool: {}...", name);
+                        harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+                            let detail = format_tool_call_detail(&name, &arguments);
+                            *call_obs.lock().unwrap() = detail.clone();
+                            let status = format!("⚡ Executing {detail}…");
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = app_obs.upgrade() {
                                     let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
                                     if let Some(last) = msgs.last_mut() {
-                                        last.content = status.into();
+                                        last.status = status.into();
                                     }
                                     app.set_transcript(Rc::new(VecModel::from(msgs)).into());
                                 }
                             });
                         }
-                        harness_core::AgentEvent::ToolExecuted { .. } => {}
+                        harness_core::AgentEvent::ToolExecuted { name: _, output, is_error } => {
+                            let call_label = call_obs.lock().unwrap().clone();
+                            let summary = format_tool_result_summary(&output, is_error);
+                            let entry = if call_label.is_empty() {
+                                summary
+                            } else {
+                                format!("{call_label}\n   ↳ {summary}")
+                            };
+                            tools_obs.lock().unwrap().push(entry);
+                            let current_tools = tools_obs.lock().unwrap().join("\n");
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = app_obs.upgrade() {
+                                    let mut msgs: Vec<ChatMsg> = app.get_transcript().iter().collect();
+                                    if let Some(last) = msgs.last_mut() {
+                                        last.tool_calls = current_tools.into();
+                                    }
+                                    app.set_transcript(Rc::new(VecModel::from(msgs)).into());
+                                }
+                            });
+                        }
                     }
                 }));
 
@@ -635,6 +842,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         finish(format!("Execution error: {}", err));
                     }
                 }
+
+                // The turn is what titles a chat (the first user line is stored as its title), so
+                // refresh the sidebar here rather than leaving the entry on its raw session id.
+                let list = load_session_items(&store, &session_id).await;
+                let app_sessions = app_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_sessions.upgrade() {
+                        app.set_sessions(Rc::new(VecModel::from(list)).into());
+                    }
+                });
             });
         }
     });

@@ -396,6 +396,52 @@ async fn list_reports_the_first_user_line_and_the_most_recent_session() {
 }
 
 #[tokio::test]
+async fn delete_session_removes_the_session_and_its_messages() {
+    let (_dir, path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+    store.ensure_session("s2").await.unwrap();
+    store.append("s1", &Message::user("keep me"), false).await.unwrap();
+    store.append("s2", &Message::user("delete me"), false).await.unwrap();
+    store.append("s2", &Message::assistant("gone"), false).await.unwrap();
+    assert_eq!(count_rows(&path, "1 = 1"), 3);
+
+    assert!(store.delete_session("s2").await.unwrap());
+
+    // The foreign key cascade takes the messages with the session.
+    assert_eq!(count_rows(&path, "1 = 1"), 1);
+    assert!(store.get("s2").await.is_err(), "the deleted session is gone");
+
+    let sessions = store.list().await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "s1");
+    assert_eq!(store.most_recent().await.unwrap().as_deref(), Some("s1"));
+
+    // Deleting what is already gone is not an error: it reports that nothing was removed.
+    assert!(!store.delete_session("s2").await.unwrap());
+}
+
+#[tokio::test]
+async fn delete_all_sessions_empties_the_store() {
+    let (_dir, path, store) = temp_store();
+    for id in ["s1", "s2", "s3"] {
+        store.ensure_session(id).await.unwrap();
+        store.append(id, &Message::user("hi"), false).await.unwrap();
+        store.append(id, &Message::assistant("hello"), false).await.unwrap();
+    }
+    assert_eq!(count_rows(&path, "1 = 1"), 6);
+
+    assert_eq!(store.delete_all_sessions().await.unwrap(), 3);
+
+    // The cascade takes every message with its session, in the same statement.
+    assert_eq!(count_rows(&path, "1 = 1"), 0);
+    assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(store.most_recent().await.unwrap(), None);
+
+    // An empty store is not an error: it reports that nothing was removed.
+    assert_eq!(store.delete_all_sessions().await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn set_name_is_persisted_and_reported_by_list() {
     let (_dir, _path, store) = temp_store();
     store.ensure_session("s1").await.unwrap();
