@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -105,6 +106,10 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// A steering message arrived and was injected mid-turn into conversation context.
+    Steered {
+        text: String,
+    },
     ContextTokensUpdated {
         tokens_used: u32,
     },
@@ -144,6 +149,7 @@ where
     session: Option<SessionBinding>,
     observer: Option<AgentObserver>,
     reasoning_effort: Option<ReasoningEffort>,
+    steer_queue: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// What the gate decided for one call.
@@ -185,7 +191,23 @@ where
             session: None,
             observer: None,
             reasoning_effort: None,
+            steer_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// Queue guidance to steer the active turn mid-run without cancelling or restarting.
+    pub fn steer(&self, text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        self.steer_queue.lock().unwrap().push_back(trimmed.to_string());
+        true
+    }
+
+    /// Obtain a clone of the steering queue handle for mid-run submission without locking the outer Agent.
+    pub fn steer_handle(&self) -> Arc<Mutex<VecDeque<String>>> {
+        self.steer_queue.clone()
     }
 
     /// Update the active model provider dynamically during a session.
@@ -486,6 +508,38 @@ where
 
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
+                let pending_steers: Vec<String> = {
+                    let mut sq = self.steer_queue.lock().unwrap();
+                    sq.drain(..).collect()
+                };
+                if !pending_steers.is_empty() {
+                    let joined_steer = pending_steers.join("\n\n");
+                    let steer_prompt = format!(
+                        "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
+                        joined_steer
+                    );
+                    let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                    if !reply_text.is_empty() {
+                        let mut interim_resp = response.clone();
+                        interim_resp.content = Some(reply_text);
+                        self.append(&interim_resp, false).await?;
+                        messages.push(interim_resp);
+                    }
+                    if !user_appended {
+                        self.append(&user_message, false).await?;
+                        user_appended = true;
+                    }
+                    let steer_msg = Message::user(steer_prompt);
+                    self.append(&steer_msg, false).await?;
+                    messages.push(steer_msg);
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::Steered {
+                            text: joined_steer,
+                        });
+                    }
+                    continue;
+                }
+
                 debug!("Task successfully completed without further tool calls");
                 let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
                 if reply_text.is_empty() && last_reasoning.is_none() {
@@ -642,6 +696,27 @@ where
                 if let Some(ref observer) = self.observer {
                     observer(AgentEvent::ContextTokensUpdated {
                         tokens_used: current_tokens,
+                    });
+                }
+            }
+
+            // Check for mid-turn steering queued while tools were executing
+            let pending_steers: Vec<String> = {
+                let mut sq = self.steer_queue.lock().unwrap();
+                sq.drain(..).collect()
+            };
+            if !pending_steers.is_empty() {
+                let joined_steer = pending_steers.join("\n\n");
+                let steer_prompt = format!(
+                    "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
+                    joined_steer
+                );
+                let steer_msg = Message::user(steer_prompt);
+                self.append(&steer_msg, false).await?;
+                messages.push(steer_msg);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::Steered {
+                        text: joined_steer,
                     });
                 }
             }

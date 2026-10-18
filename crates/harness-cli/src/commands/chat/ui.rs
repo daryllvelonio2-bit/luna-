@@ -111,6 +111,26 @@ pub struct ChatUi {
     pub is_attended: bool,
 }
 
+/// Shortens a token count for the status line: 0→"0", 999→"999", 12_345→"12.3k", 272_000→"272k".
+/// Sub-k counts stay exact because that is the range where the digits still matter.
+fn humanize_tokens(count: u32) -> String {
+    if count >= 10_000 {
+        let k = count as f64 / 1_000.0;
+        if k >= 100.0 || (count % 1_000 == 0) {
+            format!("{}k", k.round() as u64)
+        } else {
+            let rounded = (k * 10.0).round() / 10.0;
+            if rounded.fract() == 0.0 {
+                format!("{}k", rounded as u64)
+            } else {
+                format!("{:.1}k", rounded)
+            }
+        }
+    } else {
+        count.to_string()
+    }
+}
+
 fn format_elapsed(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
     if secs < 60 {
@@ -350,7 +370,19 @@ impl ChatUi {
         } else {
             format!("[{}]", s.session_name)
         };
-        let mut right = format!("ctx: {}/{}", s.context_used, s.context_max);
+        // A raw five-to-six-digit token count reads as noise mid-session; the percentage is the
+        // glanceable fact ("how full is my window") and the pair keeps the absolute scale.
+        let mut right = if s.context_max > 0 {
+            let percent = (s.context_used as u64) * 100 / s.context_max as u64;
+            format!(
+                "ctx: {}% ({}/{})",
+                percent,
+                humanize_tokens(s.context_used),
+                humanize_tokens(s.context_max)
+            )
+        } else {
+            format!("ctx: {}/{}", s.context_used, s.context_max)
+        };
         if s.yolo {
             right = format!("{} {}", "yolo".yellow().bold(), right);
         }
@@ -617,5 +649,36 @@ mod tests {
         assert!(stripped.contains("24m"));
         assert!(stripped.contains("read chat.rs"));
         assert!(stripped.contains("[Ctrl+B]"));
+    }
+
+    #[test]
+    fn status_line_context_is_humanized() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 68_000, 272_000);
+
+        let line = ui.format_status_line(80).expect("status line");
+        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
+        assert!(stripped.contains("ctx: 25% (68k/272k)"), "{stripped}");
+        assert!(!stripped.contains("68000"), "{stripped}");
+    }
+
+    #[test]
+    fn humanize_tokens_stays_exact_below_10k() {
+        assert_eq!(humanize_tokens(0), "0");
+        assert_eq!(humanize_tokens(999), "999");
+        assert_eq!(humanize_tokens(9_999), "9999");
+        assert_eq!(humanize_tokens(10_000), "10k");
+        assert_eq!(humanize_tokens(12_345), "12.3k");
+        assert_eq!(humanize_tokens(272_000), "272k");
+    }
+
+    #[test]
+    fn status_line_handles_zero_context_max() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 0, 0);
+
+        let line = ui.format_status_line(80).expect("status line");
+        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
+        assert!(stripped.contains("ctx: 0/0"), "{stripped}");
     }
 }

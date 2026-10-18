@@ -275,11 +275,21 @@ pub async fn run_interactive_chat(
             };
             ui_obs.emit_above(&line);
         }
+        harness_core::AgentEvent::Steered { text } => {
+            ui_obs.finish_reasoning();
+            let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
+            in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                call_formatted: line.clone(),
+                result_formatted: String::new(),
+            });
+            ui_obs.emit_above(&line);
+        }
     }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
     }
 
+    let steer_handle = agent.steer_handle();
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     let mut compact_provider: Option<String> = config.agent.compaction_provider.clone();
@@ -830,20 +840,36 @@ pub async fn run_interactive_chat(
 
                         ui.clear_transient_error();
 
-                        if ui.is_attended {
-                            crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
-                            println!();
-                            println!("{}", right_aligned_user_message(&query, get_terminal_width()));
-                            ui.draw_initial_box();
-                        } else {
-                            ui.begin_block(OutputBlockKind::User);
-                            ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
-                        }
-
                         if active_turn.is_some() {
-                            queue.push_back(query);
+                            let steer_text = if let Some(stripped) = query.strip_prefix("/steer ") {
+                                stripped.trim().to_string()
+                            } else {
+                                query.clone()
+                            };
+
+                            steer_handle.lock().unwrap().push_back(steer_text.clone());
+
+                            let steer_display = format!("{} Steered into active turn: {}", "⏩".cyan().bold(), steer_text);
+                            in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                                call_formatted: steer_display.clone(),
+                                result_formatted: String::new(),
+                            });
+                            ui.emit_above(&steer_display);
+                            if ui.is_attended {
+                                ui.draw_initial_box();
+                            }
                         } else {
+                            if ui.is_attended {
+                                crate::commands::clear_screen();
+                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                println!();
+                                println!("{}", right_aligned_user_message(&query, get_terminal_width()));
+                                ui.draw_initial_box();
+                            } else {
+                                ui.begin_block(OutputBlockKind::User);
+                                ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
+                            }
+
                             current_cancel = CancellationToken::new();
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
@@ -1100,6 +1126,16 @@ pub async fn run_interactive_chat(
 
                 if turn_succeeded {
                     if let Some(next_query) = queue.pop_front() {
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            println!();
+                            println!("{}", right_aligned_user_message(&next_query, get_terminal_width()));
+                            ui.draw_initial_box();
+                        } else {
+                            ui.begin_block(OutputBlockKind::User);
+                            ui.emit_above(&right_aligned_user_message(&next_query, get_terminal_width()));
+                        }
                         current_cancel = CancellationToken::new();
                         let cancel_child = current_cancel.child_token();
                         let ag_ref = agent.clone();

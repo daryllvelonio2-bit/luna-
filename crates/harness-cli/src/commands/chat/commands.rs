@@ -66,6 +66,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Clear terminal screen",
     },
     SlashCommand {
+        name: "/steer",
+        details: "Steer active turn with mid-run guidance",
+    },
+    SlashCommand {
         name: "/exit",
         details: "Exit Luna chat session",
     },
@@ -254,6 +258,16 @@ pub(crate) async fn execute_slash_command(
             turns.clear();
             crate::commands::clear_screen();
             ui.draw_initial_box();
+            Ok(false)
+        }
+        "/steer" => {
+            if let Some(guidance) = arg {
+                let ag = agent.lock().await;
+                ag.steer(guidance);
+                ui.emit_above(&format!("{} Steered: {}", "⏩".cyan().bold(), guidance));
+            } else {
+                ui.emit_above(&format!("{} Usage: /steer <guidance>", "•".dimmed()));
+            }
             Ok(false)
         }
         "exit" | "quit" | "/exit" | "/quit" => {

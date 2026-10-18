@@ -323,3 +323,80 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
     let err = result.unwrap_err();
     assert!(err.to_string().contains("empty response") || err.to_string().contains("overloaded"));
 }
+
+struct SteeringMockProvider {
+    steer_observed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl ModelProvider for SteeringMockProvider {
+    fn provider_id(&self) -> &str {
+        "steering-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        // Check if any message contains the steering marker
+        for msg in messages {
+            if let Some(ref content) = msg.content {
+                if content.contains("OUT-OF-BAND USER MESSAGE") && content.contains("Switch to alternate plan") {
+                    self.steer_observed.store(true, Ordering::SeqCst);
+                    return Ok(Message::assistant("Acknowledged steering instruction"));
+                }
+            }
+        }
+
+        // First round: request tool call
+        Ok(Message::assistant_with_tools(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "failing_tool".to_string(),
+            arguments: serde_json::json!({}),
+        }]))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn test_mid_turn_steering_delivers_user_message() {
+    let steer_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(SteeringMockProvider {
+        steer_observed: steer_observed.clone(),
+    });
+    let memory = Arc::new(MockMemory);
+    let notes = Arc::new(MockNotes);
+    let evolver = Arc::new(MockEvolver);
+    let registry = Arc::new(DefaultToolRegistry::new());
+    registry.register(Arc::new(FailingTool)).await.unwrap();
+
+    let agent = Agent::new(
+        provider,
+        memory,
+        notes,
+        evolver,
+        registry,
+        AgentConfig {
+            max_consecutive_failures: 5,
+            ..AgentConfig::default()
+        },
+    );
+
+    // Queue steering guidance
+    assert!(agent.steer("Switch to alternate plan"));
+
+    let cancel = CancellationToken::new();
+    let outcome = agent.run_turn("Initial query", cancel).await.unwrap();
+
+    assert!(steer_observed.load(Ordering::SeqCst), "Model must receive mid-turn steering message");
+    assert_eq!(outcome.reply, "Acknowledged steering instruction");
+}

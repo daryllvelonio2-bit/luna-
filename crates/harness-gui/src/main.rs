@@ -1081,6 +1081,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         }
+                        harness_core::AgentEvent::Steered { .. } => {}
                     }
                 }));
 
