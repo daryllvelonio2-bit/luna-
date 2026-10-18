@@ -227,6 +227,13 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// shown, truncated, rather than the row collapsing to a bare spinner.
 pub const LIVE_CALL_MIN_CHARS: usize = 12;
 
+/// Share of the terminal the user's own message may occupy. Staying below 100% is what puts the
+/// message — including every wrapped row — visibly on the user's side of the transcript.
+pub const USER_BLOCK_PERCENT: usize = 70;
+
+/// Floor for that block on a narrow terminal, so the message does not become a one-word column.
+pub const USER_BLOCK_MIN_CHARS: usize = 24;
+
 /// One transcript block kind, tracked so blank lines land only between differing blocks
 /// (user → reasoning, reasoning → tool) and never between repeats (tool → tool).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -259,26 +266,41 @@ pub fn truncate_visible(text: &str, max: usize) -> String {
 
 /// Right-align the user's own message so the transcript reads as a chat — the user on the
 /// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
+///
+/// The message is wrapped here, to a block narrower than the terminal, rather than left to the
+/// terminal's own soft wrap. A line wider than the terminal used to pad to zero (so it started at
+/// column 0) and then wrap with its tail at column 0 as well — the continuation landed in the
+/// same column as Luna's replies and read as assistant text. Wrapping to a block and right-aligning
+/// *every* row keeps the whole message, wrap included, on the user's side.
 pub fn right_aligned_user_message(query: &str, width: usize) -> String {
-    let lines: Vec<&str> = query.lines().collect();
-    if lines.is_empty() {
-        let line = PROMPT.trim_end();
-        let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
-        return format!("{}{}", " ".repeat(pad), line.bold());
+    let prompt = PROMPT.trim_end();
+    if query.trim().is_empty() {
+        let pad = width.saturating_sub(1).saturating_sub(prompt.chars().count());
+        return format!("{}{}", " ".repeat(pad), prompt.bold());
     }
-    let mut out = Vec::new();
-    let total = lines.len();
-    for (i, line) in lines.iter().enumerate() {
-        let is_last = i == total - 1;
-        let formatted = if is_last {
-            format!("{} {}", line, PROMPT.trim_end())
-        } else {
-            line.to_string()
-        };
-        let pad = width.saturating_sub(1).saturating_sub(formatted.chars().count());
-        out.push(format!("{}{}", " ".repeat(pad), formatted.bold()));
+
+    // Two columns of the block are held back so " ☾" always fits on the final row.
+    let block = user_block_width(width).saturating_sub(prompt.chars().count() + 1).max(8);
+    let mut rows = wrap_rows(query, block);
+
+    if let Some(last) = rows.last_mut() {
+        last.push(' ');
+        last.push_str(prompt);
+    }
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let pad = width.saturating_sub(1).saturating_sub(row.chars().count());
+        out.push(format!("{}{}", " ".repeat(pad), row.bold()));
     }
     out.join("\n")
+}
+
+/// Widest the user's block may be: a fraction of the terminal, so a visible gap separates it from
+/// the left column where Luna's replies live.
+pub fn user_block_width(width: usize) -> usize {
+    let scaled = width * USER_BLOCK_PERCENT / 100;
+    scaled.max(USER_BLOCK_MIN_CHARS).min(width.saturating_sub(1)).max(1)
 }
 
 /// Soft-wrap `text` to `width` columns, returning the visible rows. Wrapping here rather than
@@ -1302,5 +1324,57 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].ends_with("hello"));
         assert!(lines[1].ends_with(PROMPT.trim_end()));
+    }
+
+    /// Regression: a message wider than the terminal padded to zero, so it started at column 0 and
+    /// the terminal soft-wrapped its tail back to column 0 — the continuation then sat in the same
+    /// column as Luna's replies and read as assistant text.
+    #[test]
+    fn a_long_message_wraps_on_the_user_side_and_never_at_the_left_margin() {
+        let width = 103; // the narrow terminal this was reported on
+        let long = "oohhhhh also, i have an idea, in admin abuse, players will also get encantations \
+                    and mutations on a plant!";
+        let msg = right_aligned_user_message(long, width);
+        let rows: Vec<&str> = msg.lines().collect();
+
+        // Printed under `--nocapture` so the layout can be eyeballed without launching the TUI.
+        println!("--- user message at width {width} ---\n{msg}\n---");
+
+        assert!(rows.len() > 1, "a message this long must wrap: {msg}");
+        for row in &rows {
+            let leading = row.chars().take_while(|c| *c == ' ').count();
+            let visible = row.chars().count();
+            assert!(leading > 0, "no row may start at the left margin: {row:?}");
+            assert!(visible <= width, "row overflows the terminal: {visible} > {width}");
+        }
+        assert!(
+            rows.last().unwrap().ends_with(PROMPT.trim_end()),
+            "the prompt glyph closes the last row: {msg}"
+        );
+    }
+
+    /// The wrapped rows belong to one right-anchored block: every row ends at the same column.
+    #[test]
+    fn wrapped_rows_of_a_message_share_the_right_edge() {
+        let width = 100;
+        let msg = right_aligned_user_message(&"word ".repeat(60), width);
+        let rows: Vec<&str> = msg.lines().collect();
+        assert!(rows.len() > 2, "expected several rows, got {}", rows.len());
+        for row in &rows {
+            assert_eq!(
+                row.chars().count(),
+                width - 1,
+                "each row is padded to the right edge: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_message_stays_one_right_aligned_row() {
+        let msg = right_aligned_user_message("hi", 80);
+        let rows: Vec<&str> = msg.lines().collect();
+        assert_eq!(rows.len(), 1, "short messages must not be wrapped");
+        assert_eq!(rows[0].chars().count(), 79);
+        assert!(rows[0].starts_with(' '), "still pushed to the right");
     }
 }
