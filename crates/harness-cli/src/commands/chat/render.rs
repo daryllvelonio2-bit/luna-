@@ -408,6 +408,7 @@ fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
         "save_memory" | "update_memory" | "forget_memory" => ("🧠", "memory"),
         "skill_view" => ("📖", "skill"),
         "skills_list" => ("📋", "skills"),
+        "process" => ("⚙️", "proc"),
         "apply_harness_update" => ("🚀", "update"),
         _ => ("🔧", ""),
     }
@@ -567,6 +568,11 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "skills_list" => {
             return format!("{} {} (all)", glyph, verb_col(verb));
+        }
+        "process" => {
+            let action = text("action").unwrap_or("list");
+            let job_id = text("job_id").map(|j| format!(" {}", j.cyan())).unwrap_or_default();
+            return format!("{} {}{}", glyph, verb_col(action), job_id);
         }
         "list_notes" => {
             let limit = number("limit").unwrap_or(20);

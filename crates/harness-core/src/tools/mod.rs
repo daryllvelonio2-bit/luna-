@@ -1,9 +1,11 @@
 pub mod fs;
+pub mod process;
 pub mod shell;
 pub mod todo;
 
 use std::sync::{Arc, Mutex};
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
+pub use process::ProcessTool;
 pub use shell::{
     check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,
     TerminalTool,
@@ -70,11 +72,14 @@ pub async fn register_core_tools_with_sudo(
                     .await?;
             }
             "terminal" => {
+                let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone()));
                 let mut term = TerminalTool::new(
                     ws.clone(),
                     config.tools.terminal_timeout_secs,
                     config.tools.terminal_output_max_bytes,
-                );
+                )
+                .with_background_queue(bg_queue);
+
                 if let Some(cache) = sudo_cache.clone() {
                     term = term.with_sudo_cache(cache);
                 }
@@ -82,6 +87,10 @@ pub async fn register_core_tools_with_sudo(
                     term = term.with_sudo_prompter(prompter);
                 }
                 registry.register(Arc::new(term)).await?;
+            }
+            "process" => {
+                let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone()));
+                registry.register(Arc::new(ProcessTool::new(bg_queue))).await?;
             }
             _ => {}
         }

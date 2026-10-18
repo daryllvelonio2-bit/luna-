@@ -788,3 +788,47 @@ fn test_sudo_auth_failure_detection() {
     assert!(is_sudo_auth_failure("sudo: a password is required"));
     assert!(!is_sudo_auth_failure("total 42\n-rw-r--r-- 1 root root"));
 }
+
+#[tokio::test]
+async fn test_background_task_queue_and_process_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jobs_dir = tmp.path().join("jobs");
+    let queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(jobs_dir));
+    let term = TerminalTool::new(tmp.path().to_path_buf(), 5, 50_000)
+        .with_background_queue(queue.clone());
+    let proc_tool = harness_core::tools::ProcessTool::new(queue.clone());
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    // Spawn a background command
+    let res = term
+        .execute(
+            "c_bg",
+            &json!({ "command": "echo 'hello from bg'; sleep 0.1; echo 'done bg'", "background": true }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    assert!(!res.is_error);
+    let val: serde_json::Value = serde_json::from_str(&res.content).unwrap();
+    let job_id = val["job_id"].as_str().unwrap().to_string();
+    assert_eq!(val["status"], "running");
+
+    // List jobs
+    let list_res = proc_tool
+        .execute("c_list", &json!({ "action": "list" }), &cancel)
+        .await
+        .unwrap();
+    assert!(list_res.content.contains(&job_id));
+
+    // Wait a moment for completion
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Poll job
+    let poll_res = proc_tool
+        .execute("c_poll", &json!({ "action": "poll", "job_id": job_id }), &cancel)
+        .await
+        .unwrap();
+    assert!(poll_res.content.contains("completed (exit 0)"));
+    assert!(poll_res.content.contains("done bg"));
+}

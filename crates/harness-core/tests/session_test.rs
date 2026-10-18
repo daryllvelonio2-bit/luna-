@@ -856,3 +856,32 @@ async fn agent_summarize_current_session_works_and_rejects_empty() {
 
     assert!(empty_agent.summarize_current_session("test-model").await.is_err());
 }
+
+#[tokio::test]
+async fn fork_session_copies_all_messages_and_metadata() {
+    let (_tmp, _path, store) = seeded_store(5).await;
+
+    // Set model on s1
+    store.set_model("s1", "nvidia", "deepseek-v4.1").await.unwrap();
+    store.set_name("s1", "feature-work").await.unwrap();
+
+    let forked_id = store.fork_session("s1", Some("My Fork")).await.unwrap();
+
+    // Verify record
+    let forked_rec = store.get(&forked_id).await.unwrap();
+    assert_eq!(forked_rec.title, "My Fork");
+    assert_eq!(forked_rec.name, "feature-work");
+    assert_eq!(forked_rec.model, Some(("nvidia".to_string(), "deepseek-v4.1".to_string())));
+
+    // Verify messages
+    let orig_replay = store.replay("s1", 100).await.unwrap();
+    let forked_replay = store.replay(&forked_id, 100).await.unwrap();
+
+    assert_eq!(orig_replay.total, forked_replay.total);
+    assert_eq!(orig_replay.history.len(), forked_replay.history.len());
+    for (orig, forked) in orig_replay.history.iter().zip(forked_replay.history.iter()) {
+        assert_eq!(orig.message.role, forked.message.role);
+        assert_eq!(orig.message.content, forked.message.content);
+        assert_eq!(orig.seq, forked.seq);
+    }
+}

@@ -5,6 +5,7 @@ pub mod error;
 pub mod prompts;
 pub mod registry;
 pub mod session;
+pub mod tasks;
 pub mod tools;
 pub mod traits;
 pub mod types;
@@ -23,6 +24,7 @@ pub use config::{
 };
 pub use error::HarnessError;
 pub use registry::DefaultToolRegistry;
+pub use tasks::BackgroundTaskQueue;
 pub use session::{
     compact, estimate_tokens, fold_boundary, heuristic_tokens, summarize_session, CompactionOutcome, Estimate,
     EstimateSource, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE, ReplayOutcome, SessionRecord,

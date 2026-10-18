@@ -249,6 +249,13 @@ pub async fn run_interactive_chat(
             .await?;
     }
 
+    let bg_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
+        config.paths.jobs_dir.clone(),
+    ));
+    registry
+        .register(Arc::new(harness_core::tools::ProcessTool::new(bg_queue.clone())))
+        .await?;
+
     // Register core filesystem and shell tools (§2.2)
     let sudo_cache = Arc::new(std::sync::Mutex::new(std::env::var("SUDO_PASSWORD").ok()));
     let (sudo_tx, mut sudo_rx) =
@@ -432,6 +439,62 @@ pub async fn run_interactive_chat(
                     println!("\n{}\n{}\n", "Available skills:".bold(), summary);
                 } else {
                     println!("\n{}\n", "No specialized skills installed.".dimmed());
+                }
+                continue;
+            }
+            if query == "/plan" || query.starts_with("/plan ") {
+                let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
+                let next = !current;
+                plan_mode.store(next, std::sync::atomic::Ordering::SeqCst);
+                ui.set_plan_mode(next);
+                ui.emit_above(&format!(
+                    "{} Plan mode {}",
+                    "•".cyan(),
+                    if next {
+                        "ON (read-only planning, mutating tools gated)".cyan().bold()
+                    } else {
+                        "OFF".dimmed()
+                    }
+                ));
+                continue;
+            }
+            if query == "/fork" || query.starts_with("/fork ") {
+                let title_opt = query.strip_prefix("/fork").map(str::trim).filter(|s| !s.is_empty());
+                match store.fork_session(&session_id, title_opt).await {
+                    Ok(new_id) => {
+                        let old_id = session_id.clone();
+                        session_id = new_id.clone();
+                        ui.set_session_name(&format!("fork:{}", &new_id[..new_id.len().min(8)]));
+                        ui.emit_above(&format!(
+                            "{} Forked session {} -> {}",
+                            "✔".green().bold(),
+                            old_id.dimmed(),
+                            session_id.cyan().bold()
+                        ));
+                    }
+                    Err(e) => {
+                        ui.emit_above(&format!("{} Fork failed: {}", "✖".red().bold(), e));
+                    }
+                }
+                continue;
+            }
+            if query == "/jobs" || query.starts_with("/jobs ") {
+                let jobs = bg_queue.list();
+                if jobs.is_empty() {
+                    println!("\n{}\n", "No background tasks.".dimmed());
+                } else {
+                    println!("\n{}", "Background tasks:".bold());
+                    for j in jobs {
+                        println!(
+                            "  {} {} [{}] ({}s) {}",
+                            j.id.cyan().bold(),
+                            j.command,
+                            j.status,
+                            j.elapsed_secs,
+                            j.log_path.dimmed()
+                        );
+                    }
+                    println!();
                 }
                 continue;
             }
@@ -1084,7 +1147,14 @@ pub async fn run_interactive_chat(
                             current_cancel = CancellationToken::new();
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
-                            let q = query.clone();
+                            let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
+                                format!(
+                                    "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
+                                    query
+                                )
+                            } else {
+                                query.clone()
+                            };
                             current_query = query.clone();
                             turn_start = std::time::Instant::now();
                             in_flight_tools.lock().unwrap().clear();

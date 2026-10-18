@@ -74,6 +74,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Fork current session into a new branch session",
     },
     SlashCommand {
+        name: "/jobs",
+        details: "List background task queue jobs",
+    },
+    SlashCommand {
         name: "/clear",
         details: "Clear terminal screen",
     },

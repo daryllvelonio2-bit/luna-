@@ -24,6 +24,7 @@ pub struct TerminalTool {
     env_vars: std::collections::HashMap<String, String>,
     sudo_cache: Arc<Mutex<Option<String>>>,
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
+    queue: Option<Arc<crate::tasks::BackgroundTaskQueue>>,
 }
 
 impl TerminalTool {
@@ -39,7 +40,13 @@ impl TerminalTool {
             env_vars: std::collections::HashMap::new(),
             sudo_cache: Arc::new(Mutex::new(std::env::var("SUDO_PASSWORD").ok())),
             sudo_prompter: None,
+            queue: None,
         }
+    }
+
+    pub fn with_background_queue(mut self, queue: Arc<crate::tasks::BackgroundTaskQueue>) -> Self {
+        self.queue = Some(queue);
+        self
     }
 
     pub fn with_env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
@@ -191,7 +198,8 @@ impl Tool for TerminalTool {
             "properties": {
                 "command": { "type": "string", "description": "The shell command to execute" },
                 "timeout_s": { "type": "integer", "description": "Max seconds to wait before timing out" },
-                "workdir": { "type": "string", "description": "Working directory relative to workspace root" }
+                "workdir": { "type": "string", "description": "Working directory relative to workspace root" },
+                "background": { "type": "boolean", "description": "Run asynchronously in the background task queue" }
             },
             "required": ["command"]
         })
@@ -225,6 +233,23 @@ impl Tool for TerminalTool {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
+
+        let background = args.get("background").and_then(|b| b.as_bool()).unwrap_or(false);
+        if background {
+            if let Some(ref q) = self.queue {
+                return match q.spawn(command, &resolved_workdir) {
+                    Ok(job_id) => {
+                        let msg = json!({
+                            "job_id": job_id,
+                            "status": "running",
+                            "message": format!("Task running in background. Use process(action='poll', job_id='{}') to check progress.", job_id),
+                        });
+                        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&msg).unwrap_or_default()))
+                    }
+                    Err(e) => Ok(ToolResult::error(call_id, format!("Failed to queue background task: {}", e))),
+                };
+            }
+        }
 
         let timeout_secs = args
             .get("timeout_s")
