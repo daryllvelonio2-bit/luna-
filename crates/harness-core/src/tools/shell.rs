@@ -14,6 +14,7 @@ pub struct TerminalTool {
     workspace_root: PathBuf,
     default_timeout_secs: u64,
     output_max_bytes: usize,
+    env_vars: std::collections::HashMap<String, String>,
 }
 
 impl TerminalTool {
@@ -26,7 +27,13 @@ impl TerminalTool {
             workspace_root,
             default_timeout_secs,
             output_max_bytes,
+            env_vars: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
+        self.env_vars.insert(key.into(), val.into());
+        self
     }
 }
 
@@ -93,6 +100,10 @@ impl Tool for TerminalTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+
+        for (k, v) in &self.env_vars {
+            cmd.env(k, v);
+        }
 
         let child = match cmd.spawn() {
             Ok(c) => c,

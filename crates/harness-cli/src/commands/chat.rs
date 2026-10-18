@@ -637,6 +637,14 @@ pub async fn run_interactive_chat(
                             let _ = store
                                 .append(&session_id, &harness_core::Message::system(&notice), false)
                                 .await;
+
+                            let steer_notice = format!(
+                                "[BACKGROUND EVOLVER NOTIFICATION]\nBackground evolve task [{}] finished with status: {}.\nSummary:\n{}\n[/BACKGROUND EVOLVER NOTIFICATION]",
+                                job_id,
+                                if is_ok { "success" } else { "failed" },
+                                summary
+                            );
+                            steer_handle.lock().unwrap().push_back(steer_notice);
                         }
                     }
                 }

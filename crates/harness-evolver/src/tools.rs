@@ -101,13 +101,11 @@ impl Tool for DelegateImprovementTool {
 
         match self.evolver.delegate_improvement(task, evidence).await {
             Ok(job_id) => {
-                let out = json!({
-                    "status": "queued",
-                    "job_id": job_id,
-                    "branch": format!("eng/{}", job_id),
-                    "message": "Specialized engineer agent spawned in isolated background worktree. Use `check_improvement_job` with this job_id to monitor progress."
-                });
-                Ok(ToolResult::success(call_id, out.to_string()))
+                let out = format!(
+                    "Specialized engineer agent spawned in isolated background worktree.\nJob ID: {}\nBranch: eng/{}\n\nCall `check_improvement_job(job_id: \"{}\")` (or `check_improvement_job()` for latest) at any time to inspect live tool calls, modified files, and test outcomes.",
+                    job_id, job_id, job_id
+                );
+                Ok(ToolResult::success(call_id, out))
             }
             Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }
@@ -131,16 +129,18 @@ impl Tool for CheckImprovementTool {
     }
 
     fn description(&self) -> &str {
-        "Check the status, test outcomes, and logs of a background harness improvement job."
+        "Check the live status, current tool activity, modified files, test outcomes, and logs of a background harness improvement job."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "job_id": { "type": "string", "description": "The job ID returned by delegate_improvement." }
-            },
-            "required": ["job_id"]
+                "job_id": {
+                    "type": "string",
+                    "description": "Optional job ID (or 'latest' for most recent background job). Defaults to latest if omitted."
+                }
+            }
         })
     }
 
@@ -153,16 +153,41 @@ impl Tool for CheckImprovementTool {
         let job_id = args.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
         match self.evolver.check_job(job_id).await {
             Ok(job) => {
-                let out = json!({
-                    "job_id": job.id,
-                    "task": job.task,
-                    "branch": job.branch,
-                    "status": job.status,
-                    "logs": job.logs,
-                    "created_at": job.created_at.to_rfc3339(),
-                    "updated_at": job.updated_at.to_rfc3339(),
-                });
-                Ok(ToolResult::success(call_id, out.to_string()))
+                let status_str = match &job.status {
+                    crate::JobStatus::Queued => "queued (waiting to start)".to_string(),
+                    crate::JobStatus::Running => "running (actively executing in background worktree)".to_string(),
+                    crate::JobStatus::Verified => "verified (fix verified and tests clean)".to_string(),
+                    crate::JobStatus::ReadyForReenactment { .. } => "ready for reenactment (update staged)".to_string(),
+                    crate::JobStatus::ScheduledUpdate { .. } => "scheduled update (will apply on restart)".to_string(),
+                    crate::JobStatus::FailedTest { error } => format!("failed test: {}", error),
+                    crate::JobStatus::FailedVerification { reason } => format!("failed verification: {}", reason),
+                };
+
+                let recent_logs = if job.logs.len() > 15 {
+                    job.logs[job.logs.len() - 15..].to_vec()
+                } else {
+                    job.logs.clone()
+                };
+
+                let mut out_text = format!(
+                    "Job ID: {}\nStatus: {}\nTask: {}\nBranch: {}\nWorktree: {}\n",
+                    job.id, status_str, job.task, job.branch, job.worktree_dir
+                );
+                if let Some(ref current) = job.current_tool {
+                    out_text.push_str(&format!("Current Activity: {}\n", current));
+                }
+                if !job.modified_files.is_empty() {
+                    out_text.push_str(&format!("Modified Files: {}\n", job.modified_files.join(", ")));
+                }
+                if let Some(ref sum) = job.summary {
+                    out_text.push_str(&format!("Engineer Summary: {}\n", sum));
+                }
+                out_text.push_str("\nProgress Timeline:\n");
+                for log in &recent_logs {
+                    out_text.push_str(&format!("  {}\n", log));
+                }
+
+                Ok(ToolResult::success(call_id, out_text))
             }
             Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }
@@ -186,7 +211,7 @@ impl Tool for ListImprovementJobsTool {
     }
 
     fn description(&self) -> &str {
-        "List all background harness improvement jobs and their current status in the queue."
+        "List all background harness improvement jobs with their current status and active tool activity."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -204,19 +229,29 @@ impl Tool for ListImprovementJobsTool {
     ) -> Result<ToolResult, HarnessError> {
         match self.evolver.list_jobs().await {
             Ok(jobs) => {
-                let items: Vec<serde_json::Value> = jobs
-                    .into_iter()
-                    .map(|job| {
-                        json!({
-                            "job_id": job.id,
-                            "task": job.task,
-                            "status": job.status,
-                            "branch": job.branch,
-                            "created_at": job.created_at.to_rfc3339(),
-                        })
-                    })
-                    .collect();
-                Ok(ToolResult::success(call_id, json!(items).to_string()))
+                if jobs.is_empty() {
+                    return Ok(ToolResult::success(call_id, "No harness improvement jobs found."));
+                }
+                let mut out = format!("Found {} improvement jobs:\n", jobs.len());
+                for job in &jobs {
+                    let status_str = match &job.status {
+                        crate::JobStatus::Queued => "queued",
+                        crate::JobStatus::Running => "running",
+                        crate::JobStatus::Verified => "verified",
+                        crate::JobStatus::ReadyForReenactment { .. } => "ready_for_reenactment",
+                        crate::JobStatus::ScheduledUpdate { .. } => "scheduled_update",
+                        crate::JobStatus::FailedTest { .. } => "failed_test",
+                        crate::JobStatus::FailedVerification { .. } => "failed_verification",
+                    };
+                    out.push_str(&format!("• [{}] {} - {}\n", job.id, status_str, job.task));
+                    if let Some(ref current) = job.current_tool {
+                        out.push_str(&format!("    Current activity: {}\n", current));
+                    }
+                    if !job.modified_files.is_empty() {
+                        out.push_str(&format!("    Modified: {}\n", job.modified_files.join(", ")));
+                    }
+                }
+                Ok(ToolResult::success(call_id, out))
             }
             Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }

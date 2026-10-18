@@ -21,6 +21,8 @@ pub struct AgentConfig {
     pub max_consecutive_failures: usize,
     pub require_hitl_for_mutation: bool,
     pub system_prompt_prefix: Option<String>,
+    /// When specified, completely replaces the default system prompt template (used for specialized subagents).
+    pub system_prompt_override: Option<String>,
     /// Estimated transcript size at which the oldest turns are summarised.
     pub compact_at_tokens: usize,
     /// Trailing user turns kept verbatim when compacting.
@@ -41,6 +43,7 @@ impl Default for AgentConfig {
             max_consecutive_failures: 5,
             require_hitl_for_mutation: true,
             system_prompt_prefix: None,
+            system_prompt_override: None,
             compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,
@@ -893,6 +896,10 @@ where
     /// Substitution is a literal `replace`, not `format!`, so the prompt text stays free of format
     /// syntax — a stray brace in the file can never abort a turn.
     async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
+        if let Some(ref custom_prompt) = self.config.system_prompt_override {
+            return Ok(custom_prompt.clone());
+        }
+
         let relevant_memories = self.memory.retrieve(user_input, 10).await?;
         let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
 

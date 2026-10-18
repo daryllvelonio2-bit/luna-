@@ -15,7 +15,7 @@ use harness_core::{
     MemoryEngine, MemoryRecord, ModelProvider, Note, NotesEngine, ToolPreview, ToolRegistry,
 };
 use harness_core::tools::{
-    PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, WriteFileTool,
+    ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, WriteFileTool,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,6 +60,12 @@ pub struct JobRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub logs: Vec<String>,
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    #[serde(default)]
+    pub modified_files: Vec<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +175,7 @@ pub struct CodebaseEvolver {
     repo_root: PathBuf,
     jobs_dir: PathBuf,
     provider: RwLock<Option<Arc<dyn ModelProvider>>>,
-    jobs: RwLock<HashMap<String, JobRecord>>,
+    jobs: Arc<RwLock<HashMap<String, JobRecord>>>,
     event_tx: tokio::sync::broadcast::Sender<EvolverEvent>,
 }
 
@@ -182,7 +188,7 @@ impl CodebaseEvolver {
             repo_root,
             jobs_dir,
             provider: RwLock::new(None),
-            jobs: RwLock::new(HashMap::new()),
+            jobs: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
         };
         evolver.reconcile_orphaned_jobs();
@@ -231,6 +237,12 @@ impl CodebaseEvolver {
     }
 
     pub async fn latest_job(&self) -> Result<JobRecord, HarnessError> {
+        {
+            let jobs = self.jobs.read().await;
+            if let Some(latest) = jobs.values().max_by_key(|j| j.created_at) {
+                return Ok(latest.clone());
+            }
+        }
         let jobs = self.list_jobs().await?;
         jobs.into_iter()
             .max_by_key(|j| j.created_at)
@@ -277,6 +289,9 @@ impl CodebaseEvolver {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             logs: vec![format!("Job {} created for task: {}", job_id, task)],
+            current_tool: None,
+            modified_files: Vec::new(),
+            summary: None,
         };
 
         self.save_job(&record).await?;
@@ -296,11 +311,13 @@ impl CodebaseEvolver {
         let b_name = branch.clone();
         let wt_path = worktree_dir.clone();
         let event_tx = self.event_tx.clone();
+        let jobs_map = self.jobs.clone();
 
         tokio::spawn(async move {
             if let Err(e) = run_engineer_job(
                 repo_root,
                 jobs_dir,
+                jobs_map,
                 provider,
                 j_id.clone(),
                 b_name,
@@ -319,7 +336,20 @@ impl CodebaseEvolver {
     }
 
     pub async fn check_job(&self, job_id: &str) -> Result<JobRecord, HarnessError> {
-        let path = self.jobs_dir.join(format!("{}.json", job_id));
+        let target_id = if job_id.trim().is_empty() || job_id.trim() == "latest" {
+            self.latest_job().await?.id
+        } else {
+            job_id.trim().to_string()
+        };
+
+        {
+            let jobs = self.jobs.read().await;
+            if let Some(record) = jobs.get(&target_id) {
+                return Ok(record.clone());
+            }
+        }
+
+        let path = self.jobs_dir.join(format!("{}.json", target_id));
         if path.exists() {
             let data = fs::read_to_string(&path)
                 .map_err(|e| HarnessError::Io(format!("Failed to read job file: {}", e)))?;
@@ -327,15 +357,12 @@ impl CodebaseEvolver {
                 .map_err(|e| HarnessError::EvolverError(format!("Failed to parse job JSON: {}", e)))?;
             Ok(record)
         } else {
-            let jobs = self.jobs.read().await;
-            jobs.get(job_id)
-                .cloned()
-                .ok_or_else(|| HarnessError::EvolverError(format!("Job '{}' not found", job_id)))
+            Err(HarnessError::EvolverError(format!("Job '{}' not found", target_id)))
         }
     }
 
     pub async fn list_jobs(&self) -> Result<Vec<JobRecord>, HarnessError> {
-        let mut list = Vec::new();
+        let mut list_map = HashMap::new();
         if self.jobs_dir.exists() {
             for entry in fs::read_dir(&self.jobs_dir)
                 .map_err(|e| HarnessError::Io(format!("Failed to read jobs dir: {}", e)))?
@@ -347,12 +374,19 @@ impl CodebaseEvolver {
                 {
                     if let Ok(data) = fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<JobRecord>(&data) {
-                            list.push(record);
+                            list_map.insert(record.id.clone(), record);
                         }
                     }
                 }
             }
         }
+        {
+            let mem_jobs = self.jobs.read().await;
+            for (id, rec) in mem_jobs.iter() {
+                list_map.insert(id.clone(), rec.clone());
+            }
+        }
+        let mut list: Vec<JobRecord> = list_map.into_values().collect();
         list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(list)
     }
@@ -489,6 +523,7 @@ impl CodebaseEvolver {
 async fn run_engineer_job(
     repo_root: PathBuf,
     jobs_dir: PathBuf,
+    jobs_map: Arc<RwLock<HashMap<String, JobRecord>>>,
     provider: Arc<dyn ModelProvider>,
     job_id: String,
     branch: String,
@@ -509,6 +544,7 @@ async fn run_engineer_job(
     record.updated_at = Utc::now();
     record.logs.push(format!("Creating git worktree at {} on branch {}", worktree_dir.display(), branch));
     let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
 
     let _ = event_tx.send(EvolverEvent::JobProgress {
         job_id: job_id.clone(),
@@ -536,6 +572,12 @@ async fn run_engineer_job(
     match add_res {
         Ok(out) if out.status.success() => {
             record.logs.push("Git worktree created successfully.".to_string());
+            let _ = Command::new("git")
+                .args(["-C", &worktree_dir.to_string_lossy(), "config", "user.name", "Daryll"])
+                .output();
+            let _ = Command::new("git")
+                .args(["-C", &worktree_dir.to_string_lossy(), "config", "user.email", "daryllvelonio2@gmail.com"])
+                .output();
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -545,6 +587,7 @@ async fn run_engineer_job(
             };
             record.updated_at = Utc::now();
             let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            jobs_map.write().await.insert(job_id.clone(), record.clone());
             let _ = event_tx.send(EvolverEvent::JobCompleted {
                 job_id: job_id.clone(),
                 task: task.clone(),
@@ -560,6 +603,7 @@ async fn run_engineer_job(
             };
             record.updated_at = Utc::now();
             let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+            jobs_map.write().await.insert(job_id.clone(), record.clone());
             let _ = event_tx.send(EvolverEvent::JobCompleted {
                 job_id: job_id.clone(),
                 task: task.clone(),
@@ -596,16 +640,30 @@ async fn run_engineer_job(
         .register(Arc::new(SearchFilesTool::new(worktree_dir.clone())))
         .await?;
     registry
-        .register(Arc::new(TerminalTool::new(
-            worktree_dir.clone(),
-            180,
-            50_000,
-        )))
+        .register(Arc::new(ListFilesTool::new(worktree_dir.clone())))
         .await?;
 
+    let target_dir = repo_root.join("target");
+    let mut terminal = TerminalTool::new(
+        worktree_dir.clone(),
+        300,
+        100_000,
+    ).with_env("CARGO_TARGET_DIR", target_dir.to_string_lossy());
+
+    if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
+        terminal = terminal.with_env("CARGO_HOME", cargo_home);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let cargo_bin = PathBuf::from(home).join(".cargo/bin");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        terminal = terminal.with_env("PATH", format!("{}:{}", cargo_bin.display(), current_path));
+    }
+    registry.register(Arc::new(terminal)).await?;
+
+    let engineer_prompt = prompts::section(prompts::ENGINEER_SYSTEM_PROMPT).unwrap_or_default();
     let agent_config = AgentConfig {
         require_hitl_for_mutation: false,
-        system_prompt_prefix: Some(prompts::section(prompts::ENGINEER_SYSTEM_PROMPT).unwrap_or_default()),
+        system_prompt_override: Some(engineer_prompt),
         ..Default::default()
     };
 
@@ -621,59 +679,77 @@ async fn run_engineer_job(
     let j_id_obs = job_id.clone();
     let task_obs = task.clone();
     let event_tx_obs = event_tx.clone();
-    let shared_logs = Arc::new(std::sync::Mutex::new(record.logs.clone()));
-    let shared_logs_obs = shared_logs.clone();
+    let job_file_obs = job_file.clone();
+    let jobs_map_obs = jobs_map.clone();
 
     let engineer_agent = engineer_agent.with_observer(Arc::new(move |event| {
         match event {
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-                let tool_desc = match name.as_str() {
+                let (tool_desc, touched_file) = match name.as_str() {
                     "read_file" => {
                         let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
-                        format!("read {}", leaf)
+                        (format!("read {}", path), None)
                     }
                     "write_file" => {
                         let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
-                        format!("write {}", leaf)
+                        (format!("write {}", path), Some(path.to_string()))
                     }
                     "patch" => {
                         let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        let leaf = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
-                        format!("patch {}", leaf)
+                        (format!("patch {}", path), Some(path.to_string()))
                     }
                     "search_files" => {
                         let pat = arguments.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
-                        format!("search {}", pat)
+                        (format!("search {}", pat), None)
+                    }
+                    "list_files" => {
+                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+                        (format!("list {}", path), None)
                     }
                     "terminal" => {
                         let cmd = arguments.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                        let first = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-                        format!("run {}", first)
+                        (format!("run {}", cmd), None)
                     }
-                    other => other.to_string(),
+                    other => (other.to_string(), None),
                 };
+
                 let _ = event_tx_obs.send(EvolverEvent::JobProgress {
                     job_id: j_id_obs.clone(),
                     task: task_obs.clone(),
                     current_tool: tool_desc.clone(),
                 });
-                if let Ok(mut logs) = shared_logs_obs.lock() {
-                    logs.push(format!("• Tool: {}", tool_desc));
+
+                let log_entry = format!("• Tool: {}", tool_desc);
+                if let Ok(mut jmap) = jobs_map_obs.try_write() {
+                    if let Some(rec) = jmap.get_mut(&j_id_obs) {
+                        rec.current_tool = Some(tool_desc);
+                        rec.updated_at = Utc::now();
+                        rec.logs.push(log_entry);
+                        if let Some(f) = touched_file {
+                            if !rec.modified_files.contains(&f) {
+                                rec.modified_files.push(f);
+                            }
+                        }
+                        let _ = fs::write(&job_file_obs, serde_json::to_string_pretty(&rec).unwrap_or_default());
+                    }
                 }
             }
             harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
-                let out_brief = if output.chars().count() > 120 {
-                    format!("{}…", output.chars().take(119).collect::<String>())
+                let out_brief = if output.chars().count() > 160 {
+                    format!("{}…", output.chars().take(159).collect::<String>())
                 } else {
                     output.clone()
                 };
-                if let Ok(mut logs) = shared_logs_obs.lock() {
-                    if is_error {
-                        logs.push(format!("  ✖ Error: {}", out_brief));
-                    } else {
-                        logs.push(format!("  ✔ Output: {}", out_brief));
+                let log_entry = if is_error {
+                    format!("  ✖ Error: {}", out_brief)
+                } else {
+                    format!("  ✔ Output: {}", out_brief)
+                };
+                if let Ok(mut jmap) = jobs_map_obs.try_write() {
+                    if let Some(rec) = jmap.get_mut(&j_id_obs) {
+                        rec.updated_at = Utc::now();
+                        rec.logs.push(log_entry);
+                        let _ = fs::write(&job_file_obs, serde_json::to_string_pretty(&rec).unwrap_or_default());
                     }
                 }
             }
@@ -697,18 +773,22 @@ async fn run_engineer_job(
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let turn_res = engineer_agent.run_turn(&user_prompt, cancel_token).await;
 
-    if let Ok(logs) = shared_logs.lock() {
-        record.logs = logs.clone();
+    if let Some(latest_rec) = jobs_map.read().await.get(&job_id) {
+        record = latest_rec.clone();
     }
 
     match turn_res {
         Ok(outcome) => {
+            record.summary = Some(outcome.reply.clone());
             record.logs.push(format!("Engineer finished turn: {}", outcome.reply));
         }
         Err(e) => {
             record.logs.push(format!("Engineer turn error: {}", e));
         }
     }
+    record.updated_at = Utc::now();
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
 
     // 3. Dual-gate Gate 1: cargo test --workspace inside worktree
     let _ = event_tx.send(EvolverEvent::JobProgress {
@@ -716,10 +796,16 @@ async fn run_engineer_job(
         task: task.clone(),
         current_tool: "cargo test --workspace (Gate 1)".to_string(),
     });
+    record.current_tool = Some("cargo test --workspace (Gate 1)".to_string());
     record.logs.push("Running `cargo test --workspace` verification gate...".to_string());
+    record.updated_at = Utc::now();
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
+
     let test_res = Command::new("cargo")
         .args(["test", "--workspace"])
         .current_dir(&worktree_dir)
+        .env("CARGO_TARGET_DIR", &target_dir)
         .output();
 
     let tests_passed = match test_res {
@@ -743,6 +829,7 @@ async fn run_engineer_job(
     if !tests_passed {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        jobs_map.write().await.insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -762,10 +849,16 @@ async fn run_engineer_job(
         task: task.clone(),
         current_tool: "cargo build --release in worktree".to_string(),
     });
+    record.current_tool = Some("cargo build --release in worktree".to_string());
     record.logs.push("Compiling release binary in worktree...".to_string());
+    record.updated_at = Utc::now();
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
+
     let build_res = Command::new("cargo")
         .args(["build", "--release"])
         .current_dir(&worktree_dir)
+        .env("CARGO_TARGET_DIR", &target_dir)
         .output();
 
     let build_ok = match build_res {
@@ -788,6 +881,7 @@ async fn run_engineer_job(
     if !build_ok {
         record.updated_at = Utc::now();
         let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        jobs_map.write().await.insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -798,7 +892,11 @@ async fn run_engineer_job(
         return Ok(());
     }
 
-    let binary_path = worktree_dir.join("target/release/luna");
+    let binary_path = if target_dir.join("release/luna").exists() {
+        target_dir.join("release/luna")
+    } else {
+        worktree_dir.join("target/release/luna")
+    };
     let pending = PendingUpdate {
         job_id: record.id.clone(),
         task: record.task.clone(),
@@ -811,6 +909,7 @@ async fn run_engineer_job(
         let _ = fs::write(jobs_dir.join("pending_update.json"), pending_json);
     }
 
+    record.current_tool = None;
     record.status = JobStatus::ScheduledUpdate {
         binary_path: binary_path.to_string_lossy().to_string(),
     };
@@ -821,6 +920,7 @@ async fn run_engineer_job(
     ));
 
     let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
 
     let _ = event_tx.send(EvolverEvent::JobCompleted {
         job_id: job_id.clone(),
