@@ -176,6 +176,18 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             ]),
         },
         ProviderDescriptor {
+            id: "codestral".to_string(),
+            display_name: "Mistral Codestral".to_string(),
+            default_base_url: "https://codestral.mistral.ai/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("codestral-latest", 256_000),
+                ("codestral-2501", 256_000),
+            ]),
+        },
+        ProviderDescriptor {
             id: "nvidia".to_string(),
             display_name: "NVIDIA NIM".to_string(),
             default_base_url: "https://integrate.api.nvidia.com/v1".to_string(),

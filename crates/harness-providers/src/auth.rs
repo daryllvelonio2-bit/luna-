@@ -108,6 +108,26 @@ impl CredentialManager {
         fs::write(&self.storage_path, bytes).map_err(|e| HarnessError::Io(e.to_string()))
     }
 
+    fn merge_from_disk(to_write: &mut LunaAuthStorage, path: &Path) {
+        if let Ok(disk) = Self::load_from_disk(path) {
+            for (p_id, p_state) in disk.providers {
+                if !to_write.providers.contains_key(&p_id) {
+                    to_write.providers.insert(p_id, p_state);
+                } else if let Some(local_p) = to_write.providers.get_mut(&p_id) {
+                    for disk_cred in p_state.credentials {
+                        if !local_p
+                            .credentials
+                            .iter()
+                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
+                        {
+                            local_p.credentials.push(disk_cred);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Persist the rotation state after an acquire: `usage_count`, `last_used` and the per-provider
     /// round-robin position must survive a restart (t_29ea5d7c) or `LeastUsed` restarts from the
     /// same key in every new process and `luna auth list` shows `Used: 0` forever.
@@ -119,6 +139,7 @@ impl CredentialManager {
     /// a full disk must not turn a working API key into a failed request.
     async fn persist_state(&self) {
         let mut to_write = self.state.read().await.clone();
+        Self::merge_from_disk(&mut to_write, &self.storage_path);
         for p in to_write.providers.values_mut() {
             for cred in &mut p.credentials {
                 cred.is_temporarily_disabled = false;
@@ -141,16 +162,27 @@ impl CredentialManager {
     }
 
     pub async fn save_to_disk(&self) -> Result<(), HarnessError> {
-        let bytes = {
-            let state = self.state.read().await;
-            serde_json::to_string_pretty(&*state)
-                .map_err(|e| HarnessError::SerializationError(e.to_string()))?
-        };
-        // Never overwrite a store that exists but does not read back: a truncation or hand-edit
-        // between load and write must not turn into "all your keys are gone" (t_24375a7e).
+        let mut to_write = self.state.read().await.clone();
         if self.storage_path.exists() {
-            Self::load_from_disk(&self.storage_path)?;
+            let disk = Self::load_from_disk(&self.storage_path)?;
+            for (p_id, p_state) in disk.providers {
+                if !to_write.providers.contains_key(&p_id) {
+                    to_write.providers.insert(p_id, p_state);
+                } else if let Some(local_p) = to_write.providers.get_mut(&p_id) {
+                    for disk_cred in p_state.credentials {
+                        if !local_p
+                            .credentials
+                            .iter()
+                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
+                        {
+                            local_p.credentials.push(disk_cred);
+                        }
+                    }
+                }
+            }
         }
+        let bytes = serde_json::to_string_pretty(&to_write)
+            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
         self.write_store(&bytes)
     }
 
@@ -270,19 +302,42 @@ impl CredentialManager {
     }
 
     pub async fn get_credentials(&self, provider: &str) -> Vec<CredentialEntry> {
-        let state = self.state.read().await;
-        state
-            .providers
-            .get(&provider.to_lowercase())
-            .map(|p| p.credentials.clone())
-            .unwrap_or_default()
+        let p_lower = provider.to_lowercase();
+        {
+            let state = self.state.read().await;
+            if let Some(p) = state.providers.get(&p_lower) {
+                if !p.credentials.is_empty() {
+                    return p.credentials.clone();
+                }
+            }
+        }
+        if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
+            let mut state = self.state.write().await;
+            for (p_id, p_state) in disk.providers {
+                state.providers.entry(p_id).or_insert(p_state);
+            }
+            return state
+                .providers
+                .get(&p_lower)
+                .map(|p| p.credentials.clone())
+                .unwrap_or_default();
+        }
+        Vec::new()
     }
 
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
+        let p_lower = provider.to_lowercase();
         let mut state = self.state.write().await;
+        if !state.providers.contains_key(&p_lower) {
+            if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
+                for (p_id, p_state) in disk.providers {
+                    state.providers.entry(p_id).or_insert(p_state);
+                }
+            }
+        }
         let provider_state = state
             .providers
-            .get_mut(&provider.to_lowercase())
+            .get_mut(&p_lower)
             .ok_or_else(|| HarnessError::AuthenticationFailed {
                 provider: provider.to_string(),
                 message: "No credentials registered for provider in Luna Auth".to_string(),
@@ -458,6 +513,24 @@ impl CredentialManager {
 
     /// Returns provider IDs that have registered credentials, sorted with active keys first.
     pub async fn get_loaded_providers(&self) -> Vec<String> {
+        if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
+            let mut state = self.state.write().await;
+            for (p_id, p_state) in disk.providers {
+                if !state.providers.contains_key(&p_id) {
+                    state.providers.insert(p_id, p_state);
+                } else if let Some(local_p) = state.providers.get_mut(&p_id) {
+                    for disk_cred in p_state.credentials {
+                        if !local_p
+                            .credentials
+                            .iter()
+                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
+                        {
+                            local_p.credentials.push(disk_cred);
+                        }
+                    }
+                }
+            }
+        }
         let state = self.state.read().await;
         let mut list: Vec<(String, u64, bool)> = state
             .providers
