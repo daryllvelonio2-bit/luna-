@@ -928,9 +928,6 @@ pub async fn run_interactive_chat(
                                 result_formatted: String::new(),
                             });
                             ui.emit_above(&steer_display);
-                            if ui.is_attended {
-                                ui.draw_initial_box();
-                            }
                         } else {
                             if ui.is_attended {
                                 crate::commands::clear_screen();
