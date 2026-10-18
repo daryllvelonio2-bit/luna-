@@ -847,7 +847,23 @@ async fn pick_provider_and_model(
     let catalog = get_provider_catalog();
     let loaded = cred_manager.get_loaded_providers().await;
 
-    let items: Vec<String> = catalog
+    // Only list providers that have wired credentials (or currently active)
+    let available_catalog: Vec<_> = {
+        let configured: Vec<_> = catalog
+            .into_iter()
+            .filter(|p| {
+                loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
+                    || p.id.eq_ignore_ascii_case(current_provider)
+            })
+            .collect();
+        if configured.is_empty() {
+            get_provider_catalog()
+        } else {
+            configured
+        }
+    };
+
+    let items: Vec<String> = available_catalog
         .iter()
         .map(|p| {
             let mut tags = Vec::new();
@@ -866,7 +882,7 @@ async fn pick_provider_and_model(
         })
         .collect();
 
-    let default_idx = catalog
+    let default_idx = available_catalog
         .iter()
         .position(|p| p.id.eq_ignore_ascii_case(current_provider))
         .unwrap_or(0);
@@ -883,7 +899,7 @@ async fn pick_provider_and_model(
         default_idx
     };
 
-    let chosen_provider = catalog[sel].id.clone();
+    let chosen_provider = available_catalog[sel].id.clone();
 
     // Fetch models for chosen provider
     let mut models = if chosen_provider == "antigravity" || chosen_provider == "agy" {
