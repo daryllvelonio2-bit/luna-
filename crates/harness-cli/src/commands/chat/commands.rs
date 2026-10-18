@@ -1390,7 +1390,11 @@ pub(crate) async fn handle_summarize_and_new_command(
     let old_id = session_id.clone();
     let name = arg.map(|s| s.trim()).unwrap_or("");
 
-    ui.start_activity("summarize", &serde_json::json!({ "session": old_id }));
+    ui.start_activity(
+        "summarize session",
+        "summarize",
+        &serde_json::json!({ "session": old_id }),
+    );
 
     let summary_res = {
         let ag = agent.lock().await;
@@ -1496,7 +1500,7 @@ pub(crate) async fn handle_compact_command(
     current_provider: &str,
     current_model: &str,
 ) -> Result<(), HarnessError> {
-    ui.start_activity("compact", &serde_json::json!({}));
+    ui.start_activity("compact context", "compact", &serde_json::json!({}));
     let result = {
         let ag = agent.lock().await;
         ag.compact_current_session().await

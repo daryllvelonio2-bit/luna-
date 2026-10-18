@@ -67,6 +67,9 @@ pub fn get_terminal_width() -> usize {
 /// A tool call currently in flight, as far as the animation is concerned.
 #[derive(Clone)]
 struct Activity {
+    /// The formatted call line, shown from the instant the tool is invoked — the transcript
+    /// carries the same line once it finishes, so the user watches the call, not just its result.
+    call: String,
     detail: Option<String>,
     started: std::time::Instant,
     frame: usize,
@@ -261,9 +264,10 @@ impl ChatUi {
         }
     }
 
-    pub fn start_activity(&self, name: &str, arguments: &serde_json::Value) {
+    pub fn start_activity(&self, call: &str, name: &str, arguments: &serde_json::Value) {
         let mut live = self.live.lock().unwrap();
         live.activity = Some(Activity {
+            call: call.to_string(),
             detail: tool_activity_detail(name, arguments),
             started: std::time::Instant::now(),
             frame: 0,
@@ -607,8 +611,10 @@ impl ChatUi {
                 activity.frame = activity.frame.wrapping_add(1);
                 rows.push(activity_line(
                     activity.frame,
+                    &activity.call,
                     activity.detail.as_deref(),
                     activity.started.elapsed(),
+                    width,
                 ));
             }
             rows
@@ -722,8 +728,10 @@ impl ChatUi {
             if let Some(activity) = &mut live.activity {
                 rows.push(activity_line(
                     activity.frame,
+                    &activity.call,
                     activity.detail.as_deref(),
                     activity.started.elapsed(),
+                    width,
                 ));
             }
             rows

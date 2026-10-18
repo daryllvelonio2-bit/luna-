@@ -223,6 +223,10 @@ pub const MAX_INLINE_RESULT_LINES: usize = 3;
 /// Braille-capable font, and they carry no colour, which keeps the transcript black-and-white.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Floor for the call text in a live activity row: on a very narrow terminal the call is still
+/// shown, truncated, rather than the row collapsing to a bare spinner.
+pub const LIVE_CALL_MIN_CHARS: usize = 12;
+
 /// One transcript block kind, tracked so blank lines land only between differing blocks
 /// (user → reasoning, reasoning → tool) and never between repeats (tool → tool).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -316,15 +320,36 @@ pub fn reasoning_rows(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-/// One animation frame of the activity line: a spinner cell, the operation still in flight,
-/// the elapsed time, and whatever detail the tool knows about the work (a patch's line deltas).
-pub fn activity_line(frame: usize, detail: Option<&str>, elapsed: Duration) -> String {
+/// One animation frame of the activity line: a spinner cell, the call itself, the elapsed time,
+/// and whatever detail the tool knows about the work (a patch's line deltas).
+///
+/// The call is part of the line — not just its result — so the invocation is visible from the
+/// instant it starts instead of appearing only once the tool has already finished. The call is
+/// measured and truncated in *visible* characters because this row is drawn inside the live
+/// region, where a row that wraps past the terminal width breaks the cursor arithmetic.
+pub fn activity_line(
+    frame: usize,
+    call: &str,
+    detail: Option<&str>,
+    elapsed: Duration,
+    width: usize,
+) -> String {
     let glyph = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()].cyan();
     let seconds = format!("{:.1}s", elapsed.as_secs_f32());
-    match detail {
-        Some(detail) => format!("  {} {} {}", glyph, detail.dimmed(), seconds.dimmed()),
-        None => format!("  {} {}", glyph, seconds.dimmed()),
-    }
+    let tail = match detail {
+        Some(detail) => format!("{} {}", detail, seconds),
+        None => seconds,
+    };
+    // "  ", the spinner cell, then " <call> <tail>" — everything except the call itself.
+    let fixed = 3 + 1 + tail.chars().count() + 1;
+    let budget = width.saturating_sub(fixed).max(LIVE_CALL_MIN_CHARS);
+    let plain = dialoguer::console::strip_ansi_codes(call).to_string();
+    let label = if plain.trim().is_empty() {
+        "running".to_string()
+    } else {
+        truncate_visible(&plain, budget)
+    };
+    format!("  {} {} {}", glyph, label.dimmed(), tail.dimmed())
 }
 
 /// What the activity line can say about a call beyond "still running": the size of the edit a
@@ -1051,13 +1076,51 @@ mod tests {
 
     #[test]
     fn activity_line_animates_the_frame_and_reports_elapsed_time() {
-        let first = activity_line(0, None, Duration::from_millis(1400));
-        let second = activity_line(1, None, Duration::from_millis(1500));
+        let first = activity_line(0, "", None, Duration::from_millis(1400), 80);
+        let second = activity_line(1, "", None, Duration::from_millis(1500), 80);
         assert_ne!(first, second, "each frame must differ, or nothing animates");
         assert!(first.contains("1.4s"), "got: {}", first);
 
-        let patch = activity_line(0, Some("−3 +1"), Duration::from_millis(0));
+        let patch = activity_line(0, "patch a.rs", Some("−3 +1"), Duration::from_millis(0), 80);
         assert!(patch.contains("−3 +1"), "got: {}", patch);
+    }
+
+    /// The whole point of the live line: the call is on screen while it runs, not only after it
+    /// returns. A regression that drops the call from the frame puts the user back to
+    /// result-only rendering on a slow tool.
+    #[test]
+    fn activity_line_carries_the_call_while_it_is_still_running() {
+        let line = activity_line(
+            0,
+            "terminal \"cargo test\"",
+            None,
+            Duration::from_millis(300),
+            80,
+        );
+        assert!(line.contains("cargo test"), "got: {}", line);
+        assert!(line.contains("0.3s"), "got: {}", line);
+
+        let empty = activity_line(0, "", None, Duration::from_millis(300), 80);
+        assert!(
+            empty.contains("running"),
+            "a call with no formatting still says something: {}",
+            empty
+        );
+    }
+
+    /// The live region moves the cursor by counting visible characters per row, so a call wider
+    /// than the terminal must be cut down to one physical row — never allowed to wrap.
+    #[test]
+    fn activity_line_never_exceeds_the_terminal_width() {
+        let long = "terminal \"cargo test --workspace --all-features --release\"";
+        for width in [24usize, 40, 80, 200] {
+            let row = activity_line(0, long, Some("−3 +1"), Duration::from_millis(1200), width);
+            let visible = dialoguer::console::strip_ansi_codes(&row).chars().count();
+            assert!(
+                visible <= width.max(LIVE_CALL_MIN_CHARS + 20),
+                "width {width} produced {visible} visible chars: {row}"
+            );
+        }
     }
 
     #[test]

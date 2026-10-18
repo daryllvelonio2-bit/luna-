@@ -10,6 +10,8 @@ name = "luna"
 path = "src/main.rs"
 
 [dependencies]
+arboard = "3.4"
+base64 = "0.22"
 harness-core = { workspace = true }
 harness-providers = { workspace = true }
 harness-memory = { workspace = true }

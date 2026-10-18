@@ -246,7 +246,7 @@ impl GenericProviderClient {
             });
 
             if let Some(ref text) = m.content {
-                msg_obj["content"] = json!(text);
+                msg_obj["content"] = serialize_content_with_images(role_str, text);
             }
 
             if !m.tool_calls.is_empty() {
@@ -639,4 +639,48 @@ impl ModelProvider for GenericProviderClient {
 
         Ok(embeddings)
     }
+}
+
+/// Serialize one message's text into a provider `content` value. A message that carries pasted
+/// screenshots (data URLs written by the CLI's Ctrl+V path) becomes the multimodal array form —
+/// `[{"type":"text",...},{"type":"image_url",...}]` — so vision-capable providers receive the
+/// image. Plain text stays a bare string, which every provider accepts and which keeps the
+/// common path byte-identical to what it was before images existed.
+fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
+    // Only user turns carry pasted images; a data URL inside a system/assistant/tool string is
+    // prose about an image, not an attachment, and must not be lifted into a content part.
+    if role != "user" || !text.contains("data:image/") {
+        return json!(text);
+    }
+
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    let mut prose = String::new();
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("data:image/") && trimmed.contains(";base64,") {
+            let flushed = prose.trim_end().to_string();
+            if !flushed.is_empty() {
+                parts.push(json!({ "type": "text", "text": flushed }));
+                prose.clear();
+            }
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": trimmed }
+            }));
+        } else {
+            prose.push_str(line);
+        }
+    }
+
+    let tail = prose.trim_end().to_string();
+    if !tail.is_empty() {
+        parts.push(json!({ "type": "text", "text": tail }));
+    }
+
+    if !parts.iter().any(|p| p["type"] == "image_url") {
+        return json!(text);
+    }
+
+    json!(parts)
 }

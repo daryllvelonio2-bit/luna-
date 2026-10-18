@@ -336,7 +336,10 @@ pub async fn run_interactive_chat(
             ui_obs.finish_reasoning();
             let call_fmt = format_tool_call(&name, &arguments);
             ui_obs.begin_block(OutputBlockKind::Tool);
-            ui_obs.start_activity(&name, &arguments);
+            // The call goes into the live region the instant it is invoked, so a slow tool is
+            // visible while it runs; `ToolExecuted` below finalizes the same line into the
+            // transcript with its verdict.
+            ui_obs.start_activity(&call_fmt, &name, &arguments);
             in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
                 call_formatted: call_fmt,
                 result_formatted: String::new(),
@@ -706,6 +709,9 @@ pub async fn run_interactive_chat(
     let stored_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
     ui.set_session_name(&stored_name);
 
+    // Images pasted via Ctrl+V, waiting to ride the next prompt as data URLs.
+    let pending_images: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
     let mut evolver_rx = evolver.subscribe();
     if let Some(active) = evolver.active_job().await {
         let current_tool = active
@@ -887,7 +893,7 @@ pub async fn run_interactive_chat(
                 });
                 if is_run {
                     let args = request.arguments.clone();
-                    ui.start_activity(&request.tool, &args);
+                    ui.start_activity(&format_tool_call(&request.tool, &args), &request.tool, &args);
                 }
                 let _ = decision_tx.send(decision);
             }
@@ -940,6 +946,47 @@ pub async fn run_interactive_chat(
                             process_expanded,
                         )
                         .await;
+                        continue;
+                    }
+                    Key::Char('\x16') => {
+                        // Ctrl+V: attach a screenshot from the clipboard to the next prompt
+                        match crate::commands::clipboard_image::read_clipboard_image() {
+                            Ok(Some(img)) => {
+                                let data_url = img.data_url();
+                                let marker = format!(
+                                    "[image: {}x{} saved to {}]",
+                                    img.width,
+                                    img.height,
+                                    img.saved_path.display()
+                                );
+                                {
+                                    let mut b = ui.input_buf.lock().unwrap();
+                                    if !b.is_empty() && !b.ends_with(' ') {
+                                        b.push(' ');
+                                    }
+                                    b.push_str(&marker);
+                                    b.push(' ');
+                                }
+                                let mut attachments = pending_images.lock().unwrap();
+                                attachments.push(data_url);
+                                ui.redraw_input_line();
+                                ui.emit_above(&format!(
+                                    "{} Screenshot attached ({}×{}) — press Enter to send",
+                                    "📷".cyan().bold(),
+                                    img.width,
+                                    img.height
+                                ));
+                            }
+                            Ok(None) => {
+                                ui.emit_above(&format!(
+                                    "{} Clipboard holds no image (nothing to paste)",
+                                    "•".dimmed()
+                                ));
+                            }
+                            Err(e) => {
+                                ui.emit_above(&format!("{} Screenshot paste failed: {}", "✖".red().bold(), e));
+                            }
+                        }
                         continue;
                     }
                     Key::Tab => {
@@ -1133,6 +1180,24 @@ pub async fn run_interactive_chat(
                             });
                             ui.emit_above(&steer_display);
                         } else {
+                            // Attached screenshots become OpenAI-style data-URL blocks appended
+                            // to the prompt text; the provider layer expands them into
+                            // content parts. Each URL is one paste, oldest first.
+                            let images = std::mem::take(&mut *pending_images.lock().unwrap());
+                            let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
+                                format!(
+                                    "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
+                                    query
+                                )
+                            } else {
+                                query.clone()
+                            };
+                            let q_with_images = if images.is_empty() {
+                                q
+                            } else {
+                                format!("{}\n\n{}", q, images.join("\n\n"))
+                            };
+
                             if ui.is_attended {
                                 crate::commands::clear_screen();
                                 render_all_turns(&turns, process_expanded, get_terminal_width());
@@ -1147,20 +1212,12 @@ pub async fn run_interactive_chat(
                             current_cancel = CancellationToken::new();
                             let cancel_child = current_cancel.child_token();
                             let ag_ref = agent.clone();
-                            let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
-                                format!(
-                                    "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
-                                    query
-                                )
-                            } else {
-                                query.clone()
-                            };
                             current_query = query.clone();
                             turn_start = std::time::Instant::now();
                             in_flight_tools.lock().unwrap().clear();
                             active_turn = Some(tokio::spawn(async move {
                                 let ag = ag_ref.lock().await;
-                                ag.run_turn(&q, cancel_child).await
+                                ag.run_turn(&q_with_images, cancel_child).await
                             }));
                         }
                     }
