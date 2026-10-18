@@ -41,8 +41,12 @@ struct Cli {
     yes: bool,
 
     /// Resume a stored session by id or name (`luna sessions list` shows both)
-    #[arg(long, conflicts_with = "continue_session")]
+    #[arg(long, conflicts_with_all = ["continue_session", "fork"])]
     session: Option<String>,
+
+    /// Fork an existing session and start from the copy
+    #[arg(long, conflicts_with_all = ["session", "continue_session"])]
+    fork: Option<String>,
 
     /// Resume the most recently updated session
     #[arg(long = "continue")]
@@ -74,8 +78,11 @@ enum Commands {
         #[arg(long)]
         yes: bool,
         /// Resume a stored session by id or name (`luna sessions list` shows both)
-        #[arg(long, conflicts_with = "continue_session")]
+        #[arg(long, conflicts_with_all = ["continue_session", "fork"])]
         session: Option<String>,
+        /// Fork an existing session and start from the copy
+        #[arg(long, conflicts_with_all = ["session", "continue_session"])]
+        fork: Option<String>,
         /// Resume the most recently updated session
         #[arg(long = "continue")]
         continue_session: bool,
@@ -231,15 +238,18 @@ async fn main() -> Result<(), HarnessError> {
     match cli.command {
         Some(Commands::Chat {
             session,
+            fork,
             continue_session,
             ..
         }) => {
             let session = session.or(cli.session);
+            let fork = fork.or(cli.fork);
             let continue_session = continue_session || cli.continue_session;
-            let selection = match (session, continue_session) {
-                (Some(id), _) => SessionSelection::Resume(id),
-                (None, true) => SessionSelection::Continue,
-                (None, false) => SessionSelection::New,
+            let selection = match (session, fork, continue_session) {
+                (Some(id), _, _) => SessionSelection::Resume(id),
+                (None, Some(fork_id), _) => SessionSelection::Fork(fork_id),
+                (None, None, true) => SessionSelection::Continue,
+                (None, None, false) => SessionSelection::New,
             };
             run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
         }
@@ -297,10 +307,11 @@ async fn main() -> Result<(), HarnessError> {
             tui::run_app_tui(app).await?;
         }
         None => {
-            let selection = match (cli.session, cli.continue_session) {
-                (Some(id), _) => SessionSelection::Resume(id),
-                (None, true) => SessionSelection::Continue,
-                (None, false) => SessionSelection::New,
+            let selection = match (cli.session, cli.fork, cli.continue_session) {
+                (Some(id), _, _) => SessionSelection::Resume(id),
+                (None, Some(fork_id), _) => SessionSelection::Fork(fork_id),
+                (None, None, true) => SessionSelection::Continue,
+                (None, None, false) => SessionSelection::New,
             };
             run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
         }

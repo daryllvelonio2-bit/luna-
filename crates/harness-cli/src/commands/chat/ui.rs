@@ -87,6 +87,7 @@ struct ChatStatus {
     context_used: u32,
     context_max: u32,
     yolo: bool,
+    plan_mode: bool,
     session_name: String,
 }
 
@@ -286,15 +287,16 @@ impl ChatUi {
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
-        let (yolo, session_name) = match status.as_ref() {
-            Some(s) => (s.yolo, s.session_name.clone()),
-            None => (false, String::new()),
+        let (yolo, plan_mode, session_name) = match status.as_ref() {
+            Some(s) => (s.yolo, s.plan_mode, s.session_name.clone()),
+            None => (false, false, String::new()),
         };
         *status = Some(ChatStatus {
             model: model.to_string(),
             context_used,
             context_max,
             yolo,
+            plan_mode,
             session_name,
         });
     }
@@ -344,6 +346,16 @@ impl ChatUi {
             let mut status = self.status.lock().unwrap();
             if let Some(ref mut s) = *status {
                 s.yolo = on;
+            }
+        }
+        self.redraw_status_line();
+    }
+
+    pub fn set_plan_mode(&self, on: bool) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.plan_mode = on;
             }
         }
         self.redraw_status_line();
@@ -415,6 +427,9 @@ impl ChatUi {
         } else {
             format!("ctx: {}/{}", s.context_used, s.context_max)
         };
+        if s.plan_mode {
+            right = format!("{} {}", "plan".cyan().bold(), right);
+        }
         if s.yolo {
             right = format!("{} {}", "yolo".yellow().bold(), right);
         }

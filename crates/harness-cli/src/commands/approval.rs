@@ -191,16 +191,19 @@ pub fn render_approval_box(
 pub struct ChatApprover {
     request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
     allow_all: Arc<AtomicBool>,
+    plan_mode: Arc<AtomicBool>,
 }
 
 impl ChatApprover {
     pub fn new(
         request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
         allow_all: Arc<AtomicBool>,
+        plan_mode: Arc<AtomicBool>,
     ) -> Self {
         Self {
             request_tx,
             allow_all,
+            plan_mode,
         }
     }
 }
@@ -208,6 +211,12 @@ impl ChatApprover {
 #[async_trait]
 impl Approver for ChatApprover {
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError> {
+        if self.plan_mode.load(Ordering::SeqCst) {
+            return Err(HarnessError::ApprovalRejected(
+                "plan mode active: mutating tool calls are disabled (press Tab to toggle plan mode off)"
+                    .to_string(),
+            ));
+        }
         if self.allow_all.load(Ordering::SeqCst) {
             return Ok(ApprovalDecision::Run);
         }
@@ -311,7 +320,8 @@ mod tests {
     async fn chat_approver_respects_allow_all_without_deadlock() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let allow_all = Arc::new(AtomicBool::new(false));
-        let approver = ChatApprover::new(tx, allow_all.clone());
+        let plan_mode = Arc::new(AtomicBool::new(false));
+        let approver = ChatApprover::new(tx, allow_all.clone(), plan_mode);
 
         // Initial request should ask
         let req = ApprovalRequest::default();
@@ -334,7 +344,8 @@ mod tests {
     async fn chat_approver_denies_on_dropped_receiver() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let allow_all = Arc::new(AtomicBool::new(false));
-        let approver = ChatApprover::new(tx, allow_all);
+        let plan_mode = Arc::new(AtomicBool::new(false));
+        let approver = ChatApprover::new(tx, allow_all, plan_mode);
 
         let req = ApprovalRequest::default();
         tokio::spawn(async move {
@@ -346,6 +357,18 @@ mod tests {
 
         let decision = approver.approve(&req).await.unwrap();
         assert_eq!(decision, ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn chat_approver_gates_mutations_in_plan_mode() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let allow_all = Arc::new(AtomicBool::new(true)); // Even with allow_all on
+        let plan_mode = Arc::new(AtomicBool::new(true)); // Plan mode takes precedence
+        let approver = ChatApprover::new(tx, allow_all, plan_mode);
+
+        let req = ApprovalRequest::default();
+        let err = approver.approve(&req).await.expect_err("must reject in plan mode");
+        assert!(matches!(err, HarnessError::ApprovalRejected(_)));
     }
 
     #[test]

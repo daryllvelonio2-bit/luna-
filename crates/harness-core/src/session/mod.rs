@@ -127,6 +127,13 @@ pub trait SessionStore: Send + Sync {
     /// caller that has thousands of sessions does not pay a round trip per row, and a
     /// concurrent append cannot slip a half-cleared store between two deletes.
     async fn delete_all_sessions(&self) -> Result<usize, HarnessError>;
+
+    /// Fork an existing session into a new session copy, cloning all message history and metadata.
+    async fn fork_session(
+        &self,
+        source_id: &str,
+        new_title: Option<&str>,
+    ) -> Result<String, HarnessError>;
 }
 
 /// Default `paths.sessions_db`, also used when a caller passes `None`.

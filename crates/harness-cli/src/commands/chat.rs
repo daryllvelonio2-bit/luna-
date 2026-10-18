@@ -41,8 +41,9 @@ pub mod viewer;
 
 use commands::{
     execute_slash_command, handle_compact_command, handle_compact_model_switch,
-    handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
-    handle_summarize_and_new_command, select_slash_command, SLASH_COMMANDS,
+    handle_delete_command, handle_model_switch, handle_name_command, handle_new_command,
+    handle_reasoning_switch, handle_summarize_and_new_command, select_slash_command,
+    SLASH_COMMANDS,
 };
 use render::{
     format_approval_verdict, format_tool_call, format_tool_result, parse_turns_from_history,
@@ -273,10 +274,15 @@ pub async fn run_interactive_chat(
         mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<harness_core::ApprovalDecision>)>();
 
     let allow_all_session = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let approver: Arc<dyn harness_core::Approver> =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
-            Arc::new(ChatApprover::new(approval_tx, allow_all_session.clone()))
+            Arc::new(ChatApprover::new(
+                approval_tx,
+                allow_all_session.clone(),
+                plan_mode.clone(),
+            ))
         } else {
             build_approver(&config)
         };
@@ -517,6 +523,19 @@ pub async fn run_interactive_chat(
                     )
                     .await?;
                 }
+                continue;
+            }
+            if query == "/delete" || query.starts_with("/delete ") {
+                handle_delete_command(
+                    &ui,
+                    &store,
+                    &config,
+                    &agent,
+                    &mut session_id,
+                    &current_provider,
+                    &current_model,
+                )
+                .await?;
                 continue;
             }
             let ag_ref = agent.clone();
@@ -858,6 +877,23 @@ pub async fn run_interactive_chat(
                         } else {
                             ui.emit_above(&format!("{} No background evolve tasks found", "•".dimmed()));
                         }
+                        continue;
+                    }
+                    Key::Tab => {
+                        // Tab: toggle plan mode
+                        let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
+                        let next = !current;
+                        plan_mode.store(next, std::sync::atomic::Ordering::SeqCst);
+                        ui.set_plan_mode(next);
+                        ui.emit_above(&format!(
+                            "{} Plan mode {}",
+                            "•".cyan(),
+                            if next {
+                                "ON (read-only planning, mutating tools gated)".cyan().bold()
+                            } else {
+                                "OFF".dimmed()
+                            }
+                        ));
                         continue;
                     }
                     Key::BackTab if !allow_all_session.load(std::sync::atomic::Ordering::SeqCst) => {

@@ -1,6 +1,7 @@
 //! `luna sessions list` and the session a chat run attaches to.
 
 use clap::Subcommand;
+use colored::Colorize;
 
 use harness_core::{Config, HarnessError, SessionStore, SqliteSessionStore};
 
@@ -8,6 +9,20 @@ use harness_core::{Config, HarnessError, SessionStore, SqliteSessionStore};
 pub enum SessionsCommand {
     /// List stored chat sessions, most recently updated first
     List,
+    /// Fork an existing chat session into a new branch session
+    Fork {
+        /// Session id or name to fork
+        session: String,
+        /// Optional title for the forked session
+        #[arg(short, long)]
+        title: Option<String>,
+    },
+    /// Delete a stored chat session by id or name
+    #[command(alias = "rm")]
+    Delete {
+        /// Session id or name to delete
+        session: String,
+    },
 }
 
 /// Which session `luna chat` runs against.
@@ -17,6 +32,8 @@ pub enum SessionSelection {
     New,
     /// `--session <id>`; the session is created when it does not exist yet.
     Resume(String),
+    /// Fork an existing session and start on the new copy.
+    Fork(String),
     /// `--continue`: the most recently updated session.
     Continue,
 }
@@ -43,6 +60,16 @@ pub async fn resolve_session(
             }
             store.ensure_session(&value).await?;
             Ok(value)
+        }
+        SessionSelection::Fork(source) => {
+            let id = if store.get(&source).await.is_ok() {
+                source
+            } else if let Some(resolved) = find_by_name(store, &source).await? {
+                resolved
+            } else {
+                return Err(HarnessError::SessionError(format!("source session '{}' not found", source)));
+            };
+            store.fork_session(&id, None).await
         }
         SessionSelection::Continue => match store.most_recent().await? {
             Some(id) => Ok(id),
@@ -118,5 +145,84 @@ pub async fn handle_sessions_command(
             }
             Ok(())
         }
+        SessionsCommand::Fork { session, title } => {
+            let store = open_store(config)?;
+            let id = if store.get(&session).await.is_ok() {
+                session
+            } else if let Some(resolved) = find_by_name(&store, &session).await? {
+                resolved
+            } else {
+                return Err(HarnessError::SessionError(format!("session '{}' not found", session)));
+            };
+
+            let forked_id = store.fork_session(&id, title.as_deref()).await?;
+            println!(
+                "{} Forked session {} -> {}",
+                "✔".green().bold(),
+                id.dimmed(),
+                forked_id.cyan().bold()
+            );
+            Ok(())
+        }
+        SessionsCommand::Delete { session } => {
+            let store = open_store(config)?;
+            let id = if store.get(&session).await.is_ok() {
+                session
+            } else if let Some(resolved) = find_by_name(&store, &session).await? {
+                resolved
+            } else {
+                return Err(HarnessError::SessionError(format!("session '{}' not found", session)));
+            };
+
+            let deleted = store.delete_session(&id).await?;
+            if deleted {
+                println!("{} Deleted session {}", "✔".green().bold(), id.cyan());
+            } else {
+                println!("{} Session {} not found or already deleted", "ℹ".dimmed(), id);
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_sessions_command_delete() {
+        let db_path = std::env::temp_dir().join(format!("luna_test_sessions_{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteSessionStore::new(Some(db_path.clone())).unwrap();
+
+        // Create two sessions
+        let s1 = create_session(&store).await.unwrap();
+        store.set_name(&s1, "work-session").await.unwrap();
+
+        let mut config = Config::default();
+        config.paths.sessions_db = db_path.clone();
+
+        // Delete by name
+        handle_sessions_command(
+            SessionsCommand::Delete {
+                session: "work-session".to_string(),
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(store.get(&s1).await.is_err(), "deleted session must be gone");
+
+        // Delete non-existent session returns error
+        let err = handle_sessions_command(
+            SessionsCommand::Delete {
+                session: "non-existent".to_string(),
+            },
+            &config,
+        )
+        .await;
+        assert!(err.is_err());
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

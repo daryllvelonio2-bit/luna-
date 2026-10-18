@@ -599,5 +599,50 @@ impl SessionStore for SqliteSessionStore {
             .map_err(|error| session_error("failed to delete all sessions", error))?;
         Ok(removed)
     }
+
+    async fn fork_session(
+        &self,
+        source_id: &str,
+        new_title: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        let conn = self.conn.lock().await;
+
+        let (title, name, model) = conn
+            .query_row(
+                "SELECT title, name, model FROM sessions WHERE id = ?1",
+                params![source_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .map_err(|e| session_error(&format!("source session '{source_id}' not found"), e))?;
+
+        let forked_title = new_title.map(str::to_string).unwrap_or_else(|| {
+            if title.is_empty() {
+                format!("Fork of {}", source_id)
+            } else {
+                format!("Fork of {}", title)
+            }
+        });
+
+        let new_id = format!("s{:x}", uuid::Uuid::new_v4().as_fields().0);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO sessions (id, created_at, updated_at, title, name, model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![new_id, now, now, forked_title, name, model],
+        )
+        .map_err(|e| session_error("failed to create forked session record", e))?;
+
+        conn.execute(
+            "INSERT INTO messages (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at)
+             SELECT ?1, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at
+             FROM messages WHERE session_id = ?2
+             ORDER BY seq ASC",
+            params![new_id, source_id],
+        )
+        .map_err(|e| session_error("failed to copy messages for forked session", e))?;
+
+        Ok(new_id)
+    }
 }
 

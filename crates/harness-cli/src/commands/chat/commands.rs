@@ -66,6 +66,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "List available specialized skills",
     },
     SlashCommand {
+        name: "/plan",
+        details: "Toggle read-only plan mode (or Tab key)",
+    },
+    SlashCommand {
+        name: "/fork",
+        details: "Fork current session into a new branch session",
+    },
+    SlashCommand {
         name: "/clear",
         details: "Clear terminal screen",
     },
@@ -80,6 +88,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/hb",
         details: "Alias for /heartbeat",
+    },
+    SlashCommand {
+        name: "/delete",
+        details: "Delete current session and start a fresh one",
     },
     SlashCommand {
         name: "/exit",
@@ -295,6 +307,25 @@ pub(crate) async fn execute_slash_command(
             .await;
             if ui.is_attended {
                 ui.draw_initial_box();
+            }
+            Ok(false)
+        }
+        "/delete" => {
+            turns.clear();
+            ui.clear_box_on_exit();
+            if let Err(e) = handle_delete_command(
+                ui,
+                store,
+                config,
+                agent,
+                session_id,
+                current_provider,
+                current_model,
+            )
+            .await
+            {
+                ui.draw_initial_box();
+                ui.emit_above(&format!("{} Failed to delete session: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
@@ -1244,6 +1275,66 @@ pub(crate) async fn handle_new_command(
                 session_id.dimmed()
             );
         }
+    }
+
+    Ok(())
+}
+
+/// `/delete`: permanently delete the current chat session and start a fresh one.
+pub(crate) async fn handle_delete_command(
+    ui: &ChatUi,
+    store: &Arc<SqliteSessionStore>,
+    config: &Config,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    session_id: &mut String,
+    current_provider: &str,
+    current_model: &str,
+) -> Result<(), HarnessError> {
+    let old_id = session_id.clone();
+    let old_name = store.get(&old_id).await.map(|s| s.name).unwrap_or_default();
+
+    // Delete current session from SQLite store
+    store.delete_session(&old_id).await?;
+
+    // Start a fresh new session
+    let new_id = resolve_session(store.as_ref(), SessionSelection::New).await?;
+    store
+        .set_model(&new_id, current_provider, current_model)
+        .await?;
+
+    *session_id = new_id.clone();
+    agent.lock().await.set_session(SessionBinding {
+        store: store.clone(),
+        session_id: new_id.clone(),
+        resume_max_messages: config.session.resume_max_messages,
+    });
+
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    ui.set_status(current_model, 0, context_max);
+    ui.set_session_name("");
+
+    let desc = if old_name.is_empty() {
+        old_id.cyan().to_string()
+    } else {
+        format!("'{}' ({})", old_name.cyan(), old_id.dimmed())
+    };
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        ui.draw_initial_box();
+        ui.emit_above(&format!(
+            "{} Deleted session {} and started fresh session {}",
+            "✔".green().bold(),
+            desc,
+            new_id.cyan()
+        ));
+    } else {
+        println!(
+            "{} Deleted session {} and started fresh session {}",
+            "✔".green().bold(),
+            desc,
+            new_id.cyan()
+        );
     }
 
     Ok(())
