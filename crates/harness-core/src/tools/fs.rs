@@ -43,7 +43,7 @@ impl ReadCache {
             }
         } else {
             return Err(format!(
-                "Stale write refused for '{}': file was not read in this session prior to write.",
+                "Stale write refused for '{}': file was not read in this session prior to write or patch. Call read_file on this path first.",
                 path.display()
             ));
         }
@@ -146,8 +146,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file with line numbers and optional pagination. Emits whole lines and \
-         stops at the character budget, then appends a notice naming the resume offset."
+        "Read a text file with line numbers and optional pagination. Required before patching or overwriting existing files."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -276,7 +275,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file, completely replacing existing content. Enforces read-before-write."
+        "Write content to a file, completely replacing existing content. Overwriting an existing file requires reading it first with read_file in this session."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -379,7 +378,7 @@ impl Tool for PatchTool {
     }
 
     fn description(&self) -> &str {
-        "Targeted find-and-replace edit in a file. Requires exact string match."
+        "Targeted find-and-replace edit in a file. Requires reading the file in the session first with read_file, and an exact unique string match."
     }
 
     fn parameters(&self) -> serde_json::Value {
