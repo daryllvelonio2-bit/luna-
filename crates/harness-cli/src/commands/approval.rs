@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use harness_core::{
     AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings, Approver, Config,
-    DenyAll, HarnessError, NonInteractive,
+    DenyAll, HarnessError,
 };
 
 /// The three answers the approval popup offers, in focus order.

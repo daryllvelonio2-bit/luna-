@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::HarnessError;
 
