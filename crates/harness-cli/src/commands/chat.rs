@@ -65,6 +65,39 @@ pub(crate) fn clear_on_exit() {
     crate::commands::clear_screen();
 }
 
+fn load_prompt_history(path: Option<&std::path::Path>, initial_turns: &[TurnRecord]) -> Vec<String> {
+    let mut prompts = Vec::new();
+    if let Some(p) = path {
+        if let Ok(content) = std::fs::read_to_string(p) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && prompts.last().map(|s| s != trimmed).unwrap_or(true) {
+                    prompts.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    for turn in initial_turns {
+        let q = turn.user_query.trim();
+        if !q.is_empty() && !q.starts_with('•') && prompts.last().map(|s| s != q).unwrap_or(true) {
+            prompts.push(q.to_string());
+        }
+    }
+    prompts
+}
+
+fn append_prompt_history(path: Option<&std::path::Path>, prompt: &str) {
+    if let Some(p) = path {
+        use std::io::Write;
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = writeln!(file, "{}", prompt);
+        }
+    }
+}
+
 pub async fn run_interactive_chat(
     config: Config,
     cred_manager: Arc<CredentialManager>,
@@ -628,6 +661,11 @@ pub async fn run_interactive_chat(
     let mut current_query = String::new();
     let mut turn_start = std::time::Instant::now();
 
+    let history_path = config.paths.sessions_db.parent().map(|p| p.join("history.txt"));
+    let mut prompt_history = load_prompt_history(history_path.as_deref(), &turns);
+    let mut history_cursor: Option<usize> = None;
+    let mut draft_input = String::new();
+
     // Drives the live region: streamed reasoning and the running-tool spinner advance on this
     // tick rather than on every delta, so a fast token stream cannot outrun the redraw.
     let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
@@ -833,6 +871,40 @@ pub async fn run_interactive_chat(
                             }
                         }
                     }
+                    Key::ArrowUp => {
+                        if !prompt_history.is_empty() {
+                            let next_idx = match history_cursor {
+                                None => {
+                                    draft_input = ui.input_buf.lock().unwrap().clone();
+                                    prompt_history.len().saturating_sub(1)
+                                }
+                                Some(idx) => idx.saturating_sub(1),
+                            };
+                            history_cursor = Some(next_idx);
+                            if let Some(prompt) = prompt_history.get(next_idx) {
+                                *ui.input_buf.lock().unwrap() = prompt.clone();
+                                ui.redraw_input_line();
+                            }
+                        }
+                        continue;
+                    }
+                    Key::ArrowDown => {
+                        if let Some(idx) = history_cursor {
+                            if idx + 1 < prompt_history.len() {
+                                let next_idx = idx + 1;
+                                history_cursor = Some(next_idx);
+                                if let Some(prompt) = prompt_history.get(next_idx) {
+                                    *ui.input_buf.lock().unwrap() = prompt.clone();
+                                    ui.redraw_input_line();
+                                }
+                            } else {
+                                history_cursor = None;
+                                *ui.input_buf.lock().unwrap() = draft_input.clone();
+                                ui.redraw_input_line();
+                            }
+                        }
+                        continue;
+                    }
                     Key::Char(c) => {
                         ui.input_buf.lock().unwrap().push(c);
                         ui.redraw_input_line();
@@ -842,6 +914,8 @@ pub async fn run_interactive_chat(
                         ui.redraw_input_line();
                     }
                     Key::Enter => {
+                        history_cursor = None;
+                        draft_input.clear();
                         let query = {
                             let mut b = ui.input_buf.lock().unwrap();
                             let s = b.trim().to_string();
@@ -852,6 +926,11 @@ pub async fn run_interactive_chat(
                         if query.is_empty() {
                             ui.redraw_input_line();
                             continue;
+                        }
+
+                        if prompt_history.last().map(|s| s != &query).unwrap_or(true) {
+                            append_prompt_history(history_path.as_deref(), &query);
+                            prompt_history.push(query.clone());
                         }
 
                         if query == "/" || query.eq_ignore_ascii_case("/help") {

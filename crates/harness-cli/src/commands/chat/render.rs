@@ -33,6 +33,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
     let mut current_query: Option<String> = None;
     let mut current_reasoning: Option<String> = None;
     let mut current_tools: Vec<TurnProcessItem> = Vec::new();
+    let mut current_reply: Option<String> = None;
 
     for stored in history {
         let msg = &stored.message;
@@ -45,14 +46,19 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         tools: Vec::new(),
                         tool_items: std::mem::take(&mut current_tools),
                         duration: Duration::ZERO,
-                        reply: String::new(),
+                        reply: current_reply.take().unwrap_or_default(),
                     });
                 }
                 current_query = msg.content.clone();
             }
             Role::Assistant => {
                 if let Some(ref r) = msg.reasoning {
-                    current_reasoning = Some(r.clone());
+                    if let Some(ref mut cur_r) = current_reasoning {
+                        cur_r.push('\n');
+                        cur_r.push_str(r);
+                    } else {
+                        current_reasoning = Some(r.clone());
+                    }
                 }
                 for call in &msg.tool_calls {
                     current_tools.push(TurnProcessItem {
@@ -62,15 +68,12 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                 }
                 if let Some(ref content) = msg.content {
                     if !content.trim().is_empty() {
-                        let q = current_query.take().unwrap_or_default();
-                        turns.push(TurnRecord {
-                            user_query: q,
-                            reasoning: current_reasoning.take(),
-                            tools: Vec::new(),
-                            tool_items: std::mem::take(&mut current_tools),
-                            duration: Duration::ZERO,
-                            reply: content.clone(),
-                        });
+                        if let Some(ref mut cur_reply) = current_reply {
+                            cur_reply.push_str("\n\n");
+                            cur_reply.push_str(content);
+                        } else {
+                            current_reply = Some(content.clone());
+                        }
                     }
                 }
             }
@@ -112,7 +115,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
             tools: Vec::new(),
             tool_items: current_tools,
             duration: Duration::ZERO,
-            reply: String::new(),
+            reply: current_reply.unwrap_or_default(),
         });
     }
 
@@ -253,10 +256,25 @@ pub fn truncate_visible(text: &str, max: usize) -> String {
 /// Right-align the user's own message so the transcript reads as a chat — the user on the
 /// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
 pub fn right_aligned_user_message(query: &str, width: usize) -> String {
-    // The message and its glyph are one unit, so they are bolded together.
-    let line = format!("{} {}", query, PROMPT.trim_end());
-    let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
-    format!("{}{}", " ".repeat(pad), line.bold())
+    let lines: Vec<&str> = query.lines().collect();
+    if lines.is_empty() {
+        let line = PROMPT.trim_end();
+        let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
+        return format!("{}{}", " ".repeat(pad), line.bold());
+    }
+    let mut out = Vec::new();
+    let total = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let is_last = i == total - 1;
+        let formatted = if is_last {
+            format!("{} {}", line, PROMPT.trim_end())
+        } else {
+            line.to_string()
+        };
+        let pad = width.saturating_sub(1).saturating_sub(formatted.chars().count());
+        out.push(format!("{}{}", " ".repeat(pad), formatted.bold()));
+    }
+    out.join("\n")
 }
 
 /// Soft-wrap `text` to `width` columns, returning the visible rows. Wrapping here rather than
@@ -1101,5 +1119,79 @@ mod tests {
         assert!(header.contains("▼"), "got: {}", header);
         assert!(header.contains("1 tool: terminal"), "got: {}", header);
         assert!(header.contains("Ctrl+O to collapse"), "got: {}", header);
+    }
+
+    #[test]
+    fn parse_turns_from_history_handles_multistep_and_empty_queries() {
+        use harness_core::Message;
+
+        let history = vec![
+            StoredMessage {
+                id: 1,
+                seq: 1,
+                message: Message::user("first question"),
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 2,
+                seq: 2,
+                message: Message::assistant("first reply"),
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 3,
+                seq: 3,
+                message: Message::user("second question"),
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 4,
+                seq: 4,
+                message: Message {
+                    role: Role::Assistant,
+                    content: None,
+                    reasoning: Some("thinking...".to_string()),
+                    tool_calls: vec![harness_core::ToolCall {
+                        id: "c1".to_string(),
+                        name: "terminal".to_string(),
+                        arguments: json!({ "command": "ls" }),
+                    }],
+                    tool_result: None,
+                    usage: None,
+                },
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 5,
+                seq: 5,
+                message: Message {
+                    role: Role::Assistant,
+                    content: Some("final reply".to_string()),
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage: None,
+                },
+                is_summary: false,
+            },
+        ];
+
+        let turns = parse_turns_from_history(&history);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_query, "first question");
+        assert_eq!(turns[0].reply, "first reply");
+        assert_eq!(turns[1].user_query, "second question");
+        assert_eq!(turns[1].reply, "final reply");
+        assert_eq!(turns[1].tool_items.len(), 1);
+        assert_eq!(turns[1].reasoning.as_deref(), Some("thinking..."));
+    }
+
+    #[test]
+    fn right_aligned_user_message_handles_multiline() {
+        let msg = right_aligned_user_message("hello\nworld", 80);
+        let lines: Vec<&str> = msg.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("hello"));
+        assert!(lines[1].ends_with(PROMPT.trim_end()));
     }
 }

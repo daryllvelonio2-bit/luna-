@@ -682,9 +682,6 @@ impl ChatUi {
             let _ = io::stdout().flush();
             return;
         }
-        if self.box_drawn.load(Ordering::SeqCst) {
-            return;
-        }
         let width = get_terminal_width();
         let buf = self.input_buf.lock().unwrap();
         self.draw_box(width, &buf);
