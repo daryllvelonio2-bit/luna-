@@ -211,6 +211,123 @@ impl Tool for SkillToolAdapter {
     }
 }
 
+pub struct SkillViewTool {
+    skills: Arc<Vec<Skill>>,
+}
+
+impl SkillViewTool {
+    pub fn new(skills: Arc<Vec<Skill>>) -> Self {
+        Self { skills }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillViewTool {
+    fn name(&self) -> &str {
+        "skill_view"
+    }
+
+    fn description(&self) -> &str {
+        "View the full instructions and guidelines for an available skill on demand."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the skill to inspect"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let name = args.get("name").and_then(|n| n.as_str()).unwrap_or_default().trim();
+        if let Some(skill) = self.skills.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
+            let mut output = format!(
+                "# Skill: {}\n{}\n\n## Instructions\n{}",
+                skill.name, skill.description, skill.instructions
+            );
+            if let Some(ref cmd) = skill.command {
+                output.push_str(&format!("\n\n## Command Template\n{}", cmd));
+            }
+            Ok(ToolResult::success(call_id, output))
+        } else {
+            let available: Vec<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
+            Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Skill '{}' not found. Available skills: {}",
+                    name,
+                    if available.is_empty() {
+                        "none".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ),
+            ))
+        }
+    }
+}
+
+pub struct SkillsListTool {
+    skills: Arc<Vec<Skill>>,
+}
+
+impl SkillsListTool {
+    pub fn new(skills: Arc<Vec<Skill>>) -> Self {
+        Self { skills }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillsListTool {
+    fn name(&self) -> &str {
+        "skills_list"
+    }
+
+    fn description(&self) -> &str {
+        "List all available skills with their short descriptions."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        _args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        if self.skills.is_empty() {
+            return Ok(ToolResult::success(call_id, "No skills available."));
+        }
+
+        let lines: Vec<String> = self
+            .skills
+            .iter()
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect();
+
+        Ok(ToolResult::success(
+            call_id,
+            format!("Available skills (load with skill_view):\n{}", lines.join("\n")),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +371,51 @@ Test instructions
             let adapter = SkillToolAdapter::new(skill);
             assert_eq!(adapter.name(), "browser");
         }
+    }
+
+    #[tokio::test]
+    async fn test_skill_view_and_skills_list_tools() {
+        let skills = Arc::new(vec![
+            Skill {
+                name: "ponytail".to_string(),
+                description: "Lazy senior developer guidance".to_string(),
+                instructions: "Write the simplest solution.".to_string(),
+                file_path: PathBuf::from("/skills/ponytail/SKILL.md"),
+                command: None,
+                timeout_secs: None,
+                parameters: None,
+            },
+            Skill {
+                name: "security".to_string(),
+                description: "Security review checklist".to_string(),
+                instructions: "Check for injections.".to_string(),
+                file_path: PathBuf::from("/skills/security/SKILL.md"),
+                command: None,
+                timeout_secs: None,
+                parameters: None,
+            },
+        ]);
+
+        let list_tool = SkillsListTool::new(skills.clone());
+        let cancel = CancellationToken::new();
+        let list_res = list_tool.execute("c1", &serde_json::json!({}), &cancel).await.unwrap();
+        assert!(list_res.content.contains("ponytail: Lazy senior developer guidance"));
+        assert!(list_res.content.contains("security: Security review checklist"));
+
+        let view_tool = SkillViewTool::new(skills);
+        let view_res = view_tool
+            .execute("c2", &serde_json::json!({ "name": "ponytail" }), &cancel)
+            .await
+            .unwrap();
+        assert!(!view_res.is_error);
+        assert!(view_res.content.contains("# Skill: ponytail"));
+        assert!(view_res.content.contains("Write the simplest solution."));
+
+        let not_found = view_tool
+            .execute("c3", &serde_json::json!({ "name": "unknown" }), &cancel)
+            .await
+            .unwrap();
+        assert!(not_found.is_error);
+        assert!(not_found.content.contains("Skill 'unknown' not found"));
     }
 }

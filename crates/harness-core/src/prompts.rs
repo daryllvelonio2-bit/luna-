@@ -65,6 +65,10 @@ mod tests {
             body.contains("{{ACTIVE_MEMORIES}}"),
             "memory marker missing"
         );
+        assert!(
+            body.contains("{{AVAILABLE_SKILLS}}"),
+            "skills marker missing"
+        );
     }
 
     #[test]

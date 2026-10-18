@@ -215,24 +215,37 @@ pub async fn run_interactive_chat(
     registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
     registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
 
-    // Register skills from skills_dir and workspace .harness/skills
+    // Load skills from skills_dir and workspace .harness/skills
+    let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
     if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
-        for skill in skills {
-            registry
-                .register(Arc::new(harness_plugins::SkillToolAdapter::new(skill)))
-                .await?;
-        }
+        all_skills.extend(skills);
     }
     let workspace_skills = config.paths.workspace_root.join(".harness/skills");
     if workspace_skills.exists() {
         if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&workspace_skills) {
-            for skill in skills {
-                registry
-                    .register(Arc::new(harness_plugins::SkillToolAdapter::new(skill)))
-                    .await?;
-            }
+            all_skills.extend(skills);
         }
+    }
+
+    let skills_summary = if all_skills.is_empty() {
+        None
+    } else {
+        let lines: Vec<String> = all_skills
+            .iter()
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect();
+        Some(lines.join("\n"))
+    };
+
+    if !all_skills.is_empty() {
+        let skills_arc = Arc::new(all_skills);
+        registry
+            .register(Arc::new(harness_plugins::SkillViewTool::new(skills_arc.clone())))
+            .await?;
+        registry
+            .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
+            .await?;
     }
 
     // Register core filesystem and shell tools (§2.2)
@@ -268,13 +281,16 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
+    let mut agent_config = config.agent.clone();
+    agent_config.skills_summary = skills_summary;
+
     let agent = Agent::new(
         provider,
         memory,
         notes,
         evolver.clone(),
         registry,
-        config.agent.clone(),
+        agent_config.clone(),
     )
     .with_approval(approver, approval_settings(&config))
     .with_session(SessionBinding {
@@ -402,6 +418,14 @@ pub async fn run_interactive_chat(
             if query == "/" || query.eq_ignore_ascii_case("/help") {
                 for cmd in SLASH_COMMANDS {
                     println!("  {:<12} {}", cmd.name.cyan(), cmd.details.dimmed());
+                }
+                continue;
+            }
+            if query == "/skills" || query.starts_with("/skills ") {
+                if let Some(ref summary) = agent_config.skills_summary {
+                    println!("\n{}\n{}\n", "Available skills:".bold(), summary);
+                } else {
+                    println!("\n{}\n", "No specialized skills installed.".dimmed());
                 }
                 continue;
             }

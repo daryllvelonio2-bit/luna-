@@ -35,6 +35,9 @@ pub struct AgentConfig {
     pub engineer_model: Option<String>,
     /// Provider used by the background engineer agent; `None` means the session's provider.
     pub engineer_provider: Option<String>,
+    /// Compact one-line summary index of available skills (e.g. "- name: description")
+    #[serde(default)]
+    pub skills_summary: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -50,6 +53,7 @@ impl Default for AgentConfig {
             compaction_provider: None,
             engineer_model: None,
             engineer_provider: None,
+            skills_summary: None,
         }
     }
 }
@@ -902,13 +906,19 @@ where
 
         let relevant_memories = self.memory.retrieve(user_input, 10).await?;
         let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
+        let skills_prompt = self
+            .config
+            .skills_summary
+            .as_deref()
+            .unwrap_or("(no specialized skills installed)");
 
         Ok(crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
             .replace(
                 "{{SYSTEM_PROMPT_PREFIX}}",
                 self.config.system_prompt_prefix.as_deref().unwrap_or(""),
             )
-            .replace("{{ACTIVE_MEMORIES}}", &memory_prompt))
+            .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
+            .replace("{{AVAILABLE_SKILLS}}", skills_prompt))
     }
 
     /// The session's recent transcript, plus the notice the console prints about the bound.

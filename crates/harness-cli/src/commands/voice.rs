@@ -112,6 +112,41 @@ pub async fn run_voice_loop(
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache).await?;
 
+    let mut all_skills = Vec::new();
+    let _ = std::fs::create_dir_all(&config.paths.skills_dir);
+    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
+        all_skills.extend(skills);
+    }
+    let workspace_skills = config.paths.workspace_root.join(".harness/skills");
+    if workspace_skills.exists() {
+        if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&workspace_skills) {
+            all_skills.extend(skills);
+        }
+    }
+
+    let skills_summary = if all_skills.is_empty() {
+        None
+    } else {
+        let lines: Vec<String> = all_skills
+            .iter()
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect();
+        Some(lines.join("\n"))
+    };
+
+    if !all_skills.is_empty() {
+        let skills_arc = Arc::new(all_skills);
+        registry
+            .register(Arc::new(harness_plugins::SkillViewTool::new(skills_arc.clone())))
+            .await?;
+        registry
+            .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
+            .await?;
+    }
+
+    let mut agent_cfg = config.agent.clone();
+    agent_cfg.skills_summary = skills_summary;
+
     let agent = Arc::new(
         Agent::new(
             provider,
@@ -119,7 +154,7 @@ pub async fn run_voice_loop(
             notes,
             evolver,
             registry,
-            config.agent.clone(),
+            agent_cfg,
         )
         .with_approval(build_approver(&config), approval_settings(&config)),
     );

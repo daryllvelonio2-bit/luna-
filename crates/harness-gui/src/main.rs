@@ -972,20 +972,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await;
                 let _ = registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await;
 
-                // Register skills from skills_dir and workspace .harness/skills
+                // Load skills from skills_dir and workspace .harness/skills
+                let mut all_skills = Vec::new();
                 let _ = std::fs::create_dir_all(&config.paths.skills_dir);
                 if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
-                    for skill in skills {
-                        let _ = registry.register(Arc::new(harness_plugins::SkillToolAdapter::new(skill))).await;
-                    }
+                    all_skills.extend(skills);
                 }
                 let workspace_skills = active_root.join(".harness/skills");
                 if workspace_skills.exists() {
                     if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&workspace_skills) {
-                        for skill in skills {
-                            let _ = registry.register(Arc::new(harness_plugins::SkillToolAdapter::new(skill))).await;
-                        }
+                        all_skills.extend(skills);
                     }
+                }
+
+                let skills_summary = if all_skills.is_empty() {
+                    None
+                } else {
+                    let lines: Vec<String> = all_skills
+                        .iter()
+                        .map(|s| format!("- {}: {}", s.name, s.description))
+                        .collect();
+                    Some(lines.join("\n"))
+                };
+
+                if !all_skills.is_empty() {
+                    let skills_arc = Arc::new(all_skills);
+                    let _ = registry.register(Arc::new(harness_plugins::SkillViewTool::new(skills_arc.clone()))).await;
+                    let _ = registry.register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc))).await;
                 }
 
                 // Register core sandboxed tools (strictly bounded to active workspace root)
@@ -995,7 +1008,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
                 let _ = harness_core::tools::register_core_tools(&reg_dyn, &run_config, read_cache).await;
 
-                let agent_cfg = config.agent.clone();
+                let mut agent_cfg = config.agent.clone();
+                agent_cfg.skills_summary = skills_summary;
 
                 let mut agent = Agent::new(
                     provider,

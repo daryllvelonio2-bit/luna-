@@ -62,6 +62,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Collapse intermediate tool and reasoning processes (or Ctrl+O)",
     },
     SlashCommand {
+        name: "/skills",
+        details: "List available specialized skills",
+    },
+    SlashCommand {
         name: "/clear",
         details: "Clear terminal screen",
     },
