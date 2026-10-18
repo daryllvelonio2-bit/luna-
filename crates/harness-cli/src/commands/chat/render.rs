@@ -404,7 +404,7 @@ fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
         "list_files" => ("📂", "list"),
         "terminal" | "shell" | "bash" => ("💻", "run"),
         "save_note" | "read_note" | "update_note" | "delete_note" => ("📑", "note"),
-        "search_notes" => ("🔍", "notes"),
+        "search_notes" | "list_notes" => ("🔍", "notes"),
         "save_memory" | "update_memory" | "forget_memory" => ("🧠", "memory"),
         "apply_harness_update" => ("🚀", "update"),
         _ => ("🔧", ""),
@@ -558,6 +558,16 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 .map(|l| suffix(format!("limit {}", l)))
                 .unwrap_or_default();
             return format!("{} {} {}{}", glyph, verb_col(verb), quoted(query), limit);
+        }
+        "list_notes" => {
+            let limit = number("limit").unwrap_or(20);
+            let offset = number("offset").unwrap_or(0);
+            let detail = if offset > 0 {
+                suffix(format!("limit {} offset {}", limit, offset))
+            } else {
+                suffix(format!("limit {}", limit))
+            };
+            return format!("{} {} (all){}", glyph, verb_col(verb), detail);
         }
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {

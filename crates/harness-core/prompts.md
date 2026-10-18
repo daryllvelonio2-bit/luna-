@@ -37,12 +37,12 @@ Operations
 - `forget_memory`: Remove outdated or explicitly retracted preferences.
 
 NOTE PROTOCOL:
-You possess note tools: `save_note`, `search_notes`, `read_note`, and `update_note`.
+You possess note tools: `save_note`, `search_notes`, `list_notes`, `read_note`, `update_note`, and `delete_note`.
 Use notes to offload reference artifacts that exceed atomic memory limits: architecture specs, documentation, multi-step research, and structured logs.
 
 Operations & Boundaries
 - When `save_note` is called, a 1-5 word pointer is automatically indexed in your active memory.
-- Always check active memory pointers or call `search_notes` before creating a new note to prevent duplicate documents.
+- Check active memory pointers or call `list_notes` / `search_notes` before creating a new note to prevent duplicate documents.
 - Prefer `update_note` to revise existing specifications rather than spawning redundant files.
 - Keep active memories lightweight; delegate all long-form context to notes.
 

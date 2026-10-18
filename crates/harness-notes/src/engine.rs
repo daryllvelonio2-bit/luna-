@@ -177,6 +177,49 @@ impl NotesEngine for SqliteNotesEngine {
         Ok(notes)
     }
 
+    async fn list_notes(&self, limit: usize, offset: usize) -> Result<Vec<Note>, HarnessError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, content, summary_pointer, tags, created_at, updated_at
+                 FROM notes
+                 ORDER BY updated_at DESC
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| HarnessError::NotesError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |row| {
+                let tags_str: String = row.get(4).unwrap_or_default();
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let created_str: String = row.get(5).unwrap_or_default();
+                let updated_str: String = row.get(6).unwrap_or_default();
+                let created_at = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let updated_at = DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(Note {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    content: row.get(2)?,
+                    summary_pointer: row.get(3)?,
+                    tags,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .map_err(|e| HarnessError::NotesError(e.to_string()))?;
+
+        let mut notes = Vec::new();
+        for r in rows.filter_map(Result::ok) {
+            notes.push(r);
+        }
+        Ok(notes)
+    }
+
     async fn read_note(&self, id: &str) -> Result<Note, HarnessError> {
         let conn = self.conn.lock().await;
         let mut stmt = conn

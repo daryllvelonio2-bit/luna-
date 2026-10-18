@@ -133,6 +133,64 @@ impl Tool for SearchNotesTool {
     }
 }
 
+pub struct ListNotesTool {
+    engine: Arc<dyn NotesEngine>,
+}
+
+impl ListNotesTool {
+    pub fn new(engine: Arc<dyn NotesEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl Tool for ListNotesTool {
+    fn name(&self) -> &str {
+        "list_notes"
+    }
+
+    fn description(&self) -> &str {
+        "Enumerate stored notes in persistent storage ordered by most recently updated."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer", "description": "Max results to return (default 20)" },
+                "offset": { "type": "integer", "description": "Number of results to skip (default 0)" }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
+        let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+
+        let results = self.engine.list_notes(limit, offset).await?;
+        let summaries: Vec<_> = results
+            .into_iter()
+            .map(|n| {
+                json!({
+                    "title": n.title,
+                    "id": n.id,
+                    "summary_pointer": n.summary_pointer,
+                    "tags": n.tags,
+                    "snippet": n.content.chars().take(200).collect::<String>(),
+                    "updated_at": n.updated_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&summaries).unwrap_or_default()))
+    }
+}
+
 pub struct ReadNoteTool {
     engine: Arc<dyn NotesEngine>,
 }

@@ -54,3 +54,42 @@ async fn test_delete_missing_note_is_not_an_error() {
     // Deleting an id that was never stored is a no-op, not a failure.
     assert!(!engine.delete_note("note_does_not_exist").await.unwrap());
 }
+
+#[tokio::test]
+async fn test_list_notes_orders_by_updated_and_paginates() {
+    let engine = std::sync::Arc::new(SqliteNotesEngine::in_memory().unwrap());
+
+    engine.save_note("Note 1", "Content 1", &[]).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    engine.save_note("Note 2", "Content 2", &[]).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    engine.save_note("Note 3", "Content 3", &[]).await.unwrap();
+
+    // List all
+    let all = engine.list_notes(10, 0).await.unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].title, "Note 3");
+    assert_eq!(all[1].title, "Note 2");
+    assert_eq!(all[2].title, "Note 1");
+
+    // Paginate limit 2, offset 1
+    let paged = engine.list_notes(2, 1).await.unwrap();
+    assert_eq!(paged.len(), 2);
+    assert_eq!(paged[0].title, "Note 2");
+    assert_eq!(paged[1].title, "Note 1");
+
+    // Test ListNotesTool
+    let tool = ListNotesTool::new(engine.clone());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let res = tool
+        .execute(
+            "call_1",
+            &serde_json::json!({ "limit": 2, "offset": 0 }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let list: Vec<serde_json::Value> = serde_json::from_str(&res.content).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["title"], "Note 3");
+}

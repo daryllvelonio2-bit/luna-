@@ -116,6 +116,9 @@ pub trait NotesEngine: Send + Sync {
     /// Search notes using FTS5 full-text search
     async fn search_notes(&self, query: &str, limit: usize) -> Result<Vec<Note>, HarnessError>;
 
+    /// Enumerate stored notes ordered by most recently updated
+    async fn list_notes(&self, limit: usize, offset: usize) -> Result<Vec<Note>, HarnessError>;
+
     /// Retrieve full verbatim content of a note
     async fn read_note(&self, id: &str) -> Result<Note, HarnessError>;
 

@@ -195,6 +195,9 @@ impl NotesEngine for MockNotes {
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
         Ok(vec![])
     }
+    async fn list_notes(&self, _limit: usize, _offset: usize) -> Result<Vec<Note>, HarnessError> {
+        Ok(vec![])
+    }
     async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
         unimplemented!()
     }
