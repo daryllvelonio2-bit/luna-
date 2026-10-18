@@ -253,17 +253,26 @@ pub fn truncate_visible(text: &str, max: usize) -> String {
     truncated
 }
 
-/// Left-align the user's message with a blue `User` label, so multi-line input reads
-/// naturally from the left edge — Luna's reply sits directly below it.
-pub fn right_aligned_user_message(query: &str, _width: usize) -> String {
-    let label = "User >".blue().bold();
+/// Right-align the user's own message so the transcript reads as a chat — the user on the
+/// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
+pub fn right_aligned_user_message(query: &str, width: usize) -> String {
     let lines: Vec<&str> = query.lines().collect();
     if lines.is_empty() {
-        return format!("{} {}", label, PROMPT.trim_end());
+        let line = PROMPT.trim_end();
+        let pad = width.saturating_sub(1).saturating_sub(line.chars().count());
+        return format!("{}{}", " ".repeat(pad), line.bold());
     }
     let mut out = Vec::new();
-    for line in lines {
-        out.push(format!("{} {}", label, line.bold()));
+    let total = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let is_last = i == total - 1;
+        let formatted = if is_last {
+            format!("{} {}", line, PROMPT.trim_end())
+        } else {
+            line.to_string()
+        };
+        let pad = width.saturating_sub(1).saturating_sub(formatted.chars().count());
+        out.push(format!("{}{}", " ".repeat(pad), formatted.bold()));
     }
     out.join("\n")
 }
@@ -1224,16 +1233,11 @@ mod tests {
     }
 
     #[test]
-    fn user_message_is_left_aligned_with_label() {
+    fn right_aligned_user_message_handles_multiline() {
         let msg = right_aligned_user_message("hello\nworld", 80);
-        let stripped: Vec<String> = msg
-            .lines()
-            .map(|l| dialoguer::console::strip_ansi_codes(l).to_string())
-            .collect();
-        assert_eq!(stripped.len(), 2);
-        assert!(stripped[0].starts_with("User >"), "got: {}", stripped[0]);
-        assert!(stripped[0].ends_with("hello"));
-        assert!(stripped[1].starts_with("User >"), "got: {}", stripped[1]);
-        assert!(stripped[1].ends_with("world"));
+        let lines: Vec<&str> = msg.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("hello"));
+        assert!(lines[1].ends_with(PROMPT.trim_end()));
     }
 }
