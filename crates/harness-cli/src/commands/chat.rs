@@ -930,26 +930,16 @@ pub async fn run_interactive_chat(
                         continue;
                     }
                     Key::Char('\x02') => {
-                        // Ctrl+B: inspect background engineer task in read mode
-                        let job_opt = if let Some(bg) = ui.background_task() {
-                            evolver.check_job(&bg.job_id).await.ok()
-                        } else {
-                            evolver.latest_job().await.ok()
-                        };
-
-                        if let Some(job) = job_opt {
-                            show_background_task_viewer(
-                                &mut key_rx,
-                                evolver.as_ref(),
-                                &job.id,
-                                &ui,
-                                &turns,
-                                process_expanded,
-                            )
-                            .await;
-                        } else {
-                            ui.emit_above(&format!("{} No background evolve tasks found", "•".dimmed()));
-                        }
+                        // Ctrl+B: inspect background tasks
+                        show_background_task_viewer(
+                            &mut key_rx,
+                            evolver.as_ref(),
+                            Some(bg_queue.as_ref()),
+                            &ui,
+                            &turns,
+                            process_expanded,
+                        )
+                        .await;
                         continue;
                     }
                     Key::Tab => {
