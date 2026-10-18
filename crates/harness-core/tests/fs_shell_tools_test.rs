@@ -493,12 +493,13 @@ async fn test_registry_contains_all_six_tools() {
     let tools = registry.list_tools().await.unwrap();
     let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
-    assert_eq!(tool_names.len(), 6);
+    assert_eq!(tool_names.len(), 7);
     assert!(tool_names.contains(&"read_file".to_string()));
     assert!(tool_names.contains(&"write_file".to_string()));
     assert!(tool_names.contains(&"patch".to_string()));
     assert!(tool_names.contains(&"search_files".to_string()));
     assert!(tool_names.contains(&"list_files".to_string()));
+    assert!(tool_names.contains(&"todo_list".to_string()));
     assert!(tool_names.contains(&"terminal".to_string()));
 }
 

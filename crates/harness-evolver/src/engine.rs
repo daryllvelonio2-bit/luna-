@@ -15,7 +15,8 @@ use harness_core::{
     MemoryEngine, MemoryRecord, ModelProvider, Note, NotesEngine, ToolPreview, ToolRegistry,
 };
 use harness_core::tools::{
-    ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, WriteFileTool,
+    ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, TodoListTool,
+    WriteFileTool,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -641,6 +642,9 @@ async fn run_engineer_job(
         .await?;
     registry
         .register(Arc::new(ListFilesTool::new(worktree_dir.clone())))
+        .await?;
+    registry
+        .register(Arc::new(TodoListTool::new(worktree_dir.clone())))
         .await?;
 
     let target_dir = repo_root.join("target");

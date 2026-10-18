@@ -144,6 +144,11 @@ impl Tool for TodoListTool {
                 },
                 "id": { "type": "integer", "description": "Task id for 'update' and 'remove'" },
                 "text": { "type": "string", "description": "Task text for 'add' or the replacement text for 'update'" },
+                "tasks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of task texts for bulk 'add'"
+                },
                 "status": {
                     "type": "string",
                     "enum": ["pending", "in_progress", "done"],
@@ -161,10 +166,15 @@ impl Tool for TodoListTool {
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list");
         let target = match action {
-            "add" => args
-                .get("text")
-                .and_then(|t| t.as_str())
-                .map(|t| format!("add \"{}\"", t)),
+            "add" => {
+                if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
+                    Some(format!("add {} tasks", tasks.len()))
+                } else {
+                    args.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|t| format!("add \"{}\"", t))
+                }
+            }
             "update" => Some(format!(
                 "update #{}",
                 args.get("id").and_then(|i| i.as_u64()).unwrap_or(0)
@@ -201,23 +211,50 @@ impl Tool for TodoListTool {
         let reply = match action {
             "list" => Self::render(&file),
             "add" => {
-                let Some(text) = args
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                else {
-                    return Ok(bad("'add' requires non-empty 'text'".to_string()));
-                };
-                let id = file.next_id;
-                file.next_id += 1;
-                file.items.push(TodoItem {
-                    id,
-                    text: text.to_string(),
-                    status: TodoStatus::Pending,
-                });
+                let mut texts_to_add = Vec::new();
+                if let Some(arr) = args.get("tasks").or_else(|| args.get("items")).and_then(|v| v.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                            texts_to_add.push(s.to_string());
+                        }
+                    }
+                } else if let Some(t) = args.get("text").and_then(|t| t.as_str()).map(str::trim).filter(|t| !t.is_empty()) {
+                    if t.contains('\n') {
+                        for line in t.lines() {
+                            let clean = line.trim()
+                                .trim_start_matches(|c: char| c == '-' || c == '*' || c == '+' || c == '•')
+                                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+                                .trim();
+                            if !clean.is_empty() {
+                                texts_to_add.push(clean.to_string());
+                            }
+                        }
+                    } else {
+                        texts_to_add.push(t.to_string());
+                    }
+                }
+
+                if texts_to_add.is_empty() {
+                    return Ok(bad("'add' requires non-empty 'text' or 'tasks'".to_string()));
+                }
+
+                let mut added_msgs = Vec::new();
+                for text in texts_to_add {
+                    let id = file.next_id;
+                    file.next_id += 1;
+                    file.items.push(TodoItem {
+                        id,
+                        text: text.clone(),
+                        status: TodoStatus::Pending,
+                    });
+                    added_msgs.push(format!("[{}] (pending): {}", id, text));
+                }
                 self.store(&file)?;
-                format!("added [{}] (pending): {}", id, text)
+                if added_msgs.len() == 1 {
+                    format!("added {}", added_msgs[0])
+                } else {
+                    format!("added {} tasks:\n{}", added_msgs.len(), added_msgs.join("\n"))
+                }
             }
             "update" => {
                 let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
@@ -370,5 +407,31 @@ mod tests {
         run(&tool(&dir), json!({"action": "add", "text": "survives"})).await;
         let r = run(&tool(&dir), json!({"action": "list"})).await;
         assert!(r.content.contains("survives"));
+    }
+
+    #[tokio::test]
+    async fn bulk_add_tasks_array_and_multiline() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tool(&dir);
+
+        // 1. Array of tasks
+        let r = run(&t, json!({"action": "add", "tasks": ["Task one", "Task two", "Task three"]})).await;
+        assert!(!r.is_error);
+        assert!(r.content.contains("added 3 tasks"));
+
+        let list = run(&t, json!({"action": "list"})).await;
+        assert!(list.content.contains("[0] pending Task one"));
+        assert!(list.content.contains("[1] pending Task two"));
+        assert!(list.content.contains("[2] pending Task three"));
+
+        // 2. Multiline list with markdown bullets
+        let r2 = run(&t, json!({"action": "add", "text": "- First step\n- Second step\n- Third step"})).await;
+        assert!(!r2.is_error);
+        assert!(r2.content.contains("added 3 tasks"));
+
+        let list2 = run(&t, json!({"action": "list"})).await;
+        assert!(list2.content.contains("[3] pending First step"));
+        assert!(list2.content.contains("[4] pending Second step"));
+        assert!(list2.content.contains("[5] pending Third step"));
     }
 }
