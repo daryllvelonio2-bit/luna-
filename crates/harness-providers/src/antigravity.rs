@@ -236,30 +236,23 @@ pub const ANTIGRAVITY_MODELS: &[&str] = &[
 /// Resolves user-facing clean model names and reasoning effort settings to backend Code Assist model names.
 pub fn resolve_antigravity_model(
     raw_model: &str,
-    reasoning_effort: Option<&ReasoningEffort>,
+    _reasoning_effort: Option<&ReasoningEffort>,
 ) -> String {
     let cleaned = raw_model.trim();
     let cleaned = cleaned.strip_prefix("antigravity/").unwrap_or(cleaned);
     let cleaned = cleaned.strip_prefix("agy/").unwrap_or(cleaned);
     let lower = cleaned.to_lowercase();
 
-    if lower.contains("gemini") || lower.contains("flash") {
-        match reasoning_effort {
-            Some(ReasoningEffort::High | ReasoningEffort::Xhigh | ReasoningEffort::Max) => {
-                "gemini-3.8-flash-high".to_string()
-            }
-            Some(ReasoningEffort::Medium) => "gemini-3.8-flash-medium".to_string(),
-            Some(ReasoningEffort::Low | ReasoningEffort::Minimal) => {
-                "gemini-3.8-flash-low".to_string()
-            }
-            None => "gemini-3.8-flash-tiered".to_string(),
-        }
-    } else if lower.contains("opus") {
+    if lower.contains("opus") {
         "claude-opus-4-6-thinking".to_string()
     } else if lower.contains("sonnet") {
         "claude-sonnet-4-6".to_string()
     } else if lower.contains("gpt-oss") || lower.contains("oss") {
         "gpt-oss-120b-medium".to_string()
+    } else if lower.contains("pro") {
+        "gemini-2.5-pro".to_string()
+    } else if lower.contains("gemini") || lower.contains("flash") {
+        "gemini-3.8-flash-tiered".to_string()
     } else {
         cleaned.to_string()
     }
@@ -725,5 +718,38 @@ pub async fn execute_antigravity_completion(
     res_msg.tool_calls = tool_calls;
     res_msg.usage = usage;
     Ok(res_msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_antigravity_model_mappings() {
+        assert_eq!(
+            resolve_antigravity_model("gemini-3.8-flash", Some(&ReasoningEffort::High)),
+            "gemini-3.8-flash-tiered"
+        );
+        assert_eq!(
+            resolve_antigravity_model("gemini-3.8-flash", None),
+            "gemini-3.8-flash-tiered"
+        );
+        assert_eq!(
+            resolve_antigravity_model("antigravity/gemini-3.8-flash", Some(&ReasoningEffort::Low)),
+            "gemini-3.8-flash-tiered"
+        );
+        assert_eq!(
+            resolve_antigravity_model("gpt-oss-120b", None),
+            "gpt-oss-120b-medium"
+        );
+        assert_eq!(
+            resolve_antigravity_model("claude-sonnet-4-6", None),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            resolve_antigravity_model("claude-opus-4-6", None),
+            "claude-opus-4-6-thinking"
+        );
+    }
 }
 
