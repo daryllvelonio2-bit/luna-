@@ -1,9 +1,11 @@
+pub mod delegate;
 pub mod fs;
 pub mod process;
 pub mod shell;
 pub mod todo;
 
 use std::sync::{Arc, Mutex};
+pub use delegate::DelegateTaskTool;
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
 pub use process::ProcessTool;
 pub use shell::{

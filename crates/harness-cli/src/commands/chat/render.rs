@@ -409,6 +409,7 @@ fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
         "skill_view" => ("📖", "skill"),
         "skills_list" => ("📋", "skills"),
         "process" => ("⚙️", "proc"),
+        "delegate_task" => ("🤖", "delegate"),
         "apply_harness_update" => ("🚀", "update"),
         _ => ("🔧", ""),
     }
@@ -573,6 +574,26 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             let action = text("action").unwrap_or("list");
             let job_id = text("job_id").map(|j| format!(" {}", j.cyan())).unwrap_or_default();
             return format!("{} {}{}", glyph, verb_col(action), job_id);
+        }
+        "delegate_task" => {
+            let task_count = arguments
+                .get("tasks")
+                .and_then(|t| t.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let first_goal = arguments
+                .get("tasks")
+                .and_then(|t| t.as_array())
+                .and_then(|a| a.first())
+                .and_then(|item| item.get("goal"))
+                .and_then(|g| g.as_str())
+                .unwrap_or("");
+            let goal_preview = if task_count > 1 {
+                format!("\"{}\" (+{} tasks)", truncate_visible(first_goal, 30), task_count - 1)
+            } else {
+                format!("\"{}\"", truncate_visible(first_goal, 50))
+            };
+            return format!("{} {} {}", glyph, verb_col(verb), goal_preview.cyan());
         }
         "list_notes" => {
             let limit = number("limit").unwrap_or(20);

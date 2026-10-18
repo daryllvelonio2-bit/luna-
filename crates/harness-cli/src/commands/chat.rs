@@ -256,6 +256,16 @@ pub async fn run_interactive_chat(
         .register(Arc::new(harness_core::tools::ProcessTool::new(bg_queue.clone())))
         .await?;
 
+    let delegate_tool = harness_core::tools::DelegateTaskTool::new(
+        provider.clone(),
+        memory.clone(),
+        notes.clone(),
+        evolver.clone(),
+        Some(store.clone()),
+        config.clone(),
+    );
+    registry.register(Arc::new(delegate_tool)).await?;
+
     // Register core filesystem and shell tools (§2.2)
     let sudo_cache = Arc::new(std::sync::Mutex::new(std::env::var("SUDO_PASSWORD").ok()));
     let (sudo_tx, mut sudo_rx) =

@@ -832,3 +832,96 @@ async fn test_background_task_queue_and_process_tool() {
     assert!(poll_res.content.contains("completed (exit 0)"));
     assert!(poll_res.content.contains("done bg"));
 }
+
+#[tokio::test]
+async fn test_delegate_task_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+
+    struct EchoProvider;
+    #[async_trait::async_trait]
+    impl harness_core::traits::ModelProvider for EchoProvider {
+        fn provider_id(&self) -> &str { "mock" }
+        async fn fetch_models(&self) -> Result<Vec<String>, harness_core::HarnessError> { Ok(vec![]) }
+        async fn complete(
+            &self,
+            msgs: &[harness_core::types::Message],
+            _tools: &[harness_core::types::ToolDefinition],
+            _opts: &harness_core::types::CompletionOptions,
+        ) -> Result<harness_core::types::Message, harness_core::HarnessError> {
+            let last_user = msgs
+                .iter()
+                .rev()
+                .find(|m| m.role == harness_core::types::Role::User)
+                .and_then(|m| m.content.as_deref())
+                .unwrap_or("");
+            Ok(harness_core::types::Message::assistant(format!(
+                "Subagent completed: {}",
+                last_user
+            )))
+        }
+        async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, harness_core::HarnessError> { Ok(vec![]) }
+    }
+
+    struct MockMem;
+    #[async_trait::async_trait]
+    impl harness_core::traits::MemoryEngine for MockMem {
+        async fn retrieve(&self, _q: &str, _l: usize) -> Result<Vec<harness_core::MemoryRecord>, harness_core::HarnessError> { Ok(vec![]) }
+        async fn save(&self, _r: &harness_core::MemoryRecord) -> Result<(), harness_core::HarnessError> { Ok(()) }
+        async fn update(&self, _id: &str, _r: &harness_core::MemoryRecord) -> Result<(), harness_core::HarnessError> { Ok(()) }
+        async fn forget(&self, _id: &str) -> Result<(), harness_core::HarnessError> { Ok(()) }
+        async fn add_note_pointer(&self, _id: &str, _p: &str) -> Result<(), harness_core::HarnessError> { Ok(()) }
+        fn format_as_system_prompt(&self, _m: &[harness_core::MemoryRecord]) -> String { String::new() }
+    }
+
+    struct MockNotes;
+    #[async_trait::async_trait]
+    impl harness_core::traits::NotesEngine for MockNotes {
+        async fn save_note(&self, _t: &str, _c: &str, _tags: &[String]) -> Result<harness_core::Note, harness_core::HarnessError> { unimplemented!() }
+        async fn search_notes(&self, _q: &str, _l: usize) -> Result<Vec<harness_core::Note>, harness_core::HarnessError> { Ok(vec![]) }
+        async fn list_notes(&self, _l: usize, _o: usize) -> Result<Vec<harness_core::Note>, harness_core::HarnessError> { Ok(vec![]) }
+        async fn read_note(&self, _id: &str) -> Result<harness_core::Note, harness_core::HarnessError> { unimplemented!() }
+        async fn update_note(&self, _id: &str, _t: Option<&str>, _c: Option<&str>, _tags: Option<&[String]>) -> Result<harness_core::Note, harness_core::HarnessError> { unimplemented!() }
+        async fn delete_note(&self, _id: &str) -> Result<bool, harness_core::HarnessError> { unimplemented!() }
+    }
+
+    struct MockEvol;
+    #[async_trait::async_trait]
+    impl harness_core::traits::EvolverEngine for MockEvol {
+        async fn inspect_source(&self, _p: &str) -> Result<String, harness_core::HarnessError> { Ok(String::new()) }
+        async fn propose_patch(&self, _d: &str, _diff: &str) -> Result<String, harness_core::HarnessError> { Ok("p1".to_string()) }
+        async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, harness_core::HarnessError> { Ok(true) }
+        async fn apply_patch(&self, _id: &str) -> Result<(), harness_core::HarnessError> { Ok(()) }
+    }
+
+    let delegate = harness_core::tools::DelegateTaskTool::new(
+        Arc::new(EchoProvider),
+        Arc::new(MockMem),
+        Arc::new(MockNotes),
+        Arc::new(MockEvol),
+        None,
+        config,
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let res = delegate
+        .execute(
+            "call_del",
+            &json!({
+                "tasks": [
+                    { "goal": "Analyze database schema", "context": "table users" },
+                    { "goal": "Audit security headers" }
+                ]
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    assert!(!res.is_error);
+    assert!(res.content.contains("Subagent Task Results"));
+    assert!(res.content.contains("Goal: Analyze database schema"));
+    assert!(res.content.contains("Goal: Audit security headers"));
+    assert!(res.content.contains("Subagent completed"));
+}
