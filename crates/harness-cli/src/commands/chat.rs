@@ -201,9 +201,21 @@ pub async fn run_interactive_chat(
     }
 
     // Register core filesystem and shell tools (§2.2)
+    let sudo_cache = Arc::new(std::sync::Mutex::new(std::env::var("SUDO_PASSWORD").ok()));
+    let (sudo_tx, mut sudo_rx) =
+        mpsc::unbounded_channel::<(String, oneshot::Sender<Option<String>>)>();
+    let sudo_prompter = Arc::new(ChatSudoPrompter::new(sudo_tx));
+
     let read_cache = harness_core::tools::ReadCache::new();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-    harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache).await?;
+    harness_core::tools::register_core_tools_with_sudo(
+        &reg_dyn,
+        &config,
+        read_cache,
+        Some(sudo_cache),
+        Some(sudo_prompter),
+    )
+    .await?;
 
     let is_attended = Term::stdout().features().is_attended();
     let ui = Arc::new(ChatUi::new(is_attended));
@@ -722,6 +734,20 @@ pub async fn run_interactive_chat(
                     ui.start_activity(&request.tool, &args);
                 }
                 let _ = decision_tx.send(decision);
+            }
+
+            maybe_sudo = sudo_rx.recv() => {
+                let (command, decision_tx) = match maybe_sudo {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+
+                ui.clear_live_and_box();
+                let password = prompt_sudo_password_dialog(&mut key_rx, &command).await;
+                let _ = decision_tx.send(password);
+                if ui.is_attended {
+                    ui.draw_initial_box();
+                }
             }
 
             maybe_key = key_rx.recv() => {
@@ -1308,5 +1334,99 @@ async fn prompt_approval_choice(
 
     ui.draw_initial_box();
     ApprovalChoice::Deny
+}
+
+pub struct ChatSudoPrompter {
+    request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
+}
+
+impl ChatSudoPrompter {
+    pub fn new(
+        request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
+    ) -> Self {
+        Self { request_tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl harness_core::tools::SudoPrompter for ChatSudoPrompter {
+    async fn prompt_sudo_password(&self, command: &str) -> Result<Option<String>, HarnessError> {
+        let (tx, rx) = oneshot::channel();
+        if self.request_tx.send((command.to_string(), tx)).is_err() {
+            return Ok(None);
+        }
+        match rx.await {
+            Ok(pwd) => Ok(pwd),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+async fn prompt_sudo_password_dialog(
+    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    command: &str,
+) -> Option<String> {
+    while key_rx.try_recv().is_ok() {}
+
+    println!();
+    println!("  {} {}", "🔐".bold(), "Sudo password required for command:".bold());
+    println!("     {}", command.cyan());
+    println!("     {}", "(Enter password; press Enter to confirm, Esc to skip)".dimmed());
+    print!("  Password: ");
+    let _ = io::stdout().flush();
+
+    let mut password = String::new();
+    loop {
+        let key = match key_rx.recv().await {
+            Some(k) => k,
+            None => break,
+        };
+        match key {
+            Key::Enter => {
+                println!();
+                if password.is_empty() {
+                    println!("  {} Skipped - continuing without sudo\n", "⏭".dimmed());
+                    let _ = io::stdout().flush();
+                    return None;
+                } else {
+                    println!("  {} Password received and cached for this session\n", "✔".green().bold());
+                    let _ = io::stdout().flush();
+                    return Some(password);
+                }
+            }
+            Key::Escape | Key::CtrlC => {
+                println!("\n  {} Cancelled - continuing without sudo\n", "⏭".dimmed());
+                let _ = io::stdout().flush();
+                return None;
+            }
+            Key::Backspace => {
+                if !password.is_empty() {
+                    password.pop();
+                    print!("\x08 \x08");
+                    let _ = io::stdout().flush();
+                }
+            }
+            Key::Char(c) => {
+                if c == '\n' || c == '\r' {
+                    println!();
+                    if password.is_empty() {
+                        println!("  {} Skipped - continuing without sudo\n", "⏭".dimmed());
+                        let _ = io::stdout().flush();
+                        return None;
+                    } else {
+                        println!("  {} Password received and cached for this session\n", "✔".green().bold());
+                        let _ = io::stdout().flush();
+                        return Some(password);
+                    }
+                } else if !c.is_control() {
+                    password.push(c);
+                    print!("•");
+                    let _ = io::stdout().flush();
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 

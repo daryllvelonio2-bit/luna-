@@ -655,3 +655,136 @@ async fn test_list_files_skips_noise_directories() {
         assert!(!res.content.contains(noise), "'{noise}' must be skipped: {}", res.content);
     }
 }
+
+#[test]
+fn test_rewrite_sudo_command() {
+    use harness_core::tools::shell::{contains_sudo, rewrite_sudo_command};
+
+    let (cmd, count) = rewrite_sudo_command("sudo apt update");
+    assert_eq!(cmd, "sudo -S -p '' apt update");
+    assert_eq!(count, 1);
+    assert!(contains_sudo("sudo apt update"));
+
+    let (cmd, count) = rewrite_sudo_command("/usr/bin/sudo make install");
+    assert_eq!(cmd, "/usr/bin/sudo -S -p '' make install");
+    assert_eq!(count, 1);
+
+    let (cmd, count) = rewrite_sudo_command("echo 'sudo apt update'");
+    assert_eq!(cmd, "echo 'sudo apt update'");
+    assert_eq!(count, 0);
+    assert!(!contains_sudo("echo 'sudo apt update'"));
+
+    let (cmd, count) = rewrite_sudo_command("echo \"sudo\"");
+    assert_eq!(cmd, "echo \"sudo\"");
+    assert_eq!(count, 0);
+
+    let (cmd, count) = rewrite_sudo_command("VAR=1 sudo apt update && sudo apt install -y curl");
+    assert_eq!(
+        cmd,
+        "VAR=1 sudo -S -p '' apt update && sudo -S -p '' apt install -y curl"
+    );
+    assert_eq!(count, 2);
+}
+
+struct MockSudoPrompter {
+    calls: std::sync::atomic::AtomicUsize,
+    password: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl harness_core::tools::SudoPrompter for MockSudoPrompter {
+    async fn prompt_sudo_password(&self, _command: &str) -> Result<Option<String>, harness_core::HarnessError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.password.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_terminal_sudo_password_prompts_and_caches_in_session() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    // Create a mock `sudo` binary inside test workspace that reads password from stdin
+    let mock_sudo = root.join("sudo");
+    tokio::fs::write(
+        &mock_sudo,
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-S\" ]; then shift; continue; fi\n  if [ \"$1\" = \"-p\" ]; then shift 2; continue; fi\n  break\ndone\nread -r input_pwd\nif [ \"$input_pwd\" = \"correct_pass_123\" ]; then\n  echo \"authenticated\"\n  exit 0\nelse\n  echo \"sudo: 1 incorrect password attempt\"\n  exit 1\nfi\n",
+    )
+    .await
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&mock_sudo).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&mock_sudo, perms).unwrap();
+    }
+
+    let prompter = Arc::new(MockSudoPrompter {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        password: Some("correct_pass_123".to_string()),
+    });
+    let session_cache = Arc::new(std::sync::Mutex::new(None));
+
+    let path_var = format!("{}:{}", root.display(), std::env::var("PATH").unwrap_or_default());
+    let term = TerminalTool::new(root.clone(), 5, 50_000)
+        .with_env("PATH", path_var)
+        .with_sudo_cache(session_cache.clone())
+        .with_sudo_prompter(prompter.clone());
+
+    // Initially cache is empty
+    assert!(session_cache.lock().unwrap().is_none());
+
+    // First command requiring sudo: triggers prompter, caches password
+    let res1 = term
+        .execute("call_sudo_1", &json!({ "command": "sudo test_cmd" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(!res1.is_error, "mock sudo should succeed with correct password: {}", res1.content);
+    assert_eq!(prompter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        session_cache.lock().unwrap().as_deref(),
+        Some("correct_pass_123")
+    );
+
+    // Second sudo command reuses the cached password from the session without prompting again!
+    let res2 = term
+        .execute("call_sudo_2", &json!({ "command": "sudo test_cmd" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(!res2.is_error);
+    assert_eq!(
+        prompter.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "second sudo invocation must use cached password from session"
+    );
+
+    // Now test cache invalidation on authentication failure
+    *session_cache.lock().unwrap() = Some("wrong_pass".to_string());
+    let res3 = term
+        .execute("call_sudo_3", &json!({ "command": "sudo test_cmd" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(res3.is_error);
+    assert!(res3.content.contains("incorrect password attempt"));
+    // Cache must have been cleared!
+    assert!(
+        session_cache.lock().unwrap().is_none(),
+        "authentication failure must invalidate the session cached password"
+    );
+}
+
+#[test]
+fn test_sudo_auth_failure_detection() {
+    use harness_core::tools::shell::is_sudo_auth_failure;
+
+    assert!(is_sudo_auth_failure("sudo: 1 incorrect password attempt"));
+    assert!(is_sudo_auth_failure("sudo: authentication failed"));
+    assert!(is_sudo_auth_failure("sudo: a password is required"));
+    assert!(!is_sudo_auth_failure("total 42\n-rw-r--r-- 1 root root"));
+}

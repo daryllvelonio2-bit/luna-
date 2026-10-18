@@ -2,9 +2,12 @@ pub mod fs;
 pub mod shell;
 pub mod todo;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
-pub use shell::TerminalTool;
+pub use shell::{
+    check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,
+    TerminalTool,
+};
 pub use todo::TodoListTool;
 
 use crate::config::Config;
@@ -16,6 +19,17 @@ pub async fn register_core_tools(
     registry: &Arc<dyn ToolRegistry>,
     config: &Config,
     read_cache: ReadCache,
+) -> Result<(), HarnessError> {
+    register_core_tools_with_sudo(registry, config, read_cache, None, None).await
+}
+
+/// Registers the filesystem and shell tools with optional session sudo caching and prompting.
+pub async fn register_core_tools_with_sudo(
+    registry: &Arc<dyn ToolRegistry>,
+    config: &Config,
+    read_cache: ReadCache,
+    sudo_cache: Option<Arc<Mutex<Option<String>>>>,
+    sudo_prompter: Option<Arc<dyn SudoPrompter>>,
 ) -> Result<(), HarnessError> {
     let ws = config.paths.workspace_root.clone();
 
@@ -56,13 +70,18 @@ pub async fn register_core_tools(
                     .await?;
             }
             "terminal" => {
-                registry
-                    .register(Arc::new(TerminalTool::new(
-                        ws.clone(),
-                        config.tools.terminal_timeout_secs,
-                        config.tools.terminal_output_max_bytes,
-                    )))
-                    .await?;
+                let mut term = TerminalTool::new(
+                    ws.clone(),
+                    config.tools.terminal_timeout_secs,
+                    config.tools.terminal_output_max_bytes,
+                );
+                if let Some(cache) = sudo_cache.clone() {
+                    term = term.with_sudo_cache(cache);
+                }
+                if let Some(prompter) = sudo_prompter.clone() {
+                    term = term.with_sudo_prompter(prompter);
+                }
+                registry.register(Arc::new(term)).await?;
             }
             _ => {}
         }
