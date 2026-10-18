@@ -25,6 +25,8 @@ pub struct TerminalTool {
     sudo_cache: Arc<Mutex<Option<String>>>,
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
     queue: Option<Arc<crate::tasks::BackgroundTaskQueue>>,
+    prefix: Option<String>,
+    rtk_rewrite: bool,
 }
 
 impl TerminalTool {
@@ -41,7 +43,19 @@ impl TerminalTool {
             sudo_cache: Arc::new(Mutex::new(std::env::var("SUDO_PASSWORD").ok())),
             sudo_prompter: None,
             queue: None,
+            prefix: None,
+            rtk_rewrite: true,
         }
+    }
+
+    pub fn with_prefix(mut self, prefix: Option<String>) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    pub fn with_rtk_rewrite(mut self, enabled: bool) -> Self {
+        self.rtk_rewrite = enabled;
+        self
     }
 
     pub fn with_background_queue(mut self, queue: Arc<crate::tasks::BackgroundTaskQueue>) -> Self {
@@ -67,6 +81,94 @@ impl TerminalTool {
     pub fn sudo_cache(&self) -> Arc<Mutex<Option<String>>> {
         self.sudo_cache.clone()
     }
+
+    pub async fn resolve_command(&self, command: &str) -> String {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return command.to_string();
+        }
+
+        if self.rtk_rewrite {
+            if let Some(rtk_path) = find_rtk_executable(self.prefix.as_deref()) {
+                if let Some(rewritten) = try_rtk_rewrite(trimmed, &rtk_path).await {
+                    return rewritten;
+                }
+            }
+        }
+
+        if let Some(ref pfx) = self.prefix {
+            let pfx_trimmed = pfx.trim();
+            if !pfx_trimmed.is_empty() && !trimmed.starts_with(pfx_trimmed) {
+                return format!("{} {}", pfx_trimmed, trimmed);
+            }
+        }
+
+        command.to_string()
+    }
+}
+
+pub fn find_rtk_executable(custom_prefix: Option<&str>) -> Option<PathBuf> {
+    if let Some(prefix) = custom_prefix {
+        let p_str = prefix.trim();
+        let expanded = if p_str.starts_with("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(home).join(&p_str[2..])
+            } else {
+                PathBuf::from(p_str)
+            }
+        } else {
+            PathBuf::from(p_str)
+        };
+        if expanded.is_file() {
+            return Some(expanded);
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".local/bin/rtk");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let p = dir.join("rtk");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    None
+}
+
+pub async fn try_rtk_rewrite(command: &str, rtk_path: &Path) -> Option<String> {
+    let trimmed = command.trim_start();
+    if trimmed.starts_with("rtk ") || trimmed == "rtk" {
+        return None;
+    }
+
+    let mut cmd = tokio::process::Command::new(rtk_path);
+    cmd.arg("rewrite")
+        .arg(command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    let output = match tokio::time::timeout(std::time::Duration::from_millis(1500), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        _ => return None,
+    };
+
+    if output.status.code() == Some(0) || output.status.code() == Some(3) {
+        let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !rewritten.is_empty() && rewritten != command {
+            return Some(rewritten);
+        }
+    }
+
+    None
 }
 
 pub fn rewrite_sudo_command(command: &str) -> (String, usize) {
@@ -211,8 +313,9 @@ impl Tool for TerminalTool {
 
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         let cmd = args.get("command").and_then(|c| c.as_str())?;
+        let effective = self.resolve_command(cmd).await;
         Some(ToolPreview {
-            target: Some(cmd.to_string()),
+            target: Some(effective),
             diff: None,
         })
     }
@@ -228,6 +331,8 @@ impl Tool for TerminalTool {
             None => return Ok(ToolResult::error(call_id, "Missing required argument 'command'")),
         };
 
+        let effective_command = self.resolve_command(command).await;
+
         let workdir_str = args.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
         let resolved_workdir = match resolve_path(&self.workspace_root, workdir_str) {
             Ok(p) => p,
@@ -237,10 +342,11 @@ impl Tool for TerminalTool {
         let background = args.get("background").and_then(|b| b.as_bool()).unwrap_or(false);
         if background {
             if let Some(ref q) = self.queue {
-                return match q.spawn(command, &resolved_workdir) {
+                return match q.spawn(&effective_command, &resolved_workdir) {
                     Ok(job_id) => {
                         let msg = json!({
                             "job_id": job_id,
+                            "command": effective_command,
                             "status": "running",
                             "message": format!("Task running in background. Use process(action='poll', job_id='{}') to check progress.", job_id),
                         });
@@ -257,17 +363,17 @@ impl Tool for TerminalTool {
             .unwrap_or(self.default_timeout_secs);
 
         let (exec_command, sudo_stdin) = {
-            let (rewritten, sudo_count) = rewrite_sudo_command(command);
+            let (rewritten, sudo_count) = rewrite_sudo_command(&effective_command);
             if sudo_count > 0 {
                 if check_sudo_nopasswd(&resolved_workdir).await {
-                    (command.to_string(), None)
+                    (effective_command.clone(), None)
                 } else {
                     let cached_opt = self.sudo_cache.lock().unwrap().clone();
                     let password_opt = match cached_opt {
                         Some(p) => Some(p),
                         None => {
                             if let Some(ref prompter) = self.sudo_prompter {
-                                match prompter.prompt_sudo_password(command).await {
+                                match prompter.prompt_sudo_password(&effective_command).await {
                                     Ok(Some(pwd)) if !pwd.is_empty() => {
                                         *self.sudo_cache.lock().unwrap() = Some(pwd.clone());
                                         Some(pwd)
@@ -284,11 +390,11 @@ impl Tool for TerminalTool {
                         let stdin_data = (pwd + "\n").repeat(sudo_count);
                         (rewritten, Some(stdin_data))
                     } else {
-                        (command.to_string(), None)
+                        (effective_command.clone(), None)
                     }
                 }
             } else {
-                (command.to_string(), None)
+                (effective_command.clone(), None)
             }
         };
 

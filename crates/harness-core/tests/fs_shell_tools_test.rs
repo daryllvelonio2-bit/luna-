@@ -925,3 +925,42 @@ async fn test_delegate_task_tool() {
     assert!(res.content.contains("Goal: Audit security headers"));
     assert!(res.content.contains("Subagent completed"));
 }
+
+#[tokio::test]
+async fn test_terminal_rtk_rewrite_and_prefix() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    // 1. Prefix-only tool (rtk_rewrite = false)
+    let term_prefix = TerminalTool::new(root.clone(), 5, 50_000)
+        .with_rtk_rewrite(false)
+        .with_prefix(Some("rtk".to_string()));
+
+    let cmd1 = term_prefix.resolve_command("cargo test").await;
+    assert_eq!(cmd1, "rtk cargo test");
+
+    // Command already prefixed shouldn't be double-prefixed
+    let cmd2 = term_prefix.resolve_command("rtk cargo test").await;
+    assert_eq!(cmd2, "rtk cargo test");
+
+    // 2. RTK rewrite tool (rtk_rewrite = true)
+    let term_rtk = TerminalTool::new(root.clone(), 5, 50_000).with_rtk_rewrite(true);
+
+    // If RTK is installed on this machine, "cargo test" should rewrite to "rtk cargo test"
+    let resolved = term_rtk.resolve_command("cargo test").await;
+    if harness_core::tools::shell::find_rtk_executable(None).is_some() {
+        assert_eq!(resolved, "rtk cargo test");
+    } else {
+        assert_eq!(resolved, "cargo test");
+    }
+
+    // 3. Config YAML parsing with terminal_prefix and rtk_rewrite
+    let yaml = r#"
+tools:
+  terminal_prefix: ~/.local/bin/rtk
+  rtk_rewrite: true
+"#;
+    let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.tools.terminal_prefix.as_deref(), Some("~/.local/bin/rtk"));
+    assert!(cfg.tools.rtk_rewrite);
+}

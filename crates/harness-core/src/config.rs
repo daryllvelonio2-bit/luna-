@@ -138,6 +138,10 @@ pub struct ToolsSettings {
     pub terminal_timeout_secs: u64,
     /// Maximum output bytes captured from terminal.
     pub terminal_output_max_bytes: usize,
+    /// Optional prefix binary or command to prepend to shell commands (e.g. `~/.local/bin/rtk`).
+    pub terminal_prefix: Option<String>,
+    /// Whether to automatically rewrite shell commands using RTK (`rtk rewrite`) when available.
+    pub rtk_rewrite: bool,
     /// Enabled tool names.
     pub enabled: Vec<String>,
 }
@@ -151,6 +155,8 @@ impl Default for ToolsSettings {
             read_max_chars: 100_000,
             terminal_timeout_secs: 120,
             terminal_output_max_bytes: 50_000,
+            terminal_prefix: None,
+            rtk_rewrite: true,
             enabled: vec![
                 "read_file".to_string(),
                 "write_file".to_string(),

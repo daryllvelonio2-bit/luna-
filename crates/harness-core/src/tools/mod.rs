@@ -80,7 +80,9 @@ pub async fn register_core_tools_with_sudo(
                     config.tools.terminal_timeout_secs,
                     config.tools.terminal_output_max_bytes,
                 )
-                .with_background_queue(bg_queue);
+                .with_background_queue(bg_queue)
+                .with_prefix(config.tools.terminal_prefix.clone())
+                .with_rtk_rewrite(config.tools.rtk_rewrite);
 
                 if let Some(cache) = sudo_cache.clone() {
                     term = term.with_sudo_cache(cache);
