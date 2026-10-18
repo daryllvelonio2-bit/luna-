@@ -99,6 +99,31 @@ pub struct BackgroundTaskState {
     pub status: String,
 }
 
+#[derive(Clone, Default, Debug)]
+struct BoxDrawnMetrics {
+    width: usize,
+    bg_line_len: usize,
+    status_line_len: usize,
+    divider_len: usize,
+    prompt_len: usize,
+    live_rows_lens: Vec<usize>,
+}
+
+pub fn visible_width(s: &str) -> usize {
+    dialoguer::console::strip_ansi_codes(s).chars().count()
+}
+
+pub fn physical_line_count(visible_len: usize, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    if visible_len == 0 {
+        1
+    } else {
+        (visible_len + width - 1) / width
+    }
+}
+
 #[derive(Clone)]
 pub struct ChatUi {
     pub input_buf: Arc<Mutex<String>>,
@@ -108,6 +133,7 @@ pub struct ChatUi {
     transient_error: Arc<Mutex<Option<String>>>,
     bg_task: Arc<Mutex<Option<BackgroundTaskState>>>,
     box_drawn: Arc<AtomicBool>,
+    drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
     pub is_attended: bool,
 }
 
@@ -152,6 +178,7 @@ impl ChatUi {
             transient_error: Arc::new(Mutex::new(None)),
             bg_task: Arc::new(Mutex::new(None)),
             box_drawn: Arc::new(AtomicBool::new(false)),
+            drawn_metrics: Arc::new(Mutex::new(None)),
             is_attended,
         }
     }
@@ -347,16 +374,21 @@ impl ChatUi {
         if left_len + right_len + 2 <= width {
             let spaces = width.saturating_sub(left_len + right_len);
             Some(format!("{}{}{}", left_part, " ".repeat(spaces), right_hint))
-        } else if left_len + 2 <= width {
+        } else if left_len <= width {
             Some(left_part)
         } else {
             let available = width.saturating_sub(right_len + 2);
-            let truncated = format!(
-                "{}…",
-                left_visible.chars().take(available.saturating_sub(1)).collect::<String>()
-            );
-            let spaces = width.saturating_sub(truncated.chars().count() + right_len);
-            Some(format!("{}{}{}", truncated, " ".repeat(spaces), right_hint))
+            if available > 2 {
+                let truncated = format!(
+                    "{}…",
+                    left_visible.chars().take(available.saturating_sub(1)).collect::<String>()
+                );
+                let spaces = width.saturating_sub(truncated.chars().count() + right_len);
+                Some(format!("{}{}{}", truncated, " ".repeat(spaces), right_hint))
+            } else {
+                let cut = width.saturating_sub(1);
+                Some(format!("{}…", left_visible.chars().take(cut).collect::<String>()))
+            }
         }
     }
 
@@ -388,15 +420,29 @@ impl ChatUi {
         }
 
         let right_visible = dialoguer::console::strip_ansi_codes(&right).to_string();
-        let left_len = left.chars().count();
         let right_len = right_visible.chars().count();
+        let left_len = left.chars().count();
         let center_len = center.chars().count();
 
+        // If right is already wider than available width, shorten it so it never wraps.
+        let (right_str, right_len) = if right_len > width {
+            let cut = width.saturating_sub(1);
+            let truncated = format!("{}…", right_visible.chars().take(cut).collect::<String>());
+            let t_len = truncated.chars().count();
+            (truncated.dimmed().to_string(), t_len)
+        } else {
+            (right.dimmed().to_string(), right_len)
+        };
+
         if left_len + right_len + 4 > width {
-            let available = width.saturating_sub(right_len + 4);
+            let available = width.saturating_sub(right_len + 2);
             let left_truncated = if left_len > available {
-                let cut = available.saturating_sub(1);
-                format!("{}…", left.chars().take(cut).collect::<String>())
+                if available == 0 {
+                    String::new()
+                } else {
+                    let cut = available.saturating_sub(1);
+                    format!("{}…", left.chars().take(cut).collect::<String>())
+                }
             } else {
                 left
             };
@@ -406,27 +452,27 @@ impl ChatUi {
                 "{}{}{}",
                 left_truncated.dimmed(),
                 " ".repeat(spaces),
-                right.dimmed()
+                right_str
             ))
         } else if left_len + right_len + center_len + 8 > width {
-            let spaces = width - left_len - right_len;
+            let spaces = width.saturating_sub(left_len + right_len);
             Some(format!(
                 "{}{}{}",
                 left.dimmed(),
                 " ".repeat(spaces),
-                right.dimmed()
+                right_str
             ))
         } else {
-            let free = width - left_len - right_len;
-            let left_gap = ((free - center_len) / 2).max(1);
-            let right_gap = free - center_len - left_gap;
+            let free = width.saturating_sub(left_len + right_len);
+            let left_gap = ((free.saturating_sub(center_len)) / 2).max(1);
+            let right_gap = free.saturating_sub(center_len + left_gap);
             Some(format!(
                 "{}{}{}{}{}",
                 left.dimmed(),
                 " ".repeat(left_gap),
                 center.dimmed().bold(),
                 " ".repeat(right_gap),
-                right.dimmed()
+                right_str
             ))
         }
     }
@@ -436,14 +482,54 @@ impl ChatUi {
             return;
         }
         self.box_drawn.store(false, Ordering::SeqCst);
-        let total = previous_live_rows + self.box_row_count();
-        print!("\x1b[1B");
-        for i in 0..total {
+
+        let metrics_opt = self.drawn_metrics.lock().unwrap().take();
+        let (rows_below, rows_above) = if let Some(m) = metrics_opt {
+            let current_width = get_terminal_width().max(1);
+            let bottom_rows = physical_line_count(m.divider_len, current_width);
+            let prompt_rows = physical_line_count(m.prompt_len, current_width);
+            let top_divider_rows = physical_line_count(m.divider_len, current_width);
+            let status_rows = if m.status_line_len > 0 {
+                physical_line_count(m.status_line_len, current_width)
+            } else {
+                0
+            };
+            let bg_rows = if m.bg_line_len > 0 {
+                physical_line_count(m.bg_line_len, current_width)
+            } else {
+                0
+            };
+            let live_rows: usize = m
+                .live_rows_lens
+                .iter()
+                .map(|&len| physical_line_count(len, current_width))
+                .sum();
+
+            let below = bottom_rows;
+            let above = prompt_rows.saturating_sub(1)
+                + top_divider_rows
+                + status_rows
+                + bg_rows
+                + live_rows;
+            (below, above)
+        } else {
+            let total = previous_live_rows + self.box_row_count();
+            (1, total.saturating_sub(1))
+        };
+
+        if rows_below > 0 {
+            print!("\x1b[{}B", rows_below);
+        }
+
+        let total_rows = rows_below + rows_above + 1;
+        for i in 0..total_rows {
             print!("\r\x1b[2K");
-            if i + 1 < total {
+            if i + 1 < total_rows {
                 print!("\x1b[1A");
             }
         }
+        print!("\r\x1b[J");
+        let _ = io::stdout().flush();
     }
 
     pub fn emit_above(&self, text: &str) {
@@ -522,17 +608,34 @@ impl ChatUi {
 
     pub fn draw_box(&self, width: usize, buf: &str) {
         let divider = "─".repeat(width).dimmed().to_string();
-        if let Some(bg_line) = self.format_background_task_line(width) {
-            println!("{}", bg_line);
+        let bg_line = self.format_background_task_line(width);
+        let status_str = self.format_status_line(width);
+        let prompt_str = self.prompt_row(buf);
+
+        if let Some(ref bg) = bg_line {
+            println!("{}", bg);
         }
-        if let Some(status_str) = self.format_status_line(width) {
-            println!("{}", status_str);
+        if let Some(ref st) = status_str {
+            println!("{}", st);
         }
         println!("{}", divider);
         println!();
         println!("{}", divider);
-        print!("\x1b[2A\r{}", self.prompt_row(buf));
+        print!("\x1b[2A\r{}", prompt_str);
         let _ = io::stdout().flush();
+
+        let live_rows = self.live.lock().unwrap().rows.clone();
+        let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
+
+        *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
+            width,
+            bg_line_len: bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
+            status_line_len: status_str.as_ref().map(|s| visible_width(s)).unwrap_or(0),
+            divider_len: width,
+            prompt_len: visible_width(&prompt_str),
+            live_rows_lens,
+        });
+
         self.box_drawn.store(true, Ordering::SeqCst);
     }
 
@@ -556,6 +659,18 @@ impl ChatUi {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
+        let width = get_terminal_width();
+        let drawn_width = self
+            .drawn_metrics
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|m| m.width)
+            .unwrap_or(0);
+        if drawn_width != 0 && drawn_width != width {
+            self.handle_resize();
+            return;
+        }
         let buf = self.input_buf.lock().unwrap();
         print!("\r\x1b[K{}", self.prompt_row(&buf));
         let _ = io::stdout().flush();
@@ -570,6 +685,50 @@ impl ChatUi {
         let width = get_terminal_width();
         let buf = self.input_buf.lock().unwrap();
         self.draw_box(width, &buf);
+    }
+
+    pub fn handle_resize(&self) {
+        if !self.is_attended {
+            return;
+        }
+        let width = get_terminal_width();
+        let buf = self.input_buf.lock().unwrap().clone();
+
+        let rows = {
+            let mut live = self.live.lock().unwrap();
+            let all = if live.reasoning.is_empty() {
+                Vec::new()
+            } else {
+                reasoning_rows(&live.reasoning, width)
+            };
+            let start = all.len().saturating_sub(LIVE_REASONING_ROWS);
+            let mut rows = all[start..].to_vec();
+
+            if let Some(activity) = &mut live.activity {
+                rows.push(activity_line(
+                    activity.frame,
+                    activity.detail.as_deref(),
+                    activity.started.elapsed(),
+                ));
+            }
+            rows
+        };
+
+        if self.box_drawn.load(Ordering::SeqCst) {
+            let previous = {
+                let mut live = self.live.lock().unwrap();
+                let prev = live.rows.len();
+                live.rows = rows.clone();
+                prev
+            };
+            self.erase_live_and_box(previous);
+            for row in &rows {
+                println!("{}", row);
+            }
+            self.draw_box(width, &buf);
+        } else if !rows.is_empty() {
+            self.set_live(rows);
+        }
     }
 
     pub fn redraw_box(&self) {
@@ -592,24 +751,14 @@ impl ChatUi {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
-        let width = get_terminal_width();
-        if let Some(status_str) = self.format_status_line(width) {
-            let buf = self.input_buf.lock().unwrap();
-            print!("\x1b[2A\r\x1b[2K{}\x1b[2B\r{}", status_str, self.prompt_row(&buf));
-            let _ = io::stdout().flush();
-        }
+        self.redraw_box();
     }
 
     pub fn redraw_background_task_line(&self) {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) || !self.has_background_task() {
             return;
         }
-        let width = get_terminal_width();
-        if let Some(bg_str) = self.format_background_task_line(width) {
-            let buf = self.input_buf.lock().unwrap();
-            print!("\x1b[3A\r\x1b[2K{}\x1b[3B\r{}", bg_str, self.prompt_row(&buf));
-            let _ = io::stdout().flush();
-        }
+        self.redraw_box();
     }
 
     pub fn clear_box_on_exit(&self) {
@@ -680,5 +829,56 @@ mod tests {
         let line = ui.format_status_line(80).expect("status line");
         let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
         assert!(stripped.contains("ctx: 0/0"), "{stripped}");
+    }
+
+    #[test]
+    fn physical_line_count_calculates_wrapped_rows() {
+        assert_eq!(physical_line_count(0, 80), 1);
+        assert_eq!(physical_line_count(80, 80), 1);
+        assert_eq!(physical_line_count(81, 80), 2);
+        assert_eq!(physical_line_count(100, 70), 2);
+        assert_eq!(physical_line_count(140, 70), 2);
+        assert_eq!(physical_line_count(141, 70), 3);
+    }
+
+    #[test]
+    fn status_line_never_exceeds_terminal_width_even_when_narrow() {
+        let ui = ChatUi::new(true);
+        ui.set_status("z-ai/glm-5.3-flash", 3902, 1_000_000);
+        ui.set_session_name("long-session-name-here");
+
+        for width in [15, 20, 30, 45, 60, 80, 120] {
+            let line = ui.format_status_line(width).expect("status line");
+            let stripped = dialoguer::console::strip_ansi_codes(&line);
+            assert!(
+                stripped.chars().count() <= width,
+                "width {width}: line length {} exceeds width: {:?}",
+                stripped.chars().count(),
+                stripped
+            );
+        }
+    }
+
+    #[test]
+    fn background_task_line_never_exceeds_terminal_width_even_when_narrow() {
+        let ui = ChatUi::new(true);
+        ui.set_background_task(Some(BackgroundTaskState {
+            job_id: "job_0d24ea53".to_string(),
+            task: "Fix search_notes".to_string(),
+            current_tool: "read chat.rs".to_string(),
+            started_at: std::time::Instant::now(),
+            status: "running".to_string(),
+        }));
+
+        for width in [15, 20, 30, 45, 60, 80, 120] {
+            let line = ui.format_background_task_line(width).expect("bg line");
+            let stripped = dialoguer::console::strip_ansi_codes(&line);
+            assert!(
+                stripped.chars().count() <= width,
+                "width {width}: bg line length {} exceeds width: {:?}",
+                stripped.chars().count(),
+                stripped
+            );
+        }
     }
 }

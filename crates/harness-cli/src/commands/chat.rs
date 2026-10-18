@@ -544,6 +544,10 @@ pub async fn run_interactive_chat(
 
     ui.draw_initial_box();
 
+    #[cfg(unix)]
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
 
     // Raw mode belongs to the session, not to each read — see `RawTerminal`. Held here so the
@@ -600,6 +604,22 @@ pub async fn run_interactive_chat(
 
     loop {
         tokio::select! {
+            _ = async {
+                #[cfg(unix)]
+                {
+                    match sigwinch.as_mut() {
+                        Some(sig) => { sig.recv().await; }
+                        None => std::future::pending().await,
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<()>().await
+                }
+            } => {
+                ui.handle_resize();
+            }
+
             _ = animation.tick() => {
                 ui.animate_tick();
             }
