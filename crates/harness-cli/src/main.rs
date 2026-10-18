@@ -122,6 +122,12 @@ enum Commands {
         #[command(subcommand)]
         subcommand: EvalCommand,
     },
+    /// Check harness liveness, system health, and background status (or hb)
+    #[command(alias = "hb")]
+    Heartbeat {
+        /// Optional target (e.g. "ping")
+        target: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -262,6 +268,15 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Eval { subcommand }) => {
             handle_eval_command(subcommand, cred_manager, discovery, &config).await?;
+        }
+        Some(Commands::Heartbeat { target }) => {
+            commands::heartbeat::run_cli_heartbeat(
+                target.as_deref(),
+                &config,
+                &cred_manager,
+                &discovery,
+            )
+            .await?;
         }
         Some(Commands::App) | Some(Commands::Tui) => {
             let model_name = config.model.default.clone();

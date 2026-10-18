@@ -70,6 +70,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Steer active turn with mid-run guidance",
     },
     SlashCommand {
+        name: "/heartbeat",
+        details: "Show harness liveness, system health, and background status (or /hb)",
+    },
+    SlashCommand {
+        name: "/hb",
+        details: "Alias for /heartbeat",
+    },
+    SlashCommand {
         name: "/exit",
         details: "Exit Luna chat session",
     },
@@ -267,6 +275,22 @@ pub(crate) async fn execute_slash_command(
                 ui.emit_above(&format!("{} Steered: {}", "⏩".cyan().bold(), guidance));
             } else {
                 ui.emit_above(&format!("{} Usage: /steer <guidance>", "•".dimmed()));
+            }
+            Ok(false)
+        }
+        "/heartbeat" | "/hb" => {
+            crate::commands::heartbeat::handle_chat_heartbeat(
+                arg,
+                ui,
+                agent,
+                session_id,
+                current_provider,
+                current_model,
+                turns,
+            )
+            .await;
+            if ui.is_attended {
+                ui.draw_initial_box();
             }
             Ok(false)
         }

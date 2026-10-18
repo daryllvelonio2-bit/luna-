@@ -34,7 +34,7 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
 pub mod commands;
-mod render;
+pub(crate) mod render;
 pub mod ui;
 pub mod viewer;
 
@@ -356,6 +356,25 @@ pub async fn run_interactive_chat(
                 for cmd in SLASH_COMMANDS {
                     println!("  {:<12} {}", cmd.name.cyan(), cmd.details.dimmed());
                 }
+                continue;
+            }
+            if query.starts_with("/heartbeat") || query.starts_with("/hb") {
+                let stripped = if let Some(s) = query.strip_prefix("/heartbeat") {
+                    s.trim()
+                } else {
+                    query.strip_prefix("/hb").unwrap().trim()
+                };
+                let arg_opt = if stripped.is_empty() { None } else { Some(stripped) };
+                crate::commands::heartbeat::handle_chat_heartbeat(
+                    arg_opt,
+                    &ui,
+                    &agent,
+                    &session_id,
+                    &current_provider,
+                    &current_model,
+                    &[],
+                )
+                .await;
                 continue;
             }
             if query.starts_with("/reasoning") {
