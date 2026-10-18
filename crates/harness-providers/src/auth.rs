@@ -81,106 +81,23 @@ impl CredentialManager {
     }
 
     fn load_from_disk(path: &Path) -> Result<LunaAuthStorage, HarnessError> {
-        let mut storage = if !path.exists() {
-            LunaAuthStorage::default()
-        } else {
-            let data = fs::read_to_string(path).map_err(|e| {
-                HarnessError::Io(format!(
-                    "cannot read credential store {}: {e}",
-                    path.display()
-                ))
-            })?;
-            serde_json::from_str(&data).map_err(|e| {
-                HarnessError::SerializationError(format!(
-                    "credential store {} is not valid JSON ({e}); refusing to start from an empty \
-                     credential set, which the next write would persist over your keys — repair the \
-                     file or move it aside",
-                    path.display()
-                ))
-            })?
-        };
-
-        Self::load_fallback_credentials(&mut storage);
-        Ok(storage)
-    }
-
-    fn load_fallback_credentials(storage: &mut LunaAuthStorage) {
-        let mut env_map: HashMap<String, Vec<(String, String)>> = HashMap::new();
-
-        let check_env_vars = [
-            ("openrouter", "OPENROUTER_API_KEY"),
-            ("mistral", "MISTRAL_API_KEY"),
-            ("codestral", "CODESTRAL_API_KEY"),
-            ("nvidia", "NVIDIA_API_KEY"),
-            ("openai", "OPENAI_API_KEY"),
-            ("anthropic", "ANTHROPIC_API_KEY"),
-            ("gemini", "GEMINI_API_KEY"),
-            ("gemini", "GOOGLE_API_KEY"),
-            ("deepseek", "DEEPSEEK_API_KEY"),
-            ("groq", "GROQ_API_KEY"),
-            ("together", "TOGETHER_API_KEY"),
-        ];
-
-        for (p_id, env_var) in check_env_vars {
-            if let Ok(val) = std::env::var(env_var) {
-                let val = val.trim();
-                if !val.is_empty() {
-                    env_map
-                        .entry(p_id.to_string())
-                        .or_default()
-                        .push((format!("env-{}", env_var.to_lowercase()), val.to_string()));
-                }
-            }
+        if !path.exists() {
+            return Ok(LunaAuthStorage::default());
         }
-
-        if let Ok(home) = std::env::var("HOME") {
-            let shiina_env = PathBuf::from(home).join(".shiina/.env");
-            if let Ok(content) = fs::read_to_string(&shiina_env) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains('=') {
-                        continue;
-                    }
-                    if let Some((k, v)) = trimmed.split_once('=') {
-                        let k = k.trim();
-                        let v = v.trim();
-                        if v.is_empty() {
-                            continue;
-                        }
-                        for (p_id, env_var) in check_env_vars {
-                            if k == env_var {
-                                env_map
-                                    .entry(p_id.to_string())
-                                    .or_default()
-                                    .push((format!("shiina-{}", k.to_lowercase()), v.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (p_id, keys) in env_map {
-            let pool = storage.providers.entry(p_id).or_insert_with(|| ProviderAuthState {
-                strategy: RotationStrategy::FillFirst,
-                credentials: Vec::new(),
-                current_round_robin_index: 0,
-            });
-
-            for (lbl, key) in keys {
-                if !pool.credentials.iter().any(|c| c.api_key == key) {
-                    pool.credentials.push(CredentialEntry {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        label: lbl,
-                        api_key: key,
-                        is_priority: pool.credentials.is_empty(),
-                        usage_count: 0,
-                        last_used: None,
-                        is_temporarily_disabled: false,
-                    });
-                }
-            }
-        }
+        let data = fs::read_to_string(path).map_err(|e| {
+            HarnessError::Io(format!(
+                "cannot read credential store {}: {e}",
+                path.display()
+            ))
+        })?;
+        serde_json::from_str(&data).map_err(|e| {
+            HarnessError::SerializationError(format!(
+                "credential store {} is not valid JSON ({e}); refusing to start from an empty \
+                 credential set, which the next write would persist over your keys — repair the \
+                 file or move it aside",
+                path.display()
+            ))
+        })
     }
 
     /// Rewrite the store file from `bytes`. Shared tail of every persist path.
