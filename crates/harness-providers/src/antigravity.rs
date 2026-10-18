@@ -379,7 +379,8 @@ fn build_antigravity_payload(
                             "id": call_id,
                             "name": c.name,
                             "args": c.arguments
-                        }
+                        },
+                        "thoughtSignature": "skip_thought_signature_validator"
                     }));
                 }
                 if parts.is_empty() {
@@ -406,23 +407,77 @@ fn build_antigravity_payload(
                             .find(|tc| tc.id == call_id)
                             .map(|tc| tc.name.as_str())
                     })
-                    .next()
-                    .unwrap_or("terminal");
+                    .next();
+
+                let Some(tool_name) = tool_name else {
+                    // Do not emit an orphaned functionResponse without a matching functionCall
+                    continue;
+                };
+
+                let resp_part = json!({
+                    "functionResponse": {
+                        "id": call_id,
+                        "name": tool_name,
+                        "response": { "result": result_content }
+                    }
+                });
+
+                // Merge into previous user turn if it already contains functionResponse
+                if let Some(last_entry) = gemini_contents.last_mut() {
+                    if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
+                        if let Some(parts_arr) = last_entry.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                            let has_func_resp = parts_arr.iter().any(|p| p.get("functionResponse").is_some());
+                            if has_func_resp {
+                                parts_arr.push(resp_part);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Gemini requires functionResponse turns to immediately follow a model turn.
+                let prev_is_model = gemini_contents
+                    .last()
+                    .and_then(|e| e.get("role"))
+                    .and_then(|r| r.as_str())
+                    == Some("model");
+
+                if !prev_is_model && !gemini_contents.is_empty() {
+                    gemini_contents.push(json!({
+                        "role": "model",
+                        "parts": [{ "text": "[The previous response was interrupted before it completed.]" }]
+                    }));
+                }
+
                 gemini_contents.push(json!({
                     "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "id": call_id,
-                            "name": tool_name,
-                            "response": { "result": result_content }
-                        }
-                    }]
+                    "parts": [resp_part]
                 }));
             }
         }
     }
 
-    let mut req_obj = json!({ "contents": gemini_contents });
+    // Merge adjacent same-role turns to enforce strict Gemini user/model alternation
+    let mut merged_contents: Vec<serde_json::Value> = Vec::new();
+    for content in gemini_contents {
+        let same_role = merged_contents
+            .last()
+            .and_then(|prev| prev.get("role"))
+            == content.get("role");
+
+        if same_role {
+            if let (Some(prev_parts), Some(curr_parts)) = (
+                merged_contents.last_mut().and_then(|p| p.get_mut("parts")).and_then(|p| p.as_array_mut()),
+                content.get("parts").and_then(|p| p.as_array()),
+            ) {
+                prev_parts.extend(curr_parts.iter().cloned());
+            }
+        } else {
+            merged_contents.push(content);
+        }
+    }
+
+    let mut req_obj = json!({ "contents": merged_contents });
 
     if let Some(sys) = system_instruction {
         req_obj["systemInstruction"] = sys;
@@ -750,6 +805,66 @@ mod tests {
             resolve_antigravity_model("claude-opus-4-6", None),
             "claude-opus-4-6-thinking"
         );
+    }
+
+    #[test]
+    fn test_build_antigravity_payload_merges_tool_responses_and_sets_thought_signature() {
+        let messages = vec![
+            Message::user("run two tools"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "test.txt" }),
+                    },
+                    ToolCall {
+                        id: "c2".to_string(),
+                        name: "terminal".to_string(),
+                        arguments: json!({ "command": "cargo test" }),
+                    },
+                ],
+                tool_result: None,
+                usage: None,
+            },
+            Message::tool(harness_core::ToolResult::success("c1", "content")),
+            Message::tool(harness_core::ToolResult::success("c2", "test ok")),
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+
+        let contents = payload["request"]["contents"].as_array().expect("contents array");
+        // Must be exactly 3 turns: user, model, user (with both function responses merged)
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[2]["role"], "user");
+
+        // Model turn must carry thoughtSignature on each functionCall
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert_eq!(model_parts.len(), 2);
+        assert_eq!(
+            model_parts[0]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
+        assert_eq!(
+            model_parts[1]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
+
+        // User turn must carry both functionResponses in the single turn
+        let user_parts = contents[2]["parts"].as_array().expect("user parts");
+        assert_eq!(user_parts.len(), 2);
+        assert_eq!(user_parts[0]["functionResponse"]["name"], "read_file");
+        assert_eq!(user_parts[1]["functionResponse"]["name"], "terminal");
     }
 }
 

@@ -275,7 +275,17 @@ fn query_rows(
         .map_err(|error| session_error("failed to read session messages", error))?;
 
     // Read newest-first (that is where a LIMIT has to bite), hand back oldest-first.
-    rows.into_iter().rev().map(raw_to_stored).collect()
+    let mut stored: Vec<StoredMessage> = rows.into_iter().rev().map(raw_to_stored).collect::<Result<Vec<_>, _>>()?;
+    if !summaries {
+        // If a limit boundary cuts in the middle of a turn, drop leading messages until
+        // the first User message so replayed history always starts on a clean user turn.
+        if let Some(first_user) = stored.iter().position(|m| m.message.role == Role::User) {
+            if first_user > 0 {
+                stored.drain(0..first_user);
+            }
+        }
+    }
+    Ok(stored)
 }
 
 fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError> {
