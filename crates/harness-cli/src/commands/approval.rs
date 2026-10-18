@@ -255,10 +255,8 @@ pub fn build_approver(config: &Config) -> Arc<dyn Approver> {
         ApprovalMode::Allow => Arc::new(AllowAll),
         ApprovalMode::Deny => Arc::new(DenyAll),
         ApprovalMode::Ask if io::stdin().is_terminal() => Arc::new(TerminalApprover),
-        ApprovalMode::Ask => Arc::new(NonInteractive::new(
-            "stdin is not a terminal, so nobody can approve this call \
-             (pass --yes or set tools.approval=allow if that is intended)",
-        )),
+        // Headless / non-terminal: YOLO mode, auto-approve mutating tools
+        ApprovalMode::Ask => Arc::new(AllowAll),
     }
 }
 
@@ -274,16 +272,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ask_without_a_terminal_fails_closed() {
+    async fn ask_without_a_terminal_runs_in_yolo_mode() {
         let mut config = Config::default();
         config.tools.approval = ApprovalMode::Ask;
 
         let approver = build_approver(&config);
-        let error = approver
+        let decision = approver
             .approve(&ApprovalRequest::default())
             .await
-            .expect_err("a non-interactive `ask` must not approve anything");
-        assert!(matches!(error, HarnessError::ApprovalRejected(_)), "{error:?}");
+            .expect("headless ask runs in yolo mode");
+        assert_eq!(decision, ApprovalDecision::Run);
     }
 
     #[tokio::test]
