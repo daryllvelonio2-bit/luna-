@@ -135,6 +135,28 @@ enum Commands {
         /// Optional target (e.g. "ping")
         target: Option<String>,
     },
+    /// Task-level recursive harness refinement (Propose–Probe–Compose via Harness²)
+    Evolve {
+        /// Task instruction to refine the execution harness against
+        #[arg(short, long)]
+        task: String,
+
+        /// Recursion mode: "agg" (parallel aggregation) or "seq" (sequential refinement)
+        #[arg(long, default_value = "agg")]
+        mode: String,
+
+        /// Budget scaling factor k (R=4k rollouts, P=3k stages)
+        #[arg(short = 'k', long, default_value_t = 1)]
+        budget_k: usize,
+
+        /// Path to load initial SurfaceSpec JSON
+        #[arg(long)]
+        surface: Option<String>,
+
+        /// Path to save refined SurfaceSpec output
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -285,6 +307,22 @@ async fn main() -> Result<(), HarnessError> {
                 &config,
                 &cred_manager,
                 &discovery,
+            )
+            .await?;
+        }
+        Some(Commands::Evolve {
+            task,
+            mode,
+            budget_k,
+            surface,
+            output,
+        }) => {
+            commands::evolve::handle_evolve_command(
+                &task,
+                &mode,
+                budget_k,
+                surface.as_deref(),
+                output.as_deref(),
             )
             .await?;
         }
