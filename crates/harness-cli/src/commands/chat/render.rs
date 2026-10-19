@@ -266,6 +266,33 @@ pub fn truncate_visible(text: &str, max: usize) -> String {
     truncated
 }
 
+/// Shortens `text` to at most `max` terminal *cells* — the unit the terminal actually renders.
+///
+/// `truncate_visible` counts chars, but a char is not a cell: `💻` is one char and two cells.
+/// A live-region row truncated by chars can print wider than the terminal, soft-wrap into a
+/// second physical row, and desync the cursor arithmetic that erases the row on the next
+/// animation frame — the live region then stacks one orphan frame per tick.
+pub fn truncate_to_cells(text: &str, max: usize) -> String {
+    if dialoguer::console::measure_text_width(text) <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_cells = dialoguer::console::measure_text_width(&ch.to_string());
+        if width + ch_cells > max.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        width += ch_cells;
+    }
+    out.push('…');
+    out
+}
+
 /// Right-align the user's own message so the transcript reads as a chat — the user on the
 /// right, Luna on the left. Padding is derived from the *visible* width, never the ANSI codes.
 ///
@@ -327,13 +354,18 @@ pub fn wrap_rows(text: &str, width: usize) -> Vec<String> {
         }
         let mut row = String::new();
         for word in line.split_inclusive(' ') {
-            let word_width = word.chars().count();
-            if !row.is_empty() && row.chars().count() + word_width > width {
+            // Cells, not chars: an emoji-bearing word is wider on the terminal than it is long,
+            // and a row wrapped by chars would still soft-wrap physically and desync the live
+            // region's cursor arithmetic.
+            let word_width = dialoguer::console::measure_text_width(word);
+            let row_width = dialoguer::console::measure_text_width(&row);
+            if !row.is_empty() && row_width + word_width > width {
                 rows.push(std::mem::take(&mut row));
             }
             // A single word longer than the row is hard-split so it cannot overflow the row.
             for ch in word.chars() {
-                if row.chars().count() == width {
+                let ch_cells = dialoguer::console::measure_text_width(&ch.to_string());
+                if dialoguer::console::measure_text_width(&row) + ch_cells > width {
                     rows.push(std::mem::take(&mut row));
                 }
                 row.push(ch);
@@ -374,13 +406,16 @@ pub fn activity_line(
         None => seconds,
     };
     // "  ", the spinner cell, then " <call> <tail>" — everything except the call itself.
-    let fixed = 3 + 1 + tail.chars().count() + 1;
+    // The glyph is 2 cells on the terminal but 1 char, so the budget is measured in cells
+    // (measure_text_width) throughout: a row wider than the terminal soft-wraps into a second
+    // physical row, and the erase then leaves one orphan frame behind per animation tick.
+    let fixed = 3 + 1 + dialoguer::console::measure_text_width(&tail) + 1;
     let budget = width.saturating_sub(fixed).max(LIVE_CALL_MIN_CHARS);
     let plain = dialoguer::console::strip_ansi_codes(call).to_string();
     let label = if plain.trim().is_empty() {
         "running".to_string()
     } else {
-        truncate_visible(&plain, budget)
+        truncate_to_cells(&plain, budget)
     };
     format!("  {} {} {}", glyph, label.dimmed(), tail.dimmed())
 }
@@ -1220,6 +1255,54 @@ mod tests {
                 "width {width} produced {visible} visible chars: {row}"
             );
         }
+    }
+
+    /// A row is measured in terminal cells, not chars: `💻` is one char but two cells, so a
+    /// chars-based row printed wider than the terminal, soft-wrapped into a second physical row,
+    /// and the live region's erase left one orphan frame behind per animation tick — the
+    /// reported "running tool spams the screen with copies of itself". Cell width is the
+    /// contract here; a regression to char counting reproduces the stack.
+    #[test]
+    fn an_activity_row_never_exceeds_the_terminal_in_cells() {
+        let long = "💻 run for f in dark light midnight; do magick assets/$f.gif -coalesce \
+                    -crop 1x1+0+0 -format \"%[pixel:p{0,0}]\" info:; done";
+        for width in [40usize, 80, 120] {
+            for frame in 0..SPINNER_FRAMES.len() {
+                let row = activity_line(frame, long, None, Duration::from_millis(3700), width);
+                let cells =
+                    dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(&row).to_string());
+                assert!(
+                    cells <= width,
+                    "width {width} frame {frame} rendered {cells} cells (> width, would \
+                     soft-wrap and orphan): {row}"
+                );
+            }
+        }
+    }
+
+    /// wrap_rows is the live region's other producer (reasoning rows): the same cell contract.
+    #[test]
+    fn wrapped_rows_never_exceed_their_width_in_cells() {
+        let text = "💻 a very long reasoning line with 📖 emoji 📝 scattered through 🤖 it";
+        for width in [10usize, 20, 40] {
+            for row in wrap_rows(text, width) {
+                let cells = dialoguer::console::measure_text_width(&row);
+                assert!(
+                    cells <= width,
+                    "width {width} produced a {cells}-cell row: {row}"
+                );
+            }
+        }
+    }
+
+    /// truncate_to_cells keeps the ellipsis within the cell budget too.
+    #[test]
+    fn truncation_to_cells_counts_the_ellipsis() {
+        let out = truncate_to_cells("💻💻💻💻💻💻💻💻", 5);
+        assert_eq!(dialoguer::console::measure_text_width(&out), 5, "got: {out}");
+        assert!(out.ends_with('…'), "got: {out}");
+        // Untouched when it already fits.
+        assert_eq!(truncate_to_cells("💻 hi", 10), "💻 hi");
     }
 
     #[test]

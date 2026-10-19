@@ -114,7 +114,7 @@ struct BoxDrawnMetrics {
 }
 
 pub fn visible_width(s: &str) -> usize {
-    dialoguer::console::strip_ansi_codes(s).chars().count()
+    dialoguer::console::measure_text_width(s)
 }
 
 pub fn physical_line_count(visible_len: usize, width: usize) -> usize {
