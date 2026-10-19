@@ -95,6 +95,8 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
                             .and_then(|f| f.get("arguments"))
                             .and_then(|a| a.as_str())
                             .map(|s| s.to_string()),
+                        // The OpenAI-compatible wire has no per-call signature concept.
+                        signature: None,
                     }));
                 }
             }
@@ -439,6 +441,7 @@ impl ModelProvider for GenericProviderClient {
                     id,
                     name,
                     arguments: args,
+                    signature: None,
                 });
             }
         }

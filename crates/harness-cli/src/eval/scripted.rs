@@ -96,6 +96,7 @@ impl ModelProvider for ScriptedProvider {
                 id: format!("call_{}_{}", index, i),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
+                signature: None,
             })
             .collect();
 

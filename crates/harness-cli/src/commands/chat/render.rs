@@ -1474,6 +1474,7 @@ mod tests {
                         id: "c1".to_string(),
                         name: "terminal".to_string(),
                         arguments: json!({ "command": "ls" }),
+                        signature: None,
                     }],
                     tool_result: None,
                     usage: None,

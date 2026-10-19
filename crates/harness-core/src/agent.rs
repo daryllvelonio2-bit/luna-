@@ -793,7 +793,7 @@ where
                     reasoning.push_str(&text);
                 }
                 StreamEvent::ContentDelta(text) => content.push_str(&text),
-                StreamEvent::ToolCallDelta { index, id, name, arguments_delta } => {
+                StreamEvent::ToolCallDelta { index, id, name, arguments_delta, signature } => {
                     let slot = match calls.iter_mut().find(|(i, _)| *i == index) {
                         Some((_, call)) => call,
                         None => {
@@ -803,6 +803,7 @@ where
                                     id: String::new(),
                                     name: String::new(),
                                     arguments: serde_json::Value::Null,
+                                    signature: None,
                                 },
                             ));
                             &mut calls.last_mut().expect("just pushed").1
@@ -813,6 +814,9 @@ where
                     }
                     if let Some(name) = name {
                         slot.name = name;
+                    }
+                    if let Some(signature) = signature {
+                        slot.signature = Some(signature);
                     }
                     if let Some(fragment) = arguments_delta {
                         // Arguments stream as JSON text, so each fragment is stitched onto the raw

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
     seq              INTEGER NOT NULL,
     role             TEXT NOT NULL,
     content          TEXT,
+    reasoning        TEXT,
     tool_calls_json  TEXT,
     tool_result_json TEXT,
     usage_json       TEXT,
@@ -64,6 +65,7 @@ struct RawRow {
     seq: i64,
     role: String,
     content: Option<String>,
+    reasoning: Option<String>,
     tool_calls_json: Option<String>,
     tool_result_json: Option<String>,
     usage_json: Option<String>,
@@ -152,6 +154,24 @@ impl SqliteSessionStore {
             )
             .map_err(|error| session_error("failed to add the session model column", error))?;
         }
+
+        // Reasoning is part of the conversation: replaying a session without it hands the model
+        // a transcript missing half of what it said. Widen `messages` the same way.
+        let message_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut stmt| {
+                let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                Ok(columns.collect::<Result<Vec<_>, _>>()?)
+            })
+            .map_err(|error| session_error("failed to inspect the messages schema", error))?;
+        let has_reasoning = message_columns.iter().any(|column| column == "reasoning");
+        if !has_reasoning {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN reasoning TEXT",
+                [],
+            )
+            .map_err(|error| session_error("failed to add the reasoning column", error))?;
+        }
         Ok(())
     }
 }
@@ -220,7 +240,7 @@ fn raw_to_stored(raw: RawRow) -> Result<StoredMessage, HarnessError> {
         message: Message {
             role: text_to_role(&raw.role)?,
             content: raw.content,
-            reasoning: None,
+            reasoning: raw.reasoning.filter(|r| !r.is_empty()),
             tool_calls,
             tool_result,
             usage,
@@ -243,7 +263,7 @@ fn query_rows(
         "is_summary = 0 AND compacted_at IS NULL"
     };
     let mut sql = format!(
-        "SELECT id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary
+        "SELECT id, seq, role, content, reasoning, tool_calls_json, tool_result_json, usage_json, is_summary
          FROM messages
          WHERE session_id = ?1 AND {filter}
          ORDER BY seq DESC"
@@ -264,10 +284,11 @@ fn query_rows(
                 seq: row.get(1)?,
                 role: row.get(2)?,
                 content: row.get(3)?,
-                tool_calls_json: row.get(4)?,
-                tool_result_json: row.get(5)?,
-                usage_json: row.get(6)?,
-                is_summary: row.get::<_, i64>(7)? != 0,
+                reasoning: row.get(4)?,
+                tool_calls_json: row.get(5)?,
+                tool_result_json: row.get(6)?,
+                usage_json: row.get(7)?,
+                is_summary: row.get::<_, i64>(8)? != 0,
             })
         })
         .map_err(|error| session_error("failed to read session messages", error))?
@@ -419,6 +440,11 @@ impl SessionStore for SqliteSessionStore {
                     .map_err(|error| session_error("failed to serialize tool calls", error))?,
             )
         };
+        let reasoning = message
+            .reasoning
+            .as_ref()
+            .filter(|r| !r.is_empty())
+            .cloned();
         let tool_result_json = match &message.tool_result {
             Some(result) => Some(
                 serde_json::to_string(result)
@@ -436,14 +462,15 @@ impl SessionStore for SqliteSessionStore {
 
         conn.execute(
             "INSERT INTO messages
-                (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json,
-                 is_summary, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (session_id, seq, role, content, reasoning, tool_calls_json, tool_result_json,
+                 usage_json, is_summary, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session_id,
                 seq,
                 role_to_text(message.role),
                 message.content,
+                reasoning,
                 tool_calls_json,
                 tool_result_json,
                 usage_json,

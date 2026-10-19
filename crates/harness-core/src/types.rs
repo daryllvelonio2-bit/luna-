@@ -15,6 +15,13 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Provider-issued opaque signature attached to this call (Gemini/Code Assist
+    /// `thoughtSignature`). Captured verbatim from the response and replayed verbatim on the
+    /// next request — Code Assist validates it against the model that issued it, so a call
+    /// without one is sent without the field rather than with a fabricated value. `None` for
+    /// every provider that has no such concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,6 +151,8 @@ pub enum StreamEvent {
         id: Option<String>,
         name: Option<String>,
         arguments_delta: Option<String>,
+        /// The provider's signature for this call, when the wire format carries one.
+        signature: Option<String>,
     },
     Completed {
         finish_reason: Option<String>,

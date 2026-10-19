@@ -41,6 +41,7 @@ impl ModelProvider for MockProvider {
                 id: format!("call_{}", count),
                 name: "failing_tool".to_string(),
                 arguments: serde_json::json!({}),
+                signature: None,
             }]))
         } else {
             Ok(Message::assistant("Done!"))
@@ -362,6 +363,7 @@ impl ModelProvider for SteeringMockProvider {
             id: "call_1".to_string(),
             name: "failing_tool".to_string(),
             arguments: serde_json::json!({}),
+            signature: None,
         }]))
     }
 

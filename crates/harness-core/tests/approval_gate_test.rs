@@ -69,6 +69,7 @@ impl ModelProvider for OneCallProvider {
                 id: "call_0".to_string(),
                 name: TOOL.to_string(),
                 arguments: json!({ "path": "/tmp/gate-target" }),
+                signature: None,
             }]))
         } else {
             Ok(Message::assistant("Done"))

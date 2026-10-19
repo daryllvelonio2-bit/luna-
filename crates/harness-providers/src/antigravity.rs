@@ -326,6 +326,12 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
                     arguments_delta: Some(
                         call.get("args").cloned().unwrap_or_else(|| json!({})).to_string(),
                     ),
+                    // The model's own signature for this call: replayed verbatim on the next
+                    // request, which is what Code Assist's validator actually checks.
+                    signature: part
+                        .get("thoughtSignature")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -363,6 +369,15 @@ fn build_antigravity_payload(
             }
             Role::Assistant => {
                 let mut parts = Vec::new();
+                // Replay the turn's own reasoning first, as the thought part it was on the
+                // wire: Code Assist validates the current turn's history against what the
+                // model actually produced, and dropping the thinking is what makes a replayed
+                // functionCall look like it did not follow a thought.
+                if let Some(ref reasoning) = msg.reasoning {
+                    if !reasoning.is_empty() {
+                        parts.push(json!({ "text": reasoning, "thought": true }));
+                    }
+                }
                 if let Some(ref text) = msg.content {
                     if !text.is_empty() {
                         parts.push(json!({ "text": text }));
@@ -374,14 +389,22 @@ fn build_antigravity_payload(
                     } else {
                         c.id.clone()
                     };
-                    parts.push(json!({
+                    let mut call_part = json!({
                         "functionCall": {
                             "id": call_id,
                             "name": c.name,
                             "args": c.arguments
-                        },
-                        "thoughtSignature": "skip_thought_signature_validator"
-                    }));
+                        }
+                    });
+                    // The signature the model issued with this call, replayed verbatim: Code
+                    // Assist validates each functionCall's signature against the model that
+                    // produced it. A call without one (another provider wrote this row, or an
+                    // older build) is sent WITHOUT the field — a fabricated value is what
+                    // corrupts the validation and 400s the whole request.
+                    if let Some(signature) = &c.signature {
+                        call_part["thoughtSignature"] = json!(signature);
+                    }
+                    parts.push(call_part);
                 }
                 if parts.is_empty() {
                     parts.push(json!({ "text": "" }));
@@ -707,7 +730,7 @@ pub async fn execute_antigravity_completion(
         match event? {
             StreamEvent::ContentDelta(text) => full_text.push_str(&text),
             StreamEvent::ReasoningDelta(text) => thought_buf.push_str(&text),
-            StreamEvent::ToolCallDelta { id, name, arguments_delta, .. } => {
+            StreamEvent::ToolCallDelta { id, name, arguments_delta, signature, .. } => {
                 if let Some(name) = name {
                     let arguments = arguments_delta
                         .as_deref()
@@ -717,6 +740,7 @@ pub async fn execute_antigravity_completion(
                         id: id.unwrap_or_else(|| "call_agy".to_string()),
                         name,
                         arguments,
+                        signature,
                     });
                 }
             }
@@ -820,11 +844,13 @@ mod tests {
                         id: "c1".to_string(),
                         name: "read_file".to_string(),
                         arguments: json!({ "path": "test.txt" }),
+                        signature: Some("sig-for-read".to_string()),
                     },
                     ToolCall {
                         id: "c2".to_string(),
                         name: "terminal".to_string(),
                         arguments: json!({ "command": "cargo test" }),
+                        signature: Some("sig-for-terminal".to_string()),
                     },
                 ],
                 tool_result: None,
@@ -848,16 +874,18 @@ mod tests {
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[2]["role"], "user");
 
-        // Model turn must carry thoughtSignature on each functionCall
+        // Model turn must carry the model's own signature on each functionCall — the value the
+        // provider issued, replayed verbatim. A call with no signature (history from another
+        // provider) carries no signature field at all.
         let model_parts = contents[1]["parts"].as_array().expect("model parts");
         assert_eq!(model_parts.len(), 2);
         assert_eq!(
             model_parts[0]["thoughtSignature"],
-            "skip_thought_signature_validator"
+            json!("sig-for-read")
         );
         assert_eq!(
             model_parts[1]["thoughtSignature"],
-            "skip_thought_signature_validator"
+            json!("sig-for-terminal")
         );
 
         // User turn must carry both functionResponses in the single turn
@@ -865,6 +893,80 @@ mod tests {
         assert_eq!(user_parts.len(), 2);
         assert_eq!(user_parts[0]["functionResponse"]["name"], "read_file");
         assert_eq!(user_parts[1]["functionResponse"]["name"], "terminal");
+    }
+
+    /// Calls recorded without a signature (another provider wrote the rows, or an older build)
+    /// must be sent without the `thoughtSignature` field — fabricating one corrupts the
+    /// validator and 400s the request that carries it.
+    #[test]
+    fn a_signatureless_call_is_sent_without_the_field() {
+        let messages = vec![
+            Message::user("run one tool"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "terminal".to_string(),
+                    arguments: json!({ "command": "ls" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            Message::tool(harness_core::ToolResult::success("c1", "ok")),
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+        let contents = payload["request"]["contents"].as_array().expect("contents");
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert!(
+            model_parts[0].get("thoughtSignature").is_none(),
+            "a fabricated signature is a bypass, not a fix: {:?}",
+            model_parts[0]
+        );
+    }
+
+    /// A reasoning-bearing assistant turn replays its thinking as a thought part before the
+    /// functionCall, so the replayed history says what the model actually produced.
+    #[test]
+    fn a_reasoning_turn_replays_a_thought_part_before_its_call() {
+        let messages = vec![
+            Message::user("run one tool"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("I should list the files first.".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "list_files".to_string(),
+                    arguments: json!({ "path": "." }),
+                    signature: Some("sig-1".to_string()),
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            Message::tool(harness_core::ToolResult::success("c1", "a\nb")),
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+        let contents = payload["request"]["contents"].as_array().expect("contents");
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert_eq!(model_parts.len(), 2);
+        assert_eq!(model_parts[0]["thought"], json!(true));
+        assert_eq!(model_parts[0]["text"], json!("I should list the files first."));
+        assert_eq!(model_parts[1]["thoughtSignature"], json!("sig-1"));
     }
 }
 
