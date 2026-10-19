@@ -28,7 +28,7 @@ pub use config::{
 pub use error::HarnessError;
 pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
 pub use registry::DefaultToolRegistry;
-pub use substrate::{MockSubstrate, Substrate, SubstrateOutcome};
+pub use substrate::{LocalAgentSubstrate, MockSubstrate, Substrate, SubstrateOutcome};
 pub use surface::{
     GuardrailsSpec, MemorySpec, PluginSpec, ScriptSpec, SkillSpec, SubagentSpec, SurfaceSpec,
     SystemPromptSpec,

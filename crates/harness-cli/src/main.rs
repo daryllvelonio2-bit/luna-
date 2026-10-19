@@ -156,6 +156,10 @@ enum Commands {
         /// Path to save refined SurfaceSpec output
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Run offline using simulated probe substrate (no API keys consumed)
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -316,6 +320,7 @@ async fn main() -> Result<(), HarnessError> {
             budget_k,
             surface,
             output,
+            offline,
         }) => {
             commands::evolve::handle_evolve_command(
                 &task,
@@ -323,6 +328,10 @@ async fn main() -> Result<(), HarnessError> {
                 budget_k,
                 surface.as_deref(),
                 output.as_deref(),
+                offline,
+                &config,
+                &cred_manager,
+                &discovery,
             )
             .await?;
         }

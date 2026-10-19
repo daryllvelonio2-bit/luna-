@@ -274,6 +274,29 @@ where
         self.compaction = setup;
     }
 
+    /// Apply an editable SurfaceSpec (Harness² c1–c8 components) to the agent loop.
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceSpec) -> Result<Self, HarnessError> {
+        surface.validate()?;
+        self.config.max_consecutive_failures = surface.c2_guardrails.max_consecutive_failures;
+        self.config.require_hitl_for_mutation = surface.c2_guardrails.require_hitl_for_mutation;
+
+        let rendered = surface.render_system_prompt();
+        if !rendered.is_empty() {
+            self.config.system_prompt_prefix = Some(rendered);
+        }
+
+        if !surface.c4_skills.is_empty() {
+            let summaries: Vec<String> = surface
+                .c4_skills
+                .iter()
+                .map(|s| format!("- {}: {}", s.name, s.description))
+                .collect();
+            self.config.skills_summary = Some(summaries.join("\n"));
+        }
+
+        Ok(self)
+    }
+
     pub fn memory(&self) -> &Arc<M> {
         &self.memory
     }
