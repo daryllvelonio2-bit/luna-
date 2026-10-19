@@ -350,10 +350,27 @@ where
     /// This loads the history from the session store and runs the compaction estimator.
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
         let (history, _replay_notice) = self.load_history().await?;
+
+        // 1. If any prior turn recorded actual usage from the provider, use the most recent report
+        if let Some(latest_usage) = history
+            .iter()
+            .rev()
+            .find_map(|stored| stored.message.usage.as_ref())
+        {
+            return Ok(latest_usage.prompt_tokens.saturating_add(latest_usage.completion_tokens));
+        }
+
+        // 2. Otherwise estimate accurately: system prompt + tools schemas + conversation messages
+        let system_text = self.system_prompt("").await.unwrap_or_default();
+        let tools_count = self.registry.list_tools().await.map(|t| t.len()).unwrap_or(0);
         let mut messages = Vec::with_capacity(history.len() + 1);
+        if !system_text.is_empty() {
+            messages.push(Message::system(system_text));
+        }
         messages.extend(history.iter().map(|stored| stored.message.clone()));
         let estimate = estimate_tokens(&messages);
-        Ok(estimate.tokens)
+        let tool_tokens = (tools_count as u32).saturating_mul(250);
+        Ok(estimate.tokens.saturating_add(tool_tokens))
     }
 
     /// Fold the oldest turns of the current session into a summary, ignoring
@@ -531,6 +548,15 @@ where
                 provider: self.provider.provider_id().to_string(),
                 message: "Model request failed after retries".to_string(),
             })?;
+
+            if let Some(ref usage) = response.usage {
+                let actual_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ContextTokensUpdated {
+                        tokens_used: actual_tokens,
+                    });
+                }
+            }
 
             if let Some(ref r) = response.reasoning {
                 last_reasoning = Some(r.clone());

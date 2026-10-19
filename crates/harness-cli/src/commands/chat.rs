@@ -700,7 +700,7 @@ pub async fn run_interactive_chat(
         println!();
     }
 
-    let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+    let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
     // Seed the bar from the real transcript, not 0: a resumed session already carries history, and
     // reporting "0 used" made the continuation look like a fresh start.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -1249,7 +1249,7 @@ pub async fn run_interactive_chat(
                             }
 
                             let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                             ui.update_status(context_used, context_max);
                         } else {
                             ui.clear_box_on_exit();
@@ -1285,7 +1285,7 @@ pub async fn run_interactive_chat(
                             }
 
                             let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                             ui.update_status(context_used, context_max);
                         }
                     }
@@ -1331,7 +1331,7 @@ pub async fn run_interactive_chat(
 
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
@@ -1359,7 +1359,7 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(e)) => {
@@ -1408,7 +1408,7 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                         ui.update_status(context_used, context_max);
                     }
                     Err(join_err) => {
@@ -1457,7 +1457,7 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(32_768);
+                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
                         ui.update_status(context_used, context_max);
                     }
                 }

@@ -465,16 +465,15 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
     // 3. Known architectural model families & token heuristics (matching Shiina model_metadata)
     let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
 
-    // DeepSeek V4 family is 1,000,000 (1M tokens)
-    if leaf.contains("deepseek-v4")
-        || leaf.contains("deepseek-flash")
-        || leaf.starts_with("deepseek-chat")
-        || leaf.starts_with("deepseek-reasoner")
-    {
-        if leaf.contains("deepseek-v4-pro") && provider.eq_ignore_ascii_case("nvidia") {
-            return Some(262_144);
+    // DeepSeek family (V4 = 1M, V3/R1 = 128k)
+    if leaf.contains("deepseek") {
+        if leaf.contains("v4") || leaf.contains("flash") || leaf.contains("chat") {
+            if leaf.contains("deepseek-v4-pro") && provider.eq_ignore_ascii_case("nvidia") {
+                return Some(262_144);
+            }
+            return Some(1_000_000);
         }
-        return Some(1_000_000);
+        return Some(128_000);
     }
 
     // Gemini 1.5/2.x/3.x family
@@ -500,14 +499,17 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         return Some(1_000_000);
     }
 
-    // Llama 3 / GPT-4o / Grok / Qwen
+    // Llama 3 / GPT-4o / Grok / Qwen / Mistral
     if leaf.contains("gpt-4o")
         || leaf.contains("o1")
         || leaf.contains("o3")
         || leaf.contains("llama-3")
         || leaf.contains("llama3")
+        || leaf.contains("llama-4")
         || leaf.contains("grok")
         || leaf.contains("qwen")
+        || leaf.contains("mistral")
+        || leaf.contains("codestral")
     {
         return Some(128_000);
     }
@@ -520,7 +522,7 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         return Some(245_760);
     }
 
-    None
+    Some(128_000)
 }
 
 #[cfg(test)]

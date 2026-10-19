@@ -1099,7 +1099,7 @@ pub(crate) async fn handle_model_switch(
 
     // The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
     // that stale box so the status bar is drawn once, showing the model now in use.
-    let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(32_768);
+    let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(128_000);
     // Switching models does not touch the transcript, so keep the real usage rather than resetting
     // the bar to 0.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
@@ -1259,7 +1259,7 @@ pub(crate) async fn handle_new_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
     ui.set_status(current_model, 0, context_max);
     ui.set_session_name(name);
 
@@ -1329,7 +1329,7 @@ pub(crate) async fn handle_delete_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
     ui.set_status(current_model, 0, context_max);
     ui.set_session_name("");
 
@@ -1440,7 +1440,7 @@ pub(crate) async fn handle_summarize_and_new_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
     let summary_tokens = harness_core::heuristic_tokens(&[summary_msg]);
     ui.set_status(current_model, summary_tokens, context_max);
     ui.set_session_name(name);
@@ -1516,7 +1516,7 @@ pub(crate) async fn handle_compact_command(
             ));
             // The summary replaced the folded turns, so the gauge drops for real.
             let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-            let context_max = get_context_window(current_provider, current_model).unwrap_or(32_768);
+            let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
             ui.update_status(context_used, context_max);
         }
         Err(e) => {

@@ -398,9 +398,17 @@ impl Tool for TerminalTool {
             }
         };
 
+        let is_background = exec_command.trim().ends_with('&');
+        let final_exec_command = if is_background && sudo_stdin.is_none() {
+            let stripped = exec_command.trim().trim_end_matches('&').trim();
+            format!("( {} ) </dev/null >/dev/null 2>&1 & echo $!", stripped)
+        } else {
+            exec_command.clone()
+        };
+
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
-            .arg(&exec_command)
+            .arg(&final_exec_command)
             .current_dir(&resolved_workdir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
