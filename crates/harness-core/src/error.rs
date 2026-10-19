@@ -67,6 +67,12 @@ pub enum HarnessError {
 
     #[error("Human approval rejected: {0}")]
     ApprovalRejected(String),
+
+    #[error("Surface validation error: {0}")]
+    SurfaceValidationError(String),
+
+    #[error("Ledger budget error: {0}")]
+    LedgerError(String),
 }
 
 impl From<std::io::Error> for HarnessError {

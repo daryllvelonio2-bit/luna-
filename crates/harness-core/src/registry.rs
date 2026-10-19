@@ -6,19 +6,27 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approval::ToolPreview;
 use crate::error::HarnessError;
-use crate::traits::{Tool, ToolRegistry};
+use crate::traits::{Tool, ToolMiddleware, ToolRegistry};
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
 
 #[derive(Default)]
 pub struct DefaultToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    middlewares: RwLock<Vec<Arc<dyn ToolMiddleware>>>,
 }
 
 impl DefaultToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
+            middlewares: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Register a middleware hook into the tool execution loop
+    pub async fn register_middleware(&self, middleware: Arc<dyn ToolMiddleware>) {
+        let mut list = self.middlewares.write().await;
+        list.push(middleware);
     }
 }
 
@@ -61,14 +69,26 @@ impl ToolRegistry for DefaultToolRegistry {
         call: &ToolCall,
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let tool = {
+        let (tool, mws) = {
             let map = self.tools.read().await;
-            map.get(&call.name).cloned()
+            let mws = self.middlewares.read().await.clone();
+            (map.get(&call.name).cloned(), mws)
         };
 
-        match tool {
-            Some(t) => t.execute(&call.id, &call.arguments, cancel_token).await,
-            None => Err(HarnessError::ToolNotFound(call.name.clone())),
+        let mut active_call = call.clone();
+        for mw in &mws {
+            mw.on_pre_execute(&mut active_call).await?;
         }
+
+        let mut result = match tool {
+            Some(t) => t.execute(&active_call.id, &active_call.arguments, cancel_token).await?,
+            None => return Err(HarnessError::ToolNotFound(call.name.clone())),
+        };
+
+        for mw in &mws {
+            mw.on_post_execute(&active_call, &mut result).await?;
+        }
+
+        Ok(result)
     }
 }

@@ -2,9 +2,12 @@ pub mod agent;
 pub mod approval;
 pub mod config;
 pub mod error;
+pub mod ledger;
 pub mod prompts;
 pub mod registry;
 pub mod session;
+pub mod substrate;
+pub mod surface;
 pub mod tasks;
 pub mod tools;
 pub mod traits;
@@ -23,7 +26,13 @@ pub use config::{
     SessionSettings, Source, ToolsSettings,
 };
 pub use error::HarnessError;
+pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
 pub use registry::DefaultToolRegistry;
+pub use substrate::{MockSubstrate, Substrate, SubstrateOutcome};
+pub use surface::{
+    GuardrailsSpec, MemorySpec, PluginSpec, ScriptSpec, SkillSpec, SubagentSpec, SurfaceSpec,
+    SystemPromptSpec,
+};
 pub use tasks::BackgroundTaskQueue;
 pub use session::{
     compact, estimate_tokens, fold_boundary, heuristic_tokens, summarize_session, CompactionOutcome, Estimate,
@@ -31,6 +40,6 @@ pub use session::{
     SessionStore, SqliteSessionStore, StoredMessage,
 };
 pub use traits::{
-    EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry,
+    EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry,
 };
 pub use types::*;

@@ -204,6 +204,19 @@ pub trait Tool: Send + Sync {
 }
 
 #[async_trait]
+pub trait ToolMiddleware: Send + Sync {
+    /// Hook executed before a tool runs. Can inspect/modify `call` or abort execution with an error.
+    async fn on_pre_execute(&self, _call: &mut ToolCall) -> Result<(), HarnessError> {
+        Ok(())
+    }
+
+    /// Hook executed after a tool completes. Can inspect/modify `result` or abort with an error.
+    async fn on_post_execute(&self, _call: &ToolCall, _result: &mut ToolResult) -> Result<(), HarnessError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 pub trait ToolRegistry: Send + Sync {
     /// Register a new tool
     async fn register(&self, tool: Arc<dyn Tool>) -> Result<(), HarnessError>;
