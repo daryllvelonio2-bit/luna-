@@ -53,6 +53,14 @@ impl ToolRegistry for DefaultToolRegistry {
         }
     }
 
+    async fn is_mutating_call(&self, call: &ToolCall) -> Result<bool, HarnessError> {
+        let map = self.tools.read().await;
+        match map.get(&call.name) {
+            Some(tool) => Ok(tool.is_mutating_call(&call.arguments)),
+            None => Err(HarnessError::ToolNotFound(call.name.clone())),
+        }
+    }
+
     async fn preview(&self, call: &ToolCall) -> Option<ToolPreview> {
         let tool = {
             let map = self.tools.read().await;

@@ -964,3 +964,72 @@ tools:
     assert_eq!(cfg.tools.terminal_prefix.as_deref(), Some("~/.local/bin/rtk"));
     assert!(cfg.tools.rtk_rewrite);
 }
+
+#[tokio::test]
+async fn test_scratch_dir_allowed_and_patch_without_prior_read() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cache = ReadCache::new();
+    let cancel = CancellationToken::new();
+
+    // 1. Resolve path permits /tmp scratch files
+    let tmp_file = std::env::temp_dir().join("luna_scratch_test.txt");
+    let resolved = harness_core::tools::fs::resolve_path(&root, tmp_file.to_str().unwrap());
+    assert!(resolved.is_ok(), "Scratch path in temp dir must be permitted: {:?}", resolved);
+
+    // 2. Patch file on disk without prior read succeeds when old_string uniquely matches
+    let test_file = root.join("untracked_file.txt");
+    tokio::fs::write(&test_file, "initial content to be patched\nsecond line\n").await.unwrap();
+
+    let patcher = PatchTool::new(root.clone(), cache.clone());
+    let patch_res = patcher
+        .execute(
+            "call_patch_direct",
+            &json!({
+                "path": "untracked_file.txt",
+                "old_string": "initial content to be patched",
+                "new_string": "updated content successfully applied"
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    assert!(!patch_res.is_error, "Patch without prior read should succeed when old_string matches: {}", patch_res.content);
+    let updated = tokio::fs::read_to_string(&test_file).await.unwrap();
+    assert!(updated.contains("updated content successfully applied"));
+}
+
+#[tokio::test]
+async fn test_todo_list_read_only_gating_and_status_aliases() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+    let todo_tool = harness_core::tools::TodoListTool::new(root);
+
+    // 'list' action does NOT mutate and does not require approval
+    assert!(!todo_tool.is_mutating_call(&json!({ "action": "list" })));
+    // default action (no args) does NOT mutate
+    assert!(!todo_tool.is_mutating_call(&json!({})));
+    // 'add' action DOES mutate
+    assert!(todo_tool.is_mutating_call(&json!({ "action": "add", "text": "new task" })));
+
+    // Add a task
+    let add_res = todo_tool
+        .execute("call_add", &json!({ "action": "add", "text": "Task A" }), &cancel)
+        .await
+        .unwrap();
+    assert!(!add_res.is_error);
+
+    // Update status using alias 'completed'
+    let update_res = todo_tool
+        .execute(
+            "call_update",
+            &json!({ "action": "update", "id": 0, "status": "completed" }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(!update_res.is_error, "Status alias 'completed' must be accepted: {}", update_res.content);
+    assert!(update_res.content.contains("done"));
+}

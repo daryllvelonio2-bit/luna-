@@ -41,10 +41,10 @@ enum TodoStatus {
 
 impl TodoStatus {
     fn parse(value: &str) -> Option<Self> {
-        match value {
-            "pending" => Some(Self::Pending),
-            "in_progress" => Some(Self::InProgress),
-            "done" => Some(Self::Done),
+        match value.trim().to_lowercase().as_str() {
+            "pending" | "todo" | "open" => Some(Self::Pending),
+            "in_progress" | "in-progress" | "inprogress" | "doing" | "working" => Some(Self::InProgress),
+            "done" | "completed" | "complete" | "finished" | "closed" => Some(Self::Done),
             _ => None,
         }
     }
@@ -161,6 +161,11 @@ impl Tool for TodoListTool {
 
     fn is_mutating(&self) -> bool {
         true
+    }
+
+    fn is_mutating_call(&self, arguments: &serde_json::Value) -> bool {
+        let action = arguments.get("action").and_then(|a| a.as_str()).unwrap_or("list");
+        action != "list"
     }
 
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {

@@ -87,6 +87,10 @@ impl Tool for DelegateImprovementTool {
         })
     }
 
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         call_id: &str,
@@ -288,6 +292,10 @@ impl Tool for VerifyAndStageUpdateTool {
             },
             "required": ["job_id"]
         })
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
     }
 
     async fn execute(

@@ -185,6 +185,12 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this specific call mutates given its arguments.
+    /// Defaults to `self.is_mutating()`.
+    fn is_mutating_call(&self, _arguments: &serde_json::Value) -> bool {
+        self.is_mutating()
+    }
+
     /// What a human needs to see before this call runs: the path that will be written or the exact
     /// command that will run, and for a patch-shaped call a unified diff. The default adds nothing,
     /// and the call is still gated — the prompt then shows the tool name and the arguments on
@@ -227,6 +233,11 @@ pub trait ToolRegistry: Send + Sync {
     /// Whether the named tool mutates. Deliberately has no default: a registry that silently
     /// answered "read-only" would fail open on the one check the safety gate depends on.
     async fn is_mutating(&self, name: &str) -> Result<bool, HarnessError>;
+
+    /// Whether this specific call mutates given its arguments.
+    async fn is_mutating_call(&self, call: &ToolCall) -> Result<bool, HarnessError> {
+        self.is_mutating(&call.name).await
+    }
 
     /// [`Tool::preview`] for a call; `None` when the tool has nothing to add to the prompt.
     async fn preview(&self, _call: &ToolCall) -> Option<ToolPreview> {

@@ -51,6 +51,27 @@ impl ReadCache {
         Ok(())
     }
 
+    /// Verifies patch safety: if cached, ensures no intervening modification; if not yet
+    /// cached, accepts the unique on-disk old_string match and registers the new content.
+    pub async fn verify_and_update_patch(
+        &self,
+        path: &Path,
+        current_content: &str,
+        new_content: &str,
+    ) -> Result<(), String> {
+        let mut map = self.cached.write().await;
+        if let Some(cached_content) = map.get(path) {
+            if cached_content != current_content {
+                return Err(format!(
+                    "Stale write refused for '{}': file changed on disk since last read.",
+                    path.display()
+                ));
+            }
+        }
+        map.insert(path.to_path_buf(), new_content.to_string());
+        Ok(())
+    }
+
     pub async fn record_new_file(&self, path: &Path, content: &str) {
         let mut map = self.cached.write().await;
         map.insert(path.to_path_buf(), content.to_string());
@@ -71,8 +92,15 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
 
+    let is_scratch = |path: &Path| -> bool {
+        p.is_absolute()
+            && (path.starts_with("/tmp")
+                || path.starts_with("/var/tmp")
+                || path.starts_with(&std::env::temp_dir()))
+    };
+
     if let Ok(canon) = resolved.canonicalize() {
-        if !canon.starts_with(&canonical_root) {
+        if !canon.starts_with(&canonical_root) && !is_scratch(&canon) {
             return Err(format!(
                 "Path escapes workspace root '{}': {}",
                 canonical_root.display(),
@@ -96,7 +124,10 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
         }
     }
 
-    if !normalized.starts_with(&canonical_root) && !normalized.starts_with(workspace_root) {
+    if !normalized.starts_with(&canonical_root)
+        && !normalized.starts_with(workspace_root)
+        && !is_scratch(&normalized)
+    {
         return Err(format!(
             "Path escapes workspace root '{}': {}",
             canonical_root.display(),
@@ -480,7 +511,7 @@ impl Tool for PatchTool {
             current.replacen(old_str, new_str, 1)
         };
 
-        if let Err(refusal) = self.read_cache.verify_and_update(&resolved, &current, &patched).await {
+        if let Err(refusal) = self.read_cache.verify_and_update_patch(&resolved, &current, &patched).await {
             return Ok(ToolResult::error(call_id, refusal));
         }
 

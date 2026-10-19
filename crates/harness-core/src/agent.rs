@@ -355,20 +355,20 @@ where
 
     /// Whether this call must be put to the human: the flag is on *and* the tool mutates (or
     /// `tools.mutating_overrides` names it).
-    async fn needs_approval(&self, name: &str) -> bool {
+    async fn needs_approval(&self, call: &ToolCall) -> bool {
         if !self.config.require_hitl_for_mutation {
             return false;
         }
-        if self.approval.mutating_overrides.iter().any(|tool| tool == name) {
+        if self.approval.mutating_overrides.iter().any(|tool| tool == &call.name) {
             return true;
         }
-        match self.registry.is_mutating(name).await {
+        match self.registry.is_mutating_call(call).await {
             Ok(mutating) => mutating,
             Err(error) => {
                 // Fail closed: a registry that cannot answer is not permission to write.
                 warn!(
                     "Cannot tell whether tool '{}' mutates ({}): treating it as mutating",
-                    name, error
+                    call.name, error
                 );
                 true
             }
@@ -378,7 +378,7 @@ where
     /// Put a mutating call to the approver, inside `tools.approval_timeout_secs`. Every outcome
     /// other than Run is a denial, including "nobody answered".
     async fn gate_decision(&self, call: &ToolCall) -> GateOutcome {
-        if !self.needs_approval(&call.name).await {
+        if !self.needs_approval(call).await {
             return GateOutcome::Run(None);
         }
 
@@ -592,16 +592,12 @@ where
                     return Err(HarnessError::Cancelled);
                 }
 
-                debug!("Executing tool: '{}' (call id: {})", tool_call.name, tool_call.id);
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::ToolExecuting {
-                        name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.clone(),
-                    });
-                }
+                debug!("Dispatching tool call: '{}' (call id: {})", tool_call.name, tool_call.id);
                 // The gate first: a mutating call is put to the human before it runs, and a
                 // denial comes back as an ordinary tool result the model can react to.
-                let outcome: Result<ToolResult, HarnessError> = match self.gate_decision(&tool_call).await {
+                let gate_outcome = self.gate_decision(&tool_call).await;
+                let is_denial = matches!(gate_outcome, GateOutcome::Denied(_));
+                let outcome: Result<ToolResult, HarnessError> = match gate_outcome {
                     GateOutcome::Denied(reason) => {
                         warn!(tool = %tool_call.name, "approval denied: {}", reason);
                         Ok(ToolResult::error(
@@ -610,6 +606,12 @@ where
                         ))
                     }
                     GateOutcome::Run(edited) => {
+                        if let Some(ref observer) = self.observer {
+                            observer(AgentEvent::ToolExecuting {
+                                name: tool_call.name.clone(),
+                                arguments: tool_call.arguments.clone(),
+                            });
+                        }
                         let call = ToolCall {
                             arguments: edited.unwrap_or_else(|| tool_call.arguments.clone()),
                             ..tool_call.clone()
@@ -640,8 +642,9 @@ where
                     is_error: execution_result.is_error,
                 });
 
-                // Track consecutive non-working calls (failure thrashing guardrail)
-                if execution_result.is_error {
+                // Track consecutive non-working calls (failure thrashing guardrail).
+                // Human/policy denials are intentional choices, not malfunctioning tool thrashing.
+                if execution_result.is_error && !is_denial {
                     consecutive_failures += 1;
                     warn!(
                         "Tool '{}' failed (consecutive failures: {}/{})",
