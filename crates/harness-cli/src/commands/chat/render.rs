@@ -85,7 +85,9 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         " (success)".green().to_string()
                     };
                     if let Some(last) = current_tools.last_mut() {
-                        if !last.call_formatted.ends_with("(success)") && !last.call_formatted.ends_with("(failed)") {
+                        if !last.call_formatted.ends_with("(success)")
+                            && !last.call_formatted.ends_with("(failed)")
+                        {
                             last.call_formatted.push_str(&status);
                         }
                         last.result_formatted.clear();
@@ -275,12 +277,16 @@ pub fn truncate_visible(text: &str, max: usize) -> String {
 pub fn right_aligned_user_message(query: &str, width: usize) -> String {
     let prompt = PROMPT.trim_end();
     if query.trim().is_empty() {
-        let pad = width.saturating_sub(1).saturating_sub(prompt.chars().count());
-        return format!("{}{}", " ".repeat(pad), prompt.bold());
+        let pad = width
+            .saturating_sub(1)
+            .saturating_sub(prompt.chars().count());
+        return format!("{}{}", " ".repeat(pad), prompt.blue().bold());
     }
 
     // Two columns of the block are held back so " ☾" always fits on the final row.
-    let block = user_block_width(width).saturating_sub(prompt.chars().count() + 1).max(8);
+    let block = user_block_width(width)
+        .saturating_sub(prompt.chars().count() + 1)
+        .max(8);
     let mut rows = wrap_rows(query, block);
 
     if let Some(last) = rows.last_mut() {
@@ -288,10 +294,12 @@ pub fn right_aligned_user_message(query: &str, width: usize) -> String {
         last.push_str(prompt);
     }
 
+    // Blue, not another attribute, because it is the only colour a user message carries: the
+    // transcript is otherwise achromatic, so the whole message reads at a glance as the user's.
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let pad = width.saturating_sub(1).saturating_sub(row.chars().count());
-        out.push(format!("{}{}", " ".repeat(pad), row.bold()));
+        out.push(format!("{}{}", " ".repeat(pad), row.blue().bold()));
     }
     out.join("\n")
 }
@@ -300,7 +308,10 @@ pub fn right_aligned_user_message(query: &str, width: usize) -> String {
 /// the left column where Luna's replies live.
 pub fn user_block_width(width: usize) -> usize {
     let scaled = width * USER_BLOCK_PERCENT / 100;
-    scaled.max(USER_BLOCK_MIN_CHARS).min(width.saturating_sub(1)).max(1)
+    scaled
+        .max(USER_BLOCK_MIN_CHARS)
+        .min(width.saturating_sub(1))
+        .max(1)
 }
 
 /// Soft-wrap `text` to `width` columns, returning the visible rows. Wrapping here rather than
@@ -424,9 +435,14 @@ pub fn shorten_path(raw: &str) -> String {
 pub fn shorten_paths_in_text(raw: &str) -> String {
     let mut out = Vec::new();
     for token in raw.split(' ') {
-        let clean = token.trim_matches(|c| c == '\'' || c == '"' || c == '`' || c == '(' || c == ')');
+        let clean =
+            token.trim_matches(|c| c == '\'' || c == '"' || c == '`' || c == '(' || c == ')');
         if (clean.starts_with('/') || clean.starts_with("~/") || clean.contains('/'))
-            && clean.split('/').filter(|s| !s.is_empty() && *s != "~" && *s != ".").count() > 3
+            && clean
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != "~" && *s != ".")
+                .count()
+                > 3
         {
             let short = shorten_path(clean);
             out.push(token.replace(clean, &short));
@@ -475,7 +491,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
     };
     let number = |key: &str| arguments.get(key).and_then(|v| v.as_u64());
     let suffix = |detail: String| format!(" {}", detail.dimmed());
-    let quoted = |value: &str| format!("\"{}\"", truncate_visible(value, MAX_TOOL_ARG_CHARS)).cyan();
+    let quoted =
+        |value: &str| format!("\"{}\"", truncate_visible(value, MAX_TOOL_ARG_CHARS)).cyan();
 
     let (glyph, verb) = tool_glyph_and_verb(name);
     // `{:width$}` pads but never cuts, so a long fallback name still renders in full.
@@ -619,7 +636,9 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "process" => {
             let action = text("action").unwrap_or("list");
-            let job_id = text("job_id").map(|j| format!(" {}", j.cyan())).unwrap_or_default();
+            let job_id = text("job_id")
+                .map(|j| format!(" {}", j.cyan()))
+                .unwrap_or_default();
             return format!("{} {}{}", glyph, verb_col(action), job_id);
         }
         "delegate_task" => {
@@ -636,7 +655,11 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 .and_then(|g| g.as_str())
                 .unwrap_or("");
             let goal_preview = if task_count > 1 {
-                format!("\"{}\" (+{} tasks)", truncate_visible(first_goal, 30), task_count - 1)
+                format!(
+                    "\"{}\" (+{} tasks)",
+                    truncate_visible(first_goal, 30),
+                    task_count - 1
+                )
             } else {
                 format!("\"{}\"", truncate_visible(first_goal, 50))
             };
@@ -809,7 +832,12 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 "delete_note" => " (delete)",
                 _ => "",
             };
-            format!("{} {}{}", "note".bold(), short_id.cyan().bold(), action.dimmed())
+            format!(
+                "{} {}{}",
+                "note".bold(),
+                short_id.cyan().bold(),
+                action.dimmed()
+            )
         }
         "update_memory" | "forget_memory" | "save_memory" => {
             let target = request
@@ -867,7 +895,10 @@ pub fn format_process_header(
         };
 
         let tools_label = if tools_count == 1 {
-            format!("1 tool: {}", unique_names.first().map(|s| s.as_str()).unwrap_or("tool"))
+            format!(
+                "1 tool: {}",
+                unique_names.first().map(|s| s.as_str()).unwrap_or("tool")
+            )
         } else if unique_names.len() <= 2 {
             format!("{} tools: {}", tools_count, unique_names.join(", "))
         } else {
@@ -988,7 +1019,9 @@ mod tests {
             "downloads/rust-agent-harness/agents.md"
         );
         assert_eq!(
-            shorten_path("/home/janelle/Downloads/rust-agent-harness/crates/harness-core/prompts.md"),
+            shorten_path(
+                "/home/janelle/Downloads/rust-agent-harness/crates/harness-core/prompts.md"
+            ),
             "crates/harness-core/prompts.md"
         );
         assert_eq!(shorten_path("agents.md"), "agents.md");
@@ -1001,28 +1034,43 @@ mod tests {
 
     #[test]
     fn terminal_call_shows_the_command_and_directory() {
-        let line = call("terminal", json!({ "command": "cargo test\n--all", "workdir": "/repo" }));
+        let line = call(
+            "terminal",
+            json!({ "command": "cargo test\n--all", "workdir": "/repo" }),
+        );
         assert!(line.contains("cargo test"), "got: {}", line);
         assert!(line.contains("in /repo"), "got: {}", line);
-        assert!(!line.contains("--all"), "only the first command line is shown");
+        assert!(
+            !line.contains("--all"),
+            "only the first command line is shown"
+        );
     }
 
     #[test]
     fn read_call_shows_the_line_range() {
-        let ranged = call("read_file", json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }));
+        let ranged = call(
+            "read_file",
+            json!({ "path": "src/lib.rs", "offset": 10, "limit": 20 }),
+        );
         assert!(ranged.contains("L10-29"), "got: {}", ranged);
         assert!(call("read_file", json!({ "path": "src/lib.rs" })).contains("src/lib.rs"));
     }
 
     #[test]
     fn write_call_shows_the_payload_size() {
-        let line = call("write_file", json!({ "path": "a.rs", "content": "one\ntwo\nthree" }));
+        let line = call(
+            "write_file",
+            json!({ "path": "a.rs", "content": "one\ntwo\nthree" }),
+        );
         assert!(line.contains("3 lines"), "got: {}", line);
     }
 
     #[test]
     fn patch_call_flags_replace_all() {
-        let one = call("patch", json!({ "path": "a.rs", "old_string": "x", "new_string": "y" }));
+        let one = call(
+            "patch",
+            json!({ "path": "a.rs", "old_string": "x", "new_string": "y" }),
+        );
         assert!(!one.contains("all occurrences"), "got: {}", one);
 
         let all = call(
@@ -1036,16 +1084,35 @@ mod tests {
     /// render as blank gaps.
     #[test]
     fn search_call_names_the_mode_and_defaults_the_path() {
-        let content = call("search_files", json!({ "pattern": "needle", "path": "", "file_glob": "*" }));
+        let content = call(
+            "search_files",
+            json!({ "pattern": "needle", "path": "", "file_glob": "*" }),
+        );
         assert!(content.contains("\"needle\""), "got: {}", content);
-        assert!(content.contains("in ."), "an empty path renders as the workspace root");
-        assert!(!content.contains("matching"), "a `*` glob filters nothing and is hidden");
-        assert!(!content.contains("(content)"), "the default mode carries no tag: {}", content);
+        assert!(
+            content.contains("in ."),
+            "an empty path renders as the workspace root"
+        );
+        assert!(
+            !content.contains("matching"),
+            "a `*` glob filters nothing and is hidden"
+        );
+        assert!(
+            !content.contains("(content)"),
+            "the default mode carries no tag: {}",
+            content
+        );
 
-        let files = call("search_files", json!({ "pattern": "needle", "output_mode": "files_only" }));
+        let files = call(
+            "search_files",
+            json!({ "pattern": "needle", "output_mode": "files_only" }),
+        );
         assert!(files.contains("(files_only)"), "got: {}", files);
 
-        let scoped = call("search_files", json!({ "pattern": "needle", "file_glob": "*.rs" }));
+        let scoped = call(
+            "search_files",
+            json!({ "pattern": "needle", "file_glob": "*.rs" }),
+        );
         assert!(scoped.contains("matching *.rs"), "got: {}", scoped);
     }
 
@@ -1064,7 +1131,10 @@ mod tests {
 
     #[test]
     fn unknown_and_mcp_tools_fall_back_to_named_arguments() {
-        let mcp = call("mcp__filesystem__read", json!({ "path": "/etc/hosts", "missing": null }));
+        let mcp = call(
+            "mcp__filesystem__read",
+            json!({ "path": "/etc/hosts", "missing": null }),
+        );
         assert!(mcp.contains("filesystem/read"), "got: {}", mcp);
         assert!(mcp.contains("path=\"/etc/hosts\""), "got: {}", mcp);
         assert!(!mcp.contains("missing"), "null arguments are hidden");
@@ -1083,7 +1153,10 @@ mod tests {
 
     #[test]
     fn long_results_collapse_to_a_line_count() {
-        let output = (0..40).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let output = (0..40)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let rendered = format_tool_result(false, &output);
         assert!(rendered.contains("line 0"), "got: {}", rendered);
         assert!(rendered.contains("(+39 lines)"), "got: {}", rendered);
@@ -1092,7 +1165,11 @@ mod tests {
     #[test]
     fn errors_report_the_first_line() {
         let rendered = format_tool_result(true, "boom: file not found\nmore detail");
-        assert!(rendered.contains("boom: file not found"), "got: {}", rendered);
+        assert!(
+            rendered.contains("boom: file not found"),
+            "got: {}",
+            rendered
+        );
         assert!(!rendered.contains("more detail"), "got: {}", rendered);
     }
 
@@ -1157,7 +1234,10 @@ mod tests {
             tool_activity_detail("write_file", &json!({ "content": "x\ny" })).as_deref(),
             Some("+2")
         );
-        assert_eq!(tool_activity_detail("terminal", &json!({ "command": "ls" })), None);
+        assert_eq!(
+            tool_activity_detail("terminal", &json!({ "command": "ls" })),
+            None
+        );
     }
 
     /// Every row must fit one physical terminal row, because the live region moves the cursor by
@@ -1175,7 +1255,10 @@ mod tests {
         }
 
         assert_eq!(wrap_rows("line one\nline two", 40).len(), 2);
-        assert!(wrap_rows("", 40).len() == 1, "an empty line still occupies a row");
+        assert!(
+            wrap_rows("", 40).len() == 1,
+            "an empty line still occupies a row"
+        );
     }
 
     #[test]
@@ -1184,8 +1267,14 @@ mod tests {
         assert!(!needs_separator(None, User));
         assert!(needs_separator(User, Thinking));
         assert!(needs_separator(Thinking, Tool));
-        assert!(!needs_separator(Tool, Tool), "consecutive tool calls stay adjacent");
-        assert!(needs_separator(Reply, User), "a new user message starts after a blank line");
+        assert!(
+            !needs_separator(Tool, Tool),
+            "consecutive tool calls stay adjacent"
+        );
+        assert!(
+            needs_separator(Reply, User),
+            "a new user message starts after a blank line"
+        );
     }
 
     #[test]
@@ -1199,7 +1288,11 @@ mod tests {
         };
         let line = format_approval_verdict(true, &req);
         assert!(line.contains("Approved:"), "got: {}", line);
-        assert!(line.contains("/home/janelle/fts-verify/src/main.rs"), "got: {}", line);
+        assert!(
+            line.contains("/home/janelle/fts-verify/src/main.rs"),
+            "got: {}",
+            line
+        );
         assert!(line.contains("write"), "got: {}", line);
     }
 
@@ -1215,7 +1308,10 @@ mod tests {
         let line = format_approval_verdict(true, &req);
         assert!(line.contains("$"), "got: {}", line);
         assert!(line.contains("cargo run --quiet"), "got: {}", line);
-        assert!(!line.contains("terminal (cargo"), "must not be wrapped in bloated tool parentheses");
+        assert!(
+            !line.contains("terminal (cargo"),
+            "must not be wrapped in bloated tool parentheses"
+        );
     }
 
     #[test]
@@ -1229,15 +1325,23 @@ mod tests {
         };
         let line = format_approval_verdict(true, &req);
         assert!(line.contains("note_5d26a9f8…"), "got: {}", line);
-        assert!(!line.contains("note_5d26a9f8-b905-43aa-8168-3f286a96ee3f"), "raw UUID must be shortened");
+        assert!(
+            !line.contains("note_5d26a9f8-b905-43aa-8168-3f286a96ee3f"),
+            "raw UUID must be shortened"
+        );
     }
 
     #[test]
     fn process_header_formats_collapsed_with_tools_and_duration() {
         let tools = vec!["read_file".to_string(), "patch".to_string()];
-        let header = format_process_header(false, 2, &tools, Some(Duration::from_millis(2400)), true);
+        let header =
+            format_process_header(false, 2, &tools, Some(Duration::from_millis(2400)), true);
         assert!(header.contains("Process"), "got: {}", header);
-        assert!(header.contains("2 tools: read_file, patch"), "got: {}", header);
+        assert!(
+            header.contains("2 tools: read_file, patch"),
+            "got: {}",
+            header
+        );
         assert!(header.contains("thought for 2.4s"), "got: {}", header);
         assert!(header.contains("Ctrl+O to expand"), "got: {}", header);
         assert!(header.contains("▶"), "got: {}", header);
@@ -1246,7 +1350,8 @@ mod tests {
     #[test]
     fn process_header_formats_expanded_header() {
         let tools = vec!["terminal".to_string()];
-        let header = format_process_header(true, 1, &tools, Some(Duration::from_millis(500)), false);
+        let header =
+            format_process_header(true, 1, &tools, Some(Duration::from_millis(500)), false);
         assert!(header.contains("▼"), "got: {}", header);
         assert!(header.contains("1 tool: terminal"), "got: {}", header);
         assert!(header.contains("Ctrl+O to collapse"), "got: {}", header);
@@ -1317,22 +1422,85 @@ mod tests {
         assert_eq!(turns[1].reasoning.as_deref(), Some("thinking..."));
     }
 
+    /// `colored` decides on escapes by whether stdout is a tty, which it never is under
+    /// `cargo test`, so colour has to be forced. The override is process-global and these tests
+    /// run in parallel — hence unset in a guard, and hence the geometry tests below reading
+    /// through `plain` so a concurrent override cannot perturb them.
+    struct ColorOverride;
+    impl ColorOverride {
+        fn force_on() -> Self {
+            colored::control::set_override(true);
+            Self
+        }
+    }
+    impl Drop for ColorOverride {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
+
+    /// Every row of a user message — wrapped rows included — carries the blue foreground, so a
+    /// long message reads as one block on the user's side rather than alternating with plain text.
+    #[test]
+    fn every_row_of_a_user_message_is_blue() {
+        let _color = ColorOverride::force_on();
+
+        // `colored` merges the attributes it is given, so blue+bold arrives as one sequence
+        // rather than two separate ones.
+        const BLUE_FG: &str = "\u{1b}[1;34m";
+        let msg = right_aligned_user_message("alpha beta gamma delta epsilon zeta eta theta", 60);
+        let rows: Vec<&str> = msg.lines().collect();
+        assert!(rows.len() > 1, "expected a wrap at width 60");
+        for row in &rows {
+            assert!(
+                row.contains(BLUE_FG),
+                "row is missing the blue foreground: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_empty_input_prompt_is_blue_too() {
+        let _color = ColorOverride::force_on();
+
+        let msg = right_aligned_user_message("   ", 80);
+        assert!(msg.contains("\u{1b}[1;34m"), "got: {msg:?}");
+        assert!(msg.ends_with("\u{1b}[0m"), "style is closed: {msg:?}");
+    }
+
+    /// `colored::control::set_override` is process-global and these tests run in parallel, so the
+    /// blue tests can flip it on while a width test is mid-assertion. Anything that measures
+    /// geometry must therefore strip escapes first — the same way `ui::visible_width` does in the
+    /// live region, which sees both colored and plain rows.
+    // The dimension of the live region is computed from visible characters, so a colour escape
+    // must not be counted. `strip_ansi_codes` is what the live activity row already relies on;
+    // reusing it keeps the test and the code looking at the same definition of "visible".
+    fn plain(s: &str) -> String {
+        dialoguer::console::strip_ansi_codes(s).to_string()
+    }
+
+    #[test]
+    fn plain_strips_colored_escapes() {
+        assert_eq!(plain("\u{1b}[1;34mfoo\u{1b}[0m"), "foo");
+    }
+
     #[test]
     fn right_aligned_user_message_handles_multiline() {
         let msg = right_aligned_user_message("hello\nworld", 80);
         let lines: Vec<&str> = msg.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].ends_with("hello"));
-        assert!(lines[1].ends_with(PROMPT.trim_end()));
+        assert!(plain(lines[0]).ends_with("hello"));
+        assert!(plain(lines[1]).ends_with(PROMPT.trim_end()));
     }
 
     /// Regression: a message wider than the terminal padded to zero, so it started at column 0 and
-    /// the terminal soft-wrapped its tail back to column 0 — the continuation then sat in the same
-    /// column as Luna's replies and read as assistant text.
+    /// the terminal soft-wrapped its tail back to column 0 — the continuation then sat in the
+    /// same column as Luna's replies and read as assistant text.
     #[test]
     fn a_long_message_wraps_on_the_user_side_and_never_at_the_left_margin() {
         let width = 103; // the narrow terminal this was reported on
-        let long = "oohhhhh also, i have an idea, in admin abuse, players will also get encantations \
+        let long =
+            "oohhhhh also, i have an idea, in admin abuse, players will also get encantations \
                     and mutations on a plant!";
         let msg = right_aligned_user_message(long, width);
         let rows: Vec<&str> = msg.lines().collect();
@@ -1342,13 +1510,17 @@ mod tests {
 
         assert!(rows.len() > 1, "a message this long must wrap: {msg}");
         for row in &rows {
+            let row = plain(row);
             let leading = row.chars().take_while(|c| *c == ' ').count();
             let visible = row.chars().count();
             assert!(leading > 0, "no row may start at the left margin: {row:?}");
-            assert!(visible <= width, "row overflows the terminal: {visible} > {width}");
+            assert!(
+                visible <= width,
+                "row overflows the terminal: {visible} > {width}"
+            );
         }
         assert!(
-            rows.last().unwrap().ends_with(PROMPT.trim_end()),
+            plain(rows.last().unwrap()).ends_with(PROMPT.trim_end()),
             "the prompt glyph closes the last row: {msg}"
         );
     }
@@ -1362,7 +1534,7 @@ mod tests {
         assert!(rows.len() > 2, "expected several rows, got {}", rows.len());
         for row in &rows {
             assert_eq!(
-                row.chars().count(),
+                plain(row).chars().count(),
                 width - 1,
                 "each row is padded to the right edge: {row:?}"
             );
@@ -1374,7 +1546,7 @@ mod tests {
         let msg = right_aligned_user_message("hi", 80);
         let rows: Vec<&str> = msg.lines().collect();
         assert_eq!(rows.len(), 1, "short messages must not be wrapped");
-        assert_eq!(rows[0].chars().count(), 79);
-        assert!(rows[0].starts_with(' '), "still pushed to the right");
+        assert_eq!(plain(rows[0]).chars().count(), 79);
+        assert!(plain(rows[0]).starts_with(' '), "still pushed to the right");
     }
 }
