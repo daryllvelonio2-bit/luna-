@@ -23,6 +23,7 @@ impl TaskEntry {
         }
     }
 
+    #[allow(dead_code)]
     fn title(&self) -> String {
         match self {
             Self::Evolver(j) => {

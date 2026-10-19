@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,6 +9,7 @@ use tracing::{debug, info};
 use harness_core::{HarnessError, MemoryCategory, MemoryEngine, MemoryRecord};
 
 pub struct SqliteMemoryEngine {
+    #[allow(dead_code)]
     db_path: PathBuf,
     conn: Arc<Mutex<Connection>>,
 }

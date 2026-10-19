@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -11,6 +11,7 @@ use harness_core::HarnessError;
 use crate::types::{JsonRpcRequest, JsonRpcResponse, McpToolInfo};
 
 pub struct McpStdioClient {
+    #[allow(dead_code)]
     command: String,
     stdin: Mutex<ChildStdin>,
     reader: Mutex<BufReader<ChildStdout>>,

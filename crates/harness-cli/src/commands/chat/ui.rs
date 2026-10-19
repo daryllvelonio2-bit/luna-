@@ -95,6 +95,7 @@ struct ChatStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BackgroundTaskState {
     pub job_id: String,
     pub task: String,
@@ -225,6 +226,7 @@ impl ChatUi {
         }
     }
 
+    #[allow(dead_code)]
     pub fn background_task(&self) -> Option<BackgroundTaskState> {
         self.bg_task.lock().unwrap().clone()
     }

@@ -250,13 +250,11 @@ impl Approver for TerminalApprover {
 }
 
 async fn read_line() -> String {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        let _ = io::stdin().read_line(&mut line);
-        line
-    })
-    .await
-    .unwrap_or_default()
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut line = String::new();
+    let _ = reader.read_line(&mut line).await;
+    line
 }
 
 pub fn build_approver(config: &Config) -> Arc<dyn Approver> {

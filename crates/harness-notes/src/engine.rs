@@ -10,6 +10,7 @@ use harness_core::{HarnessError, Note, NotesEngine};
 use crate::distiller::PointerDistiller;
 
 pub struct SqliteNotesEngine {
+    #[allow(dead_code)]
     db_path: PathBuf,
     conn: Arc<Mutex<Connection>>,
 }

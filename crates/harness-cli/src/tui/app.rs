@@ -10,6 +10,7 @@ pub enum PanelFocus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChatMessage {
     pub role: MessageRole,
     pub author: String,
@@ -19,6 +20,7 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -27,6 +29,7 @@ pub enum MessageRole {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SessionSummaryItem {
     pub id: String,
     pub name: String,
@@ -40,6 +43,7 @@ pub enum DragTarget {
     RightDivider,
 }
 
+#[allow(dead_code)]
 pub struct AppState {
     pub theme: Theme,
     pub focus: PanelFocus,
@@ -147,6 +151,7 @@ impl AppState {
         self.theme = Theme::for_mode(next_mode);
     }
 
+    #[allow(dead_code)]
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         self.theme = Theme::for_mode(mode);
     }

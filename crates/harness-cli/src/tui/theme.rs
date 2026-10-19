@@ -2,6 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::BorderType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub enum ThemeMode {
     #[default]
     Transparent,
@@ -10,6 +11,7 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Transparent => "Transparent",
@@ -29,6 +31,7 @@ impl ThemeMode {
 
 /// Global TUI theme structure supporting Transparent, Dark, and Light modes
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Theme {
     pub mode: ThemeMode,
     pub bg: Color,

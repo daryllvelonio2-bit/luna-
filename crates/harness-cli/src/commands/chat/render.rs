@@ -244,6 +244,7 @@ pub enum OutputBlockKind {
     User,
     Thinking,
     Tool,
+    #[allow(dead_code)]
     Reply,
 }
 
