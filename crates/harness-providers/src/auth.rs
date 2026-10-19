@@ -90,14 +90,23 @@ impl CredentialManager {
                 path.display()
             ))
         })?;
-        serde_json::from_str(&data).map_err(|e| {
+        let mut state: LunaAuthStorage = serde_json::from_str(&data).map_err(|e| {
             HarnessError::SerializationError(format!(
                 "credential store {} is not valid JSON ({e}); refusing to start from an empty \
                  credential set, which the next write would persist over your keys — repair the \
                  file or move it aside",
                 path.display()
             ))
-        })
+        })?;
+        // Every row the store hands out comes through here, so this is the single place the
+        // one-account-one-row invariant holds. A store written by an older build already has a
+        // row per token refresh, and the load path is otherwise a plain deserialize: without
+        // this, the in-memory state starts stacked and the fast path in `get_credentials`
+        // returns the stack unexamined.
+        for p in state.providers.values_mut() {
+            Self::dedupe_by_label(p);
+        }
+        Ok(state)
     }
 
     /// Rewrite the store file from `bytes`. Shared tail of every persist path.
@@ -108,24 +117,76 @@ impl CredentialManager {
         fs::write(&self.storage_path, bytes).map_err(|e| HarnessError::Io(e.to_string()))
     }
 
-    fn merge_from_disk(to_write: &mut LunaAuthStorage, path: &Path) {
-        if let Ok(disk) = Self::load_from_disk(path) {
-            for (p_id, p_state) in disk.providers {
-                if !to_write.providers.contains_key(&p_id) {
-                    to_write.providers.insert(p_id, p_state);
-                } else if let Some(local_p) = to_write.providers.get_mut(&p_id) {
-                    for disk_cred in p_state.credentials {
-                        if !local_p
-                            .credentials
-                            .iter()
-                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
-                        {
-                            local_p.credentials.push(disk_cred);
-                        }
-                    }
+    /// Fold the on-disk store into an in-memory one: a provider missing locally is taken whole,
+    /// a provider present locally absorbs the disk's credentials that are not there yet.
+    ///
+    /// Every merge is deduplicated afterwards. The per-credential `id`/`api_key` check cannot
+    /// catch the stack, because the rows being stacked share nothing on id or key — only the
+    /// label — so without the dedupe pass every read pulls the stack back in again.
+    /// `luna auth list` reads what lands on disk, so this is where the list gets its shape.
+    fn merge_from_disk(to_write: &mut LunaAuthStorage, path: &Path) -> Result<(), HarnessError> {
+        // A store that cannot be read means "cannot merge", not "there is nothing to merge": the
+        // error goes back to the caller, which decides whether that is fatal (`save_to_disk`) or
+        // merely a lost merge (`persist_state`, which must not fail a working request).
+        let disk = Self::load_from_disk(path)?;
+        for (p_id, disk_state) in disk.providers {
+            if !to_write.providers.contains_key(&p_id) {
+                to_write.providers.insert(p_id, disk_state);
+                continue;
+            }
+            let local = to_write.providers.get_mut(&p_id).expect("checked above");
+            for disk_cred in disk_state.credentials {
+                let already = local.credentials.iter().any(|c| {
+                    c.id == disk_cred.id || c.api_key == disk_cred.api_key
+                });
+                if !already {
+                    local.credentials.push(disk_cred);
                 }
             }
         }
+        // One pass over everything that ended up in the store, local rows included: the
+        // in-memory stack predates the label-keyed `add_credential`, so it needs the same
+        // collapse the merged rows do, or `luna auth list` still shows the duplicates.
+        for p in to_write.providers.values_mut() {
+            Self::dedupe_by_label(p);
+        }
+        Ok(())
+    }
+
+    /// Collapse rows that describe the same account, keeping the one that carries the most
+    /// history.
+    ///
+    /// `add_credential` now keys an account by its label, but that reached the code after stores
+    /// had already stacked a row per token refresh: the label stayed the same while the key
+    /// rotated, so a single Gmail account had as many rows as it had refreshes. Dedupe by label
+    /// on the way to disk, otherwise every write re-persists the rows forever.
+    ///
+    /// The winner is the most recently used row, which for an OAuth account holds the live
+    /// token; chronological ties break on `usage_count`, and the surviving row keeps its own `id`
+    /// so the rotation code's `current_round_robin_index` still points at something real.
+    /// Returns how many rows were dropped.
+    fn dedupe_by_label(p: &mut ProviderAuthState) -> usize {
+        let before = p.credentials.len();
+        let mut deduped: Vec<CredentialEntry> = Vec::with_capacity(before);
+        for cred in std::mem::take(&mut p.credentials) {
+            if let Some(kept) = deduped.iter_mut().find(|k| k.label == cred.label) {
+                // Most recently used wins first. For an OAuth account that is the only correct
+                // rule: the stacked rows are the same account after each token refresh, so the
+                // newest row holds the live token and the older ones are already expired.
+                // `usage_count` alone would keep the oldest row, which is exactly backwards.
+                let newer = cred.last_used.is_some()
+                    && (kept.last_used.is_none() || cred.last_used > kept.last_used);
+                let more_used =
+                    cred.last_used.is_none() == kept.last_used.is_none() && cred.usage_count > kept.usage_count;
+                if newer || more_used {
+                    *kept = cred;
+                }
+            } else {
+                deduped.push(cred);
+            }
+        }
+        p.credentials = deduped;
+        before - p.credentials.len()
     }
 
     /// Persist the rotation state after an acquire: `usage_count`, `last_used` and the per-provider
@@ -139,7 +200,11 @@ impl CredentialManager {
     /// a full disk must not turn a working API key into a failed request.
     async fn persist_state(&self) {
         let mut to_write = self.state.read().await.clone();
-        Self::merge_from_disk(&mut to_write, &self.storage_path);
+        // A store that cannot be read is logged, not returned: this runs after a successful
+        // acquire, and a full disk or a transient read failure must not fail the request itself.
+        if let Err(e) = Self::merge_from_disk(&mut to_write, &self.storage_path) {
+            warn!(error = %e, "cannot merge on-disk credential state; persisting in-memory view");
+        }
         for p in to_write.providers.values_mut() {
             for cred in &mut p.credentials {
                 cred.is_temporarily_disabled = false;
@@ -163,24 +228,10 @@ impl CredentialManager {
 
     pub async fn save_to_disk(&self) -> Result<(), HarnessError> {
         let mut to_write = self.state.read().await.clone();
-        if self.storage_path.exists() {
-            let disk = Self::load_from_disk(&self.storage_path)?;
-            for (p_id, p_state) in disk.providers {
-                if !to_write.providers.contains_key(&p_id) {
-                    to_write.providers.insert(p_id, p_state);
-                } else if let Some(local_p) = to_write.providers.get_mut(&p_id) {
-                    for disk_cred in p_state.credentials {
-                        if !local_p
-                            .credentials
-                            .iter()
-                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
-                        {
-                            local_p.credentials.push(disk_cred);
-                        }
-                    }
-                }
-            }
-        }
+        // Propagating matters: `load_from_disk` refuses a corrupt store on purpose, and silently
+        // treating a corrupt file as "nothing there" is how an empty state gets persisted over
+        // every registered key. The merge helper takes a Result for exactly this reason.
+        Self::merge_from_disk(&mut to_write, &self.storage_path)?;
         let bytes = serde_json::to_string_pretty(&to_write)
             .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
         self.write_store(&bytes)
@@ -196,24 +247,57 @@ impl CredentialManager {
         let mut state = self.state.write().await;
         let provider_state = state.providers.entry(provider.to_lowercase()).or_default();
 
-        let id = uuid::Uuid::new_v4().to_string();
+        // One account is one entry, keyed by the label the account is known by. Re-registering
+        // an account — `luna auth antigravity copy` after a token refresh, or re-adding the same
+        // provider/label — used to append a second row with a fresh UUID, so a single Gmail
+        // account accumulated a row per refresh. The token itself rotates, so neither `id` nor
+        // `api_key` could identify the account; the label is the only stable handle on it.
+        let existing = provider_state
+            .credentials
+            .iter_mut()
+            .find(|c| c.label == label);
+
+        let id = match existing {
+            Some(cred) => {
+                // Refresh in place: keep the identity, the usage history and the priority flag,
+                // so a token rotation does not reset `luna auth list` counters or drop the
+                // account back out of the rotation order.
+                cred.api_key = key.to_string();
+                if is_priority {
+                    cred.is_priority = true;
+                }
+                cred.is_temporarily_disabled = false;
+                cred.id.clone()
+            }
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let entry = CredentialEntry {
+                    id: id.clone(),
+                    label: label.to_string(),
+                    api_key: key.to_string(),
+                    is_priority,
+                    usage_count: 0,
+                    last_used: None,
+                    is_temporarily_disabled: false,
+                };
+                provider_state.credentials.push(entry);
+                id
+            }
+        };
+
         if is_priority {
             for cred in &mut provider_state.credentials {
                 cred.is_priority = false;
             }
+            if let Some(cred) = provider_state
+                .credentials
+                .iter_mut()
+                .find(|c| c.id == id)
+            {
+                cred.is_priority = true;
+            }
         }
 
-        let entry = CredentialEntry {
-            id: id.clone(),
-            label: label.to_string(),
-            api_key: key.to_string(),
-            is_priority,
-            usage_count: 0,
-            last_used: None,
-            is_temporarily_disabled: false,
-        };
-
-        provider_state.credentials.push(entry);
         drop(state);
         self.save_to_disk().await?;
         Ok(id)
@@ -301,6 +385,18 @@ impl CredentialManager {
         }
     }
 
+    /// Fold the on-disk store into the in-memory one, in place. Every load path funnels through
+    /// this so the two never disagree about which rows exist.
+    async fn absorb_disk_state(&self) -> Result<(), HarnessError> {
+        let mut merged = self.state.read().await.clone();
+        Self::merge_from_disk(&mut merged, &self.storage_path)?;
+        let mut state = self.state.write().await;
+        for (p_id, p_state) in merged.providers {
+            state.providers.insert(p_id, p_state);
+        }
+        Ok(())
+    }
+
     pub async fn get_credentials(&self, provider: &str) -> Vec<CredentialEntry> {
         let p_lower = provider.to_lowercase();
         {
@@ -311,28 +407,30 @@ impl CredentialManager {
                 }
             }
         }
-        if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
-            let mut state = self.state.write().await;
-            for (p_id, p_state) in disk.providers {
-                state.providers.entry(p_id).or_insert(p_state);
-            }
-            return state
-                .providers
-                .get(&p_lower)
-                .map(|p| p.credentials.clone())
-                .unwrap_or_default();
-        }
-        Vec::new()
+        self.absorb_disk_state().await;
+        let state = self.state.read().await;
+        state
+            .providers
+            .get(&p_lower)
+            .map(|p| p.credentials.clone())
+            .unwrap_or_default()
     }
 
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
         let p_lower = provider.to_lowercase();
         let mut state = self.state.write().await;
         if !state.providers.contains_key(&p_lower) {
-            if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
-                for (p_id, p_state) in disk.providers {
-                    state.providers.entry(p_id).or_insert(p_state);
-                }
+            // Merge under no lock, then take the lock again: holding the write lock across a
+            // blocking read makes every other acquirer wait on two filesystem reads.
+            let mut merged = state.clone();
+            drop(state);
+            // Nothing on disk to offer: the provider must already be in memory, or the request
+            // is about to fail with its own "no credentials" error, which names the provider
+            // more usefully than a read failure would.
+            let _ = Self::merge_from_disk(&mut merged, &self.storage_path);
+            state = self.state.write().await;
+            for (p_id, p_state) in merged.providers {
+                state.providers.entry(p_id).or_insert(p_state);
             }
         }
         let provider_state = state
@@ -513,24 +611,7 @@ impl CredentialManager {
 
     /// Returns provider IDs that have registered credentials, sorted with active keys first.
     pub async fn get_loaded_providers(&self) -> Vec<String> {
-        if let Ok(disk) = Self::load_from_disk(&self.storage_path) {
-            let mut state = self.state.write().await;
-            for (p_id, p_state) in disk.providers {
-                if !state.providers.contains_key(&p_id) {
-                    state.providers.insert(p_id, p_state);
-                } else if let Some(local_p) = state.providers.get_mut(&p_id) {
-                    for disk_cred in p_state.credentials {
-                        if !local_p
-                            .credentials
-                            .iter()
-                            .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key)
-                        {
-                            local_p.credentials.push(disk_cred);
-                        }
-                    }
-                }
-            }
-        }
+        self.absorb_disk_state().await;
         let state = self.state.read().await;
         let mut list: Vec<(String, u64, bool)> = state
             .providers
@@ -571,5 +652,104 @@ mod tests {
         let path = CredentialManager::default_storage_path(Some("/home/tester".to_string()))
             .expect("HOME set");
         assert_eq!(path, PathBuf::from("/home/tester/.luna/credentials.json"));
+    }
+
+    fn cred(label: &str, key: &str, used: u64) -> CredentialEntry {
+        CredentialEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            label: label.to_string(),
+            api_key: key.to_string(),
+            is_priority: false,
+            usage_count: used,
+            last_used: None,
+            is_temporarily_disabled: false,
+        }
+    }
+
+    /// The reported bug: `luna auth antigravity copy` re-registers the same Gmail account after
+    /// each token refresh. The label is identical, the key is not, so every stacked row survived
+    /// both the id and the api_key dedupe in the merge path and landed in `luna auth list`.
+    #[tokio::test]
+    async fn re_registering_one_account_does_not_stack_a_row_per_refresh() {
+        let mgr = CredentialManager::new(Some(temp_store_path())).expect("manager");
+        for key in ["token-a", "token-b", "token-c"] {
+            mgr.add_credential("antigravity", "daryllvelonio9@gmail.com", key, false)
+                .await
+                .expect("add");
+        }
+        let rows = mgr.get_credentials("antigravity").await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "one Gmail account must be one list entry, got {} rows: {:?}",
+            rows.len(),
+            rows.iter().map(|c| c.label.as_str()).collect::<Vec<_>>()
+        );
+        // The refresh must take effect on the surviving row, not be dropped alongside it.
+        assert_eq!(rows[0].api_key, "token-c");
+    }
+
+    /// A store that accumulated the duplicates before the fix must heal on read, not only on
+    /// write: `luna auth list` reads what is merged out of the file.
+    #[tokio::test]
+    async fn a_store_that_already_stacked_the_rows_collapses_on_read() {
+        let path = temp_store_path();
+        let mut stacked = LunaAuthStorage::default();
+        stacked.providers.insert(
+            "antigravity".to_string(),
+            ProviderAuthState {
+                strategy: RotationStrategy::default(),
+                credentials: vec![
+                    CredentialEntry {
+                        last_used: Some(
+                            "2026-10-18T16:07:35Z".parse().expect("timestamp"),
+                        ),
+                        ..cred("daryllvelonio9@gmail.com", "token-old", 88)
+                    },
+                    CredentialEntry {
+                        last_used: Some(
+                            "2026-10-18T17:45:41Z".parse().expect("timestamp"),
+                        ),
+                        ..cred("daryllvelonio9@gmail.com", "token-fresh", 87)
+                    },
+                ],
+                current_round_robin_index: 0,
+            },
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&stacked).expect("serialize")).unwrap();
+
+        let mgr = CredentialManager::new(Some(path)).expect("manager");
+        let rows = mgr.get_credentials("antigravity").await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "an already-stacked store must collapse to one entry, got {}",
+            rows.len()
+        );
+        // The most recently used row survives: it carries the live OAuth token. Picking by
+        // `usage_count` would keep the older token, which the provider has already rotated away.
+        assert_eq!(rows[0].api_key, "token-fresh");
+        assert_eq!(rows[0].usage_count, 87);
+    }
+
+    /// Two genuinely different accounts must both survive — the collapse is per label, not a
+    /// "keep only the first row of the provider".
+    #[tokio::test]
+    async fn two_distinct_accounts_both_survive_the_collapse() {
+        let mgr = CredentialManager::new(Some(temp_store_path())).expect("manager");
+        mgr.add_credential("antigravity", "one@gmail.com", "key-1", false)
+            .await
+            .expect("add");
+        mgr.add_credential("antigravity", "two@gmail.com", "key-2", false)
+            .await
+            .expect("add");
+        assert_eq!(mgr.get_credentials("antigravity").await.len(), 2);
+    }
+
+    fn temp_store_path() -> std::path::PathBuf {
+        let path = std::env::temp_dir()
+            .join(format!("luna-test-{}.json", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&path);
+        path
     }
 }
