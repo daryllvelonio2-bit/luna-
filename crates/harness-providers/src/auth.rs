@@ -407,7 +407,9 @@ impl CredentialManager {
                 }
             }
         }
-        self.absorb_disk_state().await;
+        if let Err(e) = self.absorb_disk_state().await {
+            tracing::warn!("Failed to absorb credentials from disk: {}", e);
+        }
         let state = self.state.read().await;
         state
             .providers
@@ -611,7 +613,9 @@ impl CredentialManager {
 
     /// Returns provider IDs that have registered credentials, sorted with active keys first.
     pub async fn get_loaded_providers(&self) -> Vec<String> {
-        self.absorb_disk_state().await;
+        if let Err(e) = self.absorb_disk_state().await {
+            tracing::warn!("Failed to absorb credentials from disk: {}", e);
+        }
         let state = self.state.read().await;
         let mut list: Vec<(String, u64, bool)> = state
             .providers

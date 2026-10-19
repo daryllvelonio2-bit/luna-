@@ -408,6 +408,8 @@ impl Tool for TerminalTool {
 
         if sudo_stdin.is_some() {
             cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
         }
 
         for (k, v) in &self.env_vars {
