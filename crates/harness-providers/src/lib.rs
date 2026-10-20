@@ -3,6 +3,7 @@ pub mod auth;
 pub mod catalog;
 pub mod client;
 pub mod discovery;
+pub mod kiro;
 pub mod opencode;
 
 pub use antigravity::{

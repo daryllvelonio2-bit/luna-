@@ -107,6 +107,11 @@ impl ModelDiscovery {
         // Per-provider timeout, so a hanging `/models` call cannot outlive the config value.
         let http_client = build_http_client(descriptor.timeout_secs)?;
 
+        if provider_id == "kiro" || provider_id == "kiro-cli" {
+            let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
+            return crate::kiro::fetch_kiro_models().await;
+        }
+
         let secret = cred_manager.acquire_credential(provider_id).await?;
         let api_key = secret.expose_secret();
 

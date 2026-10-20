@@ -343,6 +343,10 @@ impl ModelProvider for GenericProviderClient {
 
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
+        if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
+            return crate::kiro::execute_kiro_completion(&model, messages, tools, options).await;
+        }
+
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
             return crate::antigravity::execute_antigravity_completion(
                 &self.http_client,
@@ -580,6 +584,10 @@ impl ModelProvider for GenericProviderClient {
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+
+        if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
+            return crate::kiro::stream_kiro_completion(&model, messages, tools, options).await;
+        }
 
         // Antigravity speaks the Code Assist protocol, not the OpenAI one, so it has its own
         // SSE reader rather than the `/chat/completions` body below.

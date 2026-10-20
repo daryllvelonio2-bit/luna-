@@ -440,6 +440,42 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("gpt6-luna-free", 128_000),
             ]),
         },
+        ProviderDescriptor {
+            id: "kiro-cli".to_string(),
+            display_name: "Kiro CLI (Local)".to_string(),
+            default_base_url: "kiro://local".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::None,
+            context_windows: ctx_windows(&[
+                ("auto", 1_000_000),
+                ("claude-sonnet-4.5", 200_000),
+                ("claude-haiku-4.5", 200_000),
+                ("deepseek-3.2", 164_000),
+                ("minimax-m2.5", 196_000),
+                ("minimax-m2.1", 196_000),
+                ("glm-5", 200_000),
+                ("qwen3-coder-next", 256_000),
+            ]),
+        },
+        ProviderDescriptor {
+            id: "kiro".to_string(),
+            display_name: "Kiro CLI (Local)".to_string(),
+            default_base_url: "kiro://local".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::None,
+            context_windows: ctx_windows(&[
+                ("auto", 1_000_000),
+                ("claude-sonnet-4.5", 200_000),
+                ("claude-haiku-4.5", 200_000),
+                ("deepseek-3.2", 164_000),
+                ("minimax-m2.5", 196_000),
+                ("minimax-m2.1", 196_000),
+                ("glm-5", 200_000),
+                ("qwen3-coder-next", 256_000),
+            ]),
+        },
     ]
 }
 

@@ -2258,6 +2258,7 @@ dependencies = [
  "keyring",
  "rand 0.8.8",
  "reqwest",
+ "rusqlite",
  "secrecy",
  "serde",
  "serde_json",
