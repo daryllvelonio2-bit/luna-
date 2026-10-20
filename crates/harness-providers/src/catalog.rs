@@ -476,6 +476,29 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("qwen3-coder-next", 256_000),
             ]),
         },
+        ProviderDescriptor {
+            id: "supercode".to_string(),
+            display_name: "Supercode Cloud".to_string(),
+            default_base_url: "https://supercode-8w7e.onrender.com".to_string(),
+            models_endpoint: "/api/ai/chat".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("kimi-k3", 256_000),
+                ("deepseek-v4-flash", 128_000),
+                ("kimi-k2-7-code", 256_000),
+                ("kimi-k2-6", 256_000),
+                ("minimax-m3", 196_000),
+                ("glm-5.2", 200_000),
+                ("glm-5.1", 200_000),
+                ("mimo-v2.5", 128_000),
+                ("hy3", 128_000),
+                ("gemini-2.5-flash", 1_000_000),
+                ("meta/llama-3.3-70b-instruct", 128_000),
+                ("orcarouter/auto", 128_000),
+                ("stealth/ox-alpha", 128_000),
+            ]),
+        },
     ]
 }
 
@@ -536,6 +559,7 @@ pub fn resolve_descriptor(
 /// Returns the conventional default model for a given provider.
 pub fn get_default_model(provider: &str) -> &'static str {
     match provider.to_lowercase().as_str() {
+        "supercode" => "kimi-k3",
         "nvidia" => "deepseek-ai/deepseek-v4.1-flash",
         "deepseek" => "deepseek-chat",
         "anthropic" => "claude-3-5-sonnet-20241022",

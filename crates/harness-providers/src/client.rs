@@ -338,6 +338,10 @@ impl ModelProvider for GenericProviderClient {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
             let _ = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await;
         }
+
+        if self.provider_id == "supercode" {
+            let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
+        }
         let (headers, query_param, secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/chat/completions", self.base_url);
         if let Some(q) = query_param {
@@ -345,6 +349,19 @@ impl ModelProvider for GenericProviderClient {
         }
 
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+
+        if self.provider_id == "supercode" {
+            return crate::supercode::execute_supercode_completion(
+                &self.http_client,
+                secret.expose_secret(),
+                Some(&self.cred_manager),
+                &model,
+                messages,
+                tools,
+                options,
+            )
+            .await;
+        }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
             return crate::kiro::execute_kiro_completion(
@@ -598,7 +615,25 @@ impl ModelProvider for GenericProviderClient {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
             let _ = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await;
         }
+
+        if self.provider_id == "supercode" {
+            let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
+        }
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+
+        if self.provider_id == "supercode" {
+            let (_, _, secret) = self.build_auth_headers().await?;
+            return crate::supercode::stream_supercode_completion(
+                &self.http_client,
+                secret.expose_secret(),
+                Some(&self.cred_manager),
+                &model,
+                messages,
+                tools,
+                options,
+            )
+            .await;
+        }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
             let (_, _, secret) = self.build_auth_headers().await?;

@@ -110,7 +110,7 @@ impl ModelDiscovery {
                 providers.push(p.clone());
             }
         }
-        for p in ["opencode", "opencode-zen", "antigravity", "kiro", "kiro-cli"] {
+        for p in ["opencode", "opencode-zen", "antigravity", "kiro", "kiro-cli", "supercode"] {
             let s = p.to_string();
             if !providers.contains(&s) {
                 providers.push(s);
@@ -146,10 +146,14 @@ impl ModelDiscovery {
                 let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
             }
 
+            if provider == "supercode" {
+                let _ = crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
+            }
+
             let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
             let is_auto = matches!(
                 provider.as_str(),
-                "opencode" | "opencode-zen" | "antigravity" | "agy" | "kiro" | "kiro-cli"
+                "opencode" | "opencode-zen" | "antigravity" | "agy" | "kiro" | "kiro-cli" | "supercode"
             );
 
             if !has_creds && !is_auto {
@@ -171,6 +175,11 @@ impl ModelDiscovery {
         let descriptor = resolve_descriptor(provider_id, self.overrides.get(provider_id))?;
         // Per-provider timeout, so a hanging `/models` call cannot outlive the config value.
         let http_client = build_http_client(descriptor.timeout_secs)?;
+
+        if provider_id == "supercode" {
+            let _ = crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
+            return crate::supercode::fetch_supercode_models().await;
+        }
 
         if provider_id == "kiro" || provider_id == "kiro-cli" {
             let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;

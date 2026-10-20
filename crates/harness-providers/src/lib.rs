@@ -5,6 +5,7 @@ pub mod client;
 pub mod discovery;
 pub mod kiro;
 pub mod opencode;
+pub mod supercode;
 
 pub use antigravity::{
     detect_antigravity_credentials, execute_antigravity_completion, extract_bearer_token,

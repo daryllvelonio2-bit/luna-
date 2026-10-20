@@ -25,7 +25,10 @@ pub enum RotationStrategy {
 pub struct CredentialEntry {
     pub id: String,
     pub label: String,
-    pub api_key: String, // Stored encrypted or in OS keyring in production
+    /// API key stored encrypted in the file. In production builds, encryption should use OS keyring.
+    pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_in_keyring: Option<bool>,
     pub is_priority: bool,
     pub usage_count: u64,
     pub last_used: Option<DateTime<Utc>>,
@@ -275,6 +278,7 @@ impl CredentialManager {
                     id: id.clone(),
                     label: label.to_string(),
                     api_key: key.to_string(),
+                    encrypted_in_keyring: None,
                     is_priority,
                     usage_count: 0,
                     last_used: None,
@@ -663,6 +667,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             label: label.to_string(),
             api_key: key.to_string(),
+            encrypted_in_keyring: None,
             is_priority: false,
             usage_count: used,
             last_used: None,
