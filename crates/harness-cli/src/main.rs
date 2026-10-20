@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use colored::Colorize;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use harness_core::config::{self, Config};
@@ -101,6 +102,14 @@ enum Commands {
     Models {
         #[command(subcommand)]
         subcommand: ModelsCommand,
+    },
+    /// Fetch models dynamically for a provider (e.g. `luna fetch opencode`, `luna fetch antigravity`)
+    Fetch {
+        /// Provider name (opencode, antigravity, nvidia, etc.)
+        provider: Option<String>,
+        /// Force refresh cache from provider
+        #[arg(short, long)]
+        refresh: bool,
     },
     /// Start hands-free voice interface with wake word "Luna"
     Voice {
@@ -292,6 +301,23 @@ async fn main() -> Result<(), HarnessError> {
         Some(Commands::Models { subcommand }) => {
             let default_provider = config.model.provider.clone();
             handle_models_command(subcommand, &default_provider, cred_manager, discovery).await?;
+        }
+        Some(Commands::Fetch { provider, refresh }) => {
+            let default_provider = config.model.provider.clone();
+            let provider = provider.unwrap_or_else(|| default_provider);
+            println!("Fetching models for provider '{}'...", provider.cyan().bold());
+            match discovery.get_models(&provider, &cred_manager, refresh).await {
+                Ok(models) => {
+                    println!("\n{} Available Models for {}:", "✔".green().bold(), provider.cyan().bold());
+                    for m in &models {
+                        println!("  • {}", m);
+                    }
+                    println!("\n  Total: {} models", models.len());
+                }
+                Err(e) => {
+                    eprintln!("{} Failed to fetch models: {}", "✖".red().bold(), e);
+                }
+            }
         }
         Some(Commands::Sessions { subcommand }) => {
             handle_sessions_command(subcommand, &config).await?;

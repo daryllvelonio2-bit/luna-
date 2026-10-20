@@ -181,3 +181,78 @@ pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, 
 
     Ok(detected)
 }
+
+pub const OPENCODE_FREE_MODELS: &[&str] = &[
+    "deepseek-v4.1-flash-free",
+    "mimo-v2.6-flash-free",
+    "minimax-m3.1-flash-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "nemotron-3.5-super-vl-free",
+    "glm-5.3-flash-free",
+    "big-pickle",
+    "beam-free",
+    "longcat-2.5-preview-free",
+];
+
+pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
+    // 1. Try running `opencode api GET /api/model`
+    if let Ok(output) = tokio::process::Command::new("opencode")
+        .args(["api", "GET", "/api/model"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+                    let mut list = Vec::new();
+                    for item in arr {
+                        if item.get("providerID").and_then(|p| p.as_str()) == Some("opencode") {
+                            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                                list.push(id.to_string());
+                            }
+                        }
+                    }
+                    if !list.is_empty() {
+                        list.sort();
+                        return Ok(list);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Try ~/.local/state/opencode/model.json
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let state_file = PathBuf::from(&home).join(".local").join("state").join("opencode").join("model.json");
+    if state_file.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&state_file) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(recent) = val.get("recent").and_then(|r| r.as_array()) {
+                    let mut list = Vec::new();
+                    for item in recent {
+                        if item.get("providerID").and_then(|p| p.as_str()) == Some("opencode") {
+                            if let Some(id) = item.get("modelID").and_then(|i| i.as_str()) {
+                                if !list.contains(&id.to_string()) {
+                                    list.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if !list.is_empty() {
+                        for &m in OPENCODE_FREE_MODELS {
+                            if !list.contains(&m.to_string()) {
+                                list.push(m.to_string());
+                            }
+                        }
+                        list.sort();
+                        return Ok(list);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to constant verified free models
+    Ok(OPENCODE_FREE_MODELS.iter().map(|&s| s.to_string()).collect())
+}

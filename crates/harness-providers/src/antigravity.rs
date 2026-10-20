@@ -228,9 +228,13 @@ pub fn extract_bearer_token(secret: &str) -> (String, Option<String>) {
 
 pub const ANTIGRAVITY_MODELS: &[&str] = &[
     "gemini-3.8-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
     "claude-sonnet-4-6",
     "claude-opus-4-6",
     "gpt-oss-120b",
+    "gpt-oss-20b",
 ];
 
 /// Resolves user-facing clean model names and reasoning effort settings to backend Code Assist model names.

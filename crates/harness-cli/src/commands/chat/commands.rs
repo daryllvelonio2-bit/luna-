@@ -902,18 +902,9 @@ async fn pick_provider_and_model(
     let chosen_provider = available_catalog[sel].id.clone();
 
     // Fetch models for chosen provider
-    let mut models = if chosen_provider == "antigravity" || chosen_provider == "agy" {
-        vec![
-            "gemini-3.8-flash".to_string(),
-            "claude-sonnet-4-6".to_string(),
-            "claude-opus-4-6".to_string(),
-            "gpt-oss-120b".to_string(),
-        ]
-    } else {
-        match discovery.get_models(&chosen_provider, cred_manager, false).await {
-            Ok(m) => m,
-            Err(_) => Vec::new(),
-        }
+    let mut models = match discovery.get_models(&chosen_provider, cred_manager, false).await {
+        Ok(m) => m,
+        Err(_) => Vec::new(),
     };
 
     let default_model = get_default_model(&chosen_provider).to_string();

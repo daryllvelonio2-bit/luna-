@@ -115,6 +115,10 @@ impl ModelDiscovery {
             return crate::antigravity::fetch_antigravity_models(&http_client, &bearer).await;
         }
 
+        if provider_id == "opencode" || provider_id == "opencode-zen" {
+            return crate::opencode::fetch_opencode_models().await;
+        }
+
         let mut url = format!("{}{}", descriptor.default_base_url, descriptor.models_endpoint);
         let mut headers = HeaderMap::new();
 
