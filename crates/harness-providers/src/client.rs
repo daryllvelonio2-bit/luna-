@@ -269,6 +269,12 @@ impl GenericProviderClient {
 
             if let Some(ref text) = m.content {
                 msg_obj["content"] = serialize_content_with_images(role_str, text);
+            } else if m.role == Role::Assistant {
+                msg_obj["content"] = serde_json::Value::Null;
+            }
+
+            if let Some(ref r) = m.reasoning {
+                msg_obj["reasoning_content"] = json!(r);
             }
 
             if !m.tool_calls.is_empty() {

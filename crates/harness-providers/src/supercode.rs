@@ -74,10 +74,7 @@ pub async fn fetch_supercode_models() -> Result<Vec<String>, HarnessError> {
     Ok(SUPERCODE_MODELS.iter().map(|s| s.to_string()).collect())
 }
 
-pub fn format_messages_for_supercode(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-) -> Vec<serde_json::Value> {
+pub fn format_messages_for_supercode(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
 
     for msg in messages {
@@ -98,17 +95,38 @@ pub fn format_messages_for_supercode(
             "content": content,
         });
 
+        if let Some(ref r) = msg.reasoning {
+            obj["reasoning_content"] = json!(r);
+        }
+
+        if msg.role == Role::Tool {
+            let tool_call_id = msg
+                .tool_result
+                .as_ref()
+                .map(|tr| tr.call_id.clone())
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| "call_0".to_string());
+            obj["tool_call_id"] = json!(tool_call_id);
+            if let Some(ref tr) = msg.tool_result {
+                obj["content"] = json!(tr.content);
+            }
+        }
+
         if !msg.tool_calls.is_empty() {
             let tcs: Vec<serde_json::Value> = msg
                 .tool_calls
                 .iter()
                 .map(|tc| {
+                    let args_str = match &tc.arguments {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
                     json!({
-                        "id": tc.id,
+                        "id": if tc.id.is_empty() { "call_0".to_string() } else { tc.id.clone() },
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": tc.arguments,
+                            "arguments": args_str,
                         }
                     })
                 })
@@ -119,28 +137,24 @@ pub fn format_messages_for_supercode(
         out.push(obj);
     }
 
-    if !tools.is_empty() {
-        // Prepend available tools summary into first system message if present
-        let mut tool_lines = vec!["Available tools:".to_string()];
-        for t in tools {
-            tool_lines.push(format!("- {}: {} (parameters: {})", t.name, t.description, t.parameters));
-        }
-        let tools_text = tool_lines.join("\n");
-
-        if let Some(first) = out.first_mut() {
-            if first.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(c) = first.get("content").and_then(|c| c.as_str()) {
-                    first["content"] = json!(format!("{}\n\n{}", tools_text, c));
-                }
-            } else {
-                out.insert(0, json!({ "role": "system", "content": tools_text }));
-            }
-        } else {
-            out.push(json!({ "role": "system", "content": tools_text }));
-        }
-    }
-
     out
+}
+
+pub fn serialize_tools_for_supercode(tools: &[ToolDefinition]) -> Option<serde_json::Value> {
+    if tools.is_empty() {
+        return None;
+    }
+    let mut map = serde_json::Map::new();
+    for t in tools {
+        map.insert(
+            t.name.clone(),
+            json!({
+                "description": t.description,
+                "parameters": t.parameters,
+            }),
+        );
+    }
+    Some(serde_json::Value::Object(map))
 }
 
 pub async fn stream_supercode_completion(
@@ -162,13 +176,17 @@ pub async fn stream_supercode_completion(
     };
 
     let resolved_model = if model.is_empty() { "kimi-k3" } else { model };
-    let formatted_messages = format_messages_for_supercode(messages, tools);
+    let formatted_messages = format_messages_for_supercode(messages);
 
-    let body = json!({
+    let mut body = json!({
         "messages": formatted_messages,
         "provider": "supercode",
         "model": resolved_model,
     });
+
+    if let Some(tools_obj) = serialize_tools_for_supercode(tools) {
+        body["tools"] = tools_obj;
+    }
 
     let resp = http_client
         .post(SUPERCODE_ENDPOINT)

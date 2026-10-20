@@ -822,13 +822,20 @@ async fn test_background_task_queue_and_process_tool() {
     assert!(list_res.content.contains(&job_id));
 
     // Wait a moment for completion
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    // Poll job
-    let poll_res = proc_tool
+    let mut poll_res = proc_tool
         .execute("c_poll", &json!({ "action": "poll", "job_id": job_id }), &cancel)
         .await
         .unwrap();
+    for _ in 0..30 {
+        if poll_res.content.contains("completed (exit 0)") {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        poll_res = proc_tool
+            .execute("c_poll", &json!({ "action": "poll", "job_id": job_id }), &cancel)
+            .await
+            .unwrap();
+    }
     assert!(poll_res.content.contains("completed (exit 0)"));
     assert!(poll_res.content.contains("done bg"));
 }
