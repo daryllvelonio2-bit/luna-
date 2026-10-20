@@ -134,22 +134,23 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
         ProviderDescriptor {
             id: "opencode".to_string(),
             display_name: "OpenCode".to_string(),
-            default_base_url: "https://api.groq.com/openai/v1".to_string(),
+            default_base_url: "https://opencode.ai/zen/v1".to_string(),
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
-                ("llama-3.3-70b-versatile", 128_000),
-                ("llama-3.1-8b-instant", 128_000),
-                ("openai/gpt-oss-120b", 128_000),
-                ("qwen/qwen3.8-27b", 128_000),
                 ("deepseek-v4.1-flash-free", 1_000_000),
                 ("glm-5.3-flash-free", 1_000_000),
-                ("minimax-m3.1-flash-free", 245_760),
                 ("nemotron-3-ultra-free", 1_000_000),
                 ("nemotron-3.5-lightning-free", 1_000_000),
+                ("nemotron-3.5-super-vl-free", 1_000_000),
+                ("mimo-v2.6-flash-free", 1_048_576),
+                ("minimax-m3.1-flash-free", 245_760),
+                ("muse-spark-1.3-contributor-free", 1_048_576),
+                ("muse-spark-1.2-contributor-free", 1_048_576),
                 ("beam-free", 128_000),
                 ("big-pickle", 128_000),
+                ("longcat-2.5-preview-free", 128_000),
             ]),
         },
         ProviderDescriptor {
@@ -440,6 +441,7 @@ pub fn get_default_model(provider: &str) -> &'static str {
         "copilot" => "gpt-4o",
         "openai" => "gpt-4o",
         "antigravity" | "agy" => "gemini-3.8-flash",
+        "opencode" | "opencode-zen" => "deepseek-v4.1-flash-free",
         _ => "default",
     }
 }

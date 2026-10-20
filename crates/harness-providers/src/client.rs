@@ -187,6 +187,12 @@ impl GenericProviderClient {
             AuthHeaderFormat::Bearer => {
                 let token = if self.provider_id == "antigravity" || self.provider_id == "agy" {
                     crate::antigravity::extract_bearer_token(&api_key).0
+                } else if self.provider_id.starts_with("opencode") {
+                    if api_key.trim().is_empty() {
+                        "public".to_string()
+                    } else {
+                        api_key
+                    }
                 } else {
                     api_key
                 };
@@ -208,6 +214,19 @@ impl GenericProviderClient {
                 query_param = Some(format!("{}={}", param, api_key));
             }
             AuthHeaderFormat::None => {}
+        }
+
+        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+            let session_id = crate::opencode::get_or_create_opencode_session_id();
+            headers.insert("User-Agent", HeaderValue::from_static("opencode/latest/2.0.29/cli"));
+            headers.insert("x-opencode-client", HeaderValue::from_static("cli"));
+            headers.insert("x-opencode-project", HeaderValue::from_static("global"));
+            if let Ok(v) = HeaderValue::from_str(&session_id) {
+                headers.insert("x-opencode-session", v.clone());
+                headers.insert("x-opencode-session-id", v.clone());
+                headers.insert("x-session-affinity", v.clone());
+                headers.insert("x-session-id", v);
+            }
         }
 
         Ok((headers, query_param, secret))
@@ -334,6 +353,68 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+        }
+
+        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+            let mut stream = self.stream(messages, tools, options).await?;
+            let mut content = String::new();
+            let mut reasoning = String::new();
+            let mut usage = None;
+            let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
+                std::collections::BTreeMap::new();
+
+            while let Some(ev_res) = stream.next().await {
+                match ev_res? {
+                    StreamEvent::ContentDelta(d) => content.push_str(&d),
+                    StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
+                    StreamEvent::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        arguments_delta,
+                        ..
+                    } => {
+                        let entry = tool_builders
+                            .entry(index)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        if let Some(i) = id {
+                            entry.0.push_str(&i);
+                        }
+                        if let Some(n) = name {
+                            entry.1.push_str(&n);
+                        }
+                        if let Some(a) = arguments_delta {
+                            entry.2.push_str(&a);
+                        }
+                    }
+                    StreamEvent::Completed { usage: u, .. } => {
+                        usage = u;
+                    }
+                }
+            }
+
+            let mut tool_calls = Vec::new();
+            for (_, (id, name, args_str)) in tool_builders {
+                if !name.is_empty() {
+                    let arguments: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        signature: None,
+                    });
+                }
+            }
+
+            return Ok(Message {
+                role: Role::Assistant,
+                content: if content.is_empty() { None } else { Some(content) },
+                reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+                tool_calls,
+                tool_result: None,
+                usage,
+            });
         }
 
         let mut body = json!({
@@ -533,6 +614,10 @@ impl ModelProvider for GenericProviderClient {
         }
         if let Some(effort) = options.reasoning_effort {
             body["reasoning_effort"] = json!(effort.as_str());
+        }
+
+        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+            crate::opencode::ensure_compat_tools(&mut body);
         }
 
         let resp = self

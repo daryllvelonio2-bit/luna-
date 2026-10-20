@@ -53,7 +53,12 @@ impl ToolRegistry for DefaultToolRegistry {
     /// `execute` will report `ToolNotFound` a moment later anyway.
     async fn is_mutating(&self, name: &str) -> Result<bool, HarnessError> {
         let map = self.tools.read().await;
-        match map.get(name) {
+        let resolved_name = match name {
+            "bash" if !map.contains_key("bash") => "terminal",
+            "read" if !map.contains_key("read") => "read_file",
+            other => other,
+        };
+        match map.get(resolved_name) {
             Some(tool) => Ok(tool.is_mutating()),
             None => Err(HarnessError::ToolNotFound(name.to_string())),
         }
@@ -61,7 +66,12 @@ impl ToolRegistry for DefaultToolRegistry {
 
     async fn is_mutating_call(&self, call: &ToolCall) -> Result<bool, HarnessError> {
         let map = self.tools.read().await;
-        match map.get(&call.name) {
+        let resolved_name = match call.name.as_str() {
+            "bash" if !map.contains_key("bash") => "terminal",
+            "read" if !map.contains_key("read") => "read_file",
+            other => other,
+        };
+        match map.get(resolved_name) {
             Some(tool) => Ok(tool.is_mutating_call(&call.arguments)),
             None => Err(HarnessError::ToolNotFound(call.name.clone())),
         }
@@ -70,7 +80,15 @@ impl ToolRegistry for DefaultToolRegistry {
     async fn preview(&self, call: &ToolCall) -> Option<ToolPreview> {
         let tool = {
             let map = self.tools.read().await;
-            map.get(&call.name).cloned()
+            map.get(&call.name).cloned().or_else(|| {
+                if call.name == "bash" {
+                    map.get("terminal").cloned()
+                } else if call.name == "read" {
+                    map.get("read_file").cloned()
+                } else {
+                    None
+                }
+            })
         };
         match tool {
             Some(tool) => tool.preview(&call.arguments).await,
@@ -86,10 +104,24 @@ impl ToolRegistry for DefaultToolRegistry {
         let (tool, mws) = {
             let map = self.tools.read().await;
             let mws = self.middlewares.read().await.clone();
-            (map.get(&call.name).cloned(), mws)
+            let t = map.get(&call.name).cloned().or_else(|| {
+                if call.name == "bash" {
+                    map.get("terminal").cloned()
+                } else if call.name == "read" {
+                    map.get("read_file").cloned()
+                } else {
+                    None
+                }
+            });
+            (t, mws)
         };
 
         let mut active_call = call.clone();
+        if active_call.name == "read" {
+            if let Some(fp) = active_call.arguments.get("filePath").cloned() {
+                active_call.arguments["path"] = fp;
+            }
+        }
         for mw in &mws {
             mw.on_pre_execute(&mut active_call).await?;
         }
