@@ -2,3 +2,4 @@
 /.worktrees
 *.db
 eval-report.json
+.luna-todo.json
