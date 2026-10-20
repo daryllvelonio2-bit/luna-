@@ -1007,12 +1007,11 @@ async fn test_todo_list_read_only_gating_and_status_aliases() {
     let cancel = CancellationToken::new();
     let todo_tool = harness_core::tools::TodoListTool::new(root);
 
-    // 'list' action does NOT mutate and does not require approval
+    // todo_list is an internal scratchpad: never requires approval for any action
+    assert!(!todo_tool.is_mutating());
     assert!(!todo_tool.is_mutating_call(&json!({ "action": "list" })));
-    // default action (no args) does NOT mutate
     assert!(!todo_tool.is_mutating_call(&json!({})));
-    // 'add' action DOES mutate
-    assert!(todo_tool.is_mutating_call(&json!({ "action": "add", "text": "new task" })));
+    assert!(!todo_tool.is_mutating_call(&json!({ "action": "add", "text": "new task" })));
 
     // Add a task
     let add_res = todo_tool

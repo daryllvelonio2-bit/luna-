@@ -160,12 +160,11 @@ impl Tool for TodoListTool {
     }
 
     fn is_mutating(&self) -> bool {
-        true
+        false
     }
 
-    fn is_mutating_call(&self, arguments: &serde_json::Value) -> bool {
-        let action = arguments.get("action").and_then(|a| a.as_str()).unwrap_or("list");
-        action != "list"
+    fn is_mutating_call(&self, _arguments: &serde_json::Value) -> bool {
+        false
     }
 
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
