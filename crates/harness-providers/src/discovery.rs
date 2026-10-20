@@ -109,7 +109,8 @@ impl ModelDiscovery {
 
         if provider_id == "kiro" || provider_id == "kiro-cli" {
             let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
-            return crate::kiro::fetch_kiro_models().await;
+            let secret = cred_manager.acquire_credential(provider_id).await?;
+            return crate::kiro::fetch_kiro_models(&http_client, secret.expose_secret()).await;
         }
 
         let secret = cred_manager.acquire_credential(provider_id).await?;
