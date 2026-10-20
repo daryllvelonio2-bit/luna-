@@ -2103,6 +2103,7 @@ dependencies = [
  "indicatif",
  "libc",
  "ratatui",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -38,3 +38,4 @@ futures-util = { workspace = true }
 libc = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+rusqlite = { workspace = true }

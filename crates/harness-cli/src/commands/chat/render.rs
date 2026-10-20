@@ -489,6 +489,68 @@ pub fn shorten_paths_in_text(raw: &str) -> String {
     out.join(" ")
 }
 
+fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let db_path = std::path::PathBuf::from(home).join(".luna").join("memory.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare("SELECT subject, predicate FROM memories WHERE id = ?1 LIMIT 1")
+        .ok()?;
+    let mut rows = stmt.query([id]).ok()?;
+    if let Ok(Some(row)) = rows.next() {
+        let subject: String = row.get(0).ok()?;
+        let predicate: String = row.get(1).ok()?;
+        return Some((subject, predicate));
+    }
+    None
+}
+
+fn resolve_memory_name(arguments: &serde_json::Value) -> String {
+    let text = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+
+    if let Some(name) = text("name").or_else(|| text("key")).or_else(|| text("title")) {
+        return format!("\"{}\"", truncate_visible(name, MAX_TOOL_ARG_CHARS));
+    }
+
+    let subj = text("subject");
+    let pred = text("predicate");
+    match (subj, pred) {
+        (Some(s), Some(p)) => return format!("{}.{}", s, p),
+        (Some(s), None) => return s.to_string(),
+        _ => {}
+    }
+
+    if let Some(target) = text("target") {
+        return format!("\"{}\"", truncate_visible(target, MAX_TOOL_ARG_CHARS));
+    }
+
+    if let Some(id) = text("memory_id").or_else(|| text("id")) {
+        if let Some((sub, pred)) = lookup_memory_from_db(id) {
+            if !pred.is_empty() {
+                return format!("{}.{}", sub, pred);
+            } else if !sub.is_empty() {
+                return sub;
+            }
+        }
+        let short = if id.len() > 16 { &id[..16] } else { id };
+        return short.to_string();
+    }
+
+    "memory".to_string()
+}
+
 /// How wide the verb column of a tool-call line is, so targets line up across calls.
 const VERB_COLUMN: usize = 12;
 
@@ -504,7 +566,7 @@ fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
         "terminal" | "shell" | "bash" => ("💻", "run"),
         "save_note" | "read_note" | "update_note" | "delete_note" => ("📑", "note"),
         "search_notes" | "list_notes" => ("🔍", "notes"),
-        "save_memory" | "update_memory" | "forget_memory" => ("🧠", "memory"),
+        "save_memory" | "update_memory" | "forget_memory" | "memory" => ("🧠", "memory"),
         "skill_view" => ("📖", "skill"),
         "skills_list" => ("📋", "skills"),
         "process" => ("⚙️", "proc"),
@@ -627,23 +689,31 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 include
             );
         }
-        "save_memory" => {
-            let subject = text("subject").unwrap_or("?");
-            let predicate = text("predicate").unwrap_or("?");
-            let object = text("object").unwrap_or("?");
+        "save_memory" | "update_memory" | "forget_memory" | "memory" => {
+            let action = match name {
+                "save_memory" => "save",
+                "update_memory" => "update",
+                "forget_memory" => "forget",
+                _ => text("action").unwrap_or("update"),
+            };
+            let verb_label = format!("memory {}", action);
+            let mem_name = resolve_memory_name(arguments);
+            let detail = if action == "save" || action == "update" {
+                if let Some(obj) = text("object") {
+                    format!("{}{}", " = ".dimmed(), quoted(obj))
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             return format!(
-                "{} {} {}{}{}",
+                "{} {} {}{}",
                 glyph,
-                verb_col(verb),
-                format!("{}.{}", subject, predicate).cyan(),
-                " = ".dimmed(),
-                quoted(object)
+                verb_col(&verb_label),
+                mem_name.cyan(),
+                detail
             );
-        }
-        "update_memory" | "forget_memory" => {
-            if let Some(id) = text("memory_id") {
-                return format!("{} {} {}", glyph, verb_col(verb), id.cyan());
-            }
         }
         "save_note" => {
             let title = text("title").unwrap_or("");
@@ -875,13 +945,20 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 action.dimmed()
             )
         }
-        "update_memory" | "forget_memory" | "save_memory" => {
+        "update_memory" | "forget_memory" | "save_memory" | "memory" => {
+            let action = match request.tool.as_str() {
+                "save_memory" => "save",
+                "update_memory" => "update",
+                "forget_memory" => "forget",
+                _ => text_arg("action").unwrap_or("update"),
+            };
             let target = request
                 .target
                 .as_deref()
+                .or_else(|| text_arg("name"))
                 .or_else(|| text_arg("subject"))
                 .unwrap_or("memory");
-            format!("{} {}", "memory".bold(), target.cyan().bold())
+            format!("{} {} {}", "memory".bold(), action.bold(), target.cyan().bold())
         }
         "apply_harness_update" => {
             let id = request
@@ -1158,8 +1235,16 @@ mod tests {
             "save_memory",
             json!({ "subject": "user", "predicate": "editor", "object": "neovim" }),
         );
+        assert!(memory.contains("memory save"), "got: {}", memory);
         assert!(memory.contains("user.editor"), "got: {}", memory);
         assert!(memory.contains("neovim"), "got: {}", memory);
+
+        let update = call(
+            "update_memory",
+            json!({ "memory_id": "mem_123", "subject": "user", "predicate": "editor", "object": "helix" }),
+        );
+        assert!(update.contains("memory update"), "got: {}", update);
+        assert!(update.contains("user.editor"), "got: {}", update);
 
         assert!(call("search_notes", json!({ "query": "budget", "limit": 5 })).contains("limit 5"));
         assert!(call("read_note", json!({ "id": "note_123" })).contains("note_123"));
