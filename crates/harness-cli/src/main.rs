@@ -220,7 +220,7 @@ async fn main() -> Result<(), HarnessError> {
     if let Some(Commands::Models { subcommand }) = &cli.command {
         let provider = match subcommand {
             ModelsCommand::List { provider, .. } => provider,
-            ModelsCommand::Refresh { provider } => provider,
+            ModelsCommand::Refresh { provider, .. } => provider,
         };
         if let Some(provider) = provider {
             layers.flags.insert("model.provider".to_string(), provider.clone());

@@ -479,8 +479,21 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
     ]
 }
 
+pub fn canonicalize_provider_id(id: &str) -> &str {
+    match id.to_lowercase().as_str() {
+        "agy" => "antigravity",
+        "opencode-zen" | "opencode-local" | "opencode-agent" | "opencode-bin" | "opencode-cli" => "opencode",
+        "kiro-ai" => "kiro",
+        "openai-codex" => "openai",
+        _ => id,
+    }
+}
+
 pub fn find_provider(id: &str) -> Option<ProviderDescriptor> {
-    get_provider_catalog().into_iter().find(|p| p.id.eq_ignore_ascii_case(id))
+    let canonical = canonicalize_provider_id(id);
+    get_provider_catalog()
+        .into_iter()
+        .find(|p| p.id.eq_ignore_ascii_case(canonical) || p.id.eq_ignore_ascii_case(id))
 }
 
 /// Every provider id the catalog knows, for error messages.

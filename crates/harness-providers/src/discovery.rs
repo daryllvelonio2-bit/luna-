@@ -98,6 +98,71 @@ impl ModelDiscovery {
         Ok(models)
     }
 
+    pub async fn get_all_target_providers(&self, cred_manager: &CredentialManager) -> Vec<String> {
+        let mut providers = Vec::new();
+        for p in cred_manager.get_loaded_providers().await {
+            if !providers.contains(&p) {
+                providers.push(p);
+            }
+        }
+        for p in self.overrides.keys() {
+            if !providers.contains(p) {
+                providers.push(p.clone());
+            }
+        }
+        for p in ["opencode", "opencode-zen", "antigravity", "kiro", "kiro-cli"] {
+            let s = p.to_string();
+            if !providers.contains(&s) {
+                providers.push(s);
+            }
+        }
+        for p in crate::catalog::known_provider_ids() {
+            if !providers.contains(&p) {
+                providers.push(p);
+            }
+        }
+        providers
+    }
+
+    pub async fn refresh_all_models(
+        &self,
+        cred_manager: &CredentialManager,
+    ) -> Vec<(String, Result<Vec<String>, HarnessError>)> {
+        let providers = self.get_all_target_providers(cred_manager).await;
+        let mut results = Vec::new();
+        let mut seen_canonical = std::collections::HashSet::new();
+
+        for provider in providers {
+            let canonical = crate::catalog::canonicalize_provider_id(&provider);
+            if !seen_canonical.insert(canonical.to_string()) {
+                continue;
+            }
+
+            if crate::catalog::find_provider(&provider).is_none() {
+                continue;
+            }
+
+            if provider == "kiro" || provider == "kiro-cli" {
+                let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
+            }
+
+            let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
+            let is_auto = matches!(
+                provider.as_str(),
+                "opencode" | "opencode-zen" | "antigravity" | "agy" | "kiro" | "kiro-cli"
+            );
+
+            if !has_creds && !is_auto {
+                continue;
+            }
+
+            let res = self.get_models(&provider, cred_manager, true).await;
+            results.push((provider, res));
+        }
+
+        results
+    }
+
     async fn fetch_live_models(
         &self,
         provider_id: &str,
