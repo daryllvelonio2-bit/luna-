@@ -376,6 +376,70 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("gpt-oss-120b", 128_000),
             ]),
         },
+        ProviderDescriptor {
+            id: "xkiro".to_string(),
+            display_name: "xKiro".to_string(),
+            default_base_url: "https://api.xkiro.com/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("qwen/qwen3.7-flash:free", 128_000),
+                ("qwen/qwen3-coder-plus:free", 128_000),
+                ("qwen/qwen3.8-max:free", 128_000),
+                ("minimax/minimax-m2.5:free", 128_000),
+            ]),
+        },
+        ProviderDescriptor {
+            id: "tokenharbor".to_string(),
+            display_name: "TokenHarbor".to_string(),
+            default_base_url: "https://tokenharbor.ai/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("deepseek-v4.1-flash:free", 128_000),
+                ("deepseek-v4-flash:free", 128_000),
+                ("mimo-v2.5:free", 128_000),
+                ("qwen3.8-flash:free", 128_000),
+            ]),
+        },
+        ProviderDescriptor {
+            id: "cline".to_string(),
+            display_name: "Cline".to_string(),
+            default_base_url: "https://api.cline.bot/api/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("stealth/pixel-canary", 128_000),
+                ("stealth/space-bunny-alpha", 128_000),
+            ]),
+        },
+        ProviderDescriptor {
+            id: "unorouter".to_string(),
+            display_name: "UnoRouter".to_string(),
+            default_base_url: "https://api.unorouter.com/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("deepseek-v4-flash:free", 128_000),
+                ("qwen3.8-flash-next:free", 128_000),
+            ]),
+        },
+        ProviderDescriptor {
+            id: "apmix".to_string(),
+            display_name: "Apmix".to_string(),
+            default_base_url: "https://api.apmix.ai/v1".to_string(),
+            models_endpoint: "/models".to_string(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            auth_header_format: AuthHeaderFormat::Bearer,
+            context_windows: ctx_windows(&[
+                ("deepseek-v4-flash-free", 128_000),
+                ("gpt6-luna-free", 128_000),
+            ]),
+        },
     ]
 }
 
