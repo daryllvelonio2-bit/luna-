@@ -67,6 +67,10 @@ pub struct JobRecord {
     pub modified_files: Vec<String>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Commit the worktree branch was created from. Used to prove that a job
+    /// actually produced commits before its gates are treated as meaningful.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +154,14 @@ fn find_git_toplevel(path: &Path) -> Option<PathBuf> {
 
 /// Cleans up a git worktree, its branch, and any leftover directory on disk.
 fn cleanup_worktree(repo_root: &Path, worktree_dir: &Path, branch: Option<&str>) {
+    // Purge the worktree's own cargo target dir first. If `git worktree remove`
+    // below refuses (e.g. locked index), this still guarantees the artifacts
+    // cannot survive to poison another tree's build.
+    let own_target = worktree_target_dir(worktree_dir);
+    if own_target.exists() {
+        let _ = fs::remove_dir_all(&own_target);
+    }
+
     let _ = Command::new("git")
         .args([
             "-C",
@@ -170,6 +182,94 @@ fn cleanup_worktree(repo_root: &Path, worktree_dir: &Path, branch: Option<&str>)
     if worktree_dir.exists() {
         let _ = fs::remove_dir_all(worktree_dir);
     }
+}
+
+/// The cargo target directory used for builds inside an engineer worktree.
+///
+/// This is deliberately *inside* the worktree: `<worktree>/target`. Engineer
+/// builds must never write into the main repository's shared `target/`, because
+/// artifacts compiled from a worktree bake `CARGO_MANIFEST_DIR` to a path that
+/// only exists while the worktree does. Once the worktree is deleted those
+/// artifacts remain "fresh" to cargo and main-repo suites that canonicalize
+/// `CARGO_MANIFEST_DIR` start failing with phantom `NotFound` errors.
+pub fn worktree_target_dir(worktree_dir: &Path) -> PathBuf {
+    worktree_dir.join("target")
+}
+
+/// Stages and commits every change inside the worktree.
+/// Returns `true` when a commit was created, `false` when the tree was clean.
+fn commit_worktree_changes(worktree_dir: &Path, message: &str) -> Result<bool, HarnessError> {
+    let wt = worktree_dir.to_string_lossy().to_string();
+
+    let add = Command::new("git")
+        .args(["-C", &wt, "add", "-A"])
+        .output()
+        .map_err(|e| HarnessError::Io(format!("git add failed: {}", e)))?;
+    if !add.status.success() {
+        return Err(HarnessError::EvolverError(format!(
+            "git add -A failed in worktree: {}",
+            String::from_utf8_lossy(&add.stderr)
+        )));
+    }
+
+    let staged = Command::new("git")
+        .args(["-C", &wt, "diff", "--cached", "--quiet"])
+        .output()
+        .map_err(|e| HarnessError::Io(format!("git diff --cached failed: {}", e)))?;
+    if staged.status.success() {
+        // Nothing staged: the tree is clean, the agent changed nothing.
+        return Ok(false);
+    }
+
+    let commit = Command::new("git")
+        .args(["-C", &wt, "commit", "-m", message])
+        .output()
+        .map_err(|e| HarnessError::Io(format!("git commit failed: {}", e)))?;
+    if !commit.status.success() {
+        return Err(HarnessError::EvolverError(format!(
+            "git commit failed in worktree: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        )));
+    }
+    Ok(true)
+}
+
+/// Number of commits on the worktree branch that are not reachable from `base`.
+fn count_commits_ahead(worktree_dir: &Path, base: &str) -> Result<u64, HarnessError> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &worktree_dir.to_string_lossy(),
+            "rev-list",
+            "--count",
+            &format!("{}..HEAD", base),
+        ])
+        .output()
+        .map_err(|e| HarnessError::Io(format!("git rev-list failed: {}", e)))?;
+    if !out.status.success() {
+        return Err(HarnessError::EvolverError(format!(
+            "git rev-list --count failed in worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| HarnessError::EvolverError(format!("unparsable commit count: {}", e)))
+}
+
+fn head_commit(worktree_dir: &Path) -> Result<String, HarnessError> {
+    let out = Command::new("git")
+        .args(["-C", &worktree_dir.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| HarnessError::Io(format!("git rev-parse failed: {}", e)))?;
+    if !out.status.success() {
+        return Err(HarnessError::EvolverError(format!(
+            "git rev-parse HEAD failed in worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 pub struct CodebaseEvolver {
@@ -293,6 +393,7 @@ impl CodebaseEvolver {
             current_tool: None,
             modified_files: Vec::new(),
             summary: None,
+            base_commit: None,
         };
 
         self.save_job(&record).await?;
@@ -579,6 +680,13 @@ async fn run_engineer_job(
             let _ = Command::new("git")
                 .args(["-C", &worktree_dir.to_string_lossy(), "config", "user.email", "daryllvelonio2@gmail.com"])
                 .output();
+            match head_commit(&worktree_dir) {
+                Ok(sha) => {
+                    record.base_commit = Some(sha.clone());
+                    record.logs.push(format!("Worktree based on commit {}.", sha));
+                }
+                Err(e) => record.logs.push(format!("Warning: could not record base commit: {}", e)),
+            }
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -647,7 +755,9 @@ async fn run_engineer_job(
         .register(Arc::new(TodoListTool::new(worktree_dir.clone())))
         .await?;
 
-    let target_dir = repo_root.join("target");
+    // Engineer builds are confined to the worktree's own target dir so their
+    // artifacts can never be mistaken for the main repo's by a later cargo run.
+    let target_dir = worktree_target_dir(&worktree_dir);
     let mut terminal = TerminalTool::new(
         worktree_dir.clone(),
         300,
@@ -794,6 +904,67 @@ async fn run_engineer_job(
     let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
     jobs_map.write().await.insert(job_id.clone(), record.clone());
 
+    // 2b. Prove the job actually produced work before running any gate.
+    // Gates executed against an unchanged tree are measuring `main`, not the fix —
+    // that is exactly how three jobs reported "dual-gate passed" with zero commits.
+    record.current_tool = Some("committing worktree changes".to_string());
+    record.logs.push("Committing worktree changes...".to_string());
+    record.updated_at = Utc::now();
+    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+    jobs_map.write().await.insert(job_id.clone(), record.clone());
+
+    let commit_msg = format!(
+        "eng({}): {}",
+        job_id,
+        task.lines().next().unwrap_or("harness improvement").trim()
+    );
+    let commit_res = commit_worktree_changes(&worktree_dir, &commit_msg);
+    let ahead_res = match &commit_res {
+        Err(e) => Err(HarnessError::EvolverError(e.to_string())),
+        Ok(_) => {
+            let base = record
+                .base_commit
+                .clone()
+                .unwrap_or_else(|| "main".to_string());
+            count_commits_ahead(&worktree_dir, &base)
+        }
+    };
+
+    let fail_reason = match (commit_res, ahead_res) {
+        (Err(e), _) => Some(format!("Could not commit worktree changes: {}", e)),
+        (_, Err(e)) => Some(format!("Could not determine worktree commit count: {}", e)),
+        (Ok(_), Ok(0)) => Some(
+            "Job produced no changes: the worktree branch has 0 commits ahead of its base, so the \
+             verification gates would only have re-measured unchanged code. No update staged."
+                .to_string(),
+        ),
+        (Ok(committed), Ok(n)) => {
+            record.logs.push(format!(
+                "Worktree committed: {} ({} commit(s) ahead of base).",
+                if committed { "yes" } else { "already committed" },
+                n
+            ));
+            None
+        }
+    };
+
+    if let Some(reason) = fail_reason {
+        record.status = JobStatus::FailedTest { error: reason.clone() };
+        record.current_tool = None;
+        record.updated_at = Utc::now();
+        record.logs.push(format!("Job rejected: {}", reason));
+        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = event_tx.send(EvolverEvent::JobCompleted {
+            job_id: job_id.clone(),
+            task: task.clone(),
+            status: record.status.clone(),
+            summary: reason,
+        });
+        cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
+        return Ok(());
+    }
+
     // 3. Dual-gate Gate 1: cargo test --workspace inside worktree
     let _ = event_tx.send(EvolverEvent::JobProgress {
         job_id: job_id.clone(),
@@ -896,11 +1067,28 @@ async fn run_engineer_job(
         return Ok(());
     }
 
-    let binary_path = if target_dir.join("release/luna").exists() {
-        target_dir.join("release/luna")
-    } else {
-        worktree_dir.join("target/release/luna")
-    };
+    let binary_path = worktree_dir.join("target").join("release").join("luna");
+    if !binary_path.exists() {
+        let reason = format!(
+            "Release binary missing at {} after a successful `cargo build --release` in the worktree. \
+             Refusing to stage an update whose artifact does not exist.",
+            binary_path.display()
+        );
+        record.status = JobStatus::FailedTest { error: reason.clone() };
+        record.current_tool = None;
+        record.updated_at = Utc::now();
+        record.logs.push(reason.clone());
+        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
+        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = event_tx.send(EvolverEvent::JobCompleted {
+            job_id: job_id.clone(),
+            task: task.clone(),
+            status: record.status.clone(),
+            summary: reason,
+        });
+        cleanup_worktree(&repo_root, &worktree_dir, Some(&branch));
+        return Ok(());
+    }
     let pending = PendingUpdate {
         job_id: record.id.clone(),
         task: record.task.clone(),
@@ -952,7 +1140,19 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
 
     info!("Applying pending update for job {}", pending.job_id);
 
-    // 1. Merge branch into main
+    // 1. Validate the artifact before touching main, so a stale pending record
+    // can never merge a branch whose binary is already gone.
+    let target_binary = repo_root.join("target/release/luna");
+    let src_binary = PathBuf::from(&pending.binary_path);
+    if !src_binary.exists() {
+        let _ = fs::remove_file(&pending_file);
+        return Err(HarnessError::EvolverError(format!(
+            "Pending update references a missing worktree binary at {}; discarding it without merging.",
+            src_binary.display()
+        )));
+    }
+
+    // 2. Merge branch into main
     let merge_out = Command::new("git")
         .args([
             "-C",
@@ -966,23 +1166,29 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
 
     if !merge_out.status.success() {
         let err = String::from_utf8_lossy(&merge_out.stderr).to_string();
+        let already = err.contains("Already up to date");
         return Err(HarnessError::EvolverError(format!(
-            "Failed to merge branch {} into main: {}",
-            pending.branch, err
+            "Failed to merge branch {} into main{}: {}",
+            pending.branch,
+            if already { " (branch carries no commits)" } else { "" },
+            err
         )));
     }
 
-    // 2. Replace release binary
-    let target_binary = repo_root.join("target/release/luna");
-    let src_binary = PathBuf::from(&pending.binary_path);
-    if src_binary.exists() {
-        let _ = fs::copy(&src_binary, &target_binary);
-    }
+    // 3. Replace release binary
+    fs::copy(&src_binary, &target_binary).map_err(|e| {
+        HarnessError::Io(format!(
+            "Failed to install {} -> {}: {}",
+            src_binary.display(),
+            target_binary.display(),
+            e
+        ))
+    })?;
 
-    // 3. Clean up worktree and branch
+    // 4. Clean up worktree and branch
     cleanup_worktree(repo_root, Path::new(&pending.worktree_dir), Some(&pending.branch));
 
-    // 4. Delete pending update marker
+    // 5. Delete pending update marker
     let _ = fs::remove_file(&pending_file);
 
     Ok(Some(format!(
@@ -1138,5 +1344,97 @@ mod tests {
         std::env::remove_var("LUNA_HARNESS_REPO");
 
         assert_eq!(discovered, repo_path);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git binary must be runnable for these tests");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q"]);
+        git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Engine Tests"]);
+    }
+
+    /// Regression: engineer builds must never write into the shared repo target/.
+    #[test]
+    fn worktree_target_dir_is_isolated_from_shared_repo_target() {
+        let repo = PathBuf::from("/home/janelle/Downloads/rust-agent-harness");
+        let worktree = repo.join(".worktrees/eng_job_deadbeef");
+        let isolated = worktree_target_dir(&worktree);
+
+        assert_eq!(isolated, worktree.join("target"));
+        assert!(isolated.starts_with(&worktree));
+        assert_ne!(isolated, repo.join("target"));
+        assert!(!isolated.starts_with(repo.join("target")));
+    }
+
+    /// Regression: deleting a worktree purges its artifacts and leaves the
+    /// main repo's target/ intact.
+    #[test]
+    fn cleanup_worktree_purges_own_target_and_leaves_shared_target_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let shared = repo.join("target/debug");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("luna"), b"shared").unwrap();
+
+        let worktree = repo.join(".worktrees/eng_job_x");
+        let own_target = worktree_target_dir(&worktree);
+        fs::create_dir_all(&own_target).unwrap();
+        fs::write(own_target.join("luna"), b"worktree").unwrap();
+
+        cleanup_worktree(&repo, &worktree, Some("eng/job_x"));
+
+        assert!(!worktree.exists(), "worktree dir must be removed");
+        assert!(!own_target.exists(), "worktree target/ must be purged");
+        assert!(
+            shared.join("luna").exists(),
+            "the shared repo target/ must never be touched by worktree cleanup"
+        );
+    }
+
+    /// Regression: a job that changed nothing must show 0 commits ahead, which is
+    /// exactly what the false-success jobs reported as "dual-gate passed".
+    #[test]
+    fn commit_gate_distinguishes_noop_jobs_from_real_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        fs::write(repo.join("file.txt"), "v1").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let base = head_commit(&repo).unwrap();
+
+        // Clean tree: no commit created, nothing ahead of base.
+        assert!(
+            !commit_worktree_changes(&repo, "eng(job_x): noop").unwrap(),
+            "a clean worktree must not produce a commit"
+        );
+        assert_eq!(
+            count_commits_ahead(&repo, &base).unwrap(),
+            0,
+            "a no-op job must be detected as 0 commits ahead"
+        );
+
+        // Real work: one commit, one ahead of base.
+        fs::write(repo.join("file.txt"), "v2").unwrap();
+        assert!(
+            commit_worktree_changes(&repo, "eng(job_x): fix").unwrap(),
+            "a dirty worktree must be committed"
+        );
+        assert_eq!(count_commits_ahead(&repo, &base).unwrap(), 1);
     }
 }

@@ -61,6 +61,30 @@ impl SqliteNotesEngine {
     }
 }
 
+pub fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in text.trim().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if c.is_whitespace() || c == '-' || c == '_' || c == '.' || c == '/' {
+            if !slug.is_empty() && !prev_dash {
+                slug.push('-');
+                prev_dash = true;
+            }
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "note".to_string()
+    } else {
+        slug
+    }
+}
+
 #[async_trait]
 impl NotesEngine for SqliteNotesEngine {
     async fn save_note(
@@ -69,12 +93,27 @@ impl NotesEngine for SqliteNotesEngine {
         content: &str,
         tags: &[String],
     ) -> Result<Note, HarnessError> {
-        let id = format!("note_{}", uuid::Uuid::new_v4());
+        let slug = slugify(title);
         let summary_pointer = PointerDistiller::distill(title, content);
         let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
         let now = Utc::now();
 
         let conn = self.conn.lock().await;
+        let id = {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM notes WHERE id = ?1 LIMIT 1",
+                    params![slug],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if exists {
+                format!("{}-{}", slug, &uuid::Uuid::new_v4().to_string()[..4])
+            } else {
+                slug
+            }
+        };
+
         conn.execute(
             "INSERT INTO notes (id, title, content, summary_pointer, tags, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -275,7 +314,7 @@ impl NotesEngine for SqliteNotesEngine {
                 new_pointer,
                 tags_json,
                 now.to_rfc3339(),
-                id
+                &current.id
             ],
         )
         .map_err(|e| HarnessError::NotesError(e.to_string()))?;

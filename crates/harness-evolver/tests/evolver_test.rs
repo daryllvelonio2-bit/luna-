@@ -67,6 +67,7 @@ async fn test_job_lifecycle_and_pending_update() {
         current_tool: None,
         modified_files: Vec::new(),
         summary: None,
+        base_commit: None,
     };
 
     let job_file = jobs_temp.path().join(format!("{}.json", job_id));
@@ -115,6 +116,7 @@ async fn test_check_improvement_tool_native_progress_reading() {
         current_tool: Some("cargo check --workspace".to_string()),
         modified_files: vec!["crates/harness-core/src/parser.rs".to_string()],
         summary: None,
+        base_commit: None,
     };
 
     let job_file = jobs_temp.path().join(format!("{}.json", job_id));

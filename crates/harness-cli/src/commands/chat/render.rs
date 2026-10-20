@@ -512,6 +512,28 @@ fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
     None
 }
 
+fn lookup_note_title_from_db(id: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let db_path = std::path::PathBuf::from(home).join(".luna").join("notes.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare("SELECT title FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE LIMIT 1")
+        .ok()?;
+    let mut rows = stmt.query([id]).ok()?;
+    if let Ok(Some(row)) = rows.next() {
+        let title: String = row.get(0).ok()?;
+        return Some(title);
+    }
+    None
+}
+
 fn resolve_memory_name(arguments: &serde_json::Value) -> String {
     let text = |key: &str| {
         arguments
@@ -783,12 +805,13 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
+                let display_title = lookup_note_title_from_db(target).unwrap_or_else(|| target.to_string());
                 let action = match name {
                     "update_note" => suffix("(update)".to_string()),
                     "delete_note" => suffix("(delete)".to_string()),
                     _ => String::new(),
                 };
-                return format!("{} {} {}{}", glyph, verb_col(verb), quoted(target), action);
+                return format!("{} {} {}{}", glyph, verb_col(verb), quoted(&display_title), action);
             }
         }
         "inspect_harness_source" => {
@@ -927,21 +950,24 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 .target
                 .as_deref()
                 .or_else(|| text_arg("id"))
+                .or_else(|| text_arg("title"))
                 .unwrap_or("note");
-            let short_id = if id.len() > 16 && id.starts_with("note_") {
-                format!("{}…", &id[..13])
-            } else {
-                id.to_string()
-            };
+            let display_name = lookup_note_title_from_db(id).unwrap_or_else(|| {
+                if id.len() > 16 && id.starts_with("note_") {
+                    format!("{}…", &id[..13])
+                } else {
+                    id.to_string()
+                }
+            });
             let action = match request.tool.as_str() {
                 "update_note" => " (update)",
                 "delete_note" => " (delete)",
                 _ => "",
             };
             format!(
-                "{} {}{}",
+                "{} \"{}\"{}",
                 "note".bold(),
-                short_id.cyan().bold(),
+                display_name.cyan().bold(),
                 action.dimmed()
             )
         }

@@ -296,7 +296,7 @@ impl MemoryEngine for SqliteMemoryEngine {
             subject: "note".to_string(),
             predicate: format!("doc_{}", note_id),
             object: pointer.to_string(),
-            raw_content: format!("Note \"{}\" (id: {})", pointer, note_id),
+            raw_content: format!("Note: \"{}\"", pointer),
             category: MemoryCategory::NotePointer,
             confidence: 1.0,
             created_at: Utc::now(),
@@ -315,11 +315,25 @@ impl MemoryEngine for SqliteMemoryEngine {
         let mut lines = Vec::new();
         for m in memories {
             if m.category == MemoryCategory::NotePointer {
-                lines.push(format!("- [Note] {}", m.raw_content));
+                let clean_content = if let Some(idx) = m.raw_content.find(" (id: note_") {
+                    m.raw_content[..idx].to_string()
+                } else {
+                    m.raw_content.clone()
+                };
+                lines.push(format!("- [Note] {}", clean_content));
             } else {
+                let name = format!("{}.{}", m.subject, m.predicate);
+                let display_cat = match m.category {
+                    MemoryCategory::UserProfile => "User Profile",
+                    MemoryCategory::CodePattern => "Code Pattern",
+                    MemoryCategory::WorkflowRule => "Workflow Rule",
+                    MemoryCategory::HarnessImprovement => "Improvement",
+                    MemoryCategory::Fact => "Fact",
+                    MemoryCategory::NotePointer => "Note",
+                };
                 lines.push(format!(
-                    "- [{}] {}: {} (ID: {})",
-                    m.category, m.subject, m.raw_content, m.id
+                    "- [{}] {}: {}",
+                    display_cat, name, m.object
                 ));
             }
         }

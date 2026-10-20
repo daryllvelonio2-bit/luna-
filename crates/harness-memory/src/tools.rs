@@ -82,7 +82,25 @@ impl Tool for SaveMemoryTool {
             _ => MemoryCategory::Fact,
         };
 
-        let id = format!("mem_{}", uuid::Uuid::new_v4());
+        let s_sub = subject
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string();
+        let s_pred = predicate
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string();
+        let id = if !s_sub.is_empty() && !s_pred.is_empty() {
+            format!("{}.{}", s_sub, s_pred)
+        } else if !s_sub.is_empty() {
+            s_sub
+        } else {
+            format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8])
+        };
         let raw_content = format!("{} {} {}", subject, predicate, object);
 
         let record = MemoryRecord {
@@ -184,7 +202,25 @@ impl Tool for UpdateMemoryTool {
             _ => MemoryCategory::Fact,
         };
 
-        let new_id = format!("mem_{}", uuid::Uuid::new_v4());
+        let s_sub = subject
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string();
+        let s_pred = predicate
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string();
+        let new_id = if !s_sub.is_empty() && !s_pred.is_empty() {
+            format!("{}.{}", s_sub, s_pred)
+        } else if !s_sub.is_empty() {
+            s_sub
+        } else {
+            format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8])
+        };
         let raw_content = format!("{} {} {}", subject, predicate, object);
 
         let record = MemoryRecord {
