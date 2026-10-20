@@ -833,6 +833,120 @@ async fn test_background_task_queue_and_process_tool() {
     assert!(poll_res.content.contains("done bg"));
 }
 
+/// Regression: `terminal` and `process` registered through `register_core_tools_with_sudo`
+/// must share ONE `BackgroundTaskQueue`.
+///
+/// The bug: each `match` arm built its own queue, so `terminal(background=true)` returned a
+/// `job_id` that `process poll` could not find ("Background job 'x' not found"). A single spawn/
+/// list/poll underneath one shared queue is what the host wiring now depends on.
+#[tokio::test]
+async fn test_registry_wired_terminal_background_job_is_pollable() {
+    let tmp = tempdir().unwrap();
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.jobs_dir = tmp.path().join("jobs");
+    config.tools.enabled = vec!["terminal".to_string(), "process".to_string()];
+
+    // What the host (chat.rs) now does: create the queue once, hand it to registration, and
+    // keep a handle for `/jobs` and the task viewer.
+    let host_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
+        config.paths.jobs_dir.clone(),
+    ));
+
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+    let shared = harness_core::tools::register_core_tools_shared_queue(
+        &reg_dyn,
+        &config,
+        ReadCache::new(),
+        None,
+        None,
+        host_queue.clone(),
+    )
+    .await
+    .expect("core tools register");
+
+    // Both tools must be present, i.e. registration did not drop one of them.
+    let names: Vec<String> = reg_dyn
+        .list_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.contains(&"terminal".to_string()), "terminal missing: {:?}", names);
+    assert!(names.contains(&"process".to_string()), "process missing: {:?}", names);
+
+    // Spawn through the queue the host owns — if `terminal` had built its own queue, this job
+    // would be invisible to anything else holding `host_queue`.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let term = TerminalTool::new(tmp.path().to_path_buf(), 5, 50_000)
+        .with_background_queue(shared.clone());
+    let spawn = term
+        .execute(
+            "c_spawn",
+            &json!({ "command": "echo 'bg via registry'; sleep 0.1; echo 'finished'", "background": true }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(!spawn.is_error, "spawn failed: {}", spawn.content);
+    let val: serde_json::Value = serde_json::from_str(&spawn.content).unwrap();
+    let job_id = val["job_id"].as_str().unwrap().to_string();
+
+    // The host-visible queue must see the job immediately — the old bug made this invisible.
+    assert!(
+        host_queue.list().iter().any(|j| j.id == job_id),
+        "host queue cannot see the job terminal spawned into the shared queue"
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    let poll_re = host_queue
+        .list()
+        .into_iter()
+        .find(|j| j.id == job_id)
+        .expect("job still present");
+    assert!(
+        poll_re.status.starts_with("completed"),
+        "job did not complete: {}",
+        poll_re.status
+    );
+}
+
+/// Regression: passing an existing queue in must not create a second one — the returned value
+/// is the very same `Arc`, so hosts and tools can never drift apart.
+#[tokio::test]
+async fn test_register_core_tools_shared_queue_is_not_copied() {
+    let tmp = tempdir().unwrap();
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.jobs_dir = tmp.path().join("jobs");
+    config.tools.enabled = vec!["terminal".to_string(), "process".to_string()];
+
+    let host_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
+        config.paths.jobs_dir.clone(),
+    ));
+
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
+    let returned = harness_core::tools::register_core_tools_shared_queue(
+        &reg_dyn,
+        &config,
+        ReadCache::new(),
+        None,
+        None,
+        host_queue.clone(),
+    )
+    .await
+    .expect("core tools register with shared queue");
+
+    assert!(
+        Arc::ptr_eq(&host_queue, &returned),
+        "registration must reuse the caller's queue, not allocate a second one"
+    );
+}
+
 #[tokio::test]
 async fn test_delegate_task_tool() {
     let tmp = tempfile::tempdir().unwrap();

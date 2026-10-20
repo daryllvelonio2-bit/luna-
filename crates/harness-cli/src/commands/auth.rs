@@ -57,11 +57,22 @@ pub enum AuthCommand {
         #[command(subcommand)]
         subcommand: AntigravitySubcommand,
     },
+    /// Manage OpenCode credentials
+    Opencode {
+        #[command(subcommand)]
+        subcommand: OpencodeSubcommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum AntigravitySubcommand {
     /// Copy logged-in Antigravity credentials from system/Shiina into Luna harness
+    Copy,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OpencodeSubcommand {
+    /// Copy logged-in OpenCode credentials from system/Shiina into Luna harness
     Copy,
 }
 
@@ -221,6 +232,29 @@ pub async fn handle_auth_command(
                 println!("  Set as priority: {}", "yes".green());
             }
         },
+        AuthCommand::Opencode { subcommand } => match subcommand {
+            OpencodeSubcommand::Copy => {
+                let detected = harness_providers::detect_opencode_credentials()?;
+                println!(
+                    "{} Found {} OpenCode credential(s) on system:",
+                    "✔".green().bold(),
+                    detected.len()
+                );
+                for cred in detected {
+                    let id = cred_manager
+                        .add_credential(&cred.provider, &cred.label, &cred.api_key, true)
+                        .await?;
+                    println!(
+                        "  {} Registered credential for provider '{}' ({})",
+                        "✔".green().bold(),
+                        cred.provider.cyan().bold(),
+                        cred.label.bold()
+                    );
+                    println!("    Credential ID:   {}", id);
+                    println!("    Set as priority: {}", "yes".green());
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -238,6 +272,7 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
         "Reset cooldowns for a provider",
         "Set rotation strategy for a provider",
         "Copy Antigravity credentials (from logged-in session)",
+        "Copy OpenCode credentials (from OpenCode CLI / Shiina)",
         "Exit",
     ];
 
@@ -247,7 +282,7 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
     }
     println!();
 
-    let selection = match Input::<String>::new().with_prompt("Choice [1-6]").interact_text() {
+    let selection = match Input::<String>::new().with_prompt("Choice [1-7]").interact_text() {
         Ok(s) => s.trim().to_string(),
         Err(_) => return Ok(()),
     };
@@ -261,6 +296,15 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
             handle_auth_command(
                 AuthCommand::Antigravity {
                     subcommand: AntigravitySubcommand::Copy,
+                },
+                cred_manager,
+            )
+            .await?;
+        }
+        "6" => {
+            handle_auth_command(
+                AuthCommand::Opencode {
+                    subcommand: OpencodeSubcommand::Copy,
                 },
                 cred_manager,
             )

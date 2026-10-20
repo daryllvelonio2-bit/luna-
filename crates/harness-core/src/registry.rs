@@ -28,6 +28,12 @@ impl DefaultToolRegistry {
         let mut list = self.middlewares.write().await;
         list.push(middleware);
     }
+
+    /// Retrieve a registered tool by name
+    pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        let map = self.tools.read().await;
+        map.get(name).cloned()
+    }
 }
 
 #[async_trait]

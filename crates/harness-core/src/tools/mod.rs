@@ -24,17 +24,52 @@ pub async fn register_core_tools(
     config: &Config,
     read_cache: ReadCache,
 ) -> Result<(), HarnessError> {
-    register_core_tools_with_sudo(registry, config, read_cache, None, None).await
+    register_core_tools_with_sudo(registry, config, read_cache, None, None)
+        .await
+        .map(|_| ())
 }
 
 /// Registers the filesystem and shell tools with optional session sudo caching and prompting.
+///
+/// The `terminal` and `process` tools MUST share one [`BackgroundTaskQueue`]: `terminal` spawns
+/// background jobs into it and `process` polls it. Constructing a queue per tool makes the two
+/// disagree — `terminal(background=true)` would report a `job_id` that `process poll` cannot find.
+/// The queue that was used is returned so hosts (e.g. `/jobs`, the task viewer) observe the same
+/// registry the tools read.
 pub async fn register_core_tools_with_sudo(
     registry: &Arc<dyn ToolRegistry>,
     config: &Config,
     read_cache: ReadCache,
     sudo_cache: Option<Arc<Mutex<Option<String>>>>,
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
-) -> Result<(), HarnessError> {
+) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
+    // One queue shared by `terminal` (producer) and `process` (consumer) — see the doc comment.
+    let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(
+        config.paths.jobs_dir.clone(),
+    ));
+    register_core_tools_shared_queue(
+        registry,
+        config,
+        read_cache,
+        sudo_cache,
+        sudo_prompter,
+        bg_queue,
+    )
+    .await
+}
+
+/// Registers the filesystem and shell tools into an existing [`BackgroundTaskQueue`].
+///
+/// Same contract as [`register_core_tools_with_sudo`]; the caller supplies the queue the rest of
+/// the host already holds (so `/jobs` and the task viewer see the exact registry the tools use).
+pub async fn register_core_tools_shared_queue(
+    registry: &Arc<dyn ToolRegistry>,
+    config: &Config,
+    read_cache: ReadCache,
+    sudo_cache: Option<Arc<Mutex<Option<String>>>>,
+    sudo_prompter: Option<Arc<dyn SudoPrompter>>,
+    bg_queue: Arc<crate::tasks::BackgroundTaskQueue>,
+) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
     let ws = config.paths.workspace_root.clone();
 
     for tool_name in &config.tools.enabled {
@@ -74,13 +109,12 @@ pub async fn register_core_tools_with_sudo(
                     .await?;
             }
             "terminal" => {
-                let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone()));
                 let mut term = TerminalTool::new(
                     ws.clone(),
                     config.tools.terminal_timeout_secs,
                     config.tools.terminal_output_max_bytes,
                 )
-                .with_background_queue(bg_queue)
+                .with_background_queue(bg_queue.clone())
                 .with_prefix(config.tools.terminal_prefix.clone())
                 .with_rtk_rewrite(config.tools.rtk_rewrite);
 
@@ -93,12 +127,11 @@ pub async fn register_core_tools_with_sudo(
                 registry.register(Arc::new(term)).await?;
             }
             "process" => {
-                let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone()));
-                registry.register(Arc::new(ProcessTool::new(bg_queue))).await?;
+                registry.register(Arc::new(ProcessTool::new(bg_queue.clone()))).await?;
             }
             _ => {}
         }
     }
 
-    Ok(())
+    Ok(bg_queue)
 }

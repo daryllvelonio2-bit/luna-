@@ -252,10 +252,6 @@ pub async fn run_interactive_chat(
     let bg_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
         config.paths.jobs_dir.clone(),
     ));
-    registry
-        .register(Arc::new(harness_core::tools::ProcessTool::new(bg_queue.clone())))
-        .await?;
-
     let delegate_tool = harness_core::tools::DelegateTaskTool::new(
         provider.clone(),
         memory.clone(),
@@ -274,12 +270,16 @@ pub async fn run_interactive_chat(
 
     let read_cache = harness_core::tools::ReadCache::new();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-    harness_core::tools::register_core_tools_with_sudo(
+    // `terminal` and `process` must observe the same background-job registry as `/jobs` and the
+    // task viewer — hand the registration the queue this host already holds instead of letting it
+    // create a second one that only the tools would see.
+    harness_core::tools::register_core_tools_shared_queue(
         &reg_dyn,
         &config,
         read_cache,
         Some(sudo_cache),
         Some(sudo_prompter),
+        bg_queue.clone(),
     )
     .await?;
 
