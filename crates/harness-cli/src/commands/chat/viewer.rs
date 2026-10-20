@@ -1,7 +1,10 @@
 use std::io::{self, Write};
 use std::time::Duration;
 use colored::Colorize;
-use dialoguer::console::{Key, Term};
+use crossterm::cursor::{Hide, Show};
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use dialoguer::console::Key;
 use tokio::sync::mpsc;
 
 use harness_core::tasks::{BackgroundTaskQueue, JobSummary};
@@ -68,6 +71,8 @@ pub async fn show_background_task_viewer(
         return;
     }
 
+    let _ = execute!(io::stdout(), EnterAlternateScreen, Hide);
+
     let mut selected_idx: usize = 0;
     // Prefer selecting an actively running task if available
     if let Some(pos) = tasks.iter().position(|t| t.is_running()) {
@@ -80,12 +85,12 @@ pub async fn show_background_task_viewer(
     let mut refresh_interval = tokio::time::interval(Duration::from_millis(500));
 
     let render = |task: &TaskEntry, all_tasks: &[TaskEntry], cur_idx: usize, offset: usize| -> (usize, usize) {
-        crate::commands::clear_screen();
+        print!("\x1b[H\x1b[2J");
         let width = super::ui::get_terminal_width().max(40);
-        let (_, term_height) = Term::stdout().size();
-        let term_height = (term_height as usize).max(12);
+        let term_height = super::ui::get_terminal_height().max(10);
 
         let divider = "─".repeat(width).dimmed().to_string();
+        let mut header_lines = Vec::new();
 
         // 1. Top bar: Summary & Controls
         let running_count = all_tasks.iter().filter(|t| t.is_running()).count();
@@ -99,8 +104,8 @@ pub async fn show_background_task_viewer(
         let left_len = dialoguer::console::strip_ansi_codes(&header_left).chars().count();
         let right_len = dialoguer::console::strip_ansi_codes(&header_right).chars().count();
         let spaces = width.saturating_sub(left_len + right_len);
-        println!("  {}{}{}", header_left, " ".repeat(spaces.max(1)), header_right);
-        println!("{}", divider);
+        header_lines.push(format!("  {}{}{}", header_left, " ".repeat(spaces.max(1)), header_right));
+        header_lines.push(divider.clone());
 
         // 2. Task switcher tabs (if multiple tasks)
         if all_tasks.len() > 1 {
@@ -119,37 +124,35 @@ pub async fn show_background_task_viewer(
                 tabs_line.push_str("   ");
             }
             let truncated_tabs = dialoguer::console::truncate_str(&tabs_line, width - 2, "…");
-            println!("{}", truncated_tabs);
-            println!("{}", divider);
+            header_lines.push(truncated_tabs.to_string());
+            header_lines.push(divider.clone());
         }
 
         // 3. Task Metadata Card
-        let mut header_lines_count = if all_tasks.len() > 1 { 9 } else { 7 };
         match task {
             TaskEntry::Evolver(rec) => {
                 let status_badge = format_evolver_status(&rec.status);
                 let current_step = rec.current_tool.as_deref().unwrap_or("idle");
-                println!("  {} {}", "Task:".bold(), rec.task);
-                println!("  {} {}   {} {}", "Status:".bold(), status_badge, "Step:".bold(), current_step.cyan());
-                println!("  {} {}   {} {}", "Branch:".dimmed(), rec.branch.dimmed(), "Worktree:".dimmed(), rec.worktree_dir.dimmed());
+                header_lines.push(format!("  {} {}", "Task:".bold(), dialoguer::console::truncate_str(&rec.task, width.saturating_sub(10), "…")));
+                header_lines.push(format!("  {} {}   {} {}", "Status:".bold(), status_badge, "Step:".bold(), current_step.cyan()));
+                header_lines.push(format!("  {} {}   {} {}", "Branch:".dimmed(), rec.branch.dimmed(), "Worktree:".dimmed(), rec.worktree_dir.dimmed()));
                 if !rec.modified_files.is_empty() {
-                    header_lines_count += 1;
-                    println!("  {} {}", "Changes:".bold(), rec.modified_files.join(", ").dimmed());
+                    header_lines.push(format!("  {} {}", "Changes:".bold(), dialoguer::console::truncate_str(&rec.modified_files.join(", "), width.saturating_sub(12), "…").dimmed()));
                 }
                 if let Some(ref sum) = rec.summary {
-                    header_lines_count += 1;
-                    println!("  {} {}", "Summary:".green().bold(), sum);
+                    let first_line = sum.lines().next().unwrap_or(sum);
+                    header_lines.push(format!("  {} {}", "Summary:".green().bold(), dialoguer::console::truncate_str(first_line, width.saturating_sub(12), "…")));
                 }
             }
             TaskEntry::Process(proc) => {
                 let status_badge = format_process_status(&proc.status);
-                println!("  {} {}", "Command:".bold(), proc.command.bold());
-                println!("  {} {}   {} {}", "Status:".bold(), status_badge, "Elapsed:".dimmed(), format!("{}s", proc.elapsed_secs).dimmed());
-                println!("  {} {}", "Workdir:".dimmed(), proc.workdir.dimmed());
-                println!("  {} {}", "Log:".dimmed(), proc.log_path.dimmed());
+                header_lines.push(format!("  {} {}", "Command:".bold(), dialoguer::console::truncate_str(&proc.command, width.saturating_sub(12), "…")));
+                header_lines.push(format!("  {} {}   {} {}", "Status:".bold(), status_badge, "Elapsed:".dimmed(), format!("{}s", proc.elapsed_secs).dimmed()));
+                header_lines.push(format!("  {} {}", "Workdir:".dimmed(), dialoguer::console::truncate_str(&proc.workdir, width.saturating_sub(12), "…")));
+                header_lines.push(format!("  {} {}", "Log:".dimmed(), dialoguer::console::truncate_str(&proc.log_path, width.saturating_sub(12), "…")));
             }
         }
-        println!("{}", divider);
+        header_lines.push(divider.clone());
 
         // 4. Output / Logs Content
         let mut content_lines = Vec::new();
@@ -197,11 +200,15 @@ pub async fn show_background_task_viewer(
         }
 
         let footer_lines_count = 2;
-        let view_height = term_height.saturating_sub(header_lines_count + footer_lines_count).max(4);
+        let view_height = term_height.saturating_sub(header_lines.len() + footer_lines_count).max(3);
 
         let total_lines = content_lines.len();
         let max_offset = total_lines.saturating_sub(view_height);
         let eff_offset = offset.min(max_offset);
+
+        for h in &header_lines {
+            println!("{}", h);
+        }
 
         let visible = &content_lines[eff_offset..total_lines.min(eff_offset + view_height)];
         for line in visible {
@@ -216,11 +223,11 @@ pub async fn show_background_task_viewer(
         println!("{}", divider);
         let pos_str = format!(
             "Lines {}-{} of {} • [↑/↓ j/k: scroll • Tab: switch task • x: kill • q: exit]",
-            eff_offset + 1,
+            if total_lines == 0 { 0 } else { eff_offset + 1 },
             (eff_offset + visible.len()).min(total_lines),
             total_lines
         );
-        println!("  {}", pos_str.dimmed());
+        print!("  {}", pos_str.dimmed());
         let _ = io::stdout().flush();
 
         (eff_offset, max_offset)
@@ -394,7 +401,7 @@ pub async fn show_background_task_viewer(
         }
     }
 
-    crate::commands::clear_screen();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
     render_all_turns(turns, process_expanded, super::ui::get_terminal_width());
     if let Some(ref err) = ui.transient_error() {
         println!();

@@ -64,6 +64,14 @@ pub fn get_terminal_width() -> usize {
         .unwrap_or(80)
 }
 
+pub fn get_terminal_height() -> usize {
+    Term::stdout()
+        .size_checked()
+        .map(|(h, _)| h as usize)
+        .filter(|&h| h > 0)
+        .unwrap_or(24)
+}
+
 /// A tool call currently in flight, as far as the animation is concerned.
 #[derive(Clone)]
 struct Activity {
