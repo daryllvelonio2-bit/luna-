@@ -156,6 +156,9 @@ pub async fn run_voice_loop(
             registry,
             agent_cfg,
         )
+        .with_permissions(harness_core::PermissionEngine::validate(
+            config.tools.permissions.clone(),
+        )?)
         .with_approval(build_approver(&config), approval_settings(&config)),
     );
 

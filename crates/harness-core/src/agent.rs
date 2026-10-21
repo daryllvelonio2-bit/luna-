@@ -10,6 +10,7 @@ use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Appro
 use crate::error::HarnessError;
 use crate::checkpoint::CheckpointController;
 use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
+use crate::permission::{PermissionEngine, RuleVerdict};
 use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
 use crate::traits::*;
 use crate::types::*;
@@ -153,6 +154,7 @@ where
     registry: Arc<R>,
     config: AgentConfig,
     approver: Arc<dyn Approver>,
+    permissions: PermissionEngine,
     approval: ApprovalSettings,
     compaction: Option<CompactionSetup>,
     session: Option<SessionBinding>,
@@ -210,6 +212,7 @@ where
             // Fail closed: an agent that was never given an approver denies mutating calls rather
             // than running them ungated. The CLI injects the real one from `tools.approval`.
             approver: Arc::new(DenyAll),
+            permissions: PermissionEngine::default(),
             approval: ApprovalSettings::default(),
             compaction: None,
             session: None,
@@ -274,6 +277,17 @@ where
     /// Rebind this agent to a new or different session.
     pub fn set_session(&mut self, binding: SessionBinding) {
         self.session = Some(binding);
+    }
+
+    /// Install the standing permission rules evaluated before the human gate.
+    pub fn with_permissions(mut self, permissions: PermissionEngine) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
+    /// Replace the rules at runtime (config reload, `/permissions`).
+    pub fn set_permissions(&mut self, permissions: PermissionEngine) {
+        self.permissions = permissions;
     }
 
     /// Swap the approver at runtime — the interactive chat's "approve all for this session"
@@ -489,11 +503,28 @@ where
         }
     }
 
-    /// Put a mutating call to the approver, inside `tools.approval_timeout_secs`. Every outcome
-    /// other than Run is a denial, including "nobody answered".
+    /// Decide what happens to a call, in one place: standing rules first, then the human gate.
+    ///
+    /// A rule can refuse (`deny`), force a prompt (`ask`), or skip the prompt (`allow`). Only a
+    /// call no rule matched is put through the tool-mutability default — which is why the rules
+    /// can quiet the forty `cargo test` prompts without being able to approve a `write_file` the
+    /// gate would have asked about.
     async fn gate_decision(&self, call: &ToolCall) -> GateOutcome {
-        if !self.needs_approval(call).await {
-            return GateOutcome::Run(None);
+        match self.permissions.evaluate(call) {
+            RuleVerdict::Deny(reason) => {
+                debug!(tool = %call.name, "denied by permission rule: {}", reason);
+                return GateOutcome::Denied(reason);
+            }
+            RuleVerdict::Allow => {
+                debug!(tool = %call.name, "allowed by permission rule");
+                return GateOutcome::Run(None);
+            }
+            RuleVerdict::Ask => {}
+            RuleVerdict::NoOpinion => {
+                if !self.needs_approval(call).await {
+                    return GateOutcome::Run(None);
+                }
+            }
         }
 
         let preview = self.registry.preview(call).await.unwrap_or_default();

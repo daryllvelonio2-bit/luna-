@@ -1,0 +1,24 @@
+# An allow rule lets a call through with no reviewer involved, and the write must actually land —
+# this is the case that would fail if rules only ever narrowed.
+case: permission-rule-allow
+prompt: Write the text allowed into the file allowed.txt.
+tools:
+  - eval_write_file
+permissions:
+  - action: allow
+    tool: eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "allowed.txt", content: "allowed" }
+  - answer: Wrote allowed.txt.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      error: false
+  final_answer_contains:
+    - allowed.txt
+  files:
+    - path: allowed.txt
+      exists: true
+      content_equals: allowed

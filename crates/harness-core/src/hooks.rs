@@ -583,35 +583,7 @@ fn matcher_allows(matcher: Option<&str>, tool: Option<&str>) -> bool {
         // A tool-scoped hook is meaningless for an event with no tool.
         return false;
     };
-    glob_match(pattern, tool)
-}
-
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    let (mut p, mut t) = (0usize, 0usize);
-    let (mut star, mut resume) = (None::<usize>, 0usize);
-
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some(p);
-            resume = t;
-            p += 1;
-        } else if let Some(star_index) = star {
-            p = star_index + 1;
-            resume += 1;
-            t = resume;
-        } else {
-            return false;
-        }
-    }
-    while p < pattern.len() && pattern[p] == '*' {
-        p += 1;
-    }
-    p == pattern.len()
+    crate::glob::glob_match(pattern, tool)
 }
 
 fn user_hooks_path() -> PathBuf {

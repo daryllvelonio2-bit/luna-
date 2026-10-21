@@ -264,6 +264,13 @@ async fn drive<P: ModelProvider + 'static>(
         }
     }
 
+    // The eval gate answers "allow" and lets the case's own `approval.deny` / `permissions`
+    // decide, so a failing case names the mechanism that refused the call rather than the default.
+    let permissions = match harness_core::PermissionEngine::validate(scenario.permissions.clone()) {
+        Ok(engine) => engine,
+        Err(error) => return Err((vec![], format!("permissions: {}", error))),
+    };
+
     let agent = Agent::new(
         provider,
         Arc::new(NoopMemory),
@@ -271,6 +278,11 @@ async fn drive<P: ModelProvider + 'static>(
         Arc::new(NoopEvolver),
         registry.clone(),
         AgentConfig::default(),
+    )
+    .with_permissions(permissions)
+    .with_approval(
+        Arc::new(harness_core::AllowAll),
+        harness_core::ApprovalSettings::default(),
     );
 
     let answer = match agent

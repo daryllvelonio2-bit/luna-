@@ -173,7 +173,23 @@ A hook receives the event as JSON on stdin and may answer with `{"decision":"den
 or `{"updatedInput":{…}}`; exit code `2` also refuses. Hooks can narrow what happens but never
 approve what the human gate would refuse. Full contract: [`docs/HOOKS.md`](docs/HOOKS.md).
 
-### 2.7 Checkpoints and `/rewind`
+### 2.7 Permission rules
+
+Standing policy evaluated before the human is asked, with **`deny` > `ask` > `allow`** precedence
+regardless of order, tool-name globs and argument globs (`!` inverts):
+
+```yaml
+tools:
+  permissions:
+    - { action: allow, tool: terminal, arguments: { command: "cargo *" } }
+    - { action: deny,  tool: terminal, arguments: { command: "*git push --force*" }, reason: never }
+    - { action: ask,   tool: "write_*" }
+```
+
+A rule decides *whether the human is asked*, never *what a tool can reach*; calls matched by no
+rule behave exactly as before. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
+
+### 2.8 Checkpoints and `/rewind`
 
 Every turn snapshots the files its `write_file`/`patch` calls are about to change, into
 `~/.luna/checkpoints/<session>/turn_000N/` (plain files, written during the turn). `/rewind` lists

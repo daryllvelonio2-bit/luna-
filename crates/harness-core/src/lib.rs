@@ -3,8 +3,10 @@ pub mod approval;
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod glob;
 pub mod hooks;
 pub mod ledger;
+pub mod permission;
 pub mod prompts;
 pub mod registry;
 pub mod session;
@@ -36,6 +38,7 @@ pub use hooks::{
     HookContext, HookEvent, HookOutcome, HookRunner, HookSpec, HookVerdict, DEFAULT_HOOK_TIMEOUT_SECS,
 };
 pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
+pub use permission::{PermissionEngine, PermissionRule, RuleAction, RuleVerdict};
 pub use registry::DefaultToolRegistry;
 pub use substrate::{LocalAgentSubstrate, MockSubstrate, Substrate, SubstrateOutcome};
 pub use surface::{

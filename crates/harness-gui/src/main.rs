@@ -1019,6 +1019,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     registry,
                     agent_cfg,
                 )
+                .with_permissions(
+                    // Startup already validated this section; if it is somehow invalid now, the
+                    // rules are dropped rather than half-applied, and the reason is on stderr.
+                    harness_core::PermissionEngine::validate(config.tools.permissions.clone())
+                        .map_err(|error| {
+                            eprintln!("tools.permissions ignored: {error}");
+                            error
+                        })
+                        .unwrap_or_default(),
+                )
                 .with_approval(
                     Arc::new(harness_core::approval::AllowAll),
                     harness_core::approval::ApprovalSettings::default(),

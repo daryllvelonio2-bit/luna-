@@ -203,6 +203,8 @@ pub struct ToolsSettings {
     pub rtk_rewrite: bool,
     /// Enabled tool names.
     pub enabled: Vec<String>,
+    /// Standing policy applied before the human gate: `deny` > `ask` > `allow`.
+    pub permissions: Vec<crate::permission::PermissionRule>,
 }
 
 impl Default for ToolsSettings {
@@ -216,6 +218,7 @@ impl Default for ToolsSettings {
             terminal_output_max_bytes: 50_000,
             terminal_prefix: None,
             rtk_rewrite: true,
+            permissions: Vec::new(),
             enabled: vec![
                 "read_file".to_string(),
                 "write_file".to_string(),

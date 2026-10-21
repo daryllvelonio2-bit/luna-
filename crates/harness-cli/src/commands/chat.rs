@@ -329,6 +329,9 @@ pub async fn run_interactive_chat(
         registry,
         agent_config.clone(),
     )
+    .with_permissions(harness_core::PermissionEngine::validate(
+        config.tools.permissions.clone(),
+    )?)
     .with_approval(approver, approval_settings(&config))
     .with_session(SessionBinding {
         store: store.clone(),

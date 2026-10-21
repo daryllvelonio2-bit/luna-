@@ -40,6 +40,10 @@ prompt: The user turn handed to the agent loop.     # required
 tools: [eval_write_file, eval_read_file]            # built-in eval tools to register (see below)
 approval:
   deny: [eval_write_file]        # calls a reviewer would refuse
+permissions:                     # optional standing rules (tools.permissions shape); a deny here
+  - action: deny                 # refuses before the registry is reached, so no call is observed
+    tool: eval_write_file
+    arguments: { path: "blocked*" }
 script:                          # OFFLINE ONLY: the canned model turns, in order
   - tool_calls:
       - name: eval_write_file

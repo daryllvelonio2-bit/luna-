@@ -306,6 +306,12 @@ impl Tool for DelegateTaskTool {
                     child_registry,
                     child_cfg,
                 )
+                // A subagent inherits the parent's standing rules: a `deny` the user wrote is
+                // not something delegation gets to walk around.
+                .with_permissions(
+                    crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
+                        .unwrap_or_default(),
+                )
                 .with_approval(Arc::new(AllowAll), ApprovalSettings::default());
 
                 if let Some(s) = store {

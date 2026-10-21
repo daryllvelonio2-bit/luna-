@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
+use harness_core::permission::PermissionRule;
 use harness_core::HarnessError;
 
 /// Tools the eval runner can install into a scenario's registry. A scenario may only name these:
@@ -32,6 +33,10 @@ pub struct Scenario {
     pub tools: Vec<String>,
     #[serde(default)]
     pub approval: ApprovalSpec,
+    /// Standing permission rules installed on the agent for this case (`tools.permissions` shape).
+    /// A case can therefore assert what a rule does, not just what a reviewer does.
+    #[serde(default)]
+    pub permissions: Vec<PermissionRule>,
     /// Canned model turns for the offline backend, in order. Ignored by `--live`.
     #[serde(default)]
     pub script: Vec<ScriptTurn>,
@@ -205,6 +210,18 @@ impl Scenario {
                 return Err(at(format!(
                     "case '{}': expectation names unknown tool '{}'",
                     self.case, call.name
+                )));
+            }
+        }
+        for rule in &self.permissions {
+            if !rule.tool.trim().is_empty()
+                && !BUILTIN_TOOLS.contains(&rule.tool.as_str())
+                && !rule.tool.contains('*')
+                && !rule.tool.contains('?')
+            {
+                return Err(at(format!(
+                    "case '{}': permissions rule names unknown tool '{}'",
+                    self.case, rule.tool
                 )));
             }
         }
