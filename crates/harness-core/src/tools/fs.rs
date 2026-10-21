@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use super::sandbox::Sandbox;
 use crate::approval::{unified_diff, ToolPreview};
 use crate::error::HarnessError;
 use crate::traits::Tool;
@@ -78,64 +79,12 @@ impl ReadCache {
     }
 }
 
-/// Resolves a user-supplied path relative to workspace_root and asserts it does not escape.
+/// Resolves a user-supplied path relative to `workspace_root` and refuses anything outside it.
+///
+/// Kept as a free function because the GUI and the shell tool resolve paths outside any tool
+/// struct; the policy itself lives in [`Sandbox`].
 pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, String> {
-    let expanded_str = crate::config::expand_tilde(user_path.trim());
-    let p = Path::new(&expanded_str);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        workspace_root.join(p)
-    };
-
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-
-    let is_scratch = |path: &Path| -> bool {
-        p.is_absolute()
-            && (path.starts_with("/tmp")
-                || path.starts_with("/var/tmp")
-                || path.starts_with(&std::env::temp_dir()))
-    };
-
-    if let Ok(canon) = resolved.canonicalize() {
-        if !canon.starts_with(&canonical_root) && !is_scratch(&canon) {
-            return Err(format!(
-                "Path escapes workspace root '{}': {}",
-                canonical_root.display(),
-                user_path
-            ));
-        }
-        return Ok(canon);
-    }
-
-    // For not-yet-existing targets, normalize path components
-    let mut normalized = PathBuf::new();
-    for comp in resolved.components() {
-        match comp {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            std::path::Component::RootDir => normalized.push("/"),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::Normal(c) => normalized.push(c),
-        }
-    }
-
-    if !normalized.starts_with(&canonical_root)
-        && !normalized.starts_with(workspace_root)
-        && !is_scratch(&normalized)
-    {
-        return Err(format!(
-            "Path escapes workspace root '{}': {}",
-            canonical_root.display(),
-            user_path
-        ));
-    }
-
-    Ok(normalized)
+    Sandbox::workspace(workspace_root.to_path_buf()).resolve(user_path)
 }
 
 /// The first `max_chars` bytes of `s`, never splitting a UTF-8 character.
@@ -154,8 +103,30 @@ fn char_safe_cut(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
+
+/// Opt-in extra reach for every filesystem tool: `paths.extra_roots`.
+///
+/// The default is the workspace and nothing else. An operator who wants `/tmp` (or a scratch
+/// volume) to be reachable says so in config; a model cannot widen this by asking nicely.
+macro_rules! sandboxed_tool {
+    ($tool:ty) => {
+        impl $tool {
+            pub fn with_extra_roots(mut self, extra_roots: Vec<PathBuf>) -> Self {
+                self.extra_roots = extra_roots;
+                self
+            }
+
+            fn sandbox(&self) -> Sandbox {
+                Sandbox::with_extra_roots(self.workspace_root.clone(), self.extra_roots.clone())
+            }
+        }
+    };
+}
+
 pub struct ReadFileTool {
     workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
     max_chars: usize,
     read_cache: ReadCache,
 }
@@ -164,6 +135,7 @@ impl ReadFileTool {
     pub fn new(workspace_root: PathBuf, max_chars: usize, read_cache: ReadCache) -> Self {
         Self {
             workspace_root,
+            extra_roots: Vec::new(),
             max_chars,
             read_cache,
         }
@@ -207,7 +179,7 @@ impl Tool for ReadFileTool {
             None => return Ok(ToolResult::error(call_id, "Missing required argument 'path'")),
         };
 
-        let resolved = match resolve_path(&self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -287,6 +259,8 @@ impl Tool for ReadFileTool {
 
 pub struct WriteFileTool {
     workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
     read_cache: ReadCache,
 }
 
@@ -294,6 +268,7 @@ impl WriteFileTool {
     pub fn new(workspace_root: PathBuf, read_cache: ReadCache) -> Self {
         Self {
             workspace_root,
+            extra_roots: Vec::new(),
             read_cache,
         }
     }
@@ -347,7 +322,7 @@ impl Tool for WriteFileTool {
             None => return Ok(ToolResult::error(call_id, "Missing required argument 'content'")),
         };
 
-        let resolved = match resolve_path(&self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -390,6 +365,8 @@ impl Tool for WriteFileTool {
 
 pub struct PatchTool {
     workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
     read_cache: ReadCache,
 }
 
@@ -397,6 +374,7 @@ impl PatchTool {
     pub fn new(workspace_root: PathBuf, read_cache: ReadCache) -> Self {
         Self {
             workspace_root,
+            extra_roots: Vec::new(),
             read_cache,
         }
     }
@@ -435,7 +413,7 @@ impl Tool for PatchTool {
         let new_str = args.get("new_string").and_then(|s| s.as_str())?;
         let replace_all = args.get("replace_all").and_then(|r| r.as_bool()).unwrap_or(false);
 
-        let resolved = resolve_path(&self.workspace_root, path).ok()?;
+        let resolved = self.sandbox().resolve(path).ok()?;
         let current = std::fs::read_to_string(&resolved).ok()?;
 
         let patched = if replace_all {
@@ -471,7 +449,7 @@ impl Tool for PatchTool {
         };
         let replace_all = args.get("replace_all").and_then(|r| r.as_bool()).unwrap_or(false);
 
-        let resolved = match resolve_path(&self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -531,11 +509,16 @@ impl Tool for PatchTool {
 
 pub struct SearchFilesTool {
     workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
 }
 
 impl SearchFilesTool {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            extra_roots: Vec::new(),
+        }
     }
 }
 
@@ -655,7 +638,7 @@ impl Tool for SearchFilesTool {
         let file_glob = args.get("file_glob").and_then(|g| g.as_str());
         let output_mode = args.get("output_mode").and_then(|m| m.as_str()).unwrap_or("content");
 
-        let resolved = match resolve_path(&self.workspace_root, search_path_str) {
+        let resolved = match self.sandbox().resolve(search_path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -865,11 +848,16 @@ const MAX_COLLECTED_ENTRIES: usize = 50_000;
 
 pub struct ListFilesTool {
     workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
 }
 
 impl ListFilesTool {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            extra_roots: Vec::new(),
+        }
     }
 }
 
@@ -912,7 +900,7 @@ impl Tool for ListFilesTool {
         let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let glob = args.get("glob").and_then(|g| g.as_str());
 
-        let resolved = match resolve_path(&self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -1135,3 +1123,9 @@ mod tests {
         }
     }
 }
+
+sandboxed_tool!(ReadFileTool);
+sandboxed_tool!(WriteFileTool);
+sandboxed_tool!(PatchTool);
+sandboxed_tool!(SearchFilesTool);
+sandboxed_tool!(ListFilesTool);

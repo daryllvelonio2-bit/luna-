@@ -1093,10 +1093,23 @@ async fn test_scratch_dir_allowed_and_patch_without_prior_read() {
     let cache = ReadCache::new();
     let cancel = CancellationToken::new();
 
-    // 1. Resolve path permits /tmp scratch files
+    // 1. A temp-dir path is *outside* the workspace, so it is refused unless the operator opted in
+    //    via `paths.extra_roots`. Sharing `/tmp` with every other process is not a default.
     let tmp_file = std::env::temp_dir().join("luna_scratch_test.txt");
-    let resolved = harness_core::tools::fs::resolve_path(&root, tmp_file.to_str().unwrap());
-    assert!(resolved.is_ok(), "Scratch path in temp dir must be permitted: {:?}", resolved);
+    let refused = harness_core::tools::fs::resolve_path(&root, tmp_file.to_str().unwrap());
+    assert!(
+        refused.is_err(),
+        "a temp path must not be reachable by default: {refused:?}"
+    );
+    let sandbox = harness_core::tools::sandbox::Sandbox::with_extra_roots(
+        root.clone(),
+        vec![std::env::temp_dir()],
+    );
+    let allowed = sandbox.resolve(tmp_file.to_str().unwrap());
+    assert!(
+        allowed.is_ok(),
+        "an opted-in root must be reachable: {allowed:?}"
+    );
 
     // 2. Patch file on disk without prior read succeeds when old_string uniquely matches
     let test_file = root.join("untracked_file.txt");

@@ -150,6 +150,11 @@ pub struct PathsSettings {
     pub checkpoints_dir: PathBuf,
     /// One row per turn: tokens, model, duration, cost. See `usage.rs`.
     pub usage_db: PathBuf,
+    /// Roots the filesystem and shell tools may reach *besides* `workspace_root`.
+    ///
+    /// Empty by default: the workspace is the sandbox. An operator adds e.g. `/tmp` or a scratch
+    /// volume here, and every tool resolves through the same list (`tools::sandbox::Sandbox`).
+    pub extra_roots: Vec<PathBuf>,
 }
 
 impl Default for PathsSettings {
@@ -166,6 +171,7 @@ impl Default for PathsSettings {
             skills_dir: luna.join("skills"),
             checkpoints_dir: luna.join("checkpoints"),
             usage_db: luna.join("usage.db"),
+            extra_roots: Vec::new(),
         }
     }
 }

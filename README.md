@@ -230,6 +230,14 @@ wildcards) over a small built-in table. Details: [`docs/USAGE.md`](docs/USAGE.md
 `luna hooks` prints what is *loaded*, not what the files say. Details:
 [`docs/HOOKS.md`](docs/HOOKS.md).
 
+### 2.12 The workspace is a boundary: `paths.extra_roots`
+
+Every filesystem tool and the `terminal` workdir resolve through one sandbox: `..` folding, the
+deepest existing ancestor canonicalized (so `ws/link -> /etc` cannot smuggle a path out), component
+comparison (so `ws-evil` is not inside `ws`), `~` expanded *before* the check. `/tmp` is not special;
+opt in with `paths.extra_roots`. `--yes` approves a mutation, it does not widen the sandbox.
+Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

@@ -10,7 +10,6 @@ use crate::approval::ToolPreview;
 use crate::error::HarnessError;
 use crate::traits::Tool;
 use crate::types::ToolResult;
-use super::fs::resolve_path;
 
 #[async_trait]
 pub trait SudoPrompter: Send + Sync {
@@ -19,6 +18,8 @@ pub trait SudoPrompter: Send + Sync {
 
 pub struct TerminalTool {
     workspace_root: PathBuf,
+    /// Additional roots allowed as a `workdir` (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
     default_timeout_secs: u64,
     output_max_bytes: usize,
     env_vars: std::collections::HashMap<String, String>,
@@ -37,6 +38,7 @@ impl TerminalTool {
     ) -> Self {
         Self {
             workspace_root,
+            extra_roots: Vec::new(),
             default_timeout_secs,
             output_max_bytes,
             env_vars: std::collections::HashMap::new(),
@@ -46,6 +48,12 @@ impl TerminalTool {
             prefix: None,
             rtk_rewrite: true,
         }
+    }
+
+    /// Extra roots a `workdir` may point at, mirroring the filesystem tools.
+    pub fn with_extra_roots(mut self, extra_roots: Vec<PathBuf>) -> Self {
+        self.extra_roots = extra_roots;
+        self
     }
 
     pub fn with_prefix(mut self, prefix: Option<String>) -> Self {
@@ -334,7 +342,11 @@ impl Tool for TerminalTool {
         let effective_command = self.resolve_command(command).await;
 
         let workdir_str = args.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
-        let resolved_workdir = match resolve_path(&self.workspace_root, workdir_str) {
+        let sandbox = crate::tools::sandbox::Sandbox::with_extra_roots(
+            self.workspace_root.clone(),
+            self.extra_roots.clone(),
+        );
+        let resolved_workdir = match sandbox.resolve(workdir_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };

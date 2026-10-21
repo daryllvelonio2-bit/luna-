@@ -1,6 +1,7 @@
 pub mod delegate;
 pub mod fs;
 pub mod process;
+pub mod sandbox;
 pub mod shell;
 pub mod todo;
 
@@ -71,36 +72,52 @@ pub async fn register_core_tools_shared_queue(
     bg_queue: Arc<crate::tasks::BackgroundTaskQueue>,
 ) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
     let ws = config.paths.workspace_root.clone();
+    // The sandbox's reach, in one place: every filesystem and shell tool gets the same roots, so
+    // `read_file` and `terminal` cannot disagree about what "outside the workspace" means.
+    let extra_roots = config.paths.extra_roots.clone();
 
     for tool_name in &config.tools.enabled {
         match tool_name.as_str() {
             "read_file" => {
                 registry
-                    .register(Arc::new(ReadFileTool::new(
-                        ws.clone(),
-                        config.tools.read_max_chars,
-                        read_cache.clone(),
-                    )))
+                    .register(Arc::new(
+                        ReadFileTool::new(
+                            ws.clone(),
+                            config.tools.read_max_chars,
+                            read_cache.clone(),
+                        )
+                        .with_extra_roots(extra_roots.clone()),
+                    ))
                     .await?;
             }
             "write_file" => {
                 registry
-                    .register(Arc::new(WriteFileTool::new(ws.clone(), read_cache.clone())))
+                    .register(Arc::new(
+                        WriteFileTool::new(ws.clone(), read_cache.clone())
+                            .with_extra_roots(extra_roots.clone()),
+                    ))
                     .await?;
             }
             "patch" => {
                 registry
-                    .register(Arc::new(PatchTool::new(ws.clone(), read_cache.clone())))
+                    .register(Arc::new(
+                        PatchTool::new(ws.clone(), read_cache.clone())
+                            .with_extra_roots(extra_roots.clone()),
+                    ))
                     .await?;
             }
             "search_files" => {
                 registry
-                    .register(Arc::new(SearchFilesTool::new(ws.clone())))
+                    .register(Arc::new(
+                        SearchFilesTool::new(ws.clone()).with_extra_roots(extra_roots.clone()),
+                    ))
                     .await?;
             }
             "list_files" => {
                 registry
-                    .register(Arc::new(ListFilesTool::new(ws.clone())))
+                    .register(Arc::new(
+                        ListFilesTool::new(ws.clone()).with_extra_roots(extra_roots.clone()),
+                    ))
                     .await?;
             }
             "todo_list" => {
@@ -115,6 +132,7 @@ pub async fn register_core_tools_shared_queue(
                     config.tools.terminal_output_max_bytes,
                 )
                 .with_background_queue(bg_queue.clone())
+                .with_extra_roots(extra_roots.clone())
                 .with_prefix(config.tools.terminal_prefix.clone())
                 .with_rtk_rewrite(config.tools.rtk_rewrite);
 

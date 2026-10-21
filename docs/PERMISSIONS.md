@@ -51,6 +51,38 @@ author means by writing both.
 A call matched by no rule behaves exactly as it did before rules existed, so adding an empty
 `permissions:` list changes nothing.
 
+## The other knob: the filesystem sandbox
+
+Rules decide whether a human is asked. `paths.workspace_root` decides what a call can *reach*, and
+it applies before the gate and independently of it — `--yes` approves a mutation, it does not widen
+the sandbox.
+
+```yaml
+paths:
+  workspace_root: ~/projects/app   # the sandbox: reads and writes stay inside
+  extra_roots:                     # optional, empty by default
+    - /tmp
+    - /mnt/scratch
+```
+
+Every filesystem tool (`read_file`, `write_file`, `patch`, `search_files`, `list_files`) and the
+`workdir` of `terminal` resolves through `tools::sandbox::Sandbox`, which:
+
+- folds `.` and `..` lexically, so climbing out with `../../etc/passwd` is refused;
+- **canonicalizes the deepest existing ancestor**, then appends the rest — so `ws/link -> /etc`
+  cannot smuggle `ws/link/passwd` out (a purely lexical check would allow it);
+- compares by path component, so a sibling directory named `ws-evil` is not inside `ws`;
+- expands `~` *before* checking, so `~/.ssh/id_rsa` is outside the workspace rather than a hole;
+- refuses an empty path instead of treating it as the workspace root.
+
+`/tmp` is **not** special-cased: it is shared with every other process on the machine, so reaching
+it is an explicit `extra_roots` entry. The resolved path is the canonicalized one, so the path a
+tool writes to is the path the check looked at.
+
+`terminal` itself is a shell: once a command runs, its reach is the process's reach. The sandbox
+bounds the `workdir` it starts in and the tools that take a path, not what `sh -c` does afterwards —
+that is what the approval gate and the permission rules above are for.
+
 ## What rules do not do
 
 A rule decides **whether the human is asked**. It does not decide **what a call can reach**: an

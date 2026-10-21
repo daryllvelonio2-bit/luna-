@@ -540,3 +540,121 @@ fn hooks_command_reports_what_is_actually_loaded() {
     assert!(hooks.iter().any(|hook| hook["event"] == "stop"));
     assert_eq!(report["enabled"], true);
 }
+
+fn read_turn(path: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "role": "assistant",
+            "content": "reading",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": serde_json::to_string(&serde_json::json!({"path": path})).unwrap()
+                }
+            }]
+        }),
+        serde_json::json!({"role": "assistant", "content": "done"}),
+    ]
+}
+
+#[test]
+fn the_workspace_is_a_boundary_even_when_the_gate_says_yes() {
+    let dir = scratch("sandbox");
+    let (base_url, _served) = start_mock(read_turn("/etc/passwd"));
+    let config = write_config(&dir, &base_url, true);
+
+    // `--yes` approves every mutation. It must not widen what a tool can reach: the sandbox is a
+    // property of the path, not a human decision.
+    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "read /etc/passwd"]);
+    let escape_events = events(&output.stdout);
+    let tool_result = escape_events
+        .iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("the call ran and reported");
+    assert_eq!(tool_result["ok"], false, "escaping the workspace is an error");
+    assert!(
+        tool_result["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("escapes workspace root"),
+        "got: {}",
+        tool_result["output"]
+    );
+
+    // A symlinked parent cannot smuggle a path out either.
+    std::os::unix::fs::symlink("/etc", dir.join("ws").join("etc-link")).expect("symlink");
+    let (base_url, _served) = start_mock(read_turn("etc-link/passwd"));
+    let config = write_config(&dir, &base_url, true);
+    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "read the link"]);
+    let link_events = events(&output.stdout);
+    let tool_result = link_events
+        .iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("the call ran and reported");
+    assert_eq!(tool_result["ok"], false, "a symlinked parent must not escape");
+    assert!(
+        tool_result["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("escapes workspace root"),
+        "got: {}",
+        tool_result["output"]
+    );
+}
+
+#[test]
+fn paths_extra_roots_widens_the_sandbox_deliberately() {
+    let dir = scratch("extra-roots");
+    let shared = dir.join("shared");
+    fs::create_dir_all(&shared).expect("shared dir");
+    let outside = shared.join("allowed.txt");
+    fs::write(&outside, "shared notes").expect("write shared file");
+
+    // Without the extra root: refused, because the workspace is the sandbox.
+    let (base_url, _served) = start_mock(read_turn(outside.to_str().unwrap()));
+    let config = write_config(&dir, &base_url, true);
+    let refused = run_exec(&dir, &config, &["exec", "--json", "read the shared file"]);
+    let refused_events = events(&refused.stdout);
+    let result = refused_events
+        .iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("reported");
+    assert_eq!(result["ok"], false, "outside the workspace and not opted in");
+    assert!(result["output"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("escapes workspace root"));
+
+    // With it: readable, because the operator said so under `paths`, not under `tools`.
+    let (base_url, _served) = start_mock(read_turn(outside.to_str().unwrap()));
+    let config = write_config(&dir, &base_url, true);
+    let text = fs::read_to_string(&config).expect("config");
+    let with_root = text.replace(
+        &format!("  workspace_root: {}", dir.join("ws").display()),
+        &format!(
+            "  workspace_root: {}\n  extra_roots:\n    - {}",
+            dir.join("ws").display(),
+            shared.display()
+        ),
+    );
+    assert_ne!(with_root, text, "the config rewrite must have found the paths block");
+    fs::write(&config, with_root).expect("config with extra roots");
+
+    let allowed = run_exec(&dir, &config, &["exec", "--json", "read the shared file"]);
+    let allowed_events = events(&allowed.stdout);
+    let result = allowed_events
+        .iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("reported");
+    assert_eq!(
+        result["ok"], true,
+        "an opted-in root is reachable: {}",
+        result["output"]
+    );
+    assert!(result["output"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("shared notes"));
+}
