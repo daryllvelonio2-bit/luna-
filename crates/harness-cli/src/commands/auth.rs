@@ -220,6 +220,9 @@ pub async fn handle_auth_command(
                 let id = cred_manager
                     .add_credential("antigravity", &label, &secret_payload, true)
                     .await?;
+                let _ = cred_manager
+                    .set_rotation_strategy("antigravity", harness_providers::RotationStrategy::FillFirst)
+                    .await;
 
                 println!(
                     "{} Successfully copied Antigravity credentials for '{}' into Luna!",

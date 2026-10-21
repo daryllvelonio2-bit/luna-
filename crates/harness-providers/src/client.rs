@@ -234,8 +234,8 @@ impl GenericProviderClient {
     }
 
     /// Report the credential that just failed so the manager retires it and the next call fails
-    /// over to another key. Only ever logged by label/provider — never the key itself.
-    async fn retire_failed_credential(&self, secret: &SecretString) {
+    /// over to another key. Returns whether another credential is available for failover.
+    async fn retire_failed_credential(&self, secret: &SecretString) -> bool {
         let retired = self
             .cred_manager
             .mark_credential_failed(&self.provider_id, secret.expose_secret())
@@ -243,7 +243,7 @@ impl GenericProviderClient {
         if retired {
             warn!(
                 provider = %self.provider_id,
-                "Provider rejected the selected credential; it is retired for this process"
+                "Provider rejected the selected credential; failing over to another credential in pool"
             );
         } else {
             debug!(
@@ -251,6 +251,7 @@ impl GenericProviderClient {
                 "Provider rejected the selected credential, but no other key is available to fail over to"
             );
         }
+        retired
     }
 
     fn serialize_messages(&self, messages: &[Message]) -> serde_json::Value {
@@ -357,7 +358,7 @@ impl ModelProvider for GenericProviderClient {
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "supercode" {
-            return crate::supercode::execute_supercode_completion(
+            let res = crate::supercode::execute_supercode_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -367,10 +368,16 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            return crate::kiro::execute_kiro_completion(
+            let res = crate::kiro::execute_kiro_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -380,10 +387,16 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
-            return crate::antigravity::execute_antigravity_completion(
+            let res = crate::antigravity::execute_antigravity_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -393,99 +406,110 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
-        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
-            let mut stream = self.stream(messages, tools, options).await?;
-            let mut content = String::new();
-            let mut reasoning = String::new();
-            let mut usage = None;
-            let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
-                std::collections::BTreeMap::new();
+            if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+                let mut stream = self.stream(messages, tools, options).await?;
+                let mut content = String::new();
+                let mut reasoning = String::new();
+                let mut usage = None;
+                let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
+                    std::collections::BTreeMap::new();
 
-            while let Some(ev_res) = stream.next().await {
-                match ev_res? {
-                    StreamEvent::ContentDelta(d) => content.push_str(&d),
-                    StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
-                    StreamEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta,
-                        ..
-                    } => {
-                        let entry = tool_builders
-                            .entry(index)
-                            .or_insert_with(|| (String::new(), String::new(), String::new()));
-                        if let Some(i) = id {
-                            entry.0.push_str(&i);
+                while let Some(ev_res) = stream.next().await {
+                    match ev_res? {
+                        StreamEvent::ContentDelta(d) => content.push_str(&d),
+                        StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
+                        StreamEvent::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_delta,
+                            ..
+                        } => {
+                            let entry = tool_builders
+                                .entry(index)
+                                .or_insert_with(|| (String::new(), String::new(), String::new()));
+                            if let Some(i) = id {
+                                entry.0.push_str(&i);
+                            }
+                            if let Some(n) = name {
+                                entry.1.push_str(&n);
+                            }
+                            if let Some(a) = arguments_delta {
+                                entry.2.push_str(&a);
+                            }
                         }
-                        if let Some(n) = name {
-                            entry.1.push_str(&n);
-                        }
-                        if let Some(a) = arguments_delta {
-                            entry.2.push_str(&a);
+                        StreamEvent::Completed { usage: u, .. } => {
+                            usage = u;
                         }
                     }
-                    StreamEvent::Completed { usage: u, .. } => {
-                        usage = u;
+                }
+
+                let mut tool_calls = Vec::new();
+                for (_, (id, name, args_str)) in tool_builders {
+                    if !name.is_empty() {
+                        let arguments: serde_json::Value =
+                            serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+                        tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            signature: None,
+                        });
                     }
                 }
+
+                return Ok(Message {
+                    role: Role::Assistant,
+                    content: if content.is_empty() { None } else { Some(content) },
+                    reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+                    tool_calls,
+                    tool_result: None,
+                    usage,
+                });
             }
 
-            let mut tool_calls = Vec::new();
-            for (_, (id, name, args_str)) in tool_builders {
-                if !name.is_empty() {
-                    let arguments: serde_json::Value =
-                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments,
-                        signature: None,
-                    });
-                }
-            }
-
-            return Ok(Message {
-                role: Role::Assistant,
-                content: if content.is_empty() { None } else { Some(content) },
-                reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
-                tool_calls,
-                tool_result: None,
-                usage,
+            let mut body = json!({
+                "model": model,
+                "messages": self.serialize_messages(messages),
             });
-        }
 
-        let mut body = json!({
-            "model": model,
-            "messages": self.serialize_messages(messages),
-        });
+            if !tools.is_empty() {
+                body["tools"] = self.serialize_tools(tools);
+            }
+            if let Some(temp) = options.temperature {
+                body["temperature"] = json!(temp);
+            }
+            if let Some(max_tok) = options.max_tokens {
+                body["max_tokens"] = json!(max_tok);
+            }
+            if let Some(effort) = options.reasoning_effort {
+                body["reasoning_effort"] = json!(effort.as_str());
+            }
 
-        if !tools.is_empty() {
-            body["tools"] = self.serialize_tools(tools);
-        }
-        if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
-        }
-        if let Some(max_tok) = options.max_tokens {
-            body["max_tokens"] = json!(max_tok);
-        }
-        if let Some(effort) = options.reasoning_effort {
-            body["reasoning_effort"] = json!(effort.as_str());
-        }
-
-        let resp = self
-            .http_client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: format!("HTTP error: {}", e),
-            })?;
+            let resp = match self
+                .http_client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(HarnessError::ProviderError {
+                        provider: self.provider_id.clone(),
+                        message: format!("HTTP error: {}", e),
+                    })
+                }
+            };
 
         if resp.status().as_u16() == 429 {
             self.retire_failed_credential(&secret).await;
@@ -509,10 +533,10 @@ impl ModelProvider for GenericProviderClient {
             });
         }
 
-        let resp_json: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
-            provider: self.provider_id.clone(),
-            message: format!("Failed to parse response JSON: {}", e),
-        })?;
+            let resp_json: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: format!("Failed to parse response JSON: {}", e),
+            })?;
 
         let choice = resp_json
             .get("choices")
@@ -625,11 +649,12 @@ impl ModelProvider for GenericProviderClient {
         if self.provider_id == "supercode" {
             let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
         }
+
         let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "supercode" {
             let (_, _, secret) = self.build_auth_headers().await?;
-            return crate::supercode::stream_supercode_completion(
+            let res = crate::supercode::stream_supercode_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -639,11 +664,17 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
             let (_, _, secret) = self.build_auth_headers().await?;
-            return crate::kiro::stream_kiro_completion(
+            let res = crate::kiro::stream_kiro_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -653,13 +684,19 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
         // Antigravity speaks the Code Assist protocol, not the OpenAI one, so it has its own
         // SSE reader rather than the `/chat/completions` body below.
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
             let (_, _, secret) = self.build_auth_headers().await?;
-            return crate::antigravity::stream_antigravity_completion(
+            let res = crate::antigravity::stream_antigravity_completion(
                 &self.http_client,
                 secret.expose_secret(),
                 Some(&self.cred_manager),
@@ -669,9 +706,15 @@ impl ModelProvider for GenericProviderClient {
                 options,
             )
             .await;
+            if let Err(ref err) = res {
+                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                    self.retire_failed_credential(&secret).await;
+                }
+            }
+            return res;
         }
 
-        let (headers, query_param, _secret) = self.build_auth_headers().await?;
+        let (headers, query_param, secret) = self.build_auth_headers().await?;
         let mut url = format!("{}/chat/completions", self.base_url);
         if let Some(q) = query_param {
             url = format!("{}?{}", url, q);
@@ -709,12 +752,16 @@ impl ModelProvider for GenericProviderClient {
 
         let status = resp.status();
         if status.as_u16() == 429 {
+            self.retire_failed_credential(&secret).await;
             return Err(HarnessError::RateLimited {
                 provider: self.provider_id.clone(),
                 retry_after_secs: Some(10),
             });
         }
         if !status.is_success() {
+            if matches!(status.as_u16(), 401 | 403) {
+                self.retire_failed_credential(&secret).await;
+            }
             let body_text = resp.text().await.unwrap_or_default();
             let is_overloaded = status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
             return Err(HarnessError::ProviderError {

@@ -115,9 +115,27 @@ impl CredentialManager {
     /// Rewrite the store file from `bytes`. Shared tail of every persist path.
     fn write_store(&self, bytes: &str) -> Result<(), HarnessError> {
         if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| HarnessError::Io(e.to_string()))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                HarnessError::Io(format!(
+                    "cannot create credential store directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
         }
-        fs::write(&self.storage_path, bytes).map_err(|e| HarnessError::Io(e.to_string()))
+        if let Ok(meta) = self.storage_path.metadata() {
+            if meta.is_dir() {
+                return Err(HarnessError::Io(format!(
+                    "credential store path {} is a directory; a file is expected there",
+                    self.storage_path.display()
+                )));
+            }
+        }
+        fs::write(&self.storage_path, bytes).map_err(|e| {
+            HarnessError::Io(format!(
+                "cannot write credential store {}: {e}",
+                self.storage_path.display()
+            ))
+        })
     }
 
     /// Fold the on-disk store into an in-memory one: a provider missing locally is taken whole,
@@ -240,6 +258,19 @@ impl CredentialManager {
         self.write_store(&bytes)
     }
 
+    /// Persist the in-memory state directly without merging from disk.
+    /// Used when mutating operations (such as credential removal) must not resurrect
+    /// keys that were explicitly deleted.
+    pub async fn save_exact(&self) -> Result<(), HarnessError> {
+        let mut to_write = self.state.read().await.clone();
+        for p in to_write.providers.values_mut() {
+            Self::dedupe_by_label(p);
+        }
+        let bytes = serde_json::to_string_pretty(&to_write)
+            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+        self.write_store(&bytes)
+    }
+
     pub async fn add_credential(
         &self,
         provider: &str,
@@ -315,7 +346,7 @@ impl CredentialManager {
             let removed = provider_state.credentials.len() < initial_len;
             drop(state);
             if removed {
-                self.save_to_disk().await?;
+                self.save_exact().await?;
             }
             Ok(removed)
         } else {
@@ -753,6 +784,32 @@ mod tests {
             .await
             .expect("add");
         assert_eq!(mgr.get_credentials("antigravity").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn remove_credential_persists_deletion_without_resurrecting_from_disk() {
+        let path = temp_store_path();
+        let mgr = CredentialManager::new(Some(path.clone())).expect("manager");
+        mgr.add_credential("antigravity", "keep@gmail.com", "key-keep", false)
+            .await
+            .expect("add 1");
+        mgr.add_credential("antigravity", "delete-me", "key-del", false)
+            .await
+            .expect("add 2");
+
+        assert_eq!(mgr.get_credentials("antigravity").await.len(), 2);
+
+        let removed = mgr
+            .remove_credential("antigravity", "delete-me")
+            .await
+            .expect("remove");
+        assert!(removed, "credential should be reported removed");
+
+        // Create a completely new manager reading the disk file to ensure it wasn't resurrected
+        let fresh_mgr = CredentialManager::new(Some(path)).expect("fresh manager");
+        let remaining = fresh_mgr.get_credentials("antigravity").await;
+        assert_eq!(remaining.len(), 1, "only 1 credential should survive on disk");
+        assert_eq!(remaining[0].label, "keep@gmail.com");
     }
 
     fn temp_store_path() -> std::path::PathBuf {

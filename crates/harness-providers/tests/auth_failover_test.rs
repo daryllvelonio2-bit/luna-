@@ -199,3 +199,41 @@ async fn client_retires_the_rejected_key_on_401() {
         "sk-11111"
     );
 }
+
+#[tokio::test]
+async fn client_retires_the_rejected_key_on_stream_401() {
+    let (base_url, server) = stub_provider("401 Unauthorized").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = manager(&dir);
+    seed_two_keys(&mgr).await;
+
+    let client = client_for(base_url, &mgr, &dir);
+    let err = match client
+        .stream(&[Message::user("ping")], &[], &CompletionOptions::default())
+        .await
+    {
+        Ok(_) => panic!("a 401 stream must surface as an error"),
+        Err(e) => e,
+    };
+
+    let request = server.await.unwrap();
+    assert!(
+        request.contains("Bearer sk-22222"),
+        "the client must have sent the priority key first"
+    );
+    assert!(
+        format!("{:?}", err).contains("401"),
+        "unexpected error: {:?}",
+        err
+    );
+
+    assert_eq!(
+        disabled_labels(&mgr.get_credentials("openai").await),
+        vec!["priority".to_string()],
+        "stream path must retire the rejected key so the next call fails over"
+    );
+    assert_eq!(
+        mgr.acquire_credential("openai").await.unwrap().expose_secret(),
+        "sk-11111"
+    );
+}
