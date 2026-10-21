@@ -610,7 +610,7 @@ pub(crate) async fn select_slash_command(
                     break;
                 }
             }
-            AppKey::Escape | AppKey::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
                 ui.input_buf.lock().unwrap().clear();
                 break;
             }
@@ -850,7 +850,7 @@ async fn select_from_rx(
                 }
                 break;
             }
-            AppKey::Escape | AppKey::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
                 if !filter.is_empty() {
                     filter.clear();
                     selected_filtered_idx = 0;
@@ -918,7 +918,7 @@ async fn input_from_rx(
                 }
                 return Some(res);
             }
-            AppKey::Escape | AppKey::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
                 print!("\r\x1b[2K");
                 let _ = io::stdout().flush();
                 return None;

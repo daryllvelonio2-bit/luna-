@@ -225,6 +225,12 @@ fn csi_key(params: &[u8], final_byte: u8) -> AppKey {
 ///
 /// The modifier count is `1 +` the modifier bits: shift is 1, alt is 2, ctrl is 4. So
 /// ctrl+shift+o is `111;6u` — the count carries the offset, and the bits are one less.
+///
+/// Kitty's "disambiguate escape codes" mode — which this app asks for — moves the whole
+/// ctrl family out of the legacy control bytes and into this form: ctrl+c arrives as
+/// `CSI 99;5u` and no longer raises SIGINT, and shift+tab arrives as `CSI 9;2u`. Keys
+/// that keep their legacy bytes (enter, tab, backspace) are matched on their code
+/// alone; the ones that carry a modifier are matched on both.
 fn kitty_csi_u(parts: &[&str]) -> AppKey {
     let code = parts
         .first()
@@ -236,11 +242,24 @@ fn kitty_csi_u(parts: &[&str]) -> AppKey {
         .and_then(|p| p.parse::<u32>().ok())
         .unwrap_or(1);
     let bits = modifiers.saturating_sub(1);
+    let shift = bits & 1 != 0;
+    let ctrl = bits & 4 != 0;
     match code {
         Some(27) => AppKey::Escape,
         Some(13) => AppKey::Enter,
-        Some(9) => AppKey::Tab,
+        // The tab key itself keeps its legacy byte, but the shifted tab does not: it is
+        // a different key event, and it is how a terminal says "back tab".
+        Some(9) => {
+            if shift {
+                AppKey::BackTab
+            } else {
+                AppKey::Tab
+            }
+        }
         Some(127) => AppKey::Backspace,
+        // Ctrl+C. With the kitty protocol on, the terminal stops sending the 0x03 byte
+        // — and the SIGINT it used to raise — so this is the only way Ctrl+C arrives.
+        Some(99) if ctrl => AppKey::CtrlC,
         // The functional keys live in the Unicode private use area.
         Some(57348) => AppKey::Insert,
         Some(57349) => AppKey::Delete,
@@ -254,10 +273,10 @@ fn kitty_csi_u(parts: &[&str]) -> AppKey {
         Some(57357) => AppKey::End,
         Some(code @ 57364..=57375) => AppKey::F((code - 57364 + 1) as u8),
         Some(code) => match char::from_u32(code) {
-            Some('o') | Some('O') if bits & 4 != 0 && bits & 1 != 0 => AppKey::CtrlShiftO,
+            Some('o') | Some('O') if ctrl && shift => AppKey::CtrlShiftO,
             // Ctrl+letter: the letter, with the control bit. Kitty reports these in
             // CSI-u form, and losing the control bit would type the letter instead.
-            Some(ch) if bits & 4 != 0 => {
+            Some(ch) if ctrl => {
                 let letter = ch.to_ascii_lowercase();
                 if letter.is_ascii_alphabetic() {
                     AppKey::Ctrl(letter)
@@ -268,7 +287,7 @@ fn kitty_csi_u(parts: &[&str]) -> AppKey {
                 }
             }
             Some('O') => AppKey::Char('O'),
-            Some(ch) if bits & 1 != 0 => AppKey::Char(ch.to_ascii_uppercase()),
+            Some(ch) if shift => AppKey::Char(ch.to_ascii_uppercase()),
             Some(ch) => AppKey::Char(ch),
             None => AppKey::Unknown,
         },
@@ -280,12 +299,34 @@ fn kitty_csi_u(parts: &[&str]) -> AppKey {
 fn modified_key(code: &str, modifiers: &str) -> AppKey {
     let code = code.parse::<u32>().unwrap_or(0);
     let bits = modifiers.parse::<u32>().unwrap_or(1).saturating_sub(1);
-    match char::from_u32(code) {
-        Some('o') | Some('O') if bits & 4 != 0 && bits & 1 != 0 => AppKey::CtrlShiftO,
-        Some('o') if bits & 4 != 0 => AppKey::Ctrl('o'),
-        Some(ch) if bits & 1 != 0 => AppKey::Char(ch.to_ascii_uppercase()),
-        Some(ch) => AppKey::Char(ch),
-        None => AppKey::Unknown,
+    let shift = bits & 1 != 0;
+    let ctrl = bits & 4 != 0;
+    match code {
+        27 => AppKey::Escape,
+        13 => AppKey::Enter,
+        9 => {
+            if shift {
+                AppKey::BackTab
+            } else {
+                AppKey::Tab
+            }
+        }
+        127 => AppKey::Backspace,
+        99 if ctrl => AppKey::CtrlC,
+        _ => match char::from_u32(code) {
+            Some('o') | Some('O') if ctrl && shift => AppKey::CtrlShiftO,
+            Some(ch) if ctrl => {
+                let letter = ch.to_ascii_lowercase();
+                if letter.is_ascii_alphabetic() {
+                    AppKey::Ctrl(letter)
+                } else {
+                    AppKey::Unknown
+                }
+            }
+            Some(ch) if shift => AppKey::Char(ch.to_ascii_uppercase()),
+            Some(ch) => AppKey::Char(ch),
+            None => AppKey::Unknown,
+        },
     }
 }
 
@@ -420,14 +461,69 @@ mod tests {
         assert_eq!(key(b"\x1b[111;2u"), AppKey::Char('O'));
     }
 
-    /// Kitty reports every ctrl+letter in CSI-u form. Losing the control bit would
-    /// type the letter into the prompt instead of running the command it stands for.
+    /// Kitty's "disambiguate escape codes" mode moves the ctrl family out of the legacy
+    /// control bytes: ctrl+c stops being the byte 0x03 (and stops raising SIGINT) and
+    /// arrives as `CSI 99;5u` instead. Decoding it as the letter 'c' would leave the
+    /// user with no way out of the chat.
+    #[test]
+    fn kitty_reports_ctrl_c_as_a_key_event() {
+        assert_eq!(key(b"\x1b[99;5u"), AppKey::CtrlC);
+        // Shifted, for good measure: still a ctrl+c.
+        assert_eq!(key(b"\x1b[99;6u"), AppKey::CtrlC);
+    }
+
+    /// The same key, in xterm's modifyOtherKeys form.
+    #[test]
+    fn xterm_reports_ctrl_c_as_a_key_event() {
+        assert_eq!(key(b"\x1b[27;5;99~"), AppKey::CtrlC);
+        assert_eq!(key(b"\x1b[27;6;99~"), AppKey::CtrlC);
+    }
+
+    /// Shift+tab is a different key event from tab, and kitty reports it as the tab key
+    /// with the shift modifier — `CSI 9;2u`, not the legacy `CSI Z`. Reading it as a
+    /// plain tab would silently turn the yolo key into a space.
+    #[test]
+    fn kitty_reports_shift_tab_as_a_back_tab() {
+        assert_eq!(key(b"\x1b[9;2u"), AppKey::BackTab);
+        // The legacy form still works on a terminal without the protocol.
+        assert_eq!(key(b"\x1b[Z"), AppKey::BackTab);
+        // And the modified functional-key form.
+        assert_eq!(key(b"\x1b[1;2Z"), AppKey::BackTab);
+        // The tab key on its own is still a tab.
+        assert_eq!(key(b"\x1b[9;1u"), AppKey::Tab);
+        assert_eq!(key(b"\t"), AppKey::Tab);
+    }
+
+    /// Every key the chat binds, in the form kitty sends it.
+    #[test]
+    fn kitty_reports_the_bound_keys() {
+        assert_eq!(key(b"\x1b[13;1u"), AppKey::Enter);
+        assert_eq!(key(b"\x1b[27;1u"), AppKey::Escape);
+        assert_eq!(key(b"\x1b[127;1u"), AppKey::Backspace);
+        assert_eq!(key(b"\x1b[1;1A"), AppKey::Up);
+        assert_eq!(key(b"\x1b[1;1B"), AppKey::Down);
+        assert_eq!(key(b"\x1b[1;1C"), AppKey::Right);
+        assert_eq!(key(b"\x1b[1;1D"), AppKey::Left);
+        assert_eq!(key(b"\x1b[1;1H"), AppKey::Home);
+        assert_eq!(key(b"\x1b[1;1F"), AppKey::End);
+        assert_eq!(key(b"\x1b[5;1~"), AppKey::PageUp);
+        assert_eq!(key(b"\x1b[6;1~"), AppKey::PageDown);
+        assert_eq!(key(b"\x1b[3;1~"), AppKey::Delete);
+        assert_eq!(key(b"\x1b[2;1~"), AppKey::Insert);
+        assert_eq!(key(b"\x1b[1;1P"), AppKey::F(1));
+        assert_eq!(key(b"\x1b[15;1~"), AppKey::F(5));
+        // A shifted arrow is still that arrow.
+        assert_eq!(key(b"\x1b[1;2A"), AppKey::Up);
+    }
+
+    /// Kitty keeps the control bit on every letter, and ctrl+space is a space.
     #[test]
     fn kitty_keeps_the_control_bit_on_letters() {
         assert_eq!(key(b"\x1b[118;5u"), AppKey::Ctrl('v'));
         assert_eq!(key(b"\x1b[98;5u"), AppKey::Ctrl('b'));
         assert_eq!(key(b"\x1b[111;5u"), AppKey::Ctrl('o'));
         assert_eq!(key(b"\x1b[97;1u"), AppKey::Char('a'));
+        assert_eq!(key(b"\x1b[32;5u"), AppKey::Char(' '));
     }
 
     #[test]

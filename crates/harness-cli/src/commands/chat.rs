@@ -1356,7 +1356,9 @@ pub async fn run_interactive_chat(
                             }));
                         }
                     }
-                    AppKey::CtrlC => {
+                    // Ctrl+C, and the ctrl+c a terminal may still report as a letter:
+                    // a chat you cannot leave is worse than a stray key.
+                    AppKey::CtrlC | AppKey::Ctrl('c') => {
                         if let Some(handle) = active_turn.take() {
                             current_cancel.cancel();
                             handle.abort();
@@ -1805,7 +1807,7 @@ async fn prompt_sudo_password_dialog(
                     return Some(password);
                 }
             }
-            AppKey::Escape | AppKey::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
                 println!("\n  {} Cancelled - continuing without sudo\n", "⏭".dimmed());
                 let _ = io::stdout().flush();
                 return None;

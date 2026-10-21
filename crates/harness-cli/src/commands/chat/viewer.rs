@@ -392,7 +392,12 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    AppKey::Escape | AppKey::Char('q') | AppKey::Char('Q') | AppKey::CtrlC | AppKey::Char('\x02') => {
+                    AppKey::Escape
+                    | AppKey::Char('q')
+                    | AppKey::Char('Q')
+                    | AppKey::CtrlC
+                    | AppKey::Ctrl('c')
+                    | AppKey::Char('\x02') => {
                         break;
                     }
                     _ => {}
