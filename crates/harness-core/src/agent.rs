@@ -8,6 +8,7 @@ use tracing::{debug, error, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
 use crate::error::HarnessError;
+use crate::checkpoint::CheckpointController;
 use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
 use crate::traits::*;
@@ -156,9 +157,23 @@ where
     compaction: Option<CompactionSetup>,
     session: Option<SessionBinding>,
     hooks: Option<Arc<HookRunner>>,
+    checkpoints: Option<Arc<CheckpointController>>,
     observer: Option<AgentObserver>,
     reasoning_effort: Option<ReasoningEffort>,
     steer_queue: Arc<Mutex<VecDeque<String>>>,
+}
+
+/// Closes the turn's checkpoint on every exit path, including `?` and panics.
+struct CheckpointGuard<'a> {
+    controller: Option<&'a CheckpointController>,
+}
+
+impl Drop for CheckpointGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(controller) = self.controller {
+            controller.finish();
+        }
+    }
 }
 
 /// What the gate decided for one call.
@@ -199,6 +214,7 @@ where
             compaction: None,
             session: None,
             hooks: None,
+            checkpoints: None,
             observer: None,
             reasoning_effort: None,
             steer_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -286,6 +302,22 @@ where
     /// Replace (or clear) the hook runner at runtime.
     pub fn set_hooks(&mut self, hooks: Option<Arc<HookRunner>>) {
         self.hooks = hooks;
+    }
+
+    /// Attach per-turn file checkpoints (see [`crate::checkpoint`]). The registry middleware that
+    /// fills them is registered separately, because it has to run inside tool execution.
+    pub fn with_checkpoints(mut self, controller: Arc<CheckpointController>) -> Self {
+        self.checkpoints = Some(controller);
+        self
+    }
+
+    pub fn set_checkpoints(&mut self, controller: Option<Arc<CheckpointController>>) {
+        self.checkpoints = controller;
+    }
+
+    /// The checkpoint controller this agent writes into, if any (used by `/rewind`).
+    pub fn checkpoints(&self) -> Option<Arc<CheckpointController>> {
+        self.checkpoints.clone()
     }
 
     /// Fire an event that has no tool attached (`session_start`, `stop`, …).
@@ -531,6 +563,21 @@ where
         // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
         // or fails and leaves the transcript alone. No retry inside the turn.
         let compaction = self.compact_once(&history, &system_text, &mut messages, false).await?;
+
+        // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
+        // ones, so a later turn cannot silently capture into the wrong checkpoint.
+        if let Some(controller) = self.checkpoints.as_ref() {
+            controller.begin(
+                self.session
+                    .as_ref()
+                    .map(|binding| binding.session_id.as_str())
+                    .unwrap_or("unbound"),
+                Some(user_input),
+            );
+        }
+        let _checkpoint_guard = CheckpointGuard {
+            controller: self.checkpoints.as_deref(),
+        };
 
         let user_message = Message::user(user_input);
         let mut user_appended = false;

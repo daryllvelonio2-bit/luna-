@@ -50,6 +50,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Summarize and start a new session with it",
     },
     SlashCommand {
+        name: "/rewind",
+        details: "List turn checkpoints, or restore the files of one (/rewind 3)",
+    },
+    SlashCommand {
         name: "/compact",
         details: "Fold oldest turns into a summary in this session",
     },
@@ -203,6 +207,12 @@ pub(crate) async fn execute_slash_command(
             {
                 ui.draw_initial_box();
                 ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/rewind" => {
+            if let Err(e) = handle_rewind_command(ui, agent, session_id, arg).await {
+                ui.emit_above(&format!("{} Failed to rewind: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
@@ -1181,6 +1191,109 @@ pub(crate) async fn handle_compact_model_switch(
         chosen_provider
     ));
 
+    Ok(())
+}
+
+/// `/rewind [turn]`: list this session's file checkpoints, or restore one turn's files.
+///
+/// Restoring is about *files*. The transcript is untouched — a rewind puts the workspace back so
+/// the conversation can continue from a known state, it does not un-say what was said.
+pub(crate) async fn handle_rewind_command(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    session_id: &str,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let controller = {
+        let agent = agent.lock().await;
+        agent.checkpoints()
+    };
+    let Some(controller) = controller else {
+        ui.emit_above(&format!(
+            "{} Checkpoints are off — enable them with {}",
+            "•".cyan(),
+            "checkpoints.enabled = true".bold()
+        ));
+        return Ok(());
+    };
+    if !controller.enabled() {
+        ui.emit_above(&format!(
+            "{} Checkpoints are off — enable them with {}",
+            "•".cyan(),
+            "checkpoints.enabled = true".bold()
+        ));
+        return Ok(());
+    }
+
+    let store = controller.store();
+    let checkpoints = store.list(session_id)?;
+
+    let Some(seq) = arg.and_then(|raw| raw.parse::<u32>().ok()) else {
+        if checkpoints.is_empty() {
+            ui.emit_above(&format!(
+                "{} No checkpoints yet — the next turn that writes a file creates one",
+                "•".cyan()
+            ));
+            return Ok(());
+        }
+        ui.emit_above(&format!(
+            "{} {} checkpoint(s) for this session (newest last):",
+            "•".cyan(),
+            checkpoints.len()
+        ));
+        let len = checkpoints.len();
+        for (index, checkpoint) in checkpoints.iter().enumerate() {
+            let marker = if index + 1 == len { " (latest)" } else { "" };
+            let prompt = checkpoint
+                .prompt
+                .as_deref()
+                .map(|prompt| {
+                    let flat = prompt.replace('\n', " ");
+                    let short: String = flat.chars().take(60).collect();
+                    format!(" — {}", short.dimmed())
+                })
+                .unwrap_or_default();
+            ui.emit_above(&format!(
+                "    {}  {} file(s){}{}",
+                format!("turn {}", checkpoint.seq).bold(),
+                checkpoint.files.len(),
+                marker.green(),
+                prompt
+            ));
+        }
+        ui.emit_above(&format!(
+            "    Restore one with {}",
+            format!("/rewind <turn>").bold()
+        ));
+        return Ok(());
+    };
+
+    let report = store.restore(session_id, seq)?;
+    if report.is_empty() {
+        ui.emit_above(&format!(
+            "{} Turn {} changed nothing restorable",
+            "•".cyan(),
+            seq
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Rewound turn {}: {} file(s) restored, {} deleted",
+            "✔".green().bold(),
+            seq,
+            report.restored.len(),
+            report.deleted.len()
+        ));
+        for path in report.restored.iter().chain(report.deleted.iter()) {
+            ui.emit_above(&format!("    {}", path.dimmed()));
+        }
+    }
+    for skipped in &report.skipped {
+        ui.emit_above(&format!("    {} {}", "skipped".yellow(), skipped.dimmed()));
+    }
+    ui.emit_above(&format!(
+        "{} The transcript is unchanged — files only",
+        "•".cyan()
+    ));
     Ok(())
 }
 

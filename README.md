@@ -173,6 +173,14 @@ A hook receives the event as JSON on stdin and may answer with `{"decision":"den
 or `{"updatedInput":{…}}`; exit code `2` also refuses. Hooks can narrow what happens but never
 approve what the human gate would refuse. Full contract: [`docs/HOOKS.md`](docs/HOOKS.md).
 
+### 2.7 Checkpoints and `/rewind`
+
+Every turn snapshots the files its `write_file`/`patch` calls are about to change, into
+`~/.luna/checkpoints/<session>/turn_000N/` (plain files, written during the turn). `/rewind` lists
+them; `/rewind 3` restores turn 3's files and deletes what that turn created. `terminal` is not
+intercepted — a shell command's targets are not knowable from its arguments. On by default
+(`checkpoints.enabled`, `checkpoints.keep_turns`). Details: [`docs/CHECKPOINTS.md`](docs/CHECKPOINTS.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

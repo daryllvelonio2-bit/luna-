@@ -42,7 +42,8 @@ pub mod viewer;
 use commands::{
     execute_slash_command, handle_compact_command, handle_compact_model_switch,
     handle_delete_command, handle_model_switch, handle_name_command, handle_new_command,
-    handle_reasoning_switch, handle_summarize_and_new_command, select_slash_command,
+    handle_reasoning_switch, handle_rewind_command, handle_summarize_and_new_command,
+    select_slash_command,
     SLASH_COMMANDS,
 };
 use render::{
@@ -283,6 +284,19 @@ pub async fn run_interactive_chat(
     )
     .await?;
 
+    // Per-turn file snapshots: registered as registry middleware so the copy happens immediately
+    // before the write, not somewhere near it.
+    let checkpoints = Arc::new(harness_core::CheckpointController::new(
+        config.paths.checkpoints_dir.clone(),
+        config.paths.workspace_root.clone(),
+        &config.checkpoints,
+    ));
+    registry
+        .register_middleware(Arc::new(harness_core::CheckpointMiddleware::new(
+            checkpoints.clone(),
+        )))
+        .await;
+
     let is_attended = Term::stdout().features().is_attended();
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();
@@ -331,7 +345,10 @@ pub async fn run_interactive_chat(
         &config.paths.workspace_root,
         &config.hooks,
     )?);
-    let mut agent = agent.with_hooks(hooks.clone()).with_observer(Arc::new(move |event| match event {
+    let mut agent = agent
+        .with_hooks(hooks.clone())
+        .with_checkpoints(checkpoints.clone())
+        .with_observer(Arc::new(move |event| match event {
         // Reasoning lands in the live region and is settled into the transcript by the animation
         // tick, so it is visible while it is still being produced.
         harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
@@ -569,6 +586,12 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                continue;
+            }
+            if query.starts_with("/rewind") {
+                let arg = query.strip_prefix("/rewind").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_rewind_command(&ui, &agent, &session_id, arg_opt).await?;
                 continue;
             }
             if query.starts_with("/compact") {

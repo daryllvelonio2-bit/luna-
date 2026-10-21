@@ -54,6 +54,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub tools: ToolsSettings,
     pub hooks: HooksSettings,
+    pub checkpoints: CheckpointSettings,
     pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
 }
@@ -85,6 +86,29 @@ impl Default for HooksSettings {
             trust_workspace: false,
             timeout_secs: 30,
             disabled: Vec::new(),
+        }
+    }
+}
+
+/// Per-turn file checkpoint settings (see [`crate::checkpoint`]).
+///
+/// Enabled by default: undo is a safety net, not an experiment. What it costs is bounded — only
+/// files a `write_file`/`patch` call is about to touch are copied, and only the newest
+/// `keep_turns` turns per session are kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CheckpointSettings {
+    /// Snapshot files before a tool writes them.
+    pub enabled: bool,
+    /// Turns kept per session; the oldest are pruned.
+    pub keep_turns: usize,
+}
+
+impl Default for CheckpointSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            keep_turns: crate::checkpoint::DEFAULT_KEEP_TURNS,
         }
     }
 }
@@ -121,6 +145,8 @@ pub struct PathsSettings {
     pub workspace_root: PathBuf,
     pub jobs_dir: PathBuf,
     pub skills_dir: PathBuf,
+    /// Per-turn file snapshots that `/rewind` restores from.
+    pub checkpoints_dir: PathBuf,
 }
 
 impl Default for PathsSettings {
@@ -135,6 +161,7 @@ impl Default for PathsSettings {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             jobs_dir: luna.join("jobs"),
             skills_dir: luna.join("skills"),
+            checkpoints_dir: luna.join("checkpoints"),
         }
     }
 }
