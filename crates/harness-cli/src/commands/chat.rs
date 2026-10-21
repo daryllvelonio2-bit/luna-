@@ -350,6 +350,10 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
+    let (clarify_tx, mut clarify_rx) =
+        mpsc::unbounded_channel::<(crate::commands::clarify::ClarifyRequest, oneshot::Sender<crate::commands::clarify::ClarifyResponse>)>();
+    registry.register(Arc::new(crate::commands::clarify::ClarifyTool::new(clarify_tx))).await?;
+
     let mut agent_config = config.agent.clone();
     agent_config.skills_summary = skills_summary;
 
@@ -1019,6 +1023,20 @@ pub async fn run_interactive_chat(
                 ui.clear_live_and_box();
                 let password = prompt_sudo_password_dialog(&mut key_rx, &command).await;
                 let _ = decision_tx.send(password);
+                if ui.is_attended {
+                    ui.draw_initial_box();
+                }
+            }
+
+            maybe_clarify = clarify_rx.recv() => {
+                let (request, response_tx) = match maybe_clarify {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+
+                ui.clear_live_and_box();
+                let response = crate::commands::clarify::prompt_clarify_choice(&mut key_rx, &request, &ui).await;
+                let _ = response_tx.send(response);
                 if ui.is_attended {
                     ui.draw_initial_box();
                 }

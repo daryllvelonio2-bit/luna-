@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod auth;
 pub mod chat;
+pub mod clarify;
 pub mod clipboard_image;
 pub mod config;
 pub mod diff;
