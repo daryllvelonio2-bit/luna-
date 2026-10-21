@@ -162,6 +162,9 @@ pub struct PathsSettings {
     pub checkpoints_dir: PathBuf,
     /// One row per turn: tokens, model, duration, cost. See `usage.rs`.
     pub usage_db: PathBuf,
+    /// One file per session: the todo list of that conversation. A list belongs to the
+    /// session that made it, so two conversations in the same workspace never share one.
+    pub todos_dir: PathBuf,
     /// Roots the filesystem and shell tools may reach *besides* `workspace_root`.
     ///
     /// Empty by default: the workspace is the sandbox. An operator adds e.g. `/tmp` or a scratch
@@ -183,6 +186,7 @@ impl Default for PathsSettings {
             skills_dir: luna.join("skills"),
             checkpoints_dir: luna.join("checkpoints"),
             usage_db: luna.join("usage.db"),
+            todos_dir: luna.join("todos"),
             extra_roots: Vec::new(),
         }
     }

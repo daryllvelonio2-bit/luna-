@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use harness_core::tools::{
     register_core_tools, ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool,
-    TerminalTool, WriteFileTool,
+    TerminalTool, TodoScope, WriteFileTool,
 };
 use harness_core::{Config, DefaultToolRegistry, HarnessError, Tool, ToolRegistry};
 
@@ -488,7 +488,14 @@ async fn test_registry_contains_all_six_tools() {
     let registry: Arc<dyn ToolRegistry> = Arc::new(DefaultToolRegistry::new());
     let cache = ReadCache::new();
 
-    register_core_tools(&registry, &config, cache).await.unwrap();
+    register_core_tools(
+        &registry,
+        &config,
+        cache,
+        TodoScope::new(dir.path().join("todos"), "test"),
+    )
+    .await
+    .unwrap();
 
     let tools = registry.list_tools().await.unwrap();
     let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -869,6 +876,7 @@ async fn test_registry_wired_terminal_background_job_is_pollable() {
         None,
         None,
         host_queue.clone(),
+        TodoScope::new(tmp.path().join("todos"), "test"),
     )
     .await
     .expect("core tools register");
@@ -944,6 +952,7 @@ async fn test_register_core_tools_shared_queue_is_not_copied() {
         None,
         None,
         host_queue.clone(),
+        TodoScope::new(tmp.path().join("todos"), "test"),
     )
     .await
     .expect("core tools register with shared queue");
@@ -1160,7 +1169,10 @@ async fn test_todo_list_read_only_gating_and_status_aliases() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let cancel = CancellationToken::new();
-    let todo_tool = harness_core::tools::TodoListTool::new(root);
+    let todo_tool = harness_core::tools::TodoListTool::new(TodoScope::new(
+        root.join("todos"),
+        "test",
+    ));
 
     // todo_list is an internal scratchpad: never requires approval for any action
     assert!(!todo_tool.is_mutating());

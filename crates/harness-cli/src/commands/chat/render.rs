@@ -9,7 +9,8 @@ use std::time::Duration;
 use colored::Colorize;
 use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
 
-use super::todo::{self, TodoSnapshot};
+use super::todo;
+use harness_core::tools::todo::TodoSnapshot;
 
 /// Formatted tool execution lines for a single tool call within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
@@ -1658,12 +1659,12 @@ mod tests {
         assert!(panel.contains("write the parser"), "got: {}", panel);
     }
 
-    fn harness_cli_todo_snapshot() -> super::todo::TodoSnapshot {
-        super::todo::TodoSnapshot {
-            items: vec![super::todo::TodoEntry {
+    fn harness_cli_todo_snapshot() -> TodoSnapshot {
+        TodoSnapshot {
+            items: vec![harness_core::tools::todo::TodoItem {
                 id: 0,
                 text: "write the parser".to_string(),
-                status: super::todo::TodoStatus::Pending,
+                status: harness_core::tools::todo::TodoStatus::Pending,
             }],
         }
     }

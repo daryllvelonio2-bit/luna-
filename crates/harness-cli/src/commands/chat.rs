@@ -43,7 +43,8 @@ pub mod viewer;
 
 use commands::{
     execute_slash_command, handle_compact_command, handle_compact_model_switch,
-    handle_delete_command, handle_model_switch, handle_name_command, handle_new_command,
+    handle_delete_command, handle_fork_command, handle_model_switch, handle_name_command,
+    handle_new_command,
     handle_diff_command, handle_reasoning_switch, handle_rewind_command,
     handle_summarize_and_new_command,
     select_slash_command,
@@ -74,9 +75,9 @@ fn redraw_transcript(
     turns: &[TurnRecord],
     expanded: bool,
     todo_collapsed: bool,
-    workspace_root: &std::path::Path,
+    todo_scope: &harness_core::tools::TodoScope,
 ) {
-    let snapshot = todo::read_snapshot(workspace_root);
+    let snapshot = todo::read_session_snapshot(todo_scope);
     render_transcript(
         turns,
         expanded,
@@ -148,6 +149,10 @@ pub async fn run_interactive_chat(
     // from the config once rather than per turn.
     let usage = std::sync::Arc::new(super::usage::UsageRecorder::from_config(&config));
     let mut session_id = resolve_session(store.as_ref(), selection).await?;
+    // The todo list belongs to the session, not to the workspace: a new session starts
+    // with an empty list and never sees another session's tasks. The scope is a shared
+    // handle, so the tools follow the session when it forks or starts over.
+    let todo_scope = harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
 
     let mut current_provider = config.model.provider.clone();
     let mut current_model = config.model.default.clone();
@@ -318,6 +323,7 @@ pub async fn run_interactive_chat(
         Some(sudo_cache),
         Some(sudo_prompter),
         bg_queue.clone(),
+        todo_scope.clone(),
     )
     .await?;
 
@@ -378,9 +384,8 @@ pub async fn run_interactive_chat(
 
     let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
     let in_flight_tools_obs = in_flight_tools.clone();
-    // The todo list lives in the workspace, so the observer needs the root to read it back.
-    let workspace_root = config.paths.workspace_root.clone();
-    let workspace_root_obs = workspace_root.clone();
+    // The observer reads the session's list back, so the transcript can show the tasks.
+    let todo_scope_obs = todo_scope.clone();
 
     // Lifecycle hooks: opt-in, loaded from the user file and (only when trusted) the project
     // file. Loading is fail-closed, so a missing file means an empty runner, not an error.
@@ -402,7 +407,7 @@ pub async fn run_interactive_chat(
             ui_obs.finish_reasoning();
             // A todo call reads as the task it acts on, not as the arguments it was sent.
             let call_fmt = if name == "todo_list" {
-                todo::format_call(&arguments, &workspace_root_obs)
+                todo::format_call(&arguments, &todo_scope_obs)
             } else {
                 format_tool_call(&name, &arguments)
             };
@@ -551,22 +556,15 @@ pub async fn run_interactive_chat(
             }
             if query == "/fork" || query.starts_with("/fork ") {
                 let title_opt = query.strip_prefix("/fork").map(str::trim).filter(|s| !s.is_empty());
-                match store.fork_session(&session_id, title_opt).await {
-                    Ok(new_id) => {
-                        let old_id = session_id.clone();
-                        session_id = new_id.clone();
-                        ui.set_session_name(&format!("fork:{}", &new_id[..new_id.len().min(8)]));
-                        ui.emit_above(&format!(
-                            "{} Forked session {} -> {}",
-                            "✔".green().bold(),
-                            old_id.dimmed(),
-                            session_id.cyan().bold()
-                        ));
-                    }
-                    Err(e) => {
-                        ui.emit_above(&format!("{} Fork failed: {}", "✖".red().bold(), e));
-                    }
-                }
+                handle_fork_command(
+                    &ui,
+                    &store,
+                    &mut session_id,
+                    &todo_scope,
+                    &config,
+                    title_opt,
+                )
+                .await?;
                 continue;
             }
             if query == "/jobs" || query.starts_with("/jobs ") {
@@ -623,6 +621,9 @@ pub async fn run_interactive_chat(
             if query.starts_with("/summarize") {
                 let arg = query.strip_prefix("/summarize").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                // The summarized conversation carries its work into a new session, so
+                // the list comes with it.
+                let old_list = todo_scope.path();
                 handle_summarize_and_new_command(
                     &ui,
                     &store,
@@ -634,6 +635,9 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                todo_scope.set_session(&session_id);
+                let _ = std::fs::create_dir_all(config.paths.todos_dir.as_path());
+                let _ = std::fs::copy(&old_list, todo_scope.path());
                 continue;
             }
             if query.starts_with("/diff") {
@@ -689,6 +693,8 @@ pub async fn run_interactive_chat(
                         arg_opt,
                     )
                     .await?;
+                    // The new conversation starts with an empty list.
+                    todo_scope.set_session(&session_id);
                 }
                 continue;
             }
@@ -791,7 +797,7 @@ pub async fn run_interactive_chat(
                 .dimmed()
             );
         }
-        redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+        redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
         println!();
     }
 
@@ -1032,7 +1038,7 @@ pub async fn run_interactive_chat(
                                     &turns,
                                     process_expanded,
                                     todo_collapsed,
-                                    &workspace_root,
+                                    &todo_scope,
                                 );
                                 if let Some(ref err) = ui.transient_error() {
                                     println!();
@@ -1052,7 +1058,7 @@ pub async fn run_interactive_chat(
                                 &turns,
                                 process_expanded,
                                 todo_collapsed,
-                                &workspace_root,
+                                &todo_scope,
                             );
                             ui.draw_initial_box();
                         }
@@ -1160,6 +1166,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &mut todo_collapsed,
+                                &todo_scope,
                             )
                             .await?
                             {
@@ -1250,6 +1257,7 @@ pub async fn run_interactive_chat(
                                     &mut turns,
                                     &mut process_expanded,
                                     &mut todo_collapsed,
+                                    &todo_scope,
                                 )
                                 .await?
                                 {
@@ -1280,6 +1288,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &mut todo_collapsed,
+                                &todo_scope,
                             )
                             .await?
                             {
@@ -1326,7 +1335,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 println!();
                                 println!("{}", right_aligned_user_message(&query, get_terminal_width()));
                                 ui.draw_initial_box();
@@ -1368,7 +1377,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{}", "✖ Cancelled".red());
@@ -1404,7 +1413,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{}", "✖ Cancelled".red());
@@ -1451,7 +1460,7 @@ pub async fn run_interactive_chat(
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                             ui.draw_initial_box();
                         } else {
                             if !outcome.reply.is_empty() {
@@ -1482,7 +1491,7 @@ pub async fn run_interactive_chat(
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                             ui.draw_initial_box();
                         } else {
                             println!("{}", "✖ Cancelled".red());
@@ -1513,7 +1522,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{} Error: {}", "✖".red().bold(), e);
@@ -1528,7 +1537,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 println!();
                                 println!("{}", err_msg);
                                 ui.draw_initial_box();
@@ -1562,7 +1571,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{} Task join error: {}", "✖".red().bold(), join_err);
@@ -1577,7 +1586,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                                 println!();
                                 println!("{}", err_msg);
                                 ui.draw_initial_box();
@@ -1596,7 +1605,7 @@ pub async fn run_interactive_chat(
                     if let Some(next_query) = queue.pop_front() {
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &todo_scope);
                             println!();
                             println!("{}", right_aligned_user_message(&next_query, get_terminal_width()));
                             ui.draw_initial_box();

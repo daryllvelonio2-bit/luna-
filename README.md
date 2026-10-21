@@ -259,6 +259,13 @@ luna
 luna --provider openai --model gpt-4o
 ```
 
+**The todo list belongs to the session.** `todo_list` keeps one file per conversation in
+`paths.todos_dir` (`~/.luna/todos/<session>.json`), so a new session starts with an empty
+list and never shows another session's tasks. A `/fork` carries the list into the fork,
+because the fork continues the same work. The chat draws the list as a checklist under
+the transcript — an empty box for what is open, a half box for what is in flight, a tick
+for what is done — and folds it to a single line with **Ctrl+Shift+O** (or `/todo`).
+
 ### 4. Hands-Free Voice Mode
 Launch background listening for wake word `"Luna"`:
 ```bash

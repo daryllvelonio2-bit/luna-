@@ -1006,7 +1006,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 run_config.paths.workspace_root = active_root.clone();
                 let read_cache = harness_core::tools::ReadCache::new();
                 let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-                let _ = harness_core::tools::register_core_tools(&reg_dyn, &run_config, read_cache).await;
+                // The GUI's list belongs to the session it is showing.
+                let todo_scope = harness_core::tools::TodoScope::new(
+                    run_config.paths.todos_dir.clone(),
+                    session_id.clone(),
+                );
+                let _ = harness_core::tools::register_core_tools(&reg_dyn, &run_config, read_cache, todo_scope).await;
 
                 let mut agent_cfg = config.agent.clone();
                 agent_cfg.skills_summary = skills_summary;

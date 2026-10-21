@@ -16,6 +16,7 @@ use harness_core::{
 };
 use harness_core::tools::{
     ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, TodoListTool,
+    TodoScope,
     WriteFileTool,
 };
 
@@ -751,8 +752,12 @@ async fn run_engineer_job(
     registry
         .register(Arc::new(ListFilesTool::new(worktree_dir.clone())))
         .await?;
+    // The engineer's list belongs to the job, not to the worktree it happens to run in.
     registry
-        .register(Arc::new(TodoListTool::new(worktree_dir.clone())))
+        .register(Arc::new(TodoListTool::new(TodoScope::new(
+            jobs_dir.join("todos"),
+            &job_id,
+        ))))
         .await?;
 
     // Engineer builds are confined to the worktree's own target dir so their

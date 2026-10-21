@@ -110,7 +110,12 @@ pub async fn run_voice_loop(
     // Register core filesystem and shell tools (§2.2)
     let read_cache = harness_core::tools::ReadCache::new();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-    harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache).await?;
+    // A hands-free run is its own conversation, so it gets its own list.
+    let todo_scope = harness_core::tools::TodoScope::new(
+        config.paths.todos_dir.clone(),
+        format!("voice_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S")),
+    );
+    harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache, todo_scope).await?;
 
     let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);

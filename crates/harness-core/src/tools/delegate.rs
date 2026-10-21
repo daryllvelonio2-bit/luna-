@@ -277,12 +277,18 @@ impl Tool for DelegateTaskTool {
                 let read_cache = crate::tools::ReadCache::new();
                 let sudo_cache = Arc::new(std::sync::Mutex::new(None));
                 let reg_dyn: Arc<dyn ToolRegistry> = child_registry.clone();
+                // The sub-agent gets its own list: its work is its own.
+                let todo_scope = crate::tools::TodoScope::new(
+                    config.paths.todos_dir.clone(),
+                    &child_session_id,
+                );
                 if let Err(e) = crate::tools::register_core_tools_with_sudo(
                     &reg_dyn,
                     &config,
                     read_cache,
                     Some(sudo_cache),
                     None,
+                    todo_scope,
                 )
                 .await
                 {

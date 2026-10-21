@@ -14,7 +14,7 @@ pub use shell::{
     check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,
     TerminalTool,
 };
-pub use todo::TodoListTool;
+pub use todo::{read_snapshot, TodoItem, TodoListTool, TodoScope, TodoSnapshot, TodoStatus};
 
 use crate::config::Config;
 use crate::error::HarnessError;
@@ -25,8 +25,9 @@ pub async fn register_core_tools(
     registry: &Arc<dyn ToolRegistry>,
     config: &Config,
     read_cache: ReadCache,
+    todo_scope: TodoScope,
 ) -> Result<(), HarnessError> {
-    register_core_tools_with_sudo(registry, config, read_cache, None, None)
+    register_core_tools_with_sudo(registry, config, read_cache, None, None, todo_scope)
         .await
         .map(|_| ())
 }
@@ -44,6 +45,7 @@ pub async fn register_core_tools_with_sudo(
     read_cache: ReadCache,
     sudo_cache: Option<Arc<Mutex<Option<String>>>>,
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
+    todo_scope: TodoScope,
 ) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
     // One queue shared by `terminal` (producer) and `process` (consumer) — see the doc comment.
     let bg_queue = Arc::new(
@@ -57,6 +59,7 @@ pub async fn register_core_tools_with_sudo(
         sudo_cache,
         sudo_prompter,
         bg_queue,
+        todo_scope,
     )
     .await
 }
@@ -72,6 +75,7 @@ pub async fn register_core_tools_shared_queue(
     sudo_cache: Option<Arc<Mutex<Option<String>>>>,
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
     bg_queue: Arc<crate::tasks::BackgroundTaskQueue>,
+    todo_scope: TodoScope,
 ) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
     let ws = config.paths.workspace_root.clone();
     // The sandbox's reach, in one place: every filesystem and shell tool gets the same roots, so
@@ -123,8 +127,10 @@ pub async fn register_core_tools_shared_queue(
                     .await?;
             }
             "todo_list" => {
+                // The list belongs to the session the scope points at, not to the
+                // workspace every tool else is rooted in.
                 registry
-                    .register(Arc::new(TodoListTool::new(ws.clone())))
+                    .register(Arc::new(TodoListTool::new(todo_scope.clone())))
                     .await?;
             }
             "terminal" => {

@@ -25,14 +25,49 @@ pub struct SlashCommand {
     pub details: &'static str,
 }
 
+/// Fork the current session into a new one.
+///
+/// The fork continues the work of the conversation it came from, so the todo list comes
+/// with it: the new session starts with the tasks the old one was working on.
+pub(crate) async fn handle_fork_command(
+    ui: &ChatUi,
+    store: &Arc<SqliteSessionStore>,
+    session_id: &mut String,
+    todo_scope: &harness_core::tools::TodoScope,
+    config: &Config,
+    title: Option<&str>,
+) -> Result<(), HarnessError> {
+    match store.fork_session(session_id, title).await {
+        Ok(new_id) => {
+            let old_id = session_id.clone();
+            let old_list = todo_scope.path();
+            *session_id = new_id.clone();
+            todo_scope.set_session(session_id.as_str());
+            let _ = std::fs::create_dir_all(config.paths.todos_dir.as_path());
+            let _ = std::fs::copy(&old_list, todo_scope.path());
+            ui.set_session_name(&format!("fork:{}", &new_id[..new_id.len().min(8)]));
+            ui.emit_above(&format!(
+                "{} Forked session {} -> {}",
+                "✔".green().bold(),
+                old_id.dimmed(),
+                session_id.cyan().bold()
+            ));
+        }
+        Err(e) => {
+            ui.emit_above(&format!("{} Fork failed: {}", "✖".red().bold(), e));
+        }
+    }
+    Ok(())
+}
+
 /// Draw the transcript with the todo panel under it.
 fn draw_transcript(
     turns: &[TurnRecord],
     expanded: bool,
     todo_collapsed: bool,
-    config: &Config,
+    todo_scope: &harness_core::tools::TodoScope,
 ) {
-    let snapshot = todo::read_snapshot(&config.paths.workspace_root);
+    let snapshot = todo::read_session_snapshot(todo_scope);
     render_transcript(
         turns,
         expanded,
@@ -150,6 +185,7 @@ pub(crate) async fn execute_slash_command(
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
     todo_collapsed: &mut bool,
+    todo_scope: &harness_core::tools::TodoScope,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -311,7 +347,7 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = true;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
+                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
                 ui.draw_initial_box();
             }
             Ok(false)
@@ -320,9 +356,13 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = false;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
+                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
                 ui.draw_initial_box();
             }
+            Ok(false)
+        }
+        "/fork" => {
+            handle_fork_command(ui, store, session_id, todo_scope, config, arg).await?;
             Ok(false)
         }
         "/todo" => {
@@ -331,7 +371,7 @@ pub(crate) async fn execute_slash_command(
             *todo_collapsed = !*todo_collapsed;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
+                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
                 ui.draw_initial_box();
             }
             Ok(false)

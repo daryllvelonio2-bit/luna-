@@ -1,5 +1,5 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -12,34 +12,119 @@ use crate::error::HarnessError;
 use crate::traits::Tool;
 use crate::types::ToolResult;
 
-/// File the todo list persists to, inside the workspace: survives sessions, is readable by a
-/// human in any editor, and stays per-worktree like every other workspace artifact.
-const TODO_FILE_NAME: &str = ".luna-todo.json";
+/// A session's todo list, and where it lives.
+///
+/// The list belongs to the session, not to the workspace: two conversations in the same
+/// workspace must not see each other's tasks, and a new conversation starts with an
+/// empty list. The scope is a shared handle, so a host can point it at another session
+/// — a fork continues the work of the conversation it was forked from, a new session
+/// starts over — without rebuilding the tool registry.
+#[derive(Clone, Debug, Default)]
+pub struct TodoScope {
+    inner: Arc<RwLock<ScopeInner>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScopeInner {
+    dir: PathBuf,
+    session: String,
+}
+
+impl TodoScope {
+    /// A scope for one session, with the lists kept in `dir`.
+    pub fn new(dir: impl Into<PathBuf>, session: impl Into<String>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(ScopeInner {
+                dir: dir.into(),
+                session: session.into(),
+            })),
+        }
+    }
+
+    /// Point the scope at another session.
+    pub fn set_session(&self, session: impl Into<String>) {
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        inner.session = session.into();
+    }
+
+    /// The session the scope points at.
+    pub fn session(&self) -> String {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .session
+            .clone()
+    }
+
+    /// The file the current session's list lives in.
+    pub fn path(&self) -> PathBuf {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let name = if inner.session.trim().is_empty() {
+            "unscoped".to_string()
+        } else {
+            sanitize_file_stem(&inner.session)
+        };
+        inner.dir.join(format!("{}.json", name))
+    }
+}
+
+/// Keeps a session id from escaping the directory it names.
+fn sanitize_file_stem(session: &str) -> String {
+    let cleaned: String = session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unscoped".to_string()
+    } else {
+        cleaned
+    }
+}
 
 /// On-disk shape. `next_id` is the max id ever issued plus one, so ids are stable across
 /// removals and never reused (a stale model reference cannot point at a different task).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct TodoFile {
+    #[serde(default)]
     next_id: u64,
+    #[serde(default)]
     items: Vec<TodoItem>,
 }
 
+/// One task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct TodoItem {
-    id: u64,
-    text: String,
-    status: TodoStatus,
+pub struct TodoItem {
+    pub id: u64,
+    pub text: String,
+    pub status: TodoStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a task stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-enum TodoStatus {
+pub enum TodoStatus {
+    #[default]
     Pending,
     InProgress,
     Done,
 }
 
 impl TodoStatus {
+    /// The glyph that carries the state: an empty box, a half-filled one, a ticked one.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Pending => "☐",
+            Self::InProgress => "◐",
+            Self::Done => "☑",
+        }
+    }
+
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_lowercase().as_str() {
             "pending" | "todo" | "open" => Some(Self::Pending),
@@ -58,41 +143,87 @@ impl TodoStatus {
     }
 }
 
+/// A list as it stands on disk, for a reader that only wants to show it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TodoSnapshot {
+    #[serde(default)]
+    pub items: Vec<TodoItem>,
+}
+
+impl TodoSnapshot {
+    /// How many tasks are done, in progress and still open.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let mut done = 0;
+        let mut active = 0;
+        let mut pending = 0;
+        for item in &self.items {
+            match item.status {
+                TodoStatus::Done => done += 1,
+                TodoStatus::InProgress => active += 1,
+                TodoStatus::Pending => pending += 1,
+            }
+        }
+        (done, active, pending)
+    }
+
+    /// The task with this id, if the list still has it.
+    pub fn find(&self, id: u64) -> Option<&TodoItem> {
+        self.items.iter().find(|item| item.id == id)
+    }
+}
+
+/// Read a list from disk. A missing or unreadable file is an empty list, not an error:
+/// the panel is decoration, and decoration must never break the transcript.
+pub fn read_snapshot(path: &Path) -> TodoSnapshot {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return TodoSnapshot::default();
+    };
+    let Ok(file) = serde_json::from_str::<TodoFile>(&raw) else {
+        return TodoSnapshot::default();
+    };
+    TodoSnapshot { items: file.items }
+}
+
 pub struct TodoListTool {
-    todo_path: PathBuf,
+    scope: TodoScope,
     /// Serializes read-modify-write cycles so two concurrent calls cannot lose an update.
     lock: Arc<Mutex<()>>,
 }
 
 impl TodoListTool {
-    pub fn new(workspace_root: PathBuf) -> Self {
+    pub fn new(scope: TodoScope) -> Self {
         Self {
-            todo_path: workspace_root.join(TODO_FILE_NAME),
+            scope,
             lock: Arc::new(Mutex::new(())),
         }
     }
 
     fn load(&self) -> Result<TodoFile, HarnessError> {
-        let raw = match std::fs::read_to_string(&self.todo_path) {
+        let path = self.scope.path();
+        let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             // A missing file is an empty list, not an error — the first `add` creates it.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TodoFile::default()),
             Err(e) => {
                 return Err(HarnessError::ToolExecutionFailed {
                     tool: self.name().to_string(),
-                    reason: format!("cannot read {}: {}", self.todo_path.display(), e),
+                    reason: format!("cannot read {}: {}", path.display(), e),
                 });
             }
         };
         serde_json::from_str(&raw).map_err(|e| HarnessError::ToolExecutionFailed {
             tool: self.name().to_string(),
-            reason: format!("{} is corrupt: {}", self.todo_path.display(), e),
+            reason: format!("{} is corrupt: {}", path.display(), e),
         })
     }
 
     /// Persists via temp-file + rename, so a crash mid-write cannot truncate the list.
     fn store(&self, file: &TodoFile) -> Result<(), HarnessError> {
-        let tmp = self.todo_path.with_extension("json.tmp");
+        let path = self.scope.path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("json.tmp");
         let raw = serde_json::to_string_pretty(file).map_err(|e| HarnessError::ToolExecutionFailed {
             tool: self.name().to_string(),
             reason: format!("cannot serialize todo list: {}", e),
@@ -101,9 +232,9 @@ impl TodoListTool {
             tool: self.name().to_string(),
             reason: format!("cannot write {}: {}", tmp.display(), e),
         })?;
-        std::fs::rename(&tmp, &self.todo_path).map_err(|e| HarnessError::ToolExecutionFailed {
+        std::fs::rename(&tmp, &path).map_err(|e| HarnessError::ToolExecutionFailed {
             tool: self.name().to_string(),
-            reason: format!("cannot replace {}: {}", self.todo_path.display(), e),
+            reason: format!("cannot replace {}: {}", path.display(), e),
         })?;
         Ok(())
     }
@@ -127,10 +258,12 @@ impl Tool for TodoListTool {
     }
 
     fn description(&self) -> &str {
-        "Maintain the session's shared todo task list. Actions: 'list' (no args), 'add' (text), \
-         'update' (id + optional text/status), 'remove' (id), 'clear_done'. Ids are short numbers \
-         that are never reused. Use it to plan multi-step work and keep the user informed: add a \
-         task before starting it, mark it in_progress while working, done when verified."
+        "Maintain this conversation's todo task list. The list belongs to the session: a new \
+         session starts with an empty list and never sees another session's tasks. Actions: \
+         'list' (no args), 'add' (text), 'update' (id + optional text/status), 'remove' (id), \
+         'clear_done'. Ids are short numbers that are never reused. Use it to plan multi-step \
+         work and keep the user informed: add a task before starting it, mark it in_progress \
+         while working, done when verified."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -226,7 +359,7 @@ impl Tool for TodoListTool {
                     if t.contains('\n') {
                         for line in t.lines() {
                             let clean = line.trim()
-                                .trim_start_matches(|c: char| c == '-' || c == '*' || c == '+' || c == '•')
+                                .trim_start_matches(['-', '*', '+', '•'])
                                 .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
                                 .trim();
                             if !clean.is_empty() {
@@ -324,8 +457,12 @@ impl Tool for TodoListTool {
 mod tests {
     use super::*;
 
-    fn tool(dir: &tempfile::TempDir) -> TodoListTool {
-        TodoListTool::new(dir.path().to_path_buf())
+    fn scope(dir: &tempfile::TempDir, session: &str) -> TodoScope {
+        TodoScope::new(dir.path().join("todos"), session)
+    }
+
+    fn tool(dir: &tempfile::TempDir, session: &str) -> TodoListTool {
+        TodoListTool::new(scope(dir, session))
     }
 
     async fn run(tool: &TodoListTool, args: serde_json::Value) -> ToolResult {
@@ -337,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn add_lists_and_updates() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
 
         let r = run(&t, json!({"action": "add", "text": "write the parser"})).await;
         assert!(r.content.contains("added [0]"));
@@ -353,10 +490,68 @@ mod tests {
         assert!(r.content.contains("[1] done test it"));
     }
 
+    /// The list belongs to the session: another session must not see it, and must not
+    /// share its ids.
+    #[tokio::test]
+    async fn a_list_is_invisible_to_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = tool(&dir, "s1");
+        let second = tool(&dir, "s2");
+
+        run(&first, json!({"action": "add", "text": "mine"})).await;
+
+        let r = run(&second, json!({"action": "list"})).await;
+        assert_eq!(r.content, "[todo list is empty]");
+
+        // Ids start again in the new session: they are per list, not global.
+        let r = run(&second, json!({"action": "add", "text": "theirs"})).await;
+        assert!(r.content.contains("added [0]"));
+
+        let r = run(&first, json!({"action": "list"})).await;
+        assert!(r.content.contains("mine"));
+        assert!(!r.content.contains("theirs"));
+    }
+
+    /// A scope that is pointed at another session follows it — that is how a fork
+    /// continues the work of the conversation it came from.
+    #[tokio::test]
+    async fn a_scope_follows_the_session_it_is_pointed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = scope(&dir, "s1");
+        let t = TodoListTool::new(shared.clone());
+
+        run(&t, json!({"action": "add", "text": "carried over"})).await;
+
+        shared.set_session("s2");
+        let r = run(&t, json!({"action": "list"})).await;
+        assert_eq!(r.content, "[todo list is empty]");
+
+        shared.set_session("s1");
+        let r = run(&t, json!({"action": "list"})).await;
+        assert!(r.content.contains("carried over"));
+    }
+
+    #[tokio::test]
+    async fn the_list_lives_beside_the_other_session_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = scope(&dir, "s1");
+        let t = TodoListTool::new(shared.clone());
+        run(&t, json!({"action": "add", "text": "on disk"})).await;
+
+        let path = shared.path();
+        assert!(path.exists(), "the list should be a file at {}", path.display());
+        assert!(path.starts_with(dir.path()), "got: {}", path.display());
+
+        let snapshot = read_snapshot(&path);
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].text, "on disk");
+        assert_eq!(snapshot.counts(), (0, 0, 1));
+    }
+
     #[tokio::test]
     async fn ids_are_never_reused_after_removal() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
 
         run(&t, json!({"action": "add", "text": "a"})).await;
         run(&t, json!({"action": "remove", "id": 0})).await;
@@ -367,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn clear_done_keeps_open_tasks() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
 
         run(&t, json!({"action": "add", "text": "done thing"})).await;
         run(&t, json!({"action": "add", "text": "open thing"})).await;
@@ -383,7 +578,7 @@ mod tests {
     #[tokio::test]
     async fn bad_input_is_a_tool_error_not_a_panic() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
 
         let r = run(&t, json!({"action": "add"})).await;
         assert!(r.is_error);
@@ -400,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn empty_list_says_so() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
         let r = run(&t, json!({})).await;
         assert_eq!(r.content, "[todo list is empty]");
     }
@@ -408,15 +603,15 @@ mod tests {
     #[tokio::test]
     async fn state_persists_across_instances() {
         let dir = tempfile::tempdir().unwrap();
-        run(&tool(&dir), json!({"action": "add", "text": "survives"})).await;
-        let r = run(&tool(&dir), json!({"action": "list"})).await;
+        run(&tool(&dir, "s1"), json!({"action": "add", "text": "survives"})).await;
+        let r = run(&tool(&dir, "s1"), json!({"action": "list"})).await;
         assert!(r.content.contains("survives"));
     }
 
     #[tokio::test]
     async fn bulk_add_tasks_array_and_multiline() {
         let dir = tempfile::tempdir().unwrap();
-        let t = tool(&dir);
+        let t = tool(&dir, "s1");
 
         // 1. Array of tasks
         let r = run(&t, json!({"action": "add", "tasks": ["Task one", "Task two", "Task three"]})).await;
@@ -437,5 +632,14 @@ mod tests {
         assert!(list2.content.contains("[3] pending First step"));
         assert!(list2.content.contains("[4] pending Second step"));
         assert!(list2.content.contains("[5] pending Third step"));
+    }
+
+    #[test]
+    fn a_session_id_cannot_escape_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = TodoScope::new(dir.path(), "../../etc/passwd");
+        let path = scope.path();
+        assert_eq!(path.parent().unwrap(), dir.path());
+        assert!(!path.to_string_lossy().contains(".."));
     }
 }

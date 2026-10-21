@@ -178,6 +178,8 @@ pub async fn run_exec(
         harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
             .with_network_policy(config.tools.network),
     );
+    // The todo list belongs to the session this run belongs to.
+    let todo_scope = harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
     harness_core::tools::register_core_tools_shared_queue(
         &reg_dyn,
         &config,
@@ -185,6 +187,7 @@ pub async fn run_exec(
         None,
         None,
         bg_queue,
+        todo_scope,
     )
     .await?;
 
