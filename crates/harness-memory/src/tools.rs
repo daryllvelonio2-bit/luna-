@@ -23,7 +23,7 @@ impl Tool for SaveMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Save a durable fact, rule, user preference, or pattern into persistent long-term memory. Use only when information is valuable across future sessions."
+        "Save a durable fact, rule, or profile into persistent long-term memory. Consolidate by entity: keep all personal facts in a single 'user.profile' memory, and all facts about a project in a single 'project.<name>' memory. Do not fragment single entities into multiple separate records. When updating an existing entity, use update_memory instead."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -149,7 +149,7 @@ impl Tool for UpdateMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Update or correct an existing memory record, superseding and invalidating the prior record."
+        "Update, merge, or correct an existing consolidated memory record (e.g. 'user.profile' or 'project.<name>'), superseding the prior record. Use this to append or revise facts about an entity."
     }
 
     fn parameters(&self) -> serde_json::Value {

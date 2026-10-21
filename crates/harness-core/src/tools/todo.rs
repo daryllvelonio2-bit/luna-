@@ -262,12 +262,7 @@ impl Tool for TodoListTool {
     }
 
     fn description(&self) -> &str {
-        "Maintain this conversation's todo task list. The list belongs to the session: a new \
-         session starts with an empty list and never sees another session's tasks. Actions: \
-         'list' (no args), 'add' (text), 'update' (id + optional text/status), 'remove' (id), \
-         'clear_done'. Ids are short numbers that are never reused. Use it to plan multi-step \
-         work and keep the user informed: add a task before starting it, mark it in_progress \
-         while working, done when verified."
+        "Maintain this conversation's todo task list for major, complex multi-phase tasks that span extensive turns. Do NOT use for simple, standard, or direct tasks. Actions: 'list' (no args), 'add' (text), 'update' (id + optional text/status), 'remove' (id), 'clear_done'."
     }
 
     fn parameters(&self) -> serde_json::Value {
