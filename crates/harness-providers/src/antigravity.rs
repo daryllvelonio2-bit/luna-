@@ -17,9 +17,9 @@ pub const CODE_ASSIST_ENDPOINT: &str =
 pub const FALLBACK_CODE_ASSIST_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 pub const USER_QUOTA_ENDPOINT: &str =
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-pub const FALLBACK_USER_QUOTA_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+pub const FALLBACK_USER_QUOTA_ENDPOINT: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 pub const MODELS_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -62,49 +62,73 @@ pub struct AntigravityQuotaSummary {
 }
 
 impl AntigravityQuotaSummary {
-    pub fn format_quota_display(&self) -> Option<String> {
+    pub fn format_quota_display(&self, model: &str) -> Option<String> {
+        let lower = model.to_lowercase();
+        let is_gemini = lower.contains("gemini") || lower.contains("flash") || lower.contains("pro");
+        let is_claude_gpt = lower.contains("claude")
+            || lower.contains("opus")
+            || lower.contains("sonnet")
+            || lower.contains("gpt");
+
+        // Pick target group based on active model:
+        // Gemini models match groups mentioning "gemini"; Claude/GPT models match groups mentioning "claude" or "gpt".
+        let target_group = self
+            .groups
+            .iter()
+            .find(|g| {
+                let name = g.display_name.as_deref().unwrap_or("").to_lowercase();
+                if is_gemini && name.contains("gemini") {
+                    true
+                } else if is_claude_gpt && (name.contains("claude") || name.contains("gpt")) {
+                    true
+                } else {
+                    false
+                }
+            })
+            .or_else(|| self.groups.first());
+
+        let group = target_group?;
+
         let mut hourly_part = None;
         let mut weekly_part = None;
 
-        for group in &self.groups {
-            for b in &group.buckets {
-                let w = b.window.as_deref().unwrap_or("").to_lowercase();
-                let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
+        for b in &group.buckets {
+            let w = b.window.as_deref().unwrap_or("").to_lowercase();
+            let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
 
-                let is_5h = w == "5h" || b_id.contains("5h");
-                let is_weekly = w == "weekly" || w == "w" || b_id.contains("weekly");
+            let is_5h = w == "5h" || b_id.contains("5h");
+            let is_weekly = w == "weekly" || w == "w" || b_id.contains("weekly");
 
-                if !is_5h && !is_weekly {
-                    continue;
-                }
+            if !is_5h && !is_weekly {
+                continue;
+            }
 
-                let pct_str = if let Some(frac) = b.remaining_fraction {
-                    format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+            let pct_str = if let Some(frac) = b.remaining_fraction {
+                format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+            } else {
+                "100%".to_string()
+            };
+
+            let time_str = if let Some(ref r_time) = b.reset_time {
+                format_reset_time_remaining(r_time)
+            } else {
+                String::new()
+            };
+
+            if is_5h && hourly_part.is_none() {
+                let part = if time_str.is_empty() {
+                    format!("5h {}", pct_str)
                 } else {
-                    "100%".to_string()
+                    format!("5h {} {}", pct_str, time_str)
                 };
-
-                let time_str = if let Some(ref r_time) = b.reset_time {
-                    format_reset_time_remaining(r_time)
+                hourly_part = Some(part);
+            } else if is_weekly && weekly_part.is_none() {
+                let part = if time_str.is_empty() {
+                    format!("w {}", pct_str)
                 } else {
-                    String::new()
+                    format!("w {} {}", pct_str, time_str)
                 };
-
-                if is_5h && hourly_part.is_none() {
-                    let part = if time_str.is_empty() {
-                        format!("5h {}", pct_str)
-                    } else {
-                        format!("5h {} {}", pct_str, time_str)
-                    };
-                    hourly_part = Some(part);
-                } else if is_weekly && weekly_part.is_none() {
-                    let part = if time_str.is_empty() {
-                        format!("w {}", pct_str)
-                    } else {
-                        format!("w {} {}", pct_str, time_str)
-                    };
-                    weekly_part = Some(part);
-                }
+                weekly_part = Some(part);
             }
         }
 
@@ -1187,31 +1211,57 @@ mod tests {
     }
 
     #[test]
-    fn format_quota_display_extracts_hourly_and_weekly_buckets() {
+    fn format_quota_display_separates_gemini_and_claude_groups() {
         let summary = AntigravityQuotaSummary {
-            groups: vec![AntigravityQuotaGroup {
-                display_name: Some("Claude and GPT models".to_string()),
-                buckets: vec![
-                    AntigravityQuotaBucket {
-                        bucket_id: Some("3p-5h".to_string()),
-                        display_name: Some("Five Hour Limit Remaining".to_string()),
-                        window: Some("5h".to_string()),
-                        reset_time: None,
-                        remaining_fraction: Some(1.0),
-                    },
-                    AntigravityQuotaBucket {
-                        bucket_id: Some("3p-weekly".to_string()),
-                        display_name: Some("Weekly Limit Remaining".to_string()),
-                        window: Some("weekly".to_string()),
-                        reset_time: None,
-                        remaining_fraction: Some(1.0),
-                    },
-                ],
-            }],
+            groups: vec![
+                AntigravityQuotaGroup {
+                    display_name: Some("Gemini Models".to_string()),
+                    buckets: vec![
+                        AntigravityQuotaBucket {
+                            bucket_id: Some("gemini-5h".to_string()),
+                            display_name: Some("Five Hour Limit Remaining".to_string()),
+                            window: Some("5h".to_string()),
+                            reset_time: None,
+                            remaining_fraction: Some(1.0),
+                        },
+                        AntigravityQuotaBucket {
+                            bucket_id: Some("gemini-weekly".to_string()),
+                            display_name: Some("Weekly Limit Remaining".to_string()),
+                            window: Some("weekly".to_string()),
+                            reset_time: None,
+                            remaining_fraction: Some(0.50),
+                        },
+                    ],
+                },
+                AntigravityQuotaGroup {
+                    display_name: Some("Claude and GPT models".to_string()),
+                    buckets: vec![
+                        AntigravityQuotaBucket {
+                            bucket_id: Some("3p-5h".to_string()),
+                            display_name: Some("Five Hour Limit Remaining".to_string()),
+                            window: Some("5h".to_string()),
+                            reset_time: None,
+                            remaining_fraction: Some(1.0),
+                        },
+                        AntigravityQuotaBucket {
+                            bucket_id: Some("3p-weekly".to_string()),
+                            display_name: Some("Weekly Limit Remaining".to_string()),
+                            window: Some("weekly".to_string()),
+                            reset_time: None,
+                            remaining_fraction: Some(0.46),
+                        },
+                    ],
+                },
+            ],
         };
 
-        let formatted = summary.format_quota_display().expect("quota display");
-        assert_eq!(formatted, "5h 100% · w 100%");
+        // When active model is gemini, it must select the Gemini Models group
+        let gemini_fmt = summary.format_quota_display("gemini-3.8-flash").expect("gemini quota");
+        assert_eq!(gemini_fmt, "5h 100% · w 50%");
+
+        // When active model is claude, it must select the Claude and GPT models group
+        let claude_fmt = summary.format_quota_display("claude-sonnet-4-6").expect("claude quota");
+        assert_eq!(claude_fmt, "5h 100% · w 46%");
     }
 }
 

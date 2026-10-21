@@ -1210,7 +1210,7 @@ pub(crate) async fn handle_model_switch(
     // the bar to 0.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     ui.set_model(&chosen_model, context_used, context_max);
-    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, cred_manager).await;
+    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, &chosen_model, cred_manager).await;
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 

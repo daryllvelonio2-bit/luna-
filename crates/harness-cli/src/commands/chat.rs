@@ -798,7 +798,7 @@ pub async fn run_interactive_chat(
     // reporting "0 used" made the continuation look like a fresh start.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     ui.set_status(&current_model, context_used, context_max);
-    refresh_antigravity_status_if_needed(&ui, &current_provider, &cred_manager).await;
+    refresh_antigravity_status_if_needed(&ui, &current_provider, &current_model, &cred_manager).await;
     // A resumed named session shows its name centered in the status bar from the first frame.
     let stored_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
     ui.set_session_name(&stored_name);
@@ -1834,6 +1834,7 @@ async fn prompt_sudo_password_dialog(
 pub(crate) async fn refresh_antigravity_status_if_needed(
     ui: &ChatUi,
     current_provider: &str,
+    current_model: &str,
     cred_manager: &Arc<CredentialManager>,
 ) {
     if current_provider.eq_ignore_ascii_case("antigravity") || current_provider.eq_ignore_ascii_case("agy") {
@@ -1863,7 +1864,7 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
                 harness_providers::retrieve_antigravity_quota(&client, &primary.api_key, Some(cred_manager))
                     .await
             {
-                if let Some(display) = summary.format_quota_display() {
+                if let Some(display) = summary.format_quota_display(current_model) {
                     ui.set_quota_display(Some(display));
                 }
             }

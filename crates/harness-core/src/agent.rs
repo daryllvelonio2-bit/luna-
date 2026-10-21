@@ -464,6 +464,10 @@ where
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
         let (history, _replay_notice) = self.load_history().await?;
 
+        if history.is_empty() {
+            return Ok(0);
+        }
+
         // 1. If any prior turn recorded actual usage from the provider, use the most recent report
         if let Some(latest_usage) = history
             .iter()
@@ -473,17 +477,10 @@ where
             return Ok(latest_usage.prompt_tokens.saturating_add(latest_usage.completion_tokens));
         }
 
-        // 2. Otherwise estimate accurately: system prompt + tools schemas + conversation messages
-        let system_text = self.system_prompt("").await.unwrap_or_default();
-        let tools_count = self.registry.list_tools().await.map(|t| t.len()).unwrap_or(0);
-        let mut messages = Vec::with_capacity(history.len() + 1);
-        if !system_text.is_empty() {
-            messages.push(Message::system(system_text));
-        }
-        messages.extend(history.iter().map(|stored| stored.message.clone()));
+        // 2. Otherwise estimate accurately from session messages
+        let messages: Vec<Message> = history.iter().map(|stored| stored.message.clone()).collect();
         let estimate = estimate_tokens(&messages);
-        let tool_tokens = (tools_count as u32).saturating_mul(250);
-        Ok(estimate.tokens.saturating_add(tool_tokens))
+        Ok(estimate.tokens)
     }
 
     /// Fold the oldest turns of the current session into a summary, ignoring
