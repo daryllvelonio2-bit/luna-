@@ -9,13 +9,16 @@
 //! | exit `0`, no stdout | the event proceeds |
 //! | exit `0`, `{"decision":"deny","reason":"…"}` | a gating event is refused, the reason goes to the model |
 //! | exit `0`, `{"updatedInput":{…}}` | the tool runs with replacement arguments |
+//! | exit `0`, `{"content":"…"}` | a `post_tool_use` hook replaces the result the model reads |
 //! | exit `2` | refused; stderr (or stdout) is the reason |
 //! | any other exit code | recorded as a hook error; the event proceeds |
 //! | no exit within `hooks.timeout_secs` | a *gating* event is refused, an observability event is not |
 //!
 //! Two properties matter more than the schema. First, **hooks never widen permission**: a hook can
 //! refuse a call and can rewrite its arguments, but it cannot approve a mutating call the human
-//! gate would otherwise refuse — the gate still runs afterwards. Second, **load is fail-closed**:
+//! gate would otherwise refuse — the gate still runs afterwards. Third, **a refusal only blocks
+//! where a refusal means something**: `user_prompt_submit`, `stop` and `pre_compact` can stop the
+//! turn; an observation event cannot (see [`HookEvent::refusal_blocks_turn`]). Second, **load is fail-closed**:
 //! hooks are off unless `hooks.enabled` is set, and repository-supplied hooks
 //! (`<workspace>/.luna/hooks.json`) need `hooks.trust_workspace` as well, because a cloned repo
 //! must not be able to configure code execution for itself.
@@ -104,6 +107,15 @@ impl HookEvent {
     /// Events whose answer can stop work: a timeout or a malformed answer is a refusal.
     pub fn is_gating(self) -> bool {
         matches!(self, Self::PreToolUse | Self::PermissionRequest)
+    }
+
+    /// Whether a refusal of this turn-level event should stop the turn.
+    ///
+    /// Only three answers are worth listening to: "do not send this prompt", "do not stop yet", and
+    /// "do not compact". The rest are observations — a `notification` or `session_end` hook that
+    /// exits 2 must not be able to fail a turn it was only watching.
+    pub fn refusal_blocks_turn(self) -> bool {
+        matches!(self, Self::UserPromptSubmit | Self::Stop | Self::PreCompact)
     }
 
     pub fn parse(raw: &str) -> Result<Self, HarnessError> {
@@ -269,6 +281,21 @@ impl HookRunner {
         self.specs.is_empty()
     }
 
+    /// Every bound hook, in event order. `luna hooks` prints this: the *loaded* set is the only
+    /// honest answer to "is my guardrail armed", because a file that was not trusted, an event
+    /// that was disabled, and a typo all look like a configured hook in the file itself.
+    pub fn bound(&self) -> Vec<(HookEvent, &HookSpec)> {
+        self.specs
+            .iter()
+            .flat_map(|(event, specs)| specs.iter().map(move |spec| (*event, spec)))
+            .collect()
+    }
+
+    /// The timeout applied to a hook that does not set its own.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Whether any hook is bound to `event` (after matchers, for tool events).
     pub fn has(&self, event: HookEvent, tool: Option<&str>) -> bool {
         self.specs
@@ -406,9 +433,18 @@ impl HookRunner {
 
         let parsed: Option<HookStdout> = serde_json::from_str(stdout.trim()).ok();
         if let Some(parsed) = parsed {
-            if let Some(verdict) = parsed.into_verdict() {
+            if let Some(verdict) = parsed.into_verdict(event) {
                 return Ok(Some(verdict));
             }
+        } else if !stdout.trim().is_empty() {
+            // Non-empty output that is not a decision is almost always a broken hook — an
+            // unescaped newline in a `printf`, a stray log line. It cannot be obeyed, but it must
+            // not be silent either: the hook believes it decided something.
+            warn!(
+                hook = %spec.command,
+                event = event.as_str(),
+                "hook printed output that is not a JSON decision; proceeding as if it said nothing"
+            );
         }
 
         if code != 0 {
@@ -506,6 +542,11 @@ struct HookStdout {
     reason: Option<String>,
     #[serde(default)]
     updated_input: Option<serde_json::Value>,
+    /// What the model should read instead of the tool's own output (`post_tool_use` only). A
+    /// redaction hook needs to change the *result*, and making it wrap that in `updatedInput`
+    /// would be a wire format that says "input" where it means "output".
+    #[serde(default)]
+    content: Option<String>,
     #[serde(default)]
     hook_specific_output: Option<HookSpecificOutput>,
 }
@@ -522,7 +563,14 @@ struct HookSpecificOutput {
 }
 
 impl HookStdout {
-    fn into_verdict(self) -> Option<HookVerdict> {
+    fn into_verdict(self, event: HookEvent) -> Option<HookVerdict> {
+        // `content` replaces a result, so it is only meaningful on the post events: honouring it on
+        // a gating event would let a hook "rewrite the arguments" to an object it never meant as
+        // arguments.
+        let content = match event {
+            HookEvent::PostToolUse | HookEvent::PostToolUseFailure => self.content,
+            _ => None,
+        };
         let (decision, reason, updated_input) = match self.hook_specific_output {
             Some(specific) => (
                 specific
@@ -543,7 +591,11 @@ impl HookStdout {
             Some("deny") | Some("block") | Some("forbid") => Some(HookVerdict::Deny(
                 reason.unwrap_or_else(|| "blocked by hook".to_string()),
             )),
-            _ => updated_input.map(HookVerdict::ProceedWith),
+            _ => updated_input
+                .or_else(|| {
+                    content.map(|content| serde_json::json!({ "content": content }))
+                })
+                .map(HookVerdict::ProceedWith),
         }
     }
 }

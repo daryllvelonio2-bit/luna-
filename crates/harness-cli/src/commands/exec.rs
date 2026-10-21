@@ -212,8 +212,17 @@ pub async fn run_exec(
         agent_cfg.skills_summary = Some(skills_summary);
     }
 
+    // Hooks are part of the agent, not part of the REPL: `luna exec` is the path CI and scripts
+    // take, and a guardrail that only arms in an interactive session is a guardrail that is off
+    // exactly where nobody is watching. Same fail-closed loader as `chat`.
+    let hooks = Arc::new(harness_core::HookRunner::load(
+        &config.paths.workspace_root,
+        &config.hooks,
+    )?);
+
     let mut agent: ChatAgent = Agent::new(provider, memory, notes, evolver, registry, agent_cfg)
         .with_permissions(permissions)
+        .with_hooks(hooks)
         .with_checkpoints(checkpoints)
         .with_approval(approver, approval_settings(&config))
         .with_session(SessionBinding {
@@ -277,9 +286,21 @@ pub async fn run_exec(
         agent.set_observer(observer);
     }
 
+    // `session_start` before the turn and `session_end` after it, mirroring the REPL.
+    agent
+        .emit_hook_event(harness_core::HookEvent::SessionStart, None)
+        .await?;
     let outcome = agent
         .run_turn(&prompt, tokio_util::sync::CancellationToken::new())
         .await;
+    // `session_end` fires even when the turn failed: a hook that tears down a container or
+    // flushes a log must not be skipped because the model errored.
+    if let Err(error) = agent
+        .emit_hook_event(harness_core::HookEvent::SessionEnd, None)
+        .await
+    {
+        tracing::warn!("session_end hook refused: {}", error);
+    }
 
     if let Ok(outcome) = &outcome {
         usage

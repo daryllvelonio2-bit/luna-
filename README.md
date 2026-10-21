@@ -222,6 +222,14 @@ Cost is only reported when it is known: a model with no price is counted as **un
 guessed at. Prices live in `usage.prices` (`provider/model`, with `provider/*` and `*/model`
 wildcards) over a small built-in table. Details: [`docs/USAGE.md`](docs/USAGE.md).
 
+### 2.11 Hooks on every surface: `luna hooks`
+
+`luna chat` and `luna exec` load the same lifecycle hooks and bracket a turn with
+`session_start`/`session_end`. `pre_tool_use` can refuse or rewrite a call (the gate still decides),
+`post_tool_use` can replace the result the model reads — a redaction hook that actually redacts.
+`luna hooks` prints what is *loaded*, not what the files say. Details:
+[`docs/HOOKS.md`](docs/HOOKS.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

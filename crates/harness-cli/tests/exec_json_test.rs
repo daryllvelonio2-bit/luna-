@@ -135,6 +135,8 @@ fn write_config(dir: &Path, base_url: &str, allow_write: bool) -> PathBuf {
     // A price for the mock model, so the ledger reports a dollar figure rather than "unpriced".
     let pricing = "usage:\n  prices:\n    openai/mock-1: { input_per_million: 1.0, output_per_million: 2.0 }\n";
 
+    let hooks = "hooks:\n  enabled: true\n";
+
     let permissions = if allow_write {
         "tools:\n  permissions:\n    - action: allow\n      tool: write_file\n"
     } else {
@@ -142,7 +144,7 @@ fn write_config(dir: &Path, base_url: &str, allow_write: bool) -> PathBuf {
     };
 
     let config = format!(
-        "model:\n  provider: openai\n  default: mock-1\nproviders:\n  openai:\n    base_url: {base_url}\npaths:\n  sessions_db: {luna}/sessions.db\n  memory_db: {luna}/memory.db\n  notes_db: {luna}/notes.db\n  credentials: {luna}/credentials.json\n  models_cache: {luna}/models_cache.json\n  jobs_dir: {luna}/jobs\n  skills_dir: {luna}/skills\n  checkpoints_dir: {luna}/checkpoints\n  usage_db: {luna}/usage.db\n  workspace_root: {workspace}\n{pricing}{permissions}",
+        "model:\n  provider: openai\n  default: mock-1\nproviders:\n  openai:\n    base_url: {base_url}\npaths:\n  sessions_db: {luna}/sessions.db\n  memory_db: {luna}/memory.db\n  notes_db: {luna}/notes.db\n  credentials: {luna}/credentials.json\n  models_cache: {luna}/models_cache.json\n  jobs_dir: {luna}/jobs\n  skills_dir: {luna}/skills\n  checkpoints_dir: {luna}/checkpoints\n  usage_db: {luna}/usage.db\n  workspace_root: {workspace}\n{pricing}{hooks}{permissions}",
         luna = luna.display(),
         workspace = workspace.display(),
     );
@@ -156,9 +158,34 @@ fn run_exec(dir: &Path, config: &Path, args: &[&str]) -> Output {
     command
         .current_dir(dir.join("ws"))
         .env("LUNA_CONFIG", config)
+        // A scratch `$HOME`, so the host's `~/.luna/hooks.json` and credentials can never decide
+        // what a test does.
+        .env("HOME", dir.join("home"))
         .env_remove("OPENAI_API_KEY")
         .args(args);
     command.output().expect("luna exec runs")
+}
+
+/// Run any `luna` subcommand against `dir`'s config and a scratch `$HOME`.
+fn run_luna(dir: &Path, config: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(dir.join("ws"))
+        .env("LUNA_CONFIG", config)
+        .env("HOME", dir.join("home"))
+        .args(args)
+        .output()
+        .expect("luna runs")
+}
+
+/// Write `$HOME/.luna/hooks.json` for the test's scratch home.
+fn user_hooks(dir: &Path, body: serde_json::Value) {
+    let hooks_dir = dir.join("home").join(".luna");
+    fs::create_dir_all(&hooks_dir).expect("hooks dir");
+    fs::write(
+        hooks_dir.join("hooks.json"),
+        serde_json::to_string_pretty(&body).expect("hooks json"),
+    )
+    .expect("hooks file");
 }
 
 fn events(stdout: &[u8]) -> Vec<serde_json::Value> {
@@ -428,4 +455,88 @@ fn the_turn_is_recorded_in_the_usage_ledger() {
         .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["source"], "exec");
+}
+
+#[test]
+fn exec_runs_the_same_hooks_the_repl_does() {
+    let dir = scratch("hooks");
+    let (base_url, _served) = start_mock(write_turn());
+    let config = write_config(&dir, &base_url, true);
+    let markers = dir.join("markers.log");
+
+    // Three hooks, one per contract: the session brackets fire, and a `pre_tool_use` rewrite
+    // changes what the tool actually does. Before parity, `luna exec` ran none of them.
+    user_hooks(
+        &dir,
+        serde_json::json!({
+            "hooks": {
+                "session_start": [{"command": format!("echo start >> {}", markers.display())}],
+                "pre_tool_use": [{
+                    "matcher": "write_file",
+                    // No `\n` in the content: `printf` would turn it into a real newline and the
+                    // payload would stop being JSON — which is exactly the failure the runner now
+                    // warns about.
+                    "command": "printf '{\"updatedInput\":{\"path\":\"redirected.md\",\"content\":\"# redirected\"}}'"
+                }],
+                "session_end": [{"command": format!("echo end >> {}", markers.display())}]
+            }
+        }),
+    );
+
+    let output = run_exec(&dir, &config, &["exec", "write the report"]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ws = dir.join("ws");
+    assert!(
+        ws.join("redirected.md").is_file(),
+        "the hook rewrote the path\nstdout:\n{}\nstderr:\n{}\nws: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_dir(&ws).map(|entries| entries.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>()),
+    );
+    assert!(!ws.join("report.md").exists(), "the original path was never written");
+
+    let log = fs::read_to_string(&markers).expect("session hooks wrote markers");
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["start", "end"],
+        "session_start runs before the turn and session_end after it"
+    );
+}
+
+#[test]
+fn hooks_command_reports_what_is_actually_loaded() {
+    let dir = scratch("hooks-list");
+    let (base_url, _served) = start_mock(vec![]);
+    let config = write_config(&dir, &base_url, true);
+
+    let empty = run_luna(&dir, &config, &["hooks", "--json"]);
+    assert!(empty.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&empty.stdout).expect("json report");
+    assert_eq!(report["hooks"].as_array().map(|hooks| hooks.len()), Some(0));
+
+    user_hooks(
+        &dir,
+        serde_json::json!({
+            "hooks": {
+                "pre_tool_use": [{"matcher": "write_*", "command": "echo guarded"}],
+                "stop": [{"command": "echo bye"}]
+            }
+        }),
+    );
+
+    let listed = run_luna(&dir, &config, &["hooks", "--json"]);
+    assert!(listed.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("json report");
+    let hooks = report["hooks"].as_array().expect("a hook array");
+    assert_eq!(hooks.len(), 2);
+    assert!(hooks.iter().any(|hook| hook["event"] == "pre_tool_use" && hook["matcher"] == "write_*"));
+    assert!(hooks.iter().any(|hook| hook["event"] == "stop"));
+    assert_eq!(report["enabled"], true);
 }

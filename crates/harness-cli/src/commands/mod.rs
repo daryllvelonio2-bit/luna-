@@ -8,6 +8,7 @@ pub mod exec;
 pub mod heartbeat;
 pub mod models;
 pub mod sessions;
+pub mod hooks;
 pub mod supervisor;
 pub mod usage;
 pub mod voice;

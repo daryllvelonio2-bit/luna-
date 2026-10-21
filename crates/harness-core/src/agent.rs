@@ -368,11 +368,19 @@ where
             ..HookContext::default()
         };
         let outcome = hooks.run(event, &context).await;
+        for note in &outcome.notes {
+            debug!("{} hook: {}", event.as_str(), note);
+        }
         match outcome.denial() {
-            Some(reason) => Err(HarnessError::ApprovalRejected(format!(
-                "{} hook refused: {reason}",
-                event.as_str()
-            ))),
+            // A refusal from an event that was only watching is reported, not obeyed: a
+            // `session_end` hook exiting 2 must not turn a finished turn into a failed one.
+            Some(reason) if event.refusal_blocks_turn() => Err(HarnessError::ApprovalRejected(
+                format!("{} hook refused: {reason}", event.as_str()),
+            )),
+            Some(reason) => {
+                warn!("{} hook refused, which this event cannot do: {}", event.as_str(), reason);
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -809,9 +817,18 @@ where
                         ..HookContext::default()
                     };
                     let hook_outcome = hooks.run(HookEvent::PreToolUse, &context).await;
+                    for note in &hook_outcome.notes {
+                        debug!(tool = %tool_call.name, "pre_tool_use hook: {}", note);
+                    }
                     match hook_outcome.verdict {
-                        HookVerdict::Deny(reason) => hook_denial = Some(reason),
-                        HookVerdict::ProceedWith(arguments) => effective_arguments = arguments,
+                        HookVerdict::Deny(reason) => {
+                            warn!(tool = %tool_call.name, "pre_tool_use hook denied the call: {}", reason);
+                            hook_denial = Some(reason);
+                        }
+                        HookVerdict::ProceedWith(arguments) => {
+                            debug!(tool = %tool_call.name, "pre_tool_use hook rewrote the arguments");
+                            effective_arguments = arguments;
+                        }
                         HookVerdict::Proceed => {}
                     }
                 }
@@ -859,6 +876,10 @@ where
                     }
                 };
 
+                // `post_tool_use` can replace what the model reads without changing what the tool
+                // did: a redaction or truncation hook whose output was discarded would be a
+                // guardrail that silently guards nothing, which is worse than no hook at all.
+                let mut execution_result = execution_result;
                 if let Some(hooks) = self.hooks.as_ref() {
                     let event = if execution_result.is_error {
                         HookEvent::PostToolUseFailure
@@ -874,7 +895,29 @@ where
                             .is_error
                             .then_some(execution_result.content.as_str()),
                     };
-                    hooks.run(event, &context).await;
+                    let hook_outcome = hooks.run(event, &context).await;
+                    for note in &hook_outcome.notes {
+                        debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
+                    }
+                    if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
+                        match hook_replacement_text(&replacement) {
+                            Some(text) => {
+                                debug!(
+                                    tool = %tool_call.name,
+                                    "{} hook replaced the result the model sees ({} -> {} chars)",
+                                    event.as_str(),
+                                    execution_result.content.chars().count(),
+                                    text.chars().count()
+                                );
+                                execution_result.content = text;
+                            }
+                            None => warn!(
+                                tool = %tool_call.name,
+                                "{} hook returned a payload with no \"content\"; ignoring it",
+                                event.as_str()
+                            ),
+                        }
+                    }
                 }
 
                 if let Some(ref observer) = self.observer {
@@ -1279,5 +1322,22 @@ where
             .append(&binding.session_id, message, is_summary)
             .await
             .map(|_| ())
+    }
+}
+
+/// The text a `post_tool_use` hook wants the model to see instead of the tool's own output.
+///
+/// Two shapes are accepted, because both are what a shell one-liner naturally produces:
+/// `{"content":"…"}` (the documented one) and a bare JSON string. Anything else is not a
+/// replacement, so the caller keeps the original output rather than guessing at intent.
+fn hook_replacement_text(payload: &serde_json::Value) -> Option<String> {
+    match payload {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(map) => map
+            .get("content")
+            .or_else(|| map.get("output"))
+            .and_then(|value| value.as_str())
+            .map(|text| text.to_string()),
+        _ => None,
     }
 }

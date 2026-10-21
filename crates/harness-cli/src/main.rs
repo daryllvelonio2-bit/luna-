@@ -112,6 +112,12 @@ enum Commands {
         #[arg(long = "continue")]
         continue_session: bool,
     },
+    /// Show which lifecycle hooks are loaded (and which are ignored)
+    Hooks {
+        /// One JSON object on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Show turn usage: tokens, models, cost and time (from the usage ledger)
     Usage {
         /// Only count turns newer than this: 30m, 12h, 7d, 2w or an RFC 3339 timestamp
@@ -333,6 +339,12 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
+        }
+        Some(Commands::Hooks { json }) => {
+            commands::hooks::run_hooks(
+                config,
+                commands::hooks::HooksOptions { json },
+            )?;
         }
         Some(Commands::Usage {
             since,

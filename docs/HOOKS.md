@@ -57,11 +57,11 @@ guardrail.
 
 | event | when | can refuse? |
 |---|---|---|
-| `session_start` | the chat session is created | yes (the run aborts) |
+| `session_start` | the session is created | yes (the run aborts) |
 | `user_prompt_submit` | after the prompt is stored, before the model sees it | yes |
 | `pre_tool_use` | before the approval gate and the tool | yes, and can rewrite arguments |
-| `post_tool_use` | the tool returned successfully | no |
-| `post_tool_use_failure` | the tool returned an error | no |
+| `post_tool_use` | the tool returned successfully | no, but can replace the result the model reads |
+| `post_tool_use_failure` | the tool returned an error | no, but can replace the error text |
 | `permission_request` | the human gate is about to ask | yes |
 | `pre_compact` / `post_compact` | around a context compaction | `pre_` only |
 | `subagent_start` / `subagent_stop` | around a delegated agent | no |
@@ -94,12 +94,61 @@ with the workspace as their working directory.
 | exit `0`, no output | the event proceeds |
 | exit `0`, `{"decision":"deny","reason":"…"}` | refused; `reason` reaches the model as a tool error |
 | exit `0`, `{"updatedInput":{…}}` | the tool runs with replacement arguments (`pre_tool_use` only) |
+| exit `0`, `{"content":"…"}` | replaces what the model reads, without changing what the tool did (`post_tool_use` / `post_tool_use_failure` only) |
 | exit `2` | refused; stderr (or stdout) is the reason |
 | other exit code | recorded as a hook error; the event proceeds |
 | timeout | a *gating* event (`pre_tool_use`, `permission_request`) is refused; anything else is only logged |
 
 `{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"…"}}` is accepted
 too, since that is the shape other harnesses document.
+
+Non-empty output that is not a decision (an unescaped newline in a `printf`, a stray log line) is
+reported as a warning and the event proceeds — a hook that believes it decided something should not
+be silent about it.
+
+### Redacting a tool result
+
+`post_tool_use` can replace the text the model reads while leaving the tool's real effect alone —
+which is what a redaction or truncation hook needs:
+
+```json
+{ "hooks": { "post_tool_use": [
+  { "matcher": "terminal", "command": ".luna/hooks/redact-secrets.sh" }
+] } }
+```
+
+```sh
+# .luna/hooks/redact-secrets.sh — reads the event JSON on stdin
+python3 -c 'import json,sys,re; e=json.load(sys.stdin); print(json.dumps({"content": re.sub(r"AKIA[0-9A-Z]{16}", "[redacted]", e["message"])}))'
+```
+
+The transcript, and therefore the next model call, carries the hook's text. A payload with no
+`content` key is ignored rather than blanking the result.
+
+## Which refusals actually stop something
+
+Exit `2` is honoured everywhere, but only three turn-level events can act on it:
+`user_prompt_submit` (the prompt is refused), `stop` (the turn does not end) and `pre_compact`
+(compaction is refused). The rest are observations — a `notification` or `session_end` hook that
+exits `2` is logged and the turn continues, because an observer must not be able to fail what it was
+only watching. `pre_tool_use` and `permission_request` gate the call they are attached to.
+
+## Every surface runs them
+
+`luna chat` and `luna exec` load the same hooks from the same files, and both bracket a turn with
+`session_start` / `session_end`. A guardrail that only arms in the interactive REPL is off exactly
+where nobody is watching, so `luna exec` is not a separate policy.
+
+## Inspect what is loaded
+
+```bash
+luna hooks          # files read, whether they are trusted, every bound hook
+luna hooks --json   # the same, machine-readable
+```
+
+This reads the *runner*, not the files: a hook in `~/.luna/hooks.json` is not armed if
+`hooks.enabled` is false, if its event name is a typo, if the event is in `hooks.disabled`, or if it
+lives in a project file that is not trusted. The listing shows what will actually run.
 
 ## What hooks cannot do
 
