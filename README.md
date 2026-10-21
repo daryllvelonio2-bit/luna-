@@ -152,6 +152,27 @@ Mutating tools (`write_file`, `patch`, `terminal`) go through the approval gate 
 `agent.require_hitl_for_mutation` is set; `read_file`, `search_files` and `list_files` are
 read-only and never prompt.
 
+### 2.6 Lifecycle Hooks
+
+Shell commands bound to harness events — `pre_tool_use` (which can refuse a call or rewrite its
+arguments), `post_tool_use`, `user_prompt_submit`, `stop`, `session_start`/`session_end`,
+`pre_compact`, `subagent_*`. Off by default; repository-supplied hooks need explicit trust.
+
+```yaml
+hooks:
+  enabled: true            # default false
+  trust_workspace: false    # default false: <workspace>/.luna/hooks.json stays inert
+  timeout_secs: 30
+```
+
+```json
+{ "hooks": { "pre_tool_use": [ { "matcher": "terminal", "command": ".luna/hooks/guard.sh" } ] } }
+```
+
+A hook receives the event as JSON on stdin and may answer with `{"decision":"deny","reason":"…"}`
+or `{"updatedInput":{…}}`; exit code `2` also refuses. Hooks can narrow what happens but never
+approve what the human gate would refuse. Full contract: [`docs/HOOKS.md`](docs/HOOKS.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

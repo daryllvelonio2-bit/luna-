@@ -2,6 +2,7 @@ pub mod agent;
 pub mod approval;
 pub mod config;
 pub mod error;
+pub mod hooks;
 pub mod ledger;
 pub mod prompts;
 pub mod registry;
@@ -22,10 +23,13 @@ pub use approval::{
     Approver, DenyAll, FnApprover, NonInteractive, ToolPreview, DEFAULT_APPROVAL_TIMEOUT_SECS,
 };
 pub use config::{
-    resolve, Config, Layers, ModelSettings, PathsSettings, ProviderOverride, Resolved,
-    SessionSettings, Source, ToolsSettings,
+    resolve, Config, HooksSettings, Layers, ModelSettings, PathsSettings, ProviderOverride,
+    Resolved, SessionSettings, Source, ToolsSettings,
 };
 pub use error::HarnessError;
+pub use hooks::{
+    HookContext, HookEvent, HookOutcome, HookRunner, HookSpec, HookVerdict, DEFAULT_HOOK_TIMEOUT_SECS,
+};
 pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
 pub use registry::DefaultToolRegistry;
 pub use substrate::{LocalAgentSubstrate, MockSubstrate, Substrate, SubstrateOutcome};

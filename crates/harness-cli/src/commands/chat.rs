@@ -325,7 +325,13 @@ pub async fn run_interactive_chat(
     let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
     let in_flight_tools_obs = in_flight_tools.clone();
 
-    let mut agent = agent.with_observer(Arc::new(move |event| match event {
+    // Lifecycle hooks: opt-in, loaded from the user file and (only when trusted) the project
+    // file. Loading is fail-closed, so a missing file means an empty runner, not an error.
+    let hooks = Arc::new(harness_core::HookRunner::load(
+        &config.paths.workspace_root,
+        &config.hooks,
+    )?);
+    let mut agent = agent.with_hooks(hooks.clone()).with_observer(Arc::new(move |event| match event {
         // Reasoning lands in the live region and is settled into the transcript by the animation
         // tick, so it is visible while it is still being produced.
         harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
@@ -380,6 +386,13 @@ pub async fn run_interactive_chat(
 
     let steer_handle = agent.steer_handle();
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
+
+    {
+        let ag = agent.lock().await;
+        if let Err(error) = ag.emit_hook_event(harness_core::HookEvent::SessionStart, None).await {
+            tracing::warn!("session_start hook refused the run: {}", error);
+        }
+    }
 
     let mut compact_provider: Option<String> = config.agent.compaction_provider.clone();
     let mut compact_model: Option<String> = config.agent.compaction_model.clone();
@@ -1487,6 +1500,13 @@ pub async fn run_interactive_chat(
                     }
                 }
             }
+        }
+    }
+
+    {
+        let ag = agent.lock().await;
+        if let Err(error) = ag.emit_hook_event(harness_core::HookEvent::SessionEnd, None).await {
+            tracing::warn!("session_end hook failed: {}", error);
         }
     }
 

@@ -8,6 +8,7 @@ use tracing::{debug, error, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
 use crate::error::HarnessError;
+use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
 use crate::traits::*;
 use crate::types::*;
@@ -154,6 +155,7 @@ where
     approval: ApprovalSettings,
     compaction: Option<CompactionSetup>,
     session: Option<SessionBinding>,
+    hooks: Option<Arc<HookRunner>>,
     observer: Option<AgentObserver>,
     reasoning_effort: Option<ReasoningEffort>,
     steer_queue: Arc<Mutex<VecDeque<String>>>,
@@ -196,6 +198,7 @@ where
             approval: ApprovalSettings::default(),
             compaction: None,
             session: None,
+            hooks: None,
             observer: None,
             reasoning_effort: None,
             steer_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -272,6 +275,45 @@ where
     /// Set or update the compaction setup at runtime.
     pub fn set_compaction(&mut self, setup: Option<CompactionSetup>) {
         self.compaction = setup;
+    }
+
+    /// Attach lifecycle hooks (see [`crate::hooks`]). Without this the agent emits no events.
+    pub fn with_hooks(mut self, hooks: Arc<HookRunner>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    /// Replace (or clear) the hook runner at runtime.
+    pub fn set_hooks(&mut self, hooks: Option<Arc<HookRunner>>) {
+        self.hooks = hooks;
+    }
+
+    /// Fire an event that has no tool attached (`session_start`, `stop`, …).
+    ///
+    /// A denial is surfaced as [`HarnessError::ApprovalRejected`] so no caller can mistake a
+    /// refused event for a completed one.
+    pub async fn emit_hook_event(
+        &self,
+        event: HookEvent,
+        message: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        let Some(hooks) = self.hooks.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self.session.as_ref().map(|binding| binding.session_id.as_str());
+        let context = HookContext {
+            session_id,
+            message,
+            ..HookContext::default()
+        };
+        let outcome = hooks.run(event, &context).await;
+        match outcome.denial() {
+            Some(reason) => Err(HarnessError::ApprovalRejected(format!(
+                "{} hook refused: {reason}",
+                event.as_str()
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Apply an editable SurfaceSpec (Harness² c1–c8 components) to the agent loop.
@@ -482,6 +524,10 @@ where
         messages.extend(history.iter().map(|stored| stored.message.clone()));
         messages.push(Message::user(user_input));
 
+        // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
+        self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
+            .await?;
+
         // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
         // or fails and leaves the transcript alone. No retry inside the turn.
         let compaction = self.compact_once(&history, &system_text, &mut messages, false).await?;
@@ -617,6 +663,7 @@ where
                 let mut final_response = response.clone();
                 final_response.content = Some(final_reply.clone());
                 self.append(&final_response, false).await?;
+                self.emit_hook_event(HookEvent::Stop, Some(&final_reply)).await?;
                 return Ok(TurnOutcome {
                     reply: final_reply,
                     reasoning: last_reasoning,
@@ -642,9 +689,39 @@ where
                 }
 
                 debug!("Dispatching tool call: '{}' (call id: {})", tool_call.name, tool_call.id);
-                // The gate first: a mutating call is put to the human before it runs, and a
+
+                // Hooks run before the human gate and can only narrow the call: a denial replaces
+                // its result, an argument rewrite is what the gate and the tool then see. A hook
+                // can never approve what the gate would refuse, so the two cannot disagree.
+                let mut effective_arguments = tool_call.arguments.clone();
+                let mut hook_denial: Option<String> = None;
+                if let Some(hooks) = self.hooks.as_ref() {
+                    let context = HookContext {
+                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
+                        tool: Some(tool_call.name.as_str()),
+                        arguments: Some(&tool_call.arguments),
+                        ..HookContext::default()
+                    };
+                    let hook_outcome = hooks.run(HookEvent::PreToolUse, &context).await;
+                    match hook_outcome.verdict {
+                        HookVerdict::Deny(reason) => hook_denial = Some(reason),
+                        HookVerdict::ProceedWith(arguments) => effective_arguments = arguments,
+                        HookVerdict::Proceed => {}
+                    }
+                }
+
+                // The gate next: a mutating call is put to the human before it runs, and a
                 // denial comes back as an ordinary tool result the model can react to.
-                let gate_outcome = self.gate_decision(&tool_call).await;
+                let gate_outcome = match hook_denial {
+                    Some(ref reason) => GateOutcome::Denied(format!("hook: {reason}")),
+                    None => {
+                        let gated = ToolCall {
+                            arguments: effective_arguments.clone(),
+                            ..tool_call.clone()
+                        };
+                        self.gate_decision(&gated).await
+                    }
+                };
                 let is_denial = matches!(gate_outcome, GateOutcome::Denied(_));
                 let outcome: Result<ToolResult, HarnessError> = match gate_outcome {
                     GateOutcome::Denied(reason) => {
@@ -662,7 +739,7 @@ where
                             });
                         }
                         let call = ToolCall {
-                            arguments: edited.unwrap_or_else(|| tool_call.arguments.clone()),
+                            arguments: edited.unwrap_or_else(|| effective_arguments.clone()),
                             ..tool_call.clone()
                         };
                         self.registry.execute(&call, &cancel_token).await
@@ -675,6 +752,24 @@ where
                         ToolResult::error(&tool_call.id, e.to_string())
                     }
                 };
+
+                if let Some(hooks) = self.hooks.as_ref() {
+                    let event = if execution_result.is_error {
+                        HookEvent::PostToolUseFailure
+                    } else {
+                        HookEvent::PostToolUse
+                    };
+                    let context = HookContext {
+                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
+                        tool: Some(tool_call.name.as_str()),
+                        arguments: Some(&effective_arguments),
+                        message: Some(execution_result.content.as_str()),
+                        reason: execution_result
+                            .is_error
+                            .then_some(execution_result.content.as_str()),
+                    };
+                    hooks.run(event, &context).await;
+                }
 
                 if let Some(ref observer) = self.observer {
                     observer(AgentEvent::ToolExecuted {

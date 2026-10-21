@@ -53,8 +53,40 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderOverride>,
     pub agent: AgentConfig,
     pub tools: ToolsSettings,
+    pub hooks: HooksSettings,
     pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
+}
+
+/// Lifecycle-hook settings.
+///
+/// Hooks execute shell commands on harness events, so they are opt-in and split by trust: the
+/// user file (`~/.luna/hooks.json`) is authored by the machine's owner and runs when `enabled`;
+/// the project file (`<workspace>/.luna/hooks.json`) travels with a repository and only runs when
+/// `trust_workspace` is also set. A cloned repo cannot configure code execution for itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HooksSettings {
+    /// Run hooks at all. Default `false`: an install that never opted in runs nothing.
+    pub enabled: bool,
+    /// Allow `<workspace>/.luna/hooks.json` (repository-supplied hooks) to run as well.
+    pub trust_workspace: bool,
+    /// A hook that has not finished within this window is killed. A gating event treats that as
+    /// a denial; an observability event only records it.
+    pub timeout_secs: u64,
+    /// Event names to skip, e.g. `["post_tool_use"]`.
+    pub disabled: Vec<String>,
+}
+
+impl Default for HooksSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trust_workspace: false,
+            timeout_secs: 30,
+            disabled: Vec::new(),
+        }
+    }
 }
 
 /// Which provider and model `luna` talks to.
