@@ -153,6 +153,95 @@ impl ModelProvider for RecordingProvider {
     }
 }
 
+/// A reasoning model that spent its whole budget on reasoning and wrote no text: the
+/// first call answers with the provider layer's "no text response" marker, the second
+/// (the retry with a bigger budget) answers with a real summary. It records the budget
+/// of every call, so a test can see that the retry asked for more room.
+struct ReasoningProvider {
+    calls: AtomicUsize,
+    budgets: Mutex<Vec<u32>>,
+}
+
+impl ReasoningProvider {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            budgets: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for ReasoningProvider {
+    fn provider_id(&self) -> &str {
+        "reasoning"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["reasoning-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.budgets
+            .lock()
+            .unwrap()
+            .push(options.max_tokens.unwrap_or_default());
+        if self.calls.load(Ordering::SeqCst) == 1 {
+            Ok(Message::assistant(NO_TEXT_RESPONSE))
+        } else {
+            Ok(Message::assistant("the summary, with room to write it"))
+        }
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A model that never writes a summary: every call comes back with the marker.
+struct SilentProvider {
+    calls: AtomicUsize,
+}
+
+impl SilentProvider {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for SilentProvider {
+    fn provider_id(&self) -> &str {
+        "silent"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["silent-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Message::assistant(NO_TEXT_RESPONSE))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
 struct MockMemory;
 
 #[async_trait]
@@ -277,6 +366,33 @@ fn history(turns: usize) -> Vec<StoredMessage> {
         }
     }
     out
+}
+
+/// One stored message, with the fields a test needs to set.
+fn stored(role: Role, content: String) -> StoredMessage {
+    stored_with(role, content, vec![], None)
+}
+
+/// One stored message, with tool calls and a tool result.
+fn stored_with(
+    role: Role,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    tool_result: Option<ToolResult>,
+) -> StoredMessage {
+    StoredMessage {
+        id: 1,
+        seq: 1,
+        is_summary: false,
+        message: Message {
+            role,
+            content: Some(content),
+            reasoning: None,
+            tool_calls,
+            tool_result,
+            usage: None,
+        },
+    }
 }
 
 // ---------------------------------------------------------------- store
@@ -676,6 +792,171 @@ async fn compact_returns_an_error_when_the_provider_fails() {
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
+/// A transcript that holds fewer turns than we keep is still foldable. A turn is not a
+/// fixed size: one turn carrying a megabyte of inline image is as big as a hundred short
+/// ones, so the turn rule can have nothing to fold while the transcript is far over
+/// budget. Then the boundary moves to a message boundary — otherwise the user is left
+/// with a context they cannot shrink, and `/compact` says there is nothing to compact.
+#[tokio::test]
+async fn a_big_transcript_with_few_turns_is_folded_at_a_message_boundary() {
+    let mut big = history(2);
+    big[0].message.content = Some("x".repeat(500_000));
+    let provider = RecordingProvider::new("FOLDED");
+
+    let outcome = compact(&provider, "canned-model", &big, 8)
+        .await
+        .unwrap()
+        .expect("a transcript over budget is foldable, whatever its turn count");
+
+    assert_eq!(
+        outcome.folded_ids,
+        vec![big[0].id],
+        "the huge message is what gets folded"
+    );
+    assert_eq!(outcome.kept.len(), 3, "the most recent messages stay verbatim");
+    assert_eq!(outcome.folded_turns, 1, "the fold took the turn the huge message was in");
+    assert_eq!(outcome.folded_messages, 1);
+}
+
+/// The summarising call must not carry the megabytes. A provider rejects a prompt that
+/// long, and the fold would fail for the very transcript that needed it.
+#[tokio::test]
+async fn the_summarising_call_carries_a_bounded_transcript() {
+    let mut big = history(2);
+    big[0].message.content = Some("x".repeat(2_000_000));
+    let provider = RecordingProvider::new("FOLDED");
+
+    compact(&provider, "canned-model", &big, 8)
+        .await
+        .unwrap()
+        .expect("foldable");
+
+    let request = provider.last_request();
+    let sent = request
+        .iter()
+        .map(|message| message.content.clone().unwrap_or_default())
+        .collect::<String>();
+    assert!(
+        sent.len() < 100_000,
+        "the transcript that goes to the summariser is bounded, got {} chars",
+        sent.len()
+    );
+    assert!(
+        sent.contains("more characters cut"),
+        "the cut is marked, so the summary can still say what was cut"
+    );
+}
+
+/// A tool result may not stand alone: the assistant message that called it has to be in
+/// the kept tail as well, or the provider rejects the vector. So a boundary that lands
+/// on a tool result moves forward.
+#[tokio::test]
+async fn the_kept_tail_never_starts_with_a_tool_result() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({"path": "a.rs"}),
+        signature: None,
+    };
+    let mut transcript = vec![
+        stored(Role::User, "look at this".to_string()),
+        stored_with(
+            Role::Assistant,
+            String::new(),
+            vec![call],
+            None,
+        ),
+        stored_with(
+            Role::Tool,
+            String::new(),
+            vec![],
+            Some(ToolResult::success("call-1", "y".repeat(400_000))),
+        ),
+        stored(Role::Assistant, "here it is".to_string()),
+    ];
+    transcript[0].message.content = Some("x".repeat(500_000));
+
+    let provider = RecordingProvider::new("FOLDED");
+    let outcome = compact(&provider, "canned-model", &transcript, 8)
+        .await
+        .unwrap()
+        .expect("foldable");
+
+    assert!(
+        outcome.kept.iter().all(|m| m.role != Role::Tool),
+        "no orphan tool result survives in the kept tail"
+    );
+    assert_eq!(
+        outcome.kept.first().map(|m| m.role),
+        Some(Role::Assistant),
+        "the kept tail opens on a message that can start a conversation"
+    );
+    assert!(
+        outcome.folded_messages >= 2,
+        "the huge message and the huge tool result are folded, got {}",
+        outcome.folded_messages
+    );
+}
+
+/// A transcript that fits the budget has nothing to fold, and must not spend a call.
+#[tokio::test]
+async fn a_small_transcript_with_few_turns_is_left_alone() {
+    let history = history(2);
+    let provider = CannedProvider::new("unused");
+
+    assert_eq!(fold_boundary(&history, 8), 0);
+    let outcome = compact(&provider, "canned-model", &history, 8).await.unwrap();
+    assert!(outcome.is_none());
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "a transcript under the budget needs no summarising call at all"
+    );
+}
+
+/// A reasoning model can spend its whole budget on reasoning and answer with nothing.
+/// The provider layer then hands back a marker that says so, and a compaction that took
+/// it for a summary would have replaced the session with a sentence about reasoning.
+/// So the call is retried with more room.
+#[tokio::test]
+async fn an_empty_summary_is_retried_with_a_bigger_budget() {
+    let mut big = history(2);
+    big[0].message.content = Some("x".repeat(500_000));
+    let provider = ReasoningProvider::new();
+
+    let outcome = compact(&provider, "reasoning-model", &big, 8)
+        .await
+        .unwrap()
+        .expect("foldable");
+
+    assert_eq!(
+        outcome.summary, "the summary, with room to write it",
+        "the retry's summary is the one that counts"
+    );
+    let budgets = provider.budgets.lock().unwrap().clone();
+    assert_eq!(budgets.len(), 2, "one call, one retry");
+    assert!(
+        budgets[1] > budgets[0],
+        "the retry asks for more room: {} then {}",
+        budgets[0],
+        budgets[1]
+    );
+}
+
+/// A model that never writes a summary is a failure, not a summary: the fold must not
+/// go through with the marker in place of one.
+#[tokio::test]
+async fn a_summary_that_never_arrives_is_an_error() {
+    let mut big = history(2);
+    big[0].message.content = Some("x".repeat(500_000));
+    let provider = SilentProvider::new();
+
+    let result = compact(&provider, "silent-model", &big, 8).await;
+
+    assert!(result.is_err(), "a fold with no summary must not go through");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "one call, one retry");
+}
+
 // ---------------------------------------------------------------- the agent loop
 
 fn agent_config() -> AgentConfig {
@@ -737,6 +1018,7 @@ async fn run_turn_compacts_once_and_sends_the_summary_first() {
         Some(CompactionNotice {
             session_id: "s1".to_string(),
             turns: 4,
+            messages: 8,
         })
     );
     assert_eq!(summariser.calls.load(Ordering::SeqCst), 1, "one summarising call");
@@ -803,9 +1085,81 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
     assert_eq!(count_rows(&path, "is_summary = 1"), 0);
 }
 
+/// `/compact` is the user asking for a fold. When the summary call fails, that is the
+/// answer — it must not be reported as "there was nothing to compact", which sends the
+/// user looking for a transcript that is not there.
 #[tokio::test]
-async fn summarize_session_produces_compact_summary() {
-    let (_dir, _path, store) = seeded_store(3).await;
+async fn the_explicit_compact_reports_a_failed_summary_as_a_failure() {
+    let (_dir, path, store) = seeded_store(6).await;
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(FailingProvider::new());
+
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "unconfigured".to_string(),
+    });
+
+    let error = agent.compact_current_session().await.unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("no credential for this provider"),
+        "the real reason is reported, got: {text}"
+    );
+    assert!(
+        !text.contains("nothing to compact"),
+        "a failed summary is not an empty transcript, got: {text}"
+    );
+    assert_eq!(
+        count_rows(&path, "compacted_at IS NOT NULL"),
+        0,
+        "nothing was folded, so nothing is marked folded"
+    );
+}
+
+/// `/compact` without a compaction provider says so, instead of claiming the transcript
+/// has nothing to fold.
+#[tokio::test]
+async fn the_explicit_compact_says_when_no_compaction_provider_is_set_up() {
+    let (_dir, _path, store) = seeded_store(6).await;
+    let main = Arc::new(RecordingProvider::new("done"));
+
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    });
+
+    let error = agent.compact_current_session().await.unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("compaction is unavailable"),
+        "the missing setup is named, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn summarize_session_produces_compact_summary() {    let (_dir, _path, store) = seeded_store(3).await;
     let replayed = store.replay("s1", usize::MAX).await.unwrap();
     let provider = CannedProvider::new("The user asked 3 questions and got 3 answers.");
 

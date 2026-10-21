@@ -1,6 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// What a provider hands back when the model spent its whole answer budget on reasoning
+/// and wrote no text.
+///
+/// It is a marker, not content. A caller that needs real text — a compaction summary, say
+/// — must not mistake it for an answer, and must not write it into the transcript as one.
+pub const NO_TEXT_RESPONSE: &str = "(Completed reasoning with no text response)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {

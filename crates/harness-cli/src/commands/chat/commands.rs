@@ -452,17 +452,27 @@ pub(crate) async fn select_slash_command(
     let get_filtered = |filter: &str| -> Vec<(usize, &'static SlashCommand)> {
         let f = filter.strip_prefix('/').unwrap_or(filter).trim().to_lowercase();
         if f.is_empty() {
-            SLASH_COMMANDS.iter().enumerate().collect()
-        } else {
-            SLASH_COMMANDS
-                .iter()
-                .enumerate()
-                .filter(|(_, cmd)| {
-                    cmd.name.to_lowercase().contains(&f)
-                        || cmd.details.to_lowercase().contains(&f)
-                })
-                .collect()
+            return SLASH_COMMANDS.iter().enumerate().collect();
         }
+        let mut matches: Vec<(usize, &'static SlashCommand)> = SLASH_COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, cmd)| {
+                cmd.name.to_lowercase().contains(&f)
+                    || cmd.details.to_lowercase().contains(&f)
+            })
+            .collect();
+        // The command the user named comes first. The filter matches on "contains", so
+        // without this, typing "/compact" and pressing Enter would run "/compact-model":
+        // the first command whose name happens to hold the word.
+        if let Some(position) = matches
+            .iter()
+            .position(|(_, cmd)| cmd.name.to_lowercase() == format!("/{}", f))
+        {
+            let exact = matches.remove(position);
+            matches.insert(0, exact);
+        }
+        matches
     };
 
     let render_box = |sel: usize, filt: &str| -> Vec<String> {
@@ -1836,10 +1846,18 @@ pub(crate) async fn handle_compact_command(
 
     match result {
         Ok(notice) => {
+            // A fold that took no whole turn — one huge message, or a transcript with
+            // fewer turns than we keep — is still a fold, and saying "0 turns" would
+            // read as if nothing happened.
+            let folded = if notice.turns > 0 {
+                format!("{} turns ({} messages)", notice.turns, notice.messages)
+            } else {
+                format!("{} messages", notice.messages)
+            };
             ui.emit_above(&format!(
-                "{} Compacted {} turns into 1 summary",
+                "{} Compacted {} into 1 summary",
                 "✔".green().bold(),
-                notice.turns
+                folded
             ));
             // The summary replaced the folded turns, so the gauge drops for real.
             let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);

@@ -783,7 +783,7 @@ pub async fn execute_antigravity_completion(
         if let Some(r) = reasoning {
             return Ok(Message {
                 role: Role::Assistant,
-                content: Some("(Completed reasoning with no text response)".to_string()),
+                content: Some(harness_core::types::NO_TEXT_RESPONSE.to_string()),
                 reasoning: Some(r),
                 tool_calls: Vec::new(),
                 tool_result: None,

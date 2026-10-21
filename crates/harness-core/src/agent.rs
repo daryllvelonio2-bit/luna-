@@ -90,6 +90,8 @@ pub struct CompactionNotice {
     pub session_id: String,
     /// User turns folded into the summary.
     pub turns: usize,
+    /// Messages folded into the summary. A fold that took no whole turn is still a fold.
+    pub messages: usize,
 }
 
 /// Tool execution info recorded during a turn.
@@ -486,9 +488,15 @@ where
 
     /// Fold the oldest turns of the current session into a summary, ignoring
     /// `agent.compact_at_tokens` — this is the `/compact` command. Nothing to fold (the session
-    /// holds no more turns than `agent.keep_recent_turns`) or no compaction setup is an error,
-    /// because the user asked for the fold explicitly.
+    /// holds no more turns than `agent.keep_recent_turns`), no compaction setup, or a failed
+    /// summary is an error, because the user asked for the fold explicitly.
     pub async fn compact_current_session(&self) -> Result<CompactionNotice, HarnessError> {
+        if self.compaction.is_none() {
+            return Err(HarnessError::SessionError(
+                "compaction is unavailable: no compaction provider is configured — set agent.compaction_provider and agent.compaction_model, or pick one with /compact-model"
+                    .to_string(),
+            ));
+        }
         let (history, _) = self.load_history().await?;
         let system_text = self.system_prompt("").await?;
         let mut messages = Vec::new();
@@ -497,7 +505,7 @@ where
             .await?
             .ok_or_else(|| {
                 HarnessError::SessionError(
-                    "nothing to compact: the session holds no more turns than agent.keep_recent_turns"
+                    "nothing to compact: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
                         .to_string(),
                 )
             })?;
@@ -1157,7 +1165,7 @@ where
                 if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() { None } else { Some(reasoning) }) {
                     return Ok(Message {
                         role: Role::Assistant,
-                        content: Some("(Completed reasoning with no text response)".to_string()),
+                        content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
                         reasoning: Some(r),
                         tool_calls: Vec::new(),
                         tool_result: None,
@@ -1280,13 +1288,20 @@ where
             {
                 Ok(Some(outcome)) => outcome,
                 Ok(None) => {
-                    debug!("Nothing to fold: the session holds no more turns than agent.keep_recent_turns");
+                    debug!(
+                        "Nothing to fold: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
+                    );
                     return Ok(None);
                 }
                 Err(failure) => {
+                    // The user asked for the fold: a failure is the answer, not a silent
+                    // "there was nothing to compact". Say what actually went wrong.
+                    if force {
+                        return Err(failure);
+                    }
                     // Non-fatal by design: the transcript is unchanged, the turn runs on the full
                     // history, and this turn makes no second attempt.
-                    debug!("Compaction failed, continuing on the full transcript: {}", failure);
+                    warn!("Compaction failed, continuing on the full transcript: {}", failure);
                     return Ok(None);
                 }
             };
@@ -1307,6 +1322,7 @@ where
         Ok(Some(CompactionNotice {
             session_id: binding.session_id.clone(),
             turns: outcome.folded_turns,
+            messages: outcome.folded_messages,
         }))
     }
 
