@@ -46,6 +46,9 @@ pub(crate) async fn handle_fork_command(
             let _ = std::fs::create_dir_all(config.paths.todos_dir.as_path());
             let _ = std::fs::copy(&old_list, todo_scope.path());
             ui.set_session_name(&format!("fork:{}", &new_id[..new_id.len().min(8)]));
+            // The fork carries the list with it, so the panel above the composer shows
+            // the tasks the new session continues to work on.
+            todo::refresh_panel(ui, todo_scope);
             ui.emit_above(&format!(
                 "{} Forked session {} -> {}",
                 "✔".green().bold(),
@@ -60,21 +63,11 @@ pub(crate) async fn handle_fork_command(
     Ok(())
 }
 
-/// Draw the transcript with the todo panel under it.
-fn draw_transcript(
-    turns: &[TurnRecord],
-    expanded: bool,
-    todo_collapsed: bool,
-    todo_scope: &harness_core::tools::TodoScope,
-) {
-    let snapshot = todo::read_session_snapshot(todo_scope);
-    render_transcript(
-        turns,
-        expanded,
-        get_terminal_width(),
-        Some(&snapshot),
-        todo_collapsed,
-    );
+/// Draw the transcript.
+///
+/// The todo panel is not part of it: the panel is chrome, drawn above the composer.
+fn draw_transcript(turns: &[TurnRecord], expanded: bool) {
+    render_transcript(turns, expanded, get_terminal_width());
 }
 
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
@@ -184,7 +177,6 @@ pub(crate) async fn execute_slash_command(
     compact_model: &mut Option<String>,
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
-    todo_collapsed: &mut bool,
     todo_scope: &harness_core::tools::TodoScope,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
@@ -264,6 +256,7 @@ pub(crate) async fn execute_slash_command(
                 session_id,
                 current_provider,
                 current_model,
+                todo_scope,
                 arg,
             )
             .await
@@ -317,6 +310,7 @@ pub(crate) async fn execute_slash_command(
                     session_id,
                     current_provider,
                     current_model,
+                    todo_scope,
                     rem_opt,
                 )
                 .await
@@ -333,6 +327,7 @@ pub(crate) async fn execute_slash_command(
                     session_id,
                     current_provider,
                     current_model,
+                    todo_scope,
                     rem_opt,
                 )
                 .await
@@ -347,7 +342,7 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = true;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
+                draw_transcript(turns, *process_expanded);
                 ui.draw_initial_box();
             }
             Ok(false)
@@ -356,7 +351,7 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = false;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
+                draw_transcript(turns, *process_expanded);
                 ui.draw_initial_box();
             }
             Ok(false)
@@ -367,13 +362,9 @@ pub(crate) async fn execute_slash_command(
         }
         "/todo" => {
             // The same fold Ctrl+Shift+O does, for the terminals that cannot tell the
-            // two apart.
-            *todo_collapsed = !*todo_collapsed;
-            if ui.is_attended {
-                crate::commands::clear_screen();
-                draw_transcript(turns, *process_expanded, *todo_collapsed, todo_scope);
-                ui.draw_initial_box();
-            }
+            // two apart. The panel is chrome, so it is redrawn in place.
+            ui.toggle_todo_collapsed();
+            todo::refresh_panel(ui, todo_scope);
             Ok(false)
         }
         "/clear" => {
@@ -1576,6 +1567,7 @@ pub(crate) async fn handle_new_command(
     session_id: &mut String,
     current_provider: &str,
     current_model: &str,
+    todo_scope: &harness_core::tools::TodoScope,
     arg: Option<&str>,
 ) -> Result<(), HarnessError> {
     let new_id = resolve_session(store.as_ref(), SessionSelection::New).await?;
@@ -1599,6 +1591,12 @@ pub(crate) async fn handle_new_command(
     let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
     ui.set_status(current_model, 0, context_max);
     ui.set_session_name(name);
+
+    // The new conversation starts with an empty list, and the list belongs to the
+    // session: the scope follows the session, and the panel above the composer goes
+    // with it.
+    todo_scope.set_session(&new_id);
+    todo::refresh_panel(ui, todo_scope);
 
     if ui.is_attended {
         crate::commands::clear_screen();
@@ -1707,6 +1705,7 @@ pub(crate) async fn handle_summarize_and_new_command(
     session_id: &mut String,
     current_provider: &str,
     current_model: &str,
+    todo_scope: &harness_core::tools::TodoScope,
     arg: Option<&str>,
 ) -> Result<(), HarnessError> {
     let replayed = store.replay(session_id, usize::MAX).await?;
@@ -1781,6 +1780,14 @@ pub(crate) async fn handle_summarize_and_new_command(
     let summary_tokens = harness_core::heuristic_tokens(&[summary_msg]);
     ui.set_status(current_model, summary_tokens, context_max);
     ui.set_session_name(name);
+
+    // The summarized conversation carries its work into the new session, so the list
+    // comes with it.
+    let old_list = todo_scope.path();
+    todo_scope.set_session(&new_id);
+    let _ = std::fs::create_dir_all(config.paths.todos_dir.as_path());
+    let _ = std::fs::copy(&old_list, todo_scope.path());
+    todo::refresh_panel(ui, todo_scope);
 
     if ui.is_attended {
         crate::commands::clear_screen();

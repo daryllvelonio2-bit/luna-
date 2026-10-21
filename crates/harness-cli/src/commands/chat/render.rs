@@ -9,9 +9,6 @@ use std::time::Duration;
 use colored::Colorize;
 use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
 
-use super::todo;
-use harness_core::tools::todo::TodoSnapshot;
-
 /// Formatted tool execution lines for a single tool call within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnProcessItem {
@@ -215,24 +212,12 @@ fn has_verdict(call: &str) -> bool {
     trimmed.ends_with("(success)") || trimmed.ends_with("(failed)")
 }
 
-/// The transcript, with the todo panel underneath it.
+/// The transcript.
 ///
-/// The panel is the user's view of the task list: a checklist of what is open, what is
-/// in flight and what is done. It folds to a single line on Ctrl+Shift+O.
-pub fn render_transcript(
-    turns: &[TurnRecord],
-    expanded: bool,
-    width: usize,
-    todo: Option<&TodoSnapshot>,
-    todo_collapsed: bool,
-) {
+/// The todo panel is not part of it: the panel is chrome, drawn above the composer, so
+/// it stays put while the conversation scrolls under it.
+pub fn render_transcript(turns: &[TurnRecord], expanded: bool, width: usize) {
     render_all_turns(turns, expanded, width);
-    if let Some(snapshot) = todo {
-        if let Some(panel) = todo::render_panel(snapshot, todo_collapsed) {
-            println!();
-            println!("{}", panel);
-        }
-    }
 }
 
 /// The composer prompt. The `User >` label is gone, so Luna's crescent marks the input line
@@ -1649,18 +1634,21 @@ mod tests {
         assert!(!has_verdict("read src/lib.rs"));
     }
 
+    /// The todo panel is chrome, not transcript: it is drawn above the composer, so it
+    /// stays put while the conversation scrolls under it. `render_transcript` takes no
+    /// todo argument at all, which is what keeps it out of the transcript.
     #[test]
-    fn the_todo_panel_is_drawn_under_the_transcript() {
+    fn the_todo_panel_is_a_box_of_its_own() {
         let snapshot = harness_cli_todo_snapshot();
-        // The panel is printed by the transcript renderer; assert on the panel itself so
-        // the test does not depend on stdout capture.
-        let panel = super::todo::render_panel(&snapshot, false).unwrap();
-        assert!(panel.contains("Todo"), "got: {}", panel);
-        assert!(panel.contains("write the parser"), "got: {}", panel);
+        let panel = crate::commands::chat::todo::render_panel(&snapshot, false, 80);
+        assert_eq!(panel.len(), 3, "a header, one task, a footer: {:?}", panel);
+        let first = dialoguer::console::strip_ansi_codes(&panel[0]);
+        assert!(first.starts_with('╭'), "got: {}", first);
+        assert!(first.contains("Todo"), "got: {}", first);
     }
 
-    fn harness_cli_todo_snapshot() -> TodoSnapshot {
-        TodoSnapshot {
+    fn harness_cli_todo_snapshot() -> harness_core::tools::todo::TodoSnapshot {
+        harness_core::tools::todo::TodoSnapshot {
             items: vec![harness_core::tools::todo::TodoItem {
                 id: 0,
                 text: "write the parser".to_string(),

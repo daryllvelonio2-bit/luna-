@@ -116,12 +116,16 @@ pub enum TodoStatus {
 }
 
 impl TodoStatus {
-    /// The glyph that carries the state: an empty box, a half-filled one, a ticked one.
+    /// The glyph that carries the state: a tick for what is finished, a triangle for
+    /// what is running, an empty circle for what is still open.
+    ///
+    /// They read apart at a glance, which a set of near-identical checkbox outlines
+    /// does not.
     pub fn glyph(self) -> &'static str {
         match self {
-            Self::Pending => "☐",
-            Self::InProgress => "◐",
-            Self::Done => "☑",
+            Self::Pending => "○",
+            Self::InProgress => "▸",
+            Self::Done => "✔",
         }
     }
 

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::Term;
+use harness_core::tools::todo::TodoSnapshot;
 
 use super::render::{
     activity_line, needs_separator, reasoning_rows, tool_activity_detail,
@@ -120,6 +121,9 @@ struct BoxDrawnMetrics {
     divider_len: usize,
     prompt_len: usize,
     live_rows_lens: Vec<usize>,
+    /// Rows of the todo panel drawn above the box. They are erased with the rest of
+    /// the region, so the panel does not leave a trail behind it.
+    panel_rows_lens: Vec<usize>,
 }
 
 pub fn visible_width(s: &str) -> usize {
@@ -145,6 +149,14 @@ pub struct ChatUi {
     last_block: Arc<Mutex<OutputBlockKind>>,
     transient_error: Arc<Mutex<Option<String>>>,
     bg_task: Arc<Mutex<Option<BackgroundTaskState>>>,
+    /// The todo panel's source: the session's list, as it stands.
+    ///
+    /// The list is kept rather than the rows it was drawn into, so the panel is
+    /// rendered at the width the terminal has now — a resize redraws it at the new
+    /// width without the list having to be read again.
+    todo_snapshot: Arc<Mutex<Option<TodoSnapshot>>>,
+    /// Whether the panel is folded to a single row.
+    todo_collapsed: Arc<AtomicBool>,
     box_drawn: Arc<AtomicBool>,
     drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
     pub is_attended: bool,
@@ -190,6 +202,8 @@ impl ChatUi {
             last_block: Arc::new(Mutex::new(OutputBlockKind::None)),
             transient_error: Arc::new(Mutex::new(None)),
             bg_task: Arc::new(Mutex::new(None)),
+            todo_snapshot: Arc::new(Mutex::new(None)),
+            todo_collapsed: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             drawn_metrics: Arc::new(Mutex::new(None)),
             is_attended,
@@ -243,8 +257,60 @@ impl ChatUi {
         self.bg_task.lock().unwrap().is_some()
     }
 
+    /// The rows the todo panel is drawn from, empty when the list is.
+    pub fn todo_panel_rows(&self, width: usize) -> Vec<String> {
+        let snapshot = self.todo_snapshot.lock().unwrap();
+        match snapshot.as_ref() {
+            Some(snapshot) => super::todo::render_panel(
+                snapshot,
+                self.todo_collapsed(),
+                width,
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    /// Replace the session's list and redraw the composer, so the new list shows at
+    /// once.
+    ///
+    /// The panel is drawn above the composer, so a change to the list is a change to
+    /// the box rather than a line in the transcript: it appears in place instead of
+    /// scrolling up with the conversation.
+    pub fn set_todo_panel(&self, snapshot: Option<TodoSnapshot>) {
+        {
+            let mut panel = self.todo_snapshot.lock().unwrap();
+            if *panel == snapshot {
+                return;
+            }
+            *panel = snapshot;
+        }
+        if !self.is_attended {
+            // A headless run has no box to redraw, so the list is simply printed.
+            for row in self.todo_panel_rows(get_terminal_width()) {
+                println!("{}", row);
+            }
+            return;
+        }
+        if self.box_drawn.load(Ordering::SeqCst) {
+            self.redraw_box();
+        }
+    }
+
+    /// Whether the todo panel is folded to a single row.
+    pub fn todo_collapsed(&self) -> bool {
+        self.todo_collapsed.load(Ordering::SeqCst)
+    }
+
+    /// Fold or unfold the todo panel, and say which way it went.
+    pub fn toggle_todo_collapsed(&self) -> bool {
+        let folded = !self.todo_collapsed.load(Ordering::SeqCst);
+        self.todo_collapsed.store(folded, Ordering::SeqCst);
+        folded
+    }
+
     pub fn box_row_count(&self) -> usize {
         4 + if self.has_background_task() { 1 } else { 0 }
+            + self.todo_panel_rows(get_terminal_width()).len()
     }
 
     pub fn begin_block(&self, kind: OutputBlockKind) {
@@ -533,13 +599,20 @@ impl ChatUi {
                 .iter()
                 .map(|&len| physical_line_count(len, current_width))
                 .sum();
+            // The panel sits above the box, so it is erased with the region above it.
+            let panel_rows: usize = m
+                .panel_rows_lens
+                .iter()
+                .map(|&len| physical_line_count(len, current_width))
+                .sum();
 
             let below = bottom_rows;
             let above = prompt_rows.saturating_sub(1)
                 + top_divider_rows
                 + status_rows
                 + bg_rows
-                + live_rows;
+                + live_rows
+                + panel_rows;
             (below, above)
         } else {
             let total = previous_live_rows + self.box_row_count();
@@ -637,26 +710,50 @@ impl ChatUi {
         self.set_live(rows);
     }
 
-    pub fn draw_box(&self, width: usize, buf: &str) {
+    /// The composer as it stands, top to bottom: the todo panel, the background
+    /// task line, the status line, and the two rules around the prompt.
+    ///
+    /// The prompt sits between the rules, so the row the rules leave blank is the
+    /// prompt's own row.
+    pub fn composer_rows(&self, width: usize, buf: &str) -> Vec<String> {
         let divider = "─".repeat(width).dimmed().to_string();
-        let bg_line = self.format_background_task_line(width);
-        let status_str = self.format_status_line(width);
-        let prompt_str = self.prompt_row(buf);
+        let mut rows = Vec::new();
+        // The panel is chrome: it is drawn above the composer, so it stays put while
+        // the conversation scrolls under it.
+        rows.extend(self.todo_panel_rows(width));
+        if let Some(bg) = self.format_background_task_line(width) {
+            rows.push(bg);
+        }
+        if let Some(status) = self.format_status_line(width) {
+            rows.push(status);
+        }
+        rows.push(divider.clone());
+        rows.push(self.prompt_row(buf));
+        rows.push(divider);
+        rows
+    }
 
-        if let Some(ref bg) = bg_line {
-            println!("{}", bg);
+    pub fn draw_box(&self, width: usize, buf: &str) {
+        let rows = self.composer_rows(width, buf);
+        let prompt_str = rows[rows.len() - 2].clone();
+        let bottom_rule = rows[rows.len() - 1].clone();
+
+        for row in &rows[..rows.len() - 2] {
+            println!("{}", row);
         }
-        if let Some(ref st) = status_str {
-            println!("{}", st);
-        }
-        println!("{}", divider);
+        // The rules are printed around a blank line, and the prompt is written over
+        // that blank line: the cursor moves back up to it.
         println!();
-        println!("{}", divider);
+        println!("{}", bottom_rule);
         print!("\x1b[2A\r{}", prompt_str);
         let _ = io::stdout().flush();
 
         let live_rows = self.live.lock().unwrap().rows.clone();
         let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
+
+        let panel = self.todo_panel_rows(width);
+        let bg_line = self.format_background_task_line(width);
+        let status_str = self.format_status_line(width);
 
         *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
             width,
@@ -665,6 +762,7 @@ impl ChatUi {
             divider_len: width,
             prompt_len: visible_width(&prompt_str),
             live_rows_lens,
+            panel_rows_lens: panel.iter().map(|r| visible_width(r)).collect(),
         });
 
         self.box_drawn.store(true, Ordering::SeqCst);
@@ -813,6 +911,146 @@ impl ChatUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Capture what the UI writes to stdout while `f` runs.
+    ///
+    /// The composer draws with cursor moves rather than by rewriting the screen, so
+    /// the only way to see what it put where is to read the bytes it wrote. The work
+    /// runs on its own thread: the test harness captures `println!` per thread, and
+    /// a fresh thread writes to the real stdout, which is the redirected file.
+    fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        let file = std::fs::File::create(&path).unwrap();
+        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        assert!(saved >= 0, "cannot save stdout");
+        assert!(unsafe { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) } >= 0);
+
+        std::thread::spawn(f).join().expect("the captured work panicked");
+        let _ = io::stdout().flush();
+
+        unsafe { libc::dup2(saved, libc::STDOUT_FILENO) };
+        unsafe { libc::close(saved) };
+
+        let mut out = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn a_snapshot() -> TodoSnapshot {
+        TodoSnapshot {
+            items: vec![harness_core::tools::todo::TodoItem {
+                id: 0,
+                text: "a task".to_string(),
+                status: harness_core::tools::todo::TodoStatus::Pending,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_todo_panel_is_drawn_above_the_composer() {
+        let ui = ChatUi::new(true);
+        ui.set_todo_panel(Some(a_snapshot()));
+
+        let rows = ui.composer_rows(80, "hello");
+        let panel_at = rows
+            .iter()
+            .position(|r| r.contains("Todo"))
+            .expect("the panel is drawn");
+        let prompt_at = rows
+            .iter()
+            .position(|r| r.contains("hello"))
+            .expect("the composer is drawn");
+        assert!(
+            panel_at < prompt_at,
+            "the panel belongs above the composer: {:?}",
+            rows
+        );
+        // The panel is the first thing in the composer: nothing is drawn over the
+        // top of the terminal, so the list stays in front of the user.
+        assert_eq!(panel_at, 0, "the panel is at the top: {:?}", rows);
+    }
+
+    #[test]
+    fn the_panel_rows_are_counted_with_the_box() {
+        let ui = ChatUi::new(true);
+        ui.set_todo_panel(Some(a_snapshot()));
+        // A header, one task and a footer.
+        assert_eq!(ui.box_row_count(), 4 + 3);
+
+        let boxed = ui.clone();
+        capture_stdout(move || boxed.draw_box(80, ""));
+        let metrics = ui.drawn_metrics.lock().unwrap();
+        let drawn = metrics.as_ref().expect("the box was drawn");
+        assert_eq!(drawn.panel_rows_lens.len(), 3);
+    }
+
+    #[test]
+    fn a_fresh_list_replaces_the_old_one() {
+        let ui = ChatUi::new(true);
+        ui.set_todo_panel(Some(a_snapshot()));
+        assert_eq!(ui.todo_panel_rows(80).len(), 3);
+
+        let mut second = a_snapshot();
+        second.items.push(harness_core::tools::todo::TodoItem {
+            id: 1,
+            text: "another task".to_string(),
+            status: harness_core::tools::todo::TodoStatus::Done,
+        });
+        ui.set_todo_panel(Some(second));
+        assert_eq!(ui.todo_panel_rows(80).len(), 4);
+
+        // An empty list has no panel at all.
+        ui.set_todo_panel(None);
+        assert!(ui.todo_panel_rows(80).is_empty());
+        assert_eq!(ui.box_row_count(), 4);
+    }
+
+    #[test]
+    fn the_panel_folds_and_unfolds() {
+        let ui = ChatUi::new(true);
+        assert!(!ui.todo_collapsed(), "the panel starts open");
+        assert!(ui.toggle_todo_collapsed(), "folding says the panel is folded");
+        assert!(ui.todo_collapsed());
+        assert!(!ui.toggle_todo_collapsed(), "unfolding says it is open");
+        assert!(!ui.todo_collapsed());
+    }
+
+    /// Replays the shape of a turn: the composer is drawn, the agent answers, the
+    /// agent opens a task list, and the answer comes again.
+    ///
+    /// Ignored by default: it is a scenario to render in a terminal, not an
+    /// assertion. Run it with `--ignored --nocapture` and read the screen.
+    #[test]
+    #[ignore]
+    fn the_panel_stays_pinned_while_the_conversation_scrolls() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 1200, 128_000);
+        ui.draw_initial_box();
+        ui.emit_above("Luna: working on it");
+        ui.set_todo_panel(Some(TodoSnapshot {
+            items: vec![
+                harness_core::tools::todo::TodoItem {
+                    id: 0,
+                    text: "read the panel code".to_string(),
+                    status: harness_core::tools::todo::TodoStatus::Done,
+                },
+                harness_core::tools::todo::TodoItem {
+                    id: 1,
+                    text: "pin it above the composer".to_string(),
+                    status: harness_core::tools::todo::TodoStatus::Pending,
+                },
+            ],
+        }));
+        ui.emit_above("Luna: the panel is pinned above the composer");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
     #[test]
     fn test_format_background_task_line() {

@@ -1,62 +1,160 @@
-//! The todo list, as the transcript shows it.
+//! The todo list, as the composer shows it.
 //!
 //! The list belongs to the session: the tool keeps one file per conversation, and this
-//! module reads that same file back so the transcript shows the *tasks* — a checklist,
-//! with the finished ones ticked — instead of the raw `todo_list` argument dump the
-//! model happened to send.
+//! module reads that same file back so the user sees the *tasks* — a checklist, with
+//! the finished ones ticked — instead of the raw `todo_list` argument dump the model
+//! happened to send.
+//!
+//! The panel is chrome, not transcript: it is drawn above the composer and stays
+//! there while the conversation scrolls under it.
 
 use colored::Colorize;
-use harness_core::tools::todo::{read_snapshot, TodoScope, TodoSnapshot, TodoStatus};
+use harness_core::tools::todo::{read_snapshot, TodoItem, TodoScope, TodoSnapshot, TodoStatus};
+
+use super::ui::ChatUi;
 
 /// The session's list, as it stands right now.
 pub fn read_session_snapshot(scope: &TodoScope) -> TodoSnapshot {
     read_snapshot(&scope.path())
 }
 
-/// The checklist panel, drawn under the transcript.
+/// The glyph that carries a task's state.
 ///
-/// Collapsed it is a single summary line; expanded it is one row per task.
-pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool) -> Option<String> {
+/// The core owns the icons, so the panel and the tool's own output cannot drift
+/// apart: a tick for what is finished, a triangle for what is running, an empty
+/// circle for what is still open.
+pub fn status_icon(status: TodoStatus) -> &'static str {
+    status.glyph()
+}
+
+/// The icon a `todo_list` call shows in the transcript.
+///
+/// The call line is one line in a log of tool calls: it says what the call *did*,
+/// so the icons differ by action rather than repeating the state glyph.
+fn action_icon(action: &str) -> &'static str {
+    match action {
+        "add" => "○",
+        "update" => "▸",
+        "remove" => "✖",
+        "clear_done" => "⌫",
+        _ => "☰",
+    }
+}
+
+/// Narrowest the panel is drawn. A very narrow terminal would otherwise squeeze the
+/// task text down to a single character.
+const MIN_PANEL_WIDTH: usize = 40;
+
+/// The checklist panel, as the rows the composer draws above itself.
+///
+/// The panel is a box: a header carrying the counts, one row per task, and a footer
+/// with the fold hint. Collapsed it is a single row.
+pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool, width: usize) -> Vec<String> {
     if snapshot.items.is_empty() {
-        return None;
+        return Vec::new();
     }
 
+    let width = width.max(MIN_PANEL_WIDTH);
     let (done, active, pending) = snapshot.counts();
-    let marker = if collapsed { "▶" } else { "▼" };
+    let counts = format!("{} done · {} active · {} pending", done, active, pending);
     let hint = if collapsed {
         "Ctrl+Shift+O to expand"
     } else {
         "Ctrl+Shift+O to collapse"
     };
 
-    let mut out = format!(
-        "{} {} · {} done · {} active · {} pending · {}",
-        marker.cyan(),
-        "Todo".bold(),
-        done.to_string().green(),
-        active.to_string().yellow(),
-        pending,
-        hint.dimmed()
-    );
-
     if collapsed {
-        return Some(out);
+        return vec![collapsed_row(&counts, hint, width)];
     }
+
+    let mut rows = Vec::with_capacity(snapshot.items.len() + 2);
+    rows.push(top_border("Todo", &counts, width));
 
     for item in &snapshot.items {
-        let (glyph, text) = match item.status {
-            TodoStatus::Done => (item.status.glyph().green(), item.text.dimmed()),
-            TodoStatus::InProgress => (item.status.glyph().yellow(), item.text.normal()),
-            TodoStatus::Pending => (item.status.glyph().dimmed(), item.text.normal()),
-        };
-        out.push_str(&format!(
-            "\n    {} {}  {}",
-            glyph,
-            format!("#{}", item.id).dimmed(),
-            text
-        ));
+        rows.push(task_row(item, width));
     }
-    Some(out)
+    rows.push(bottom_border(hint, width));
+    rows
+}
+
+/// The single row the collapsed panel shows.
+fn collapsed_row(counts: &str, hint: &str, width: usize) -> String {
+    let left = format!("Todo · {}", counts);
+    let used = left.chars().count() + hint.chars().count() + 8;
+    let fill = width.saturating_sub(used);
+    format!(
+        "╭─ {} {} {} ─╮",
+        left.bold().cyan(),
+        "─".repeat(fill),
+        hint.dimmed()
+    )
+}
+
+/// The panel's top border, with the title on the left and the counts on the right.
+fn top_border(title: &str, right: &str, width: usize) -> String {
+    let used = title.chars().count() + right.chars().count() + 8;
+    let fill = width.saturating_sub(used);
+    format!(
+        "╭─ {} {} {} ─╮",
+        title.bold().cyan(),
+        "─".repeat(fill),
+        right.dimmed()
+    )
+}
+
+/// The panel's bottom border, with the fold hint on the right.
+fn bottom_border(hint: &str, width: usize) -> String {
+    let fill = width.saturating_sub(hint.chars().count() + 4);
+    format!("╰{} {} ╯", "─".repeat(fill), hint.dimmed())
+}
+
+/// One task, in a row of the panel.
+///
+/// The row is padded to the panel's width so the box's right edge stays a straight
+/// line whatever the task text says.
+fn task_row(item: &TodoItem, width: usize) -> String {
+    let icon = status_icon(item.status);
+    let inner = width.saturating_sub(4);
+    // "icon #id  text": one space after the icon, two after the id.
+    let fixed = 1 + 1 + 1 + item.id.to_string().chars().count() + 2;
+    // The text is cut to the room the row has, and the cut is marked: a task whose
+    // text runs past the edge of the panel is still legible.
+    let room = inner.saturating_sub(fixed);
+    let text = if item.text.chars().count() > room {
+        let cut = room.saturating_sub(1);
+        format!("{}…", item.text.chars().take(cut).collect::<String>())
+    } else {
+        item.text.clone()
+    };
+    let pad = inner.saturating_sub(fixed + text.chars().count());
+
+    let styled_icon = match item.status {
+        TodoStatus::Done => icon.green().bold().to_string(),
+        TodoStatus::InProgress => icon.yellow().bold().to_string(),
+        TodoStatus::Pending => icon.dimmed().to_string(),
+    };
+    let styled_text = match item.status {
+        TodoStatus::Done => text.dimmed().to_string(),
+        _ => text.normal().to_string(),
+    };
+
+    format!(
+        "│ {} {}  {}{} │",
+        styled_icon,
+        format!("#{}", item.id).dimmed(),
+        styled_text,
+        " ".repeat(pad)
+    )
+}
+
+/// Re-read the session's list and redraw the panel.
+///
+/// The panel is drawn from the file the tool writes, so it shows the list as it
+/// stands now rather than as it stood when the turn started.
+pub fn refresh_panel(ui: &ChatUi, scope: &TodoScope) {
+    let snapshot = read_session_snapshot(scope);
+    let empty = snapshot.items.is_empty();
+    ui.set_todo_panel(if empty { None } else { Some(snapshot) });
 }
 
 /// Render one `todo_list` call as the task it acts on, rather than as its arguments.
@@ -74,10 +172,10 @@ pub fn format_call(arguments: &serde_json::Value, scope: &TodoScope) -> String {
             let texts = added_texts(arguments);
             match texts.split_first() {
                 Some((first, rest)) if !rest.is_empty() => {
-                    format!("☐ {} (+{} more)", first, rest.len())
+                    format!("{} {} (+{} more)", action_icon("add"), first, rest.len())
                 }
-                Some((first, _)) => format!("☐ {}", first),
-                None => "☐ todo".to_string(),
+                Some((first, _)) => format!("{} {}", action_icon("add"), first),
+                None => format!("{} todo", action_icon("add")),
             }
         }
         "update" => {
@@ -95,9 +193,9 @@ pub fn format_call(arguments: &serde_json::Value, scope: &TodoScope) -> String {
                         .unwrap_or_else(|| "todo".to_string());
                     let status = status.or_else(|| known.as_ref().map(|item| item.status));
                     let status = status.unwrap_or(TodoStatus::Pending);
-                    format!("{} #{} {}", status.glyph(), id, text)
+                    format!("{} #{} {}", status_icon(status), id, text)
                 }
-                None => "☐ todo".to_string(),
+                None => format!("{} todo", action_icon("update")),
             }
         }
         "remove" => {
@@ -108,15 +206,15 @@ pub fn format_call(arguments: &serde_json::Value, scope: &TodoScope) -> String {
                         .find(id)
                         .map(|item| item.text.clone())
                         .unwrap_or_else(|| "todo".to_string());
-                    format!("☒ #{} {}", id, text)
+                    format!("{} #{} {}", action_icon("remove"), id, text)
                 }
-                None => "☒ todo".to_string(),
+                None => format!("{} todo", action_icon("remove")),
             }
         }
-        "clear_done" => "☑ cleared done tasks".to_string(),
+        "clear_done" => format!("{} cleared done tasks", action_icon("clear_done")),
         _ => {
             let count = read_session_snapshot(scope).items.len();
-            format!("📋 {} tasks", count)
+            format!("{} {} tasks", action_icon("list"), count)
         }
     }
 }
@@ -174,36 +272,78 @@ mod tests {
         (dir, scope)
     }
 
+    fn plain(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|r| dialoguer::console::strip_ansi_codes(r).to_string())
+            .collect()
+    }
+
     #[test]
     fn the_panel_lists_every_task_with_its_state() {
         let (_dir, scope) = scope_with(json!({}));
         let snapshot = read_session_snapshot(&scope);
         assert_eq!(snapshot.counts(), (1, 1, 1));
 
-        let panel = render_panel(&snapshot, false).unwrap();
-        let plain = dialoguer::console::strip_ansi_codes(&panel).to_string();
-        assert!(plain.contains("write the parser"), "got: {}", plain);
-        assert!(plain.contains("test it"), "got: {}", plain);
-        assert!(plain.contains("ship it"), "got: {}", plain);
-        assert!(plain.contains("☐"), "an open task is an empty box: {}", plain);
-        assert!(plain.contains("☑"), "a finished task is ticked: {}", plain);
-        assert!(plain.contains("◐"), "a task in flight is half done: {}", plain);
-        assert!(plain.contains("Ctrl+Shift+O to collapse"), "got: {}", plain);
+        let panel = plain(&render_panel(&snapshot, false, 80));
+        let text = panel.join("\n");
+        assert!(text.contains("write the parser"), "got: {}", text);
+        assert!(text.contains("test it"), "got: {}", text);
+        assert!(text.contains("ship it"), "got: {}", text);
+        assert!(text.contains("○"), "an open task is an empty circle: {}", text);
+        assert!(text.contains("✔"), "a finished task is ticked: {}", text);
+        assert!(text.contains("▸"), "a task in flight is a triangle: {}", text);
+        assert!(text.contains("Ctrl+Shift+O to collapse"), "got: {}", text);
     }
 
     #[test]
-    fn a_collapsed_panel_is_one_line() {
+    fn the_panel_is_a_box_whose_rows_are_all_the_same_width() {
         let (_dir, scope) = scope_with(json!({}));
-        let panel = render_panel(&read_session_snapshot(&scope), true).unwrap();
-        assert!(!panel.contains('\n'), "got: {}", panel);
-        assert!(panel.contains("Ctrl+Shift+O to expand"), "got: {}", panel);
+        let rows = plain(&render_panel(&read_session_snapshot(&scope), false, 80));
+        assert_eq!(rows.len(), 5, "got: {:?}", rows);
+        for row in &rows {
+            assert_eq!(row.chars().count(), 80, "row is not the panel's width: {}", row);
+        }
+        assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "got: {}", rows[0]);
+        assert!(rows[1].starts_with('│') && rows[1].ends_with('│'), "got: {}", rows[1]);
+        assert!(rows[4].starts_with('╰') && rows[4].ends_with('╯'), "got: {}", rows[4]);
+    }
+
+    #[test]
+    fn a_long_task_text_is_cut_to_fit_the_box() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = TodoScope::new(dir.path().join("todos"), "s1");
+        std::fs::create_dir_all(dir.path().join("todos")).unwrap();
+        std::fs::write(
+            scope.path(),
+            serde_json::to_string_pretty(&json!({
+                "next_id": 1,
+                "items": [{ "id": 0, "text": "x".repeat(200), "status": "pending" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rows = plain(&render_panel(&read_session_snapshot(&scope), false, 60));
+        for row in &rows {
+            assert_eq!(row.chars().count(), 60, "row is not the panel's width: {}", row);
+        }
+        assert!(rows[1].contains('…'), "the cut is marked: {}", rows[1]);
+    }
+
+    #[test]
+    fn a_collapsed_panel_is_one_row() {
+        let (_dir, scope) = scope_with(json!({}));
+        let rows = plain(&render_panel(&read_session_snapshot(&scope), true, 80));
+        assert_eq!(rows.len(), 1, "got: {:?}", rows);
+        assert_eq!(rows[0].chars().count(), 80, "got: {}", rows[0]);
+        assert!(rows[0].contains("Ctrl+Shift+O to expand"), "got: {}", rows[0]);
     }
 
     #[test]
     fn an_empty_list_has_no_panel() {
         let dir = tempfile::tempdir().unwrap();
         let scope = TodoScope::new(dir.path().join("todos"), "s1");
-        assert!(render_panel(&read_session_snapshot(&scope), false).is_none());
+        assert!(render_panel(&read_session_snapshot(&scope), false, 80).is_empty());
     }
 
     #[test]
@@ -211,13 +351,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scope = TodoScope::new(dir.path().join("todos"), "s1");
         let line = format_call(&json!({ "action": "add", "text": "write the parser" }), &scope);
-        assert_eq!(line, "☐ write the parser");
+        assert_eq!(line, "○ write the parser");
 
         let many = format_call(
             &json!({ "action": "add", "tasks": ["one", "two", "three"] }),
             &scope,
         );
-        assert_eq!(many, "☐ one (+2 more)");
+        assert_eq!(many, "○ one (+2 more)");
     }
 
     #[test]
@@ -227,14 +367,14 @@ mod tests {
             &json!({ "action": "update", "id": 1, "status": "done" }),
             &scope,
         );
-        assert_eq!(line, "☑ #1 test it");
+        assert_eq!(line, "✔ #1 test it");
     }
 
     #[test]
     fn a_remove_call_shows_the_task_it_removes() {
         let (_dir, scope) = scope_with(json!({}));
         let line = format_call(&json!({ "action": "remove", "id": 1 }), &scope);
-        assert_eq!(line, "☒ #1 test it");
+        assert_eq!(line, "✖ #1 test it");
     }
 
     #[test]
@@ -265,3 +405,4 @@ mod tests {
         assert_eq!(read_session_snapshot(&second).items.len(), 0);
     }
 }
+
