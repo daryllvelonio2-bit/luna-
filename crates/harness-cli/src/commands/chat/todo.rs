@@ -254,6 +254,7 @@ fn parse_status(value: &str) -> Option<TodoStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_core::tools::todo::TodoItem;
     use serde_json::json;
 
     fn scope_with(_unused: serde_json::Value) -> (tempfile::TempDir, TodoScope) {
@@ -328,6 +329,44 @@ mod tests {
             assert_eq!(row.chars().count(), 60, "row is not the panel's width: {}", row);
         }
         assert!(rows[1].contains('…'), "the cut is marked: {}", rows[1]);
+    }
+
+    /// The panel's exact shape. A golden screen, so a change to the box is a visible
+    /// change in the test rather than a surprise in the terminal.
+    #[test]
+    fn the_panel_has_the_shape_it_is_drawn_in() {
+        let snapshot = TodoSnapshot {
+            items: vec![
+                TodoItem {
+                    id: 9,
+                    text: "Add a regression test for the panel's erase accounting on resize"
+                        .to_string(),
+                    status: TodoStatus::InProgress,
+                },
+                TodoItem {
+                    id: 10,
+                    text: "Check the pinned panel in a narrow terminal (40 columns)".to_string(),
+                    status: TodoStatus::Pending,
+                },
+                TodoItem {
+                    id: 11,
+                    text: "Document the pinned todo panel in the README".to_string(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        };
+
+        let rows = plain(&render_panel(&snapshot, false, 72));
+        assert_eq!(
+            rows,
+            vec![
+                "╭─ Todo ─────────────────────────────── 0 done · 1 active · 2 pending ─╮",
+                "│ ▸ #9  Add a regression test for the panel's erase accounting on res… │",
+                "│ ○ #10  Check the pinned panel in a narrow terminal (40 columns)      │",
+                "│ ○ #11  Document the pinned todo panel in the README                  │",
+                "╰──────────────────────────────────────────── Ctrl+Shift+O to collapse ╯",
+            ]
+        );
     }
 
     #[test]
@@ -405,4 +444,5 @@ mod tests {
         assert_eq!(read_session_snapshot(&second).items.len(), 0);
     }
 }
+
 
