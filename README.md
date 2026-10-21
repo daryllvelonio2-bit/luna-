@@ -213,6 +213,15 @@ Headless is **fail-closed**: a mutating call no `allow` rule covers is denied, a
 non-zero (`--yes` approves all). `--strict` also fails on tool errors. Details:
 [`docs/EXEC.md`](docs/EXEC.md).
 
+### 2.10 Usage and cost: `luna usage`
+
+Every turn lands in `~/.luna/usage.db`: tokens in/out, provider, model, duration, tool calls and
+cost. `luna usage`, `--since 7d`, `--by model|session|source|day`, `--recent`, `--json`.
+
+Cost is only reported when it is known: a model with no price is counted as **unpriced**, never
+guessed at. Prices live in `usage.prices` (`provider/model`, with `provider/*` and `*/model`
+wildcards) over a small built-in table. Details: [`docs/USAGE.md`](docs/USAGE.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

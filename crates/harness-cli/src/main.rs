@@ -112,6 +112,24 @@ enum Commands {
         #[arg(long = "continue")]
         continue_session: bool,
     },
+    /// Show turn usage: tokens, models, cost and time (from the usage ledger)
+    Usage {
+        /// Only count turns newer than this: 30m, 12h, 7d, 2w or an RFC 3339 timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Group the report: model, session, source or day
+        #[arg(long, value_name = "FIELD")]
+        by: Option<String>,
+        /// One JSON object on stdout instead of tables
+        #[arg(long)]
+        json: bool,
+        /// With --recent: how many rows
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// List the newest individual turns instead of totals
+        #[arg(long)]
+        recent: bool,
+    },
     /// List stored chat sessions
     Sessions {
         #[command(subcommand)]
@@ -315,6 +333,27 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
+        }
+        Some(Commands::Usage {
+            since,
+            by,
+            json,
+            limit,
+            recent,
+        }) => {
+            commands::usage::run_usage(
+                config,
+                cred_manager,
+                discovery,
+                commands::usage::UsageOptions {
+                    since: since.clone(),
+                    by: by.clone(),
+                    json,
+                    limit,
+                    recent,
+                },
+            )
+            .await?;
         }
         Some(Commands::Exec {
             prompt,

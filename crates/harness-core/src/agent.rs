@@ -141,6 +141,11 @@ pub struct TurnOutcome {
     pub replayed: Option<ReplayNotice>,
     /// `Some` only on a turn that actually compacted.
     pub compaction: Option<CompactionNotice>,
+    /// Provider-reported tokens summed over every model call in this turn, when the provider
+    /// reported any. `None` is "unknown", never "zero".
+    pub usage: Option<TokenUsage>,
+    /// Wall-clock time the turn took, including tool execution and retries.
+    pub duration_ms: u64,
 }
 
 pub struct Agent<P, M, N, E, R>
@@ -626,6 +631,10 @@ where
         let mut consecutive_failures = 0;
         let mut executed_tools = Vec::new();
         let mut last_reasoning = None;
+        // A turn can be several model calls (tool loop, retries); the ledger wants the turn's
+        // total, so every reported usage is folded in here rather than kept per call.
+        let turn_started = std::time::Instant::now();
+        let mut turn_usage: Option<TokenUsage> = None;
         let tools = self.registry.list_tools().await?;
 
         debug!("Starting agent task loop for query: '{}'", user_input);
@@ -684,6 +693,13 @@ where
             })?;
 
             if let Some(ref usage) = response.usage {
+                let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
+                accumulated.prompt_tokens = accumulated.prompt_tokens.saturating_add(usage.prompt_tokens);
+                accumulated.completion_tokens = accumulated
+                    .completion_tokens
+                    .saturating_add(usage.completion_tokens);
+                accumulated.total_tokens = accumulated.prompt_tokens.saturating_add(accumulated.completion_tokens);
+
                 let actual_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
                 if let Some(ref observer) = self.observer {
                     observer(AgentEvent::ContextTokensUpdated {
@@ -758,6 +774,8 @@ where
                     tool_calls: executed_tools,
                     replayed: replay_notice,
                     compaction,
+                    usage: turn_usage,
+                    duration_ms: turn_started.elapsed().as_millis() as u64,
                 });
             }
 

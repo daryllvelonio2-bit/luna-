@@ -16,6 +16,7 @@ pub mod tasks;
 pub mod tools;
 pub mod traits;
 pub mod types;
+pub mod usage;
 
 pub use agent::{
     Agent, AgentConfig, AgentEvent, AgentObserver, CompactionNotice, CompactionSetup, ReplayNotice,
@@ -38,6 +39,10 @@ pub use hooks::{
     HookContext, HookEvent, HookOutcome, HookRunner, HookSpec, HookVerdict, DEFAULT_HOOK_TIMEOUT_SECS,
 };
 pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
+pub use usage::{
+    GroupBy, ModelPrice, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord,
+    UsageTotals,
+};
 pub use permission::{PermissionEngine, PermissionRule, RuleAction, RuleVerdict};
 pub use registry::DefaultToolRegistry;
 pub use substrate::{LocalAgentSubstrate, MockSubstrate, Substrate, SubstrateOutcome};

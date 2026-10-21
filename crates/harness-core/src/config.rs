@@ -57,6 +57,7 @@ pub struct Config {
     pub checkpoints: CheckpointSettings,
     pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
+    pub usage: UsageSettings,
 }
 
 /// Lifecycle-hook settings.
@@ -147,6 +148,8 @@ pub struct PathsSettings {
     pub skills_dir: PathBuf,
     /// Per-turn file snapshots that `/rewind` restores from.
     pub checkpoints_dir: PathBuf,
+    /// One row per turn: tokens, model, duration, cost. See `usage.rs`.
+    pub usage_db: PathBuf,
 }
 
 impl Default for PathsSettings {
@@ -162,6 +165,7 @@ impl Default for PathsSettings {
             jobs_dir: luna.join("jobs"),
             skills_dir: luna.join("skills"),
             checkpoints_dir: luna.join("checkpoints"),
+            usage_db: luna.join("usage.db"),
         }
     }
 }
@@ -250,6 +254,36 @@ impl Default for TelemetrySettings {
             json: false,
             level: "harness=info,harness_cli=info".to_string(),
         }
+    }
+}
+
+/// Turn accounting settings.
+///
+/// `prices` layers over the built-in table in [`crate::usage::PriceTable`]; a model with no price
+/// is recorded as unpriced rather than guessed at. `enabled: false` turns recording off entirely —
+/// a machine that must not leave a spending trail can say so.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageSettings {
+    /// Recording is on by default: a spending report you have to opt into is a spending report
+    /// nobody has.
+    pub enabled: bool,
+    /// `provider/model` (or `provider/*`, `*/model`) → price per million tokens.
+    pub prices: BTreeMap<String, crate::usage::ModelPrice>,
+}
+
+impl Default for UsageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prices: BTreeMap::new(),
+        }
+    }
+}
+
+impl UsageSettings {
+    pub fn price_table(&self) -> crate::usage::PriceTable {
+        crate::usage::PriceTable::with_overrides(&self.prices)
     }
 }
 

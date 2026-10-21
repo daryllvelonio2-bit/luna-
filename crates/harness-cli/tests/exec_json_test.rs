@@ -132,6 +132,9 @@ fn write_config(dir: &Path, base_url: &str, allow_write: bool) -> PathBuf {
     )
     .expect("credentials");
 
+    // A price for the mock model, so the ledger reports a dollar figure rather than "unpriced".
+    let pricing = "usage:\n  prices:\n    openai/mock-1: { input_per_million: 1.0, output_per_million: 2.0 }\n";
+
     let permissions = if allow_write {
         "tools:\n  permissions:\n    - action: allow\n      tool: write_file\n"
     } else {
@@ -139,7 +142,7 @@ fn write_config(dir: &Path, base_url: &str, allow_write: bool) -> PathBuf {
     };
 
     let config = format!(
-        "model:\n  provider: openai\n  default: mock-1\nproviders:\n  openai:\n    base_url: {base_url}\npaths:\n  sessions_db: {luna}/sessions.db\n  memory_db: {luna}/memory.db\n  notes_db: {luna}/notes.db\n  credentials: {luna}/credentials.json\n  models_cache: {luna}/models_cache.json\n  jobs_dir: {luna}/jobs\n  skills_dir: {luna}/skills\n  checkpoints_dir: {luna}/checkpoints\n  workspace_root: {workspace}\n{permissions}",
+        "model:\n  provider: openai\n  default: mock-1\nproviders:\n  openai:\n    base_url: {base_url}\npaths:\n  sessions_db: {luna}/sessions.db\n  memory_db: {luna}/memory.db\n  notes_db: {luna}/notes.db\n  credentials: {luna}/credentials.json\n  models_cache: {luna}/models_cache.json\n  jobs_dir: {luna}/jobs\n  skills_dir: {luna}/skills\n  checkpoints_dir: {luna}/checkpoints\n  usage_db: {luna}/usage.db\n  workspace_root: {workspace}\n{pricing}{permissions}",
         luna = luna.display(),
         workspace = workspace.display(),
     );
@@ -222,6 +225,10 @@ fn json_mode_emits_an_event_stream_and_the_answer() {
     assert_eq!(result["answer"], "wrote report.md");
     assert_eq!(result["tool_calls"][0]["name"], "write_file");
     assert_eq!(result["tool_calls"][0]["denied"], false);
+    assert_eq!(
+        result["usage"]["total_tokens"], 30,
+        "two model calls at 10 in / 5 out each"
+    );
 
     assert_eq!(
         fs::read_to_string(dir.join("ws").join("report.md")).expect("the file was written"),
@@ -368,4 +375,57 @@ fn an_empty_prompt_is_refused() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("empty prompt"), "stderr: {stderr}");
+}
+
+#[test]
+fn the_turn_is_recorded_in_the_usage_ledger() {
+    let dir = scratch("usage");
+    let (base_url, _served) = start_mock(write_turn());
+    let config = write_config(&dir, &base_url, true);
+
+    let output = run_exec(&dir, &config, &["exec", "--json", "write the report"]);
+    assert!(output.status.success());
+
+    let usage = Command::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(dir.join("ws"))
+        .env("LUNA_CONFIG", &config)
+        .args(["usage", "--json"])
+        .output()
+        .expect("luna usage runs");
+    assert!(
+        usage.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&usage.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&usage.stdout).expect("usage --json is one JSON object");
+    assert_eq!(report["totals"]["turns"], 1, "one turn, one row: {report}");
+    assert_eq!(
+        report["totals"]["unpriced_turns"], 0,
+        "usage.prices covers the mock model: {report}"
+    );
+    assert_eq!(
+        report["totals"]["total_tokens"], 30,
+        "the two model calls' tokens are summed: {report}"
+    );
+    // 20 in at $1/M + 10 out at $2/M
+    let cost = report["totals"]["cost_usd"].as_f64().unwrap_or(-1.0);
+    assert!((cost - 0.00004).abs() < 1e-9, "got {cost}");
+    assert_eq!(report["by_model"][0]["key"], "openai/mock-1");
+
+    let recent = Command::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(dir.join("ws"))
+        .env("LUNA_CONFIG", &config)
+        .args(["usage", "--recent", "--json", "--limit", "5"])
+        .output()
+        .expect("luna usage --recent runs");
+    assert!(recent.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&recent.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("a JSON row"))
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source"], "exec");
 }

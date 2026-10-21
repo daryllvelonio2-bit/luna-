@@ -9,6 +9,7 @@ pub mod heartbeat;
 pub mod models;
 pub mod sessions;
 pub mod supervisor;
+pub mod usage;
 pub mod voice;
 
 /// Clear the visible terminal and its scrollback, leaving the cursor at home.

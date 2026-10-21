@@ -199,6 +199,7 @@ pub async fn run_exec(
         )))
         .await;
 
+    let usage = Arc::new(super::usage::UsageRecorder::from_config(&config));
     let permissions = PermissionEngine::validate(config.tools.permissions.clone())?;
     let approver = headless_approver(&config, options.yes);
 
@@ -280,6 +281,18 @@ pub async fn run_exec(
         .run_turn(&prompt, tokio_util::sync::CancellationToken::new())
         .await;
 
+    if let Ok(outcome) = &outcome {
+        usage
+            .record(
+                &provider_id,
+                &model_id,
+                Some(&session_id),
+                outcome,
+                harness_core::usage::SOURCE_EXEC,
+            )
+            .await;
+    }
+
     match outcome {
         Ok(outcome) => {
             let failed_tools = outcome
@@ -304,6 +317,12 @@ pub async fn run_exec(
                     })).collect::<Vec<_>>(),
                     "replayed": outcome.replayed.as_ref().map(|replay: &ReplayNotice| replay.replayed),
                     "compacted": outcome.compaction.is_some(),
+                    "usage": outcome.usage.as_ref().map(|usage| serde_json::json!({
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens,
+                    })),
+                    "duration_ms": outcome.duration_ms,
                 }));
             } else {
                 println!("{}", outcome.reply);

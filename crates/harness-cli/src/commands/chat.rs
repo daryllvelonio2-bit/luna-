@@ -111,6 +111,9 @@ pub async fn run_interactive_chat(
     // Every turn is appended to this session; a resumed one replays its recent transcript.
     // Resolved before the provider client so the session's stored model choice can take effect.
     let store = Arc::new(open_store(&config)?);
+    // One recorder for the session: the ledger handle is process-wide, and the prices are resolved
+    // from the config once rather than per turn.
+    let usage = std::sync::Arc::new(super::usage::UsageRecorder::from_config(&config));
     let mut session_id = resolve_session(store.as_ref(), selection).await?;
 
     let mut current_provider = config.model.provider.clone();
@@ -662,6 +665,9 @@ pub async fn run_interactive_chat(
             };
             match res {
                 Ok(outcome) => {
+                    usage
+                        .record_chat(&current_provider, &current_model, Some(&session_id), &outcome)
+                        .await;
                     println!("\n{}\n{}\n", LUNA_LABEL.bold().green(), outcome.reply);
                 }
                 Err(e) => {
@@ -1345,6 +1351,10 @@ pub async fn run_interactive_chat(
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
                         ui.clear_live_state();
+                        // Accounting happens before rendering: a UI panic must not lose the row.
+                        usage
+                            .record_chat(&current_provider, &current_model, Some(&session_id), &outcome)
+                            .await;
                         let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
                         let turn_dur = turn_start.elapsed();
 
