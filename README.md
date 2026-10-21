@@ -193,7 +193,9 @@ rule behave exactly as before. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS
 
 Every turn snapshots the files its `write_file`/`patch` calls are about to change, into
 `~/.luna/checkpoints/<session>/turn_000N/` (plain files, written during the turn). `/rewind` lists
-them; `/rewind 3` restores turn 3's files and deletes what that turn created. `terminal` is not
+them with a per-turn stat line; `/rewind 3` restores turn 3's files and deletes what that turn
+created. `/diff [turn]` (or `luna diff`) reviews what a turn changed first — a read-only diff of the
+snapshot against the workspace, `created`/`modified`/`deleted`/`unchanged` derived from the bytes. `terminal` is not
 intercepted — a shell command's targets are not knowable from its arguments. On by default
 (`checkpoints.enabled`, `checkpoints.keep_turns`). Details: [`docs/CHECKPOINTS.md`](docs/CHECKPOINTS.md).
 

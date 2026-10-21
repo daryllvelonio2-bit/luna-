@@ -76,6 +76,124 @@ impl RestoreReport {
     }
 }
 
+
+/// What happened to one file between the start of a turn and now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Created,
+    Modified,
+    Deleted,
+    /// Recorded by the turn but byte-identical afterwards (a no-op write, or a restore).
+    Unchanged,
+}
+
+impl ChangeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+            Self::Unchanged => "unchanged",
+        }
+    }
+
+    /// The one-character marker a stat line uses (`+ ~ - ·`).
+    pub fn marker(&self) -> char {
+        match self {
+            Self::Created => '+',
+            Self::Modified => '~',
+            Self::Deleted => '-',
+            Self::Unchanged => '·',
+        }
+    }
+}
+
+/// One file's change inside a turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub path: String,
+    pub kind: ChangeKind,
+    /// Lines added, by the unified diff's own counting (`+` lines minus the header).
+    pub additions: usize,
+    pub deletions: usize,
+    /// A unified diff, or an explanatory line for a binary/oversized file.
+    pub diff: String,
+    /// Why the diff is not a text diff, when it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A turn, reviewed: what the workspace looked like when it started, and what changed.
+///
+/// This is the read side of a checkpoint. `/rewind` answers "put it back"; this answers "what did
+/// it actually do", which is the question a person asks *before* deciding to rewind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnDiff {
+    pub seq: u32,
+    pub session_id: String,
+    pub created_at: String,
+    pub prompt: Option<String>,
+    pub files: Vec<FileDiff>,
+}
+
+impl TurnDiff {
+    pub fn summary(&self) -> DiffSummary {
+        let mut summary = DiffSummary {
+            files: self.files.len(),
+            ..DiffSummary::default()
+        };
+        for file in &self.files {
+            summary.additions += file.additions;
+            summary.deletions += file.deletions;
+            match file.kind {
+                ChangeKind::Created => summary.created += 1,
+                ChangeKind::Modified => summary.modified += 1,
+                ChangeKind::Deleted => summary.deleted += 1,
+                ChangeKind::Unchanged => summary.unchanged += 1,
+            }
+        }
+        summary
+    }
+
+    /// Files that actually changed, in manifest order.
+    pub fn changed(&self) -> impl Iterator<Item = &FileDiff> {
+        self.files
+            .iter()
+            .filter(|file| file.kind != ChangeKind::Unchanged)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changed().next().is_none()
+    }
+}
+
+/// Totals for a turn, and for the session above it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffSummary {
+    pub files: usize,
+    pub created: usize,
+    pub modified: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+impl DiffSummary {
+    /// `+2 ~1 -0 ·3` — the stat line, with the unchanged count omitted when there is none.
+    pub fn stat_line(&self) -> String {
+        let mut line = format!(
+            "+{} ~{} -{}",
+            self.created, self.modified, self.deleted
+        );
+        if self.unchanged > 0 {
+            line.push_str(&format!(" ·{}", self.unchanged));
+        }
+        line
+    }
+}
+
 /// A snapshot being filled as a turn runs.
 ///
 /// Shared between the agent loop (which opens it) and the middleware (which adds to it), which is
@@ -421,6 +539,60 @@ impl CheckpointStore {
         Ok(report)
     }
 
+    /// Review a turn: the workspace's files as the turn left them, against the snapshot taken when
+    /// it started.
+    ///
+    /// Reads only. Nothing here writes to the workspace, so asking "what did that turn do" is
+    /// always safe — including on a turn you are about to rewind.
+    pub fn diff(&self, session_id: &str, seq: u32) -> Result<TurnDiff, HarnessError> {
+        let checkpoint = self
+            .list(session_id)?
+            .into_iter()
+            .find(|checkpoint| checkpoint.seq == seq)
+            .ok_or_else(|| {
+                HarnessError::ConfigurationError(format!(
+                    "no checkpoint {seq} in session {session_id}"
+                ))
+            })?;
+
+        let turn_dir = self.session_dir(session_id).join(turn_dir_name(seq));
+        let mut files = Vec::with_capacity(checkpoint.files.len());
+
+        for file in &checkpoint.files {
+            let before = match (file.existed, file.blob.as_ref()) {
+                (true, Some(blob)) => match std::fs::read(turn_dir.join("blobs").join(blob)) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        warn!(path = %file.path, "checkpoint blob unreadable: {error}");
+                        None
+                    }
+                },
+                _ => None,
+            };
+
+            let target = self.workspace.join(&file.path);
+            let after = std::fs::read(&target).ok();
+
+            files.push(file_diff(&file.path, before, after));
+        }
+
+        Ok(TurnDiff {
+            seq: checkpoint.seq,
+            session_id: checkpoint.session_id,
+            created_at: checkpoint.created_at,
+            prompt: checkpoint.prompt,
+            files,
+        })
+    }
+
+    /// The same review for every turn of a session, oldest first.
+    pub fn diff_all(&self, session_id: &str) -> Result<Vec<TurnDiff>, HarnessError> {
+        self.list(session_id)?
+            .into_iter()
+            .map(|checkpoint| self.diff(session_id, checkpoint.seq))
+            .collect()
+    }
+
     /// Drop the oldest turns past `keep_turns`.
     fn prune(&self, session_id: &str) -> Result<(), HarnessError> {
         let checkpoints = self.list(session_id)?;
@@ -455,6 +627,76 @@ impl CheckpointStore {
             _ => normalised.starts_with(&self.workspace),
         }
     }
+}
+
+/// Classify one file and produce its diff.
+///
+/// The kinds are derived from the *bytes*, not from the manifest: a turn that wrote a file back to
+/// exactly what it was did not change it, and saying otherwise would make every rewind look
+/// destructive. Binary content is reported as a kind and a note rather than as mojibake.
+fn file_diff(path: &str, before: Option<Vec<u8>>, after: Option<Vec<u8>>) -> FileDiff {
+    let kind = match (&before, &after) {
+        (None, None) => ChangeKind::Unchanged,
+        (None, Some(_)) => ChangeKind::Created,
+        (Some(_), None) => ChangeKind::Deleted,
+        (Some(old), Some(new)) if old == new => ChangeKind::Unchanged,
+        (Some(_), Some(_)) => ChangeKind::Modified,
+    };
+
+    if kind == ChangeKind::Unchanged {
+        return FileDiff {
+            path: path.to_string(),
+            kind,
+            additions: 0,
+            deletions: 0,
+            diff: String::new(),
+            note: None,
+        };
+    }
+
+    let old_text = before.as_deref().map(std::str::from_utf8);
+    let new_text = after.as_deref().map(std::str::from_utf8);
+    let (old_text, new_text) = match (old_text.transpose(), new_text.transpose()) {
+        (Ok(old), Ok(new)) => (old.unwrap_or(""), new.unwrap_or("")),
+        _ => {
+            return FileDiff {
+                path: path.to_string(),
+                kind,
+                additions: 0,
+                deletions: 0,
+                diff: String::new(),
+                note: Some("binary file — content differs, no text diff".to_string()),
+            }
+        }
+    };
+
+    let diff = crate::approval::unified_diff(old_text, new_text, path);
+    let (additions, deletions) = count_changes(&diff);
+    FileDiff {
+        path: path.to_string(),
+        kind,
+        additions,
+        deletions,
+        diff,
+        note: None,
+    }
+}
+
+/// Count `+`/`-` body lines, skipping the `+++`/`---` headers.
+fn count_changes(diff: &str) -> (usize, usize) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
 }
 
 fn turn_dir_name(seq: u32) -> String {

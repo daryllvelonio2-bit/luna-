@@ -42,7 +42,8 @@ pub mod viewer;
 use commands::{
     execute_slash_command, handle_compact_command, handle_compact_model_switch,
     handle_delete_command, handle_model_switch, handle_name_command, handle_new_command,
-    handle_reasoning_switch, handle_rewind_command, handle_summarize_and_new_command,
+    handle_diff_command, handle_reasoning_switch, handle_rewind_command,
+    handle_summarize_and_new_command,
     select_slash_command,
     SLASH_COMMANDS,
 };
@@ -592,6 +593,13 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                continue;
+            }
+            if query.starts_with("/diff") {
+                let arg = query.strip_prefix("/diff").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_diff_command(&ui, &agent, &session_id, arg_opt).await?;
+                ui.draw_initial_box();
                 continue;
             }
             if query.starts_with("/rewind") {

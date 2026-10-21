@@ -451,3 +451,162 @@ async fn a_whole_turn_is_undoable_through_the_production_wiring() {
         "the original goal"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `diff`: the read side of a checkpoint — what a turn changed, before you undo it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn diff_classifies_created_modified_and_unchanged_files() {
+    let fixture = fixture(50);
+    write(&fixture.workspace, "modified.txt", "one\ntwo\nthree\n");
+    write(&fixture.workspace, "same.txt", "identical\n");
+
+    let snapshot = fixture
+        .store
+        .begin("s-diff", Some("edit some files"))
+        .unwrap();
+    snapshot.capture("modified.txt").unwrap();
+    snapshot.capture("same.txt").unwrap();
+    snapshot.capture("created.txt").unwrap();
+
+    write(&fixture.workspace, "modified.txt", "one\nTWO\nthree\nfour\n");
+    write(&fixture.workspace, "same.txt", "identical\n");
+    write(&fixture.workspace, "created.txt", "brand new\n");
+
+    let turn = fixture.store.diff("s-diff", 1).unwrap();
+    let summary = turn.summary();
+    assert_eq!(summary.created, 1, "created.txt is new");
+    assert_eq!(summary.modified, 1, "modified.txt changed");
+    assert_eq!(summary.unchanged, 1, "same.txt is byte-identical");
+    assert_eq!(summary.deletions, 1, "one line removed");
+    assert_eq!(summary.additions, 3, "TWO + four, plus the created file's one line");
+    assert_eq!(summary.stat_line(), "+1 ~1 -0 ·1");
+
+    let modified = turn
+        .files
+        .iter()
+        .find(|file| file.path == "modified.txt")
+        .unwrap();
+    assert_eq!(modified.kind, checkpoint::ChangeKind::Modified);
+    assert_eq!(
+        (modified.additions, modified.deletions),
+        (2, 1),
+        "one line replaced, one added"
+    );
+    assert!(modified.diff.contains("-two"), "got: {}", modified.diff);
+    assert!(modified.diff.contains("+TWO"), "got: {}", modified.diff);
+    assert!(modified.diff.contains("+four"), "got: {}", modified.diff);
+    assert!(
+        modified.diff.starts_with("--- a/modified.txt"),
+        "a unified diff with headers: {}",
+        modified.diff
+    );
+
+    let created = turn
+        .files
+        .iter()
+        .find(|file| file.path == "created.txt")
+        .unwrap();
+    assert_eq!(created.kind, checkpoint::ChangeKind::Created);
+    assert_eq!(created.additions, 1);
+
+    let unchanged = turn
+        .files
+        .iter()
+        .find(|file| file.path == "same.txt")
+        .unwrap();
+    assert_eq!(unchanged.kind, checkpoint::ChangeKind::Unchanged);
+    assert!(unchanged.diff.is_empty(), "unchanged files carry no hunks");
+    assert_eq!(turn.changed().count(), 2);
+}
+
+#[tokio::test]
+async fn diff_reports_a_deletion_and_is_read_only() {
+    let fixture = fixture(50);
+    write(&fixture.workspace, "doomed.txt", "temporary\n");
+
+    let snapshot = fixture.store.begin("s-del", None).unwrap();
+    snapshot.capture("doomed.txt").unwrap();
+
+    std::fs::remove_file(fixture.workspace.join("doomed.txt")).unwrap();
+    let before = std::fs::read_dir(&fixture.workspace).unwrap().count();
+
+    let turn = fixture.store.diff("s-del", 1).unwrap();
+    let file = &turn.files[0];
+    assert_eq!(file.kind, checkpoint::ChangeKind::Deleted);
+    assert_eq!(file.deletions, 1);
+    assert_eq!(turn.summary().deleted, 1);
+    assert!(!turn.is_empty());
+
+    // Reviewing must never touch the workspace: that is what restore is for.
+    assert_eq!(
+        std::fs::read_dir(&fixture.workspace).unwrap().count(),
+        before,
+        "diff must not create or remove files"
+    );
+}
+
+#[tokio::test]
+async fn diff_reports_binary_content_as_a_note_instead_of_mojibake() {
+    let fixture = fixture(50);
+    std::fs::write(fixture.workspace.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
+
+    let snapshot = fixture.store.begin("s-bin", None).unwrap();
+    snapshot.capture("blob.bin").unwrap();
+
+    std::fs::write(fixture.workspace.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+
+    let turn = fixture.store.diff("s-bin", 1).unwrap();
+    let file = &turn.files[0];
+    assert_eq!(file.kind, checkpoint::ChangeKind::Modified);
+    assert!(
+        file.note.as_deref().unwrap_or_default().contains("binary"),
+        "got: {:?}",
+        file.note
+    );
+    assert!(file.diff.is_empty(), "no text diff for binary content");
+}
+
+#[tokio::test]
+async fn diff_all_covers_every_turn_and_refuses_a_missing_one() {
+    let fixture = fixture(50);
+    for (index, body) in ["a\n", "b\n"].iter().enumerate() {
+        let snapshot = fixture
+            .store
+            .begin("s-all", Some(&format!("turn {index}")))
+            .unwrap();
+        snapshot.capture("file.txt").unwrap();
+        write(&fixture.workspace, "file.txt", body);
+    }
+
+    let turns = fixture.store.diff_all("s-all").unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].seq, 1);
+    assert_eq!(turns[1].seq, 2);
+    assert_eq!(turns[1].prompt.as_deref(), Some("turn 1"));
+
+    let error = fixture.store.diff("s-all", 9).unwrap_err().to_string();
+    assert!(error.contains("no checkpoint 9"), "got: {error}");
+}
+
+#[tokio::test]
+async fn diff_after_restore_shows_the_turn_s_work_is_undone() {
+    let fixture = fixture(50);
+    write(&fixture.workspace, "notes.txt", "before\n");
+
+    let snapshot = fixture.store.begin("s-rewound", None).unwrap();
+    snapshot.capture("notes.txt").unwrap();
+    write(&fixture.workspace, "notes.txt", "after\n");
+
+    assert_eq!(fixture.store.diff("s-rewound", 1).unwrap().summary().modified, 1);
+    fixture.store.restore("s-rewound", 1).unwrap();
+
+    let turn = fixture.store.diff("s-rewound", 1).unwrap();
+    assert!(
+        turn.is_empty(),
+        "after a rewind the turn's changes are gone: {:?}",
+        turn.summary()
+    );
+    assert_eq!(turn.summary().unchanged, 1);
+}

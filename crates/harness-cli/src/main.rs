@@ -136,6 +136,24 @@ enum Commands {
         #[arg(long)]
         recent: bool,
     },
+    /// Review what a turn changed on disk: per-file diffs, from its checkpoint
+    Diff {
+        /// Session id or name (default: the most recently updated session)
+        #[arg(long)]
+        session: Option<String>,
+        /// Turn number (default: the newest checkpointed turn)
+        #[arg(long)]
+        turn: Option<u32>,
+        /// Every checkpointed turn of the session
+        #[arg(long)]
+        all: bool,
+        /// Counts only, no hunks
+        #[arg(long)]
+        stat: bool,
+        /// One JSON object on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// List stored chat sessions
     Sessions {
         #[command(subcommand)]
@@ -420,6 +438,25 @@ async fn main() -> Result<(), HarnessError> {
                     eprintln!("{} Failed to fetch models: {}", "✖".red().bold(), e);
                 }
             }
+        }
+        Some(Commands::Diff {
+            session,
+            turn,
+            all,
+            stat,
+            json,
+        }) => {
+            commands::diff::run_diff(
+                &config,
+                commands::diff::DiffOptions {
+                    session,
+                    turn,
+                    json,
+                    stat,
+                    all,
+                },
+            )
+            .await?;
         }
         Some(Commands::Sessions { subcommand }) => {
             handle_sessions_command(subcommand, &config).await?;

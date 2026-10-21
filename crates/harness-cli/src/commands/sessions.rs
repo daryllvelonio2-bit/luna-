@@ -82,7 +82,7 @@ pub async fn resolve_session(
 
 /// The id of the most recently updated session carrying this name. `list()` is ordered
 /// newest-first, so the first match is the one the user last used.
-async fn find_by_name(store: &SqliteSessionStore, name: &str) -> Result<Option<String>, HarnessError> {
+pub(crate) async fn find_by_name(store: &SqliteSessionStore, name: &str) -> Result<Option<String>, HarnessError> {
     if name.trim().is_empty() {
         return Ok(None);
     }

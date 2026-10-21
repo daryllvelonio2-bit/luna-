@@ -3,6 +3,7 @@ pub mod auth;
 pub mod chat;
 pub mod clipboard_image;
 pub mod config;
+pub mod diff;
 pub mod evolve;
 pub mod exec;
 pub mod heartbeat;

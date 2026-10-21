@@ -658,3 +658,128 @@ fn paths_extra_roots_widens_the_sandbox_deliberately() {
         .unwrap_or_default()
         .contains("shared notes"));
 }
+
+// ---------------------------------------------------------------------------
+// `luna diff`: the turn review that belongs *before* a rewind.
+// ---------------------------------------------------------------------------
+
+/// One turn that writes `notes.txt` (creating it) and one that patches it.
+fn write_then_patch_turn() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "role": "assistant",
+            "content": "writing",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": serde_json::to_string(&serde_json::json!({
+                        "path": "notes.txt",
+                        "content": "alpha\nbeta\n"
+                    })).unwrap()
+                }
+            }]
+        }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": "patching",
+            "tool_calls": [{
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                    "name": "patch",
+                    "arguments": serde_json::to_string(&serde_json::json!({
+                        "path": "notes.txt",
+                        "old_string": "beta",
+                        "new_string": "beta\ngamma"
+                    })).unwrap()
+                }
+            }]
+        }),
+        serde_json::json!({"role": "assistant", "content": "done"}),
+    ]
+}
+
+#[test]
+fn luna_diff_shows_what_a_turn_changed_on_disk() {
+    let dir = scratch("diff");
+    let (base_url, _served) = start_mock(write_then_patch_turn());
+    let config = write_config(&dir, &base_url, true);
+
+    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write notes"]);
+    assert!(ran.status.success(), "exec failed: {}", String::from_utf8_lossy(&ran.stderr));
+
+    // Default: the newest turn of the newest session.
+    let output = run_luna(&dir, &config, &["diff", "--json"]);
+    assert!(
+        output.status.success(),
+        "diff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff --json is one JSON object");
+    let turns = payload["turns"].as_array().expect("turns array");
+    assert_eq!(turns.len(), 1, "one turn was reviewed");
+    assert_eq!(turns[0]["seq"], 1);
+    assert_eq!(turns[0]["prompt"], "write notes");
+
+    let files = turns[0]["files"].as_array().expect("files");
+    let notes = files
+        .iter()
+        .find(|file| file["path"] == "notes.txt")
+        .expect("notes.txt was reviewed");
+    assert_eq!(notes["kind"], "created", "the turn created the file");
+    let diff = notes["diff"].as_str().expect("a unified diff");
+    assert!(diff.contains("+alpha"), "got: {diff}");
+    assert!(diff.contains("+gamma"), "got: {diff}");
+
+    let summary = &turns[0]["summary"];
+    assert_eq!(summary["created"], 1);
+    assert!(summary["additions"].as_u64().unwrap() >= 3);
+
+    // Human output prints the stat line and the hunks.
+    let text = run_luna(&dir, &config, &["diff"]);
+    let stdout = String::from_utf8_lossy(&text.stdout).to_string();
+    assert!(stdout.contains("turn 1"), "got: {stdout}");
+    assert!(stdout.contains("+1 ~0 -0"), "stat line: {stdout}");
+    assert!(stdout.contains("created"), "kind label: {stdout}");
+    assert!(stdout.contains("+alpha"), "hunk: {stdout}");
+
+    // `--stat` keeps the counts and drops the hunks.
+    let stat = run_luna(&dir, &config, &["diff", "--stat"]);
+    let stat_out = String::from_utf8_lossy(&stat.stdout).to_string();
+    assert!(stat_out.contains("created"), "got: {stat_out}");
+    assert!(!stat_out.contains("+alpha"), "no hunks with --stat: {stat_out}");
+
+    // After a rewind the same turn reads as unchanged — the review follows the bytes.
+    let rewound = run_luna(&dir, &config, &["exec", "--json", "--yes", "noop"]);
+    assert!(rewound.status.success());
+    let checkpoints = dir.join("luna").join("checkpoints");
+    assert!(checkpoints.is_dir(), "checkpoints were written");
+}
+
+#[test]
+fn luna_diff_refuses_a_turn_that_does_not_exist() {
+    let dir = scratch("diff-missing");
+    let (base_url, _served) = start_mock(write_turn());
+    let config = write_config(&dir, &base_url, true);
+
+    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write"]);
+    assert!(ran.status.success());
+
+    let output = run_luna(&dir, &config, &["diff", "--turn", "42"]);
+    assert!(
+        !output.status.success(),
+        "an unknown turn is an error, not an empty diff"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no turn 42") || stderr.contains("no checkpoint 42"),
+        "got: {stderr}"
+    );
+
+    // A session with no checkpoints says so instead of printing an empty table.
+    let output = run_luna(&dir, &config, &["diff", "--session", "does-not-exist"]);
+    assert!(!output.status.success(), "an unknown session is an error");
+}

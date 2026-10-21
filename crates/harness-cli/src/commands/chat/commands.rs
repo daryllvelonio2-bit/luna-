@@ -54,6 +54,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "List turn checkpoints, or restore the files of one (/rewind 3)",
     },
     SlashCommand {
+        name: "/diff",
+        details: "Review what a turn changed on disk (/diff, /diff 3, /diff --all)",
+    },
+    SlashCommand {
         name: "/compact",
         details: "Fold oldest turns into a summary in this session",
     },
@@ -213,6 +217,12 @@ pub(crate) async fn execute_slash_command(
         "/rewind" => {
             if let Err(e) = handle_rewind_command(ui, agent, session_id, arg).await {
                 ui.emit_above(&format!("{} Failed to rewind: {}", "✖".red().bold(), e));
+            }
+            Ok(false)
+        }
+        "/diff" => {
+            if let Err(e) = handle_diff_command(ui, agent, session_id, arg).await {
+                ui.emit_above(&format!("{} Failed to diff: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
@@ -1243,6 +1253,12 @@ pub(crate) async fn handle_rewind_command(
         ));
         let len = checkpoints.len();
         for (index, checkpoint) in checkpoints.iter().enumerate() {
+            // The counts come from the *bytes*, so a turn that wrote a file back unchanged reads
+            // as unchanged rather than as a scary modification.
+            let stat = store
+                .diff(session_id, checkpoint.seq)
+                .map(|turn| turn.summary().stat_line())
+                .unwrap_or_else(|_| format!("{} file(s)", checkpoint.files.len()));
             let marker = if index + 1 == len { " (latest)" } else { "" };
             let prompt = checkpoint
                 .prompt
@@ -1254,9 +1270,9 @@ pub(crate) async fn handle_rewind_command(
                 })
                 .unwrap_or_default();
             ui.emit_above(&format!(
-                "    {}  {} file(s){}{}",
+                "    {}  {}{}{}",
                 format!("turn {}", checkpoint.seq).bold(),
-                checkpoint.files.len(),
+                stat.cyan(),
                 marker.green(),
                 prompt
             ));
@@ -1296,6 +1312,122 @@ pub(crate) async fn handle_rewind_command(
     ));
     Ok(())
 }
+
+/// `/diff [turn|--all]`: what the workspace actually changed, read from the turn's checkpoint.
+///
+/// `/rewind` is a write. This is the read that belongs before it: the same snapshot, diffed against
+/// the files as they are now, so a person can see what a turn did before deciding to undo it.
+pub(crate) async fn handle_diff_command(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    session_id: &str,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let controller = {
+        let agent = agent.lock().await;
+        agent.checkpoints()
+    };
+    let Some(controller) = controller.filter(|controller| controller.enabled()) else {
+        ui.emit_above(&format!(
+            "{} Checkpoints are off — enable them with {}",
+            "•".cyan(),
+            "checkpoints.enabled = true".bold()
+        ));
+        return Ok(());
+    };
+
+    let store = controller.store();
+    let checkpoints = store.list(session_id)?;
+    if checkpoints.is_empty() {
+        ui.emit_above(&format!(
+            "{} No checkpoints yet — the next turn that writes a file creates one",
+            "•".cyan()
+        ));
+        return Ok(());
+    }
+
+    let raw = arg.unwrap_or("").trim();
+    let all = raw == "--all" || raw == "all";
+    let seq = if all {
+        None
+    } else {
+        match raw.split_whitespace().next().map(str::parse::<u32>) {
+            Some(Ok(seq)) => Some(seq),
+            _ => checkpoints.last().map(|checkpoint| checkpoint.seq),
+        }
+    };
+
+    let turns = match seq {
+        Some(seq) => vec![store.diff(session_id, seq)?],
+        None => store.diff_all(session_id)?,
+    };
+
+    for turn in &turns {
+        let summary = turn.summary();
+        let prompt = turn
+            .prompt
+            .as_deref()
+            .map(|prompt| prompt.replace('\n', " "))
+            .map(|prompt| format!(" — {}", prompt.dimmed()))
+            .unwrap_or_default();
+        ui.emit_above(&format!(
+            "{}  {}{}",
+            format!("turn {}", turn.seq).bold(),
+            summary.stat_line().cyan(),
+            prompt
+        ));
+
+        if turn.is_empty() {
+            ui.emit_above(&format!(
+                "    {}",
+                "nothing changed (the workspace matches this turn's snapshot)".dimmed()
+            ));
+            continue;
+        }
+
+        for file in turn.changed() {
+            ui.emit_above(&format!(
+                "    {} {:<9} {} {}",
+                file.kind.marker(),
+                file.kind.as_str().yellow(),
+                file.path.bold(),
+                format!("+{} -{}", file.additions, file.deletions).dimmed()
+            ));
+            if let Some(note) = &file.note {
+                ui.emit_above(&format!("        {}", note.dimmed()));
+            }
+            // Hunks are the point of a diff, but a chat pane is not a pager: cap them and say so
+            // rather than letting one regenerated lockfile scroll the conversation away.
+            let mut budget = DIFF_HUNK_BUDGET;
+            for line in file.diff.trim_end().lines() {
+                if budget == 0 {
+                    ui.emit_above(&format!(
+                        "        {}",
+                        "… more hunks not shown in chat — pipe `luna diff` for all of them".dimmed()
+                    ));
+                    break;
+                }
+                budget -= 1;
+                let painted = if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+                    line.cyan()
+                } else if line.starts_with('+') {
+                    line.green()
+                } else if line.starts_with('-') {
+                    line.red()
+                } else {
+                    line.normal()
+                };
+                ui.emit_above(&format!("        {}", painted));
+            }
+        }
+        ui.emit_above("");
+    }
+
+    Ok(())
+}
+
+/// How many diff lines a chat reply shows per turned file.
+const DIFF_HUNK_BUDGET: usize = 40;
 
 /// `/name [name]`: set the current session's user-assigned name, or report it when no name is given.
 pub(crate) async fn handle_name_command(

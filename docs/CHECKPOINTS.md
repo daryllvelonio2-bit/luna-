@@ -24,9 +24,39 @@ that writes the same file five times still restores to the state at the start of
 ## Use
 
 ```
-/rewind          # list this session's checkpoints, oldest first
+/rewind          # list this session's checkpoints with a per-turn stat line (+1 ~2 -0)
 /rewind 3        # restore the files of turn 3
+/diff            # what the newest turn actually changed, hunks and all
+/diff 3          # the same for turn 3
+/diff --all      # every turn of this session
+
+luna diff                          # the same review, outside the REPL
+luna diff --turn 3 --stat          # counts only
+luna diff --json | jq '.turns[].summary'
 ```
+
+## Reviewing before you undo: `diff`
+
+`/rewind` is a write; `diff` is the read that belongs before it, and it reads only — asking what a
+turn did is safe even for the turn you are about to undo.
+
+A review compares the turn's snapshot against the files as they are **now**, per file:
+
+| kind | meaning |
+|---|---|
+| `created` | did not exist when the turn started, exists now |
+| `modified` | bytes differ |
+| `deleted` | existed then, gone now |
+| `unchanged` | recorded by the turn but byte-identical — a no-op write, or already rewound |
+
+The kind comes from the bytes, not from the manifest: a turn that wrote a file back to exactly what
+it was reads as `unchanged`, so a rewind never looks more destructive than it is. Binary content is
+reported as a kind plus a note rather than as mojibake, and non-UTF-8 files never fail the review.
+
+Diffs are unified (`--- a/path`, `+++ b/path`, `@@` hunks) with per-file `+N -M` counts and a
+per-turn summary (`+1 ~2 -0 ·3`: created, modified, deleted, unchanged). `luna diff` prints all
+hunks; `/diff` in the REPL caps them at 40 lines per file and says so instead of scrolling the
+conversation away.
 
 Restoring is files-only: the transcript is untouched. A rewind puts the workspace back so the
 conversation can continue from a known state; it does not un-say what was said.
