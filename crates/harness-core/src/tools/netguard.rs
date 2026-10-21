@@ -92,14 +92,12 @@ pub fn apply(cmd: &mut tokio::process::Command, policy: NetworkPolicy) -> io::Re
 
 #[cfg(target_os = "linux")]
 fn install_pre_exec(cmd: &mut tokio::process::Command) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-
     // SAFETY: the closure runs in the forked child before `exec`. It only makes two `prctl` calls
     // and touches no shared state, no allocator-owned memory it does not own, and no locks —
     // requirements of a `pre_exec` hook. A failure is returned to the parent as a spawn error
     // rather than being swallowed, so the command does not run unconfined.
     unsafe {
-        cmd.pre_exec(|| install_no_network());
+        cmd.pre_exec(install_no_network);
     }
     Ok(())
 }
