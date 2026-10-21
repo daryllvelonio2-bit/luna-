@@ -42,13 +42,6 @@ impl UsageRecorder {
         }
     }
 
-    pub fn disabled() -> Self {
-        Self {
-            ledger: None,
-            prices: PriceTable::default(),
-        }
-    }
-
     /// Record one turn. Silent by design: accounting never interrupts a conversation, and a turn
     /// whose usage the provider did not report writes nothing rather than a zero.
     pub async fn record(
