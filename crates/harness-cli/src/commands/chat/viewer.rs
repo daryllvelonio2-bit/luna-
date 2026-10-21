@@ -4,12 +4,12 @@ use colored::Colorize;
 use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use dialoguer::console::Key;
 use tokio::sync::mpsc;
 
 use harness_core::tasks::{BackgroundTaskQueue, JobSummary};
 use harness_evolver::{CodebaseEvolver, EvolverEvent, JobRecord, JobStatus};
 
+use super::keys::AppKey;
 use super::render::{render_all_turns, TurnRecord};
 use super::ui::ChatUi;
 
@@ -57,7 +57,7 @@ impl TaskEntry {
 }
 
 pub async fn show_background_task_viewer(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     evolver: &CodebaseEvolver,
     bg_queue: Option<&BackgroundTaskQueue>,
     ui: &ChatUi,
@@ -274,7 +274,7 @@ pub async fn show_background_task_viewer(
                     None => break,
                 };
                 match key {
-                    Key::ArrowUp | Key::Char('k') | Key::Char('K') => {
+                    AppKey::Up | AppKey::Char('k') | AppKey::Char('K') => {
                         auto_scroll = false;
                         if scroll_offset > 0 {
                             scroll_offset = scroll_offset.saturating_sub(1);
@@ -284,7 +284,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::ArrowDown | Key::Char('j') | Key::Char('J') => {
+                    AppKey::Down | AppKey::Char('j') | AppKey::Char('J') => {
                         if scroll_offset < max_offset {
                             scroll_offset = scroll_offset.saturating_add(1);
                             if scroll_offset >= max_offset {
@@ -296,7 +296,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::PageUp | Key::Char('b') => {
+                    AppKey::PageUp | AppKey::Char('b') => {
                         auto_scroll = false;
                         scroll_offset = scroll_offset.saturating_sub(10);
                         if let Some(current) = tasks.get(selected_idx) {
@@ -304,7 +304,7 @@ pub async fn show_background_task_viewer(
                             scroll_offset = eff;
                         }
                     }
-                    Key::PageDown | Key::Char('f') | Key::Char(' ') => {
+                    AppKey::PageDown | AppKey::Char('f') | AppKey::Char(' ') => {
                         scroll_offset = (scroll_offset + 10).min(max_offset);
                         if scroll_offset >= max_offset {
                             auto_scroll = true;
@@ -314,7 +314,7 @@ pub async fn show_background_task_viewer(
                             scroll_offset = eff;
                         }
                     }
-                    Key::Home | Key::Char('g') => {
+                    AppKey::Home | AppKey::Char('g') => {
                         auto_scroll = false;
                         scroll_offset = 0;
                         if let Some(current) = tasks.get(selected_idx) {
@@ -322,7 +322,7 @@ pub async fn show_background_task_viewer(
                             scroll_offset = eff;
                         }
                     }
-                    Key::End | Key::Char('G') => {
+                    AppKey::End | AppKey::Char('G') => {
                         auto_scroll = true;
                         scroll_offset = max_offset;
                         if let Some(current) = tasks.get(selected_idx) {
@@ -330,7 +330,7 @@ pub async fn show_background_task_viewer(
                             scroll_offset = eff;
                         }
                     }
-                    Key::Tab | Key::ArrowRight | Key::Char('l') | Key::Char('L') => {
+                    AppKey::Tab | AppKey::Right | AppKey::Char('l') | AppKey::Char('L') => {
                         if !tasks.is_empty() {
                             selected_idx = (selected_idx + 1) % tasks.len();
                             auto_scroll = true;
@@ -342,7 +342,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::BackTab | Key::ArrowLeft | Key::Char('h') | Key::Char('H') => {
+                    AppKey::BackTab | AppKey::Left | AppKey::Char('h') | AppKey::Char('H') => {
                         if !tasks.is_empty() {
                             selected_idx = if selected_idx == 0 {
                                 tasks.len() - 1
@@ -358,7 +358,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::Char(c @ '1'..='9') => {
+                    AppKey::Char(c @ '1'..='9') => {
                         let idx = (c as usize) - ('1' as usize);
                         if idx < tasks.len() {
                             selected_idx = idx;
@@ -371,7 +371,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::Char('x') | Key::Char('X') => {
+                    AppKey::Char('x') | AppKey::Char('X') => {
                         // Kill / cancel active job
                         if let Some(task) = tasks.get(selected_idx) {
                             match task {
@@ -392,7 +392,7 @@ pub async fn show_background_task_viewer(
                             }
                         }
                     }
-                    Key::Escape | Key::Char('q') | Key::Char('Q') | Key::CtrlC | Key::Char('\x02') => {
+                    AppKey::Escape | AppKey::Char('q') | AppKey::Char('Q') | AppKey::CtrlC | AppKey::Char('\x02') => {
                         break;
                     }
                     _ => {}

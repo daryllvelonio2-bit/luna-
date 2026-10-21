@@ -39,3 +39,6 @@ libc = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

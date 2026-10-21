@@ -9,6 +9,8 @@ use std::time::Duration;
 use colored::Colorize;
 use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
 
+use super::todo::{self, TodoSnapshot};
+
 /// Formatted tool execution lines for a single tool call within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnProcessItem {
@@ -85,9 +87,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         " (success)".green().to_string()
                     };
                     if let Some(last) = current_tools.last_mut() {
-                        if !last.call_formatted.ends_with("(success)")
-                            && !last.call_formatted.ends_with("(failed)")
-                        {
+                        if !has_verdict(&last.call_formatted) {
                             last.call_formatted.push_str(&status);
                         }
                         last.result_formatted.clear();
@@ -180,7 +180,7 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                 for item in &turn.tool_items {
                     if !item.call_formatted.is_empty() {
                         let mut call = item.call_formatted.clone();
-                        if !call.ends_with("(success)") && !call.ends_with("(failed)") {
+                        if !has_verdict(&call) {
                             let is_err = item.result_formatted.contains('✖');
                             let status = if is_err {
                                 " (failed)".red().to_string()
@@ -198,6 +198,38 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
         if !turn.reply.is_empty() {
             println!();
             println!("{}\n{}", LUNA_LABEL.bold().green(), turn.reply);
+        }
+    }
+}
+
+/// Whether a formatted call already carries a verdict.
+///
+/// The verdict is written in colour, so the string ends in the reset escape rather than
+/// in "(success)": comparing the *visible* text is what keeps a call from being
+/// stamped with its verdict twice — once when the tool returned, once when the
+/// transcript was drawn.
+fn has_verdict(call: &str) -> bool {
+    let plain = dialoguer::console::strip_ansi_codes(call);
+    let trimmed = plain.trim_end();
+    trimmed.ends_with("(success)") || trimmed.ends_with("(failed)")
+}
+
+/// The transcript, with the todo panel underneath it.
+///
+/// The panel is the user's view of the task list: a checklist of what is open, what is
+/// in flight and what is done. It folds to a single line on Ctrl+Shift+O.
+pub fn render_transcript(
+    turns: &[TurnRecord],
+    expanded: bool,
+    width: usize,
+    todo: Option<&TodoSnapshot>,
+    todo_collapsed: bool,
+) {
+    render_all_turns(turns, expanded, width);
+    if let Some(snapshot) = todo {
+        if let Some(panel) = todo::render_panel(snapshot, todo_collapsed) {
+            println!();
+            println!("{}", panel);
         }
     }
 }
@@ -1550,6 +1582,90 @@ mod tests {
         assert!(header.contains("▼"), "got: {}", header);
         assert!(header.contains("1 tool: terminal"), "got: {}", header);
         assert!(header.contains("Ctrl+O to collapse"), "got: {}", header);
+    }
+
+    #[test]
+    fn a_tool_call_is_stamped_with_its_verdict_once() {
+        use harness_core::{Message, ToolResult};
+
+        // The call is stamped when the tool returns, and the transcript is drawn again
+        // afterwards. A coloured verdict ends in the reset escape, so comparing the
+        // visible text is what keeps the second pass from stamping it twice.
+        let history = vec![
+            StoredMessage {
+                id: 0,
+                seq: 0,
+                message: Message::user("list the todos"),
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 1,
+                seq: 1,
+                message: Message {
+                    role: Role::Assistant,
+                    content: None,
+                    reasoning: None,
+                    tool_calls: vec![harness_core::ToolCall {
+                        id: "c1".to_string(),
+                        name: "todo_list".to_string(),
+                        arguments: json!({ "action": "list" }),
+                        signature: None,
+                    }],
+                    tool_result: None,
+                    usage: None,
+                },
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 2,
+                seq: 2,
+                message: Message {
+                    role: Role::Tool,
+                    content: None,
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    tool_result: Some(ToolResult::success("c1", "[0] pending a task")),
+                    usage: None,
+                },
+                is_summary: false,
+            },
+        ];
+
+        let turns = parse_turns_from_history(&history);
+        let call = plain(&turns[0].tool_items[0].call_formatted);
+        assert_eq!(
+            call.matches("(success)").count(),
+            1,
+            "the verdict appears twice: {}",
+            call
+        );
+    }
+
+    #[test]
+    fn a_coloured_verdict_counts_as_a_verdict() {
+        assert!(has_verdict(&format!("read src/lib.rs {}", " (success)".green())));
+        assert!(has_verdict(&format!("read src/lib.rs {}", " (failed)".red())));
+        assert!(!has_verdict("read src/lib.rs"));
+    }
+
+    #[test]
+    fn the_todo_panel_is_drawn_under_the_transcript() {
+        let snapshot = harness_cli_todo_snapshot();
+        // The panel is printed by the transcript renderer; assert on the panel itself so
+        // the test does not depend on stdout capture.
+        let panel = super::todo::render_panel(&snapshot, false).unwrap();
+        assert!(panel.contains("Todo"), "got: {}", panel);
+        assert!(panel.contains("write the parser"), "got: {}", panel);
+    }
+
+    fn harness_cli_todo_snapshot() -> super::todo::TodoSnapshot {
+        super::todo::TodoSnapshot {
+            items: vec![super::todo::TodoEntry {
+                id: 0,
+                text: "write the parser".to_string(),
+                status: super::todo::TodoStatus::Pending,
+            }],
+        }
     }
 
     #[test]

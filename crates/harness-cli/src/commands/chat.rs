@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use colored::Colorize;
-use dialoguer::console::{Key, Term};
+use dialoguer::console::Term;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +35,9 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
 pub mod commands;
+pub(crate) mod keys;
 pub(crate) mod render;
+pub mod todo;
 pub mod ui;
 pub mod viewer;
 
@@ -47,9 +49,10 @@ use commands::{
     select_slash_command,
     SLASH_COMMANDS,
 };
+use keys::AppKey;
 use render::{
     format_approval_verdict, format_tool_call, format_tool_result, parse_turns_from_history,
-    render_all_turns, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
+    render_transcript, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
     LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, BackgroundTaskState, ChatUi, RawTerminal, ANIMATION_INTERVAL};
@@ -62,6 +65,35 @@ pub(crate) type ChatAgent = Agent<
     CodebaseEvolver,
     DefaultToolRegistry,
 >;
+
+/// Draw the transcript, with the todo panel under it.
+///
+/// The panel is read from the workspace on every draw, so it shows the list as it stands
+/// now rather than as it stood when a turn ended.
+fn redraw_transcript(
+    turns: &[TurnRecord],
+    expanded: bool,
+    todo_collapsed: bool,
+    workspace_root: &std::path::Path,
+) {
+    let snapshot = todo::read_snapshot(workspace_root);
+    render_transcript(
+        turns,
+        expanded,
+        get_terminal_width(),
+        Some(&snapshot),
+        todo_collapsed,
+    );
+}
+
+/// Puts the terminal's key reporting back the way it was found, however the chat ends.
+struct KittyKeyboardGuard;
+
+impl Drop for KittyKeyboardGuard {
+    fn drop(&mut self) {
+        keys::disable_kitty_keyboard();
+    }
+}
 
 /// Wipe the terminal on session exit, so only the shell prompt remains.
 /// Cosmetic: a failure to write is ignored on purpose (see `commands::clear_screen`).
@@ -346,6 +378,9 @@ pub async fn run_interactive_chat(
 
     let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
     let in_flight_tools_obs = in_flight_tools.clone();
+    // The todo list lives in the workspace, so the observer needs the root to read it back.
+    let workspace_root = config.paths.workspace_root.clone();
+    let workspace_root_obs = workspace_root.clone();
 
     // Lifecycle hooks: opt-in, loaded from the user file and (only when trusted) the project
     // file. Loading is fail-closed, so a missing file means an empty runner, not an error.
@@ -365,7 +400,12 @@ pub async fn run_interactive_chat(
         }
         harness_core::AgentEvent::ToolExecuting { name, arguments } => {
             ui_obs.finish_reasoning();
-            let call_fmt = format_tool_call(&name, &arguments);
+            // A todo call reads as the task it acts on, not as the arguments it was sent.
+            let call_fmt = if name == "todo_list" {
+                todo::format_call(&arguments, &workspace_root_obs)
+            } else {
+                format_tool_call(&name, &arguments)
+            };
             ui_obs.begin_block(OutputBlockKind::Tool);
             // The call goes into the live region the instant it is invoked, so a slow tool is
             // visible while it runs; `ToolExecuted` below finalizes the same line into the
@@ -736,9 +776,10 @@ pub async fn run_interactive_chat(
         .await?;
     let mut turns: Vec<TurnRecord> = parse_turns_from_history(&replayed.history);
     let mut process_expanded = false;
+    // The todo panel starts open; Ctrl+Shift+O folds it to a single line.
+    let mut todo_collapsed = false;
 
     if replayed.replayed > 0 {
-        let width = get_terminal_width();
         if replayed.truncated() {
             println!(
                 "{}\n",
@@ -750,7 +791,7 @@ pub async fn run_interactive_chat(
                 .dimmed()
             );
         }
-        render_all_turns(&turns, process_expanded, width);
+        redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
         println!();
     }
 
@@ -790,11 +831,20 @@ pub async fn run_interactive_chat(
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
 
-    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<AppKey>();
 
     // Raw mode belongs to the session, not to each read — see `RawTerminal`. Held here so the
     // guard drops (and the terminal is restored) when this function returns on any exit path.
     let _raw_terminal = RawTerminal::acquire();
+
+    // Ask the terminal for unambiguous key codes. Without it ctrl+shift+o arrives as the
+    // same byte as ctrl+o, and the todo panel could never have a key of its own.
+    let _kitty_guard = if Term::stdout().features().is_attended() {
+        keys::enable_kitty_keyboard();
+        Some(KittyKeyboardGuard)
+    } else {
+        None
+    };
 
     // Ctrl-C stays a signal because raw mode is entered with ISIG left on. Left to its default
     // action it would kill the process before the quit path runs and the resume hint never
@@ -803,7 +853,7 @@ pub async fn run_interactive_chat(
         let key_tx = key_tx.clone();
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
-                if key_tx.send(Key::CtrlC).is_err() {
+                if key_tx.send(AppKey::CtrlC).is_err() {
                     break;
                 }
             }
@@ -811,9 +861,8 @@ pub async fn run_interactive_chat(
     }
 
     std::thread::spawn(move || {
-        let term = Term::stdout();
         loop {
-            match term.read_key() {
+            match keys::read_key(libc::STDIN_FILENO) {
                 Ok(key) => {
                     if key_tx.send(key).is_err() {
                         break;
@@ -973,13 +1022,18 @@ pub async fn run_interactive_chat(
                 };
 
                 match key {
-                    Key::Char('\x0f') => {
+                    AppKey::Ctrl('o') => {
                         // Ctrl+O: toggle process expansion
                         if active_turn.is_none() && !turns.is_empty() {
                             process_expanded = !process_expanded;
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(
+                                    &turns,
+                                    process_expanded,
+                                    todo_collapsed,
+                                    &workspace_root,
+                                );
                                 if let Some(ref err) = ui.transient_error() {
                                     println!();
                                     println!("{}", err);
@@ -989,7 +1043,22 @@ pub async fn run_interactive_chat(
                         }
                         continue;
                     }
-                    Key::Char('\x02') => {
+                    AppKey::CtrlShiftO => {
+                        // Ctrl+Shift+O: fold or unfold the todo panel
+                        todo_collapsed = !todo_collapsed;
+                        if ui.is_attended {
+                            crate::commands::clear_screen();
+                            redraw_transcript(
+                                &turns,
+                                process_expanded,
+                                todo_collapsed,
+                                &workspace_root,
+                            );
+                            ui.draw_initial_box();
+                        }
+                        continue;
+                    }
+                    AppKey::Ctrl('b') => {
                         // Ctrl+B: inspect background tasks
                         show_background_task_viewer(
                             &mut key_rx,
@@ -1002,7 +1071,7 @@ pub async fn run_interactive_chat(
                         .await;
                         continue;
                     }
-                    Key::Char('\x16') => {
+                    AppKey::Ctrl('v') => {
                         // Ctrl+V: attach a screenshot from the clipboard to the next prompt
                         match crate::commands::clipboard_image::read_clipboard_image() {
                             Ok(Some(img)) => {
@@ -1043,7 +1112,7 @@ pub async fn run_interactive_chat(
                         }
                         continue;
                     }
-                    Key::Tab => {
+                    AppKey::Tab => {
                         // Tab: toggle plan mode
                         let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
                         let next = !current;
@@ -1060,7 +1129,7 @@ pub async fn run_interactive_chat(
                         ));
                         continue;
                     }
-                    Key::BackTab if !allow_all_session.load(std::sync::atomic::Ordering::SeqCst) => {
+                    AppKey::BackTab if !allow_all_session.load(std::sync::atomic::Ordering::SeqCst) => {
                         // Shift+Tab: yolo — mutating tools run without asking for the rest of
                         // the chat. Pressing it again while yolo is on does nothing: the same
                         // key must not silently flip a safety gate back off.
@@ -1068,7 +1137,7 @@ pub async fn run_interactive_chat(
                         ui.set_yolo(true);
                         continue;
                     }
-                    Key::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
+                    AppKey::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
                         ui.input_buf.lock().unwrap().push('/');
                         ui.redraw_input_line();
                         if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
@@ -1090,6 +1159,7 @@ pub async fn run_interactive_chat(
                                 &mut compact_model,
                                 &mut turns,
                                 &mut process_expanded,
+                                &mut todo_collapsed,
                             )
                             .await?
                             {
@@ -1097,7 +1167,7 @@ pub async fn run_interactive_chat(
                             }
                         }
                     }
-                    Key::ArrowUp => {
+                    AppKey::Up => {
                         if !prompt_history.is_empty() {
                             let next_idx = match history_cursor {
                                 None => {
@@ -1114,7 +1184,7 @@ pub async fn run_interactive_chat(
                         }
                         continue;
                     }
-                    Key::ArrowDown => {
+                    AppKey::Down => {
                         if let Some(idx) = history_cursor {
                             if idx + 1 < prompt_history.len() {
                                 let next_idx = idx + 1;
@@ -1131,15 +1201,15 @@ pub async fn run_interactive_chat(
                         }
                         continue;
                     }
-                    Key::Char(c) => {
+                    AppKey::Char(c) => {
                         ui.input_buf.lock().unwrap().push(c);
                         ui.redraw_input_line();
                     }
-                    Key::Backspace => {
+                    AppKey::Backspace => {
                         ui.input_buf.lock().unwrap().pop();
                         ui.redraw_input_line();
                     }
-                    Key::Enter => {
+                    AppKey::Enter => {
                         history_cursor = None;
                         draft_input.clear();
                         let query = {
@@ -1179,6 +1249,7 @@ pub async fn run_interactive_chat(
                                     &mut compact_model,
                                     &mut turns,
                                     &mut process_expanded,
+                                    &mut todo_collapsed,
                                 )
                                 .await?
                                 {
@@ -1208,6 +1279,7 @@ pub async fn run_interactive_chat(
                                 &mut compact_model,
                                 &mut turns,
                                 &mut process_expanded,
+                                &mut todo_collapsed,
                             )
                             .await?
                             {
@@ -1254,7 +1326,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 println!();
                                 println!("{}", right_aligned_user_message(&query, get_terminal_width()));
                                 ui.draw_initial_box();
@@ -1275,7 +1347,7 @@ pub async fn run_interactive_chat(
                             }));
                         }
                     }
-                    Key::CtrlC => {
+                    AppKey::CtrlC => {
                         if let Some(handle) = active_turn.take() {
                             current_cancel.cancel();
                             handle.abort();
@@ -1296,7 +1368,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{}", "✖ Cancelled".red());
@@ -1311,7 +1383,7 @@ pub async fn run_interactive_chat(
                             break;
                         }
                     }
-                    Key::Escape => {
+                    AppKey::Escape => {
                         if let Some(handle) = active_turn.take() {
                             current_cancel.cancel();
                             handle.abort();
@@ -1332,7 +1404,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{}", "✖ Cancelled".red());
@@ -1379,7 +1451,7 @@ pub async fn run_interactive_chat(
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                             ui.draw_initial_box();
                         } else {
                             if !outcome.reply.is_empty() {
@@ -1410,7 +1482,7 @@ pub async fn run_interactive_chat(
 
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                             ui.draw_initial_box();
                         } else {
                             println!("{}", "✖ Cancelled".red());
@@ -1441,7 +1513,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{} Error: {}", "✖".red().bold(), e);
@@ -1456,7 +1528,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 println!();
                                 println!("{}", err_msg);
                                 ui.draw_initial_box();
@@ -1490,7 +1562,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 ui.draw_initial_box();
                             } else {
                                 println!("{} Task join error: {}", "✖".red().bold(), join_err);
@@ -1505,7 +1577,7 @@ pub async fn run_interactive_chat(
 
                             if ui.is_attended {
                                 crate::commands::clear_screen();
-                                render_all_turns(&turns, process_expanded, get_terminal_width());
+                                redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                                 println!();
                                 println!("{}", err_msg);
                                 ui.draw_initial_box();
@@ -1524,7 +1596,7 @@ pub async fn run_interactive_chat(
                     if let Some(next_query) = queue.pop_front() {
                         if ui.is_attended {
                             crate::commands::clear_screen();
-                            render_all_turns(&turns, process_expanded, get_terminal_width());
+                            redraw_transcript(&turns, process_expanded, todo_collapsed, &workspace_root);
                             println!();
                             println!("{}", right_aligned_user_message(&next_query, get_terminal_width()));
                             ui.draw_initial_box();
@@ -1569,7 +1641,7 @@ pub async fn run_interactive_chat(
 }
 
 async fn prompt_approval_choice(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     request: &ApprovalRequest,
     ui: &ChatUi,
     decision_tx: &mut oneshot::Sender<harness_core::ApprovalDecision>,
@@ -1611,25 +1683,25 @@ async fn prompt_approval_choice(
         };
 
         let chosen = match key {
-            Key::ArrowUp | Key::ArrowLeft | Key::BackTab => {
+            AppKey::Up | AppKey::Left | AppKey::BackTab => {
                 selected = (selected + APPROVAL_ACTIONS.len() - 1) % APPROVAL_ACTIONS.len();
                 None
             }
-            Key::ArrowDown | Key::ArrowRight | Key::Tab => {
+            AppKey::Down | AppKey::Right | AppKey::Tab => {
                 selected = (selected + 1) % APPROVAL_ACTIONS.len();
                 None
             }
-            Key::Char('y') | Key::Char('Y') | Key::Char('1') => Some(ApprovalChoice::Once),
-            Key::Char('a') | Key::Char('A') | Key::Char('2') => Some(ApprovalChoice::AllSession),
-            Key::Char('n') | Key::Char('N') | Key::Char('3') | Key::Char('c') | Key::Char('C') | Key::Char('d') | Key::Char('D') | Key::Escape | Key::CtrlC => {
+            AppKey::Char('y') | AppKey::Char('Y') | AppKey::Char('1') => Some(ApprovalChoice::Once),
+            AppKey::Char('a') | AppKey::Char('A') | AppKey::Char('2') => Some(ApprovalChoice::AllSession),
+            AppKey::Char('n') | AppKey::Char('N') | AppKey::Char('3') | AppKey::Char('c') | AppKey::Char('C') | AppKey::Char('d') | AppKey::Char('D') | AppKey::Escape | AppKey::CtrlC => {
                 Some(ApprovalChoice::Deny)
             }
-            Key::Enter => match selected {
+            AppKey::Enter => match selected {
                 0 => Some(ApprovalChoice::Once),
                 1 => Some(ApprovalChoice::AllSession),
                 _ => Some(ApprovalChoice::Deny),
             },
-            Key::Char(' ') => match selected {
+            AppKey::Char(' ') => match selected {
                 0 => Some(ApprovalChoice::Once),
                 1 => Some(ApprovalChoice::AllSession),
                 _ => Some(ApprovalChoice::Deny),
@@ -1693,7 +1765,7 @@ impl harness_core::tools::SudoPrompter for ChatSudoPrompter {
 }
 
 async fn prompt_sudo_password_dialog(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     command: &str,
 ) -> Option<String> {
     while key_rx.try_recv().is_ok() {}
@@ -1712,7 +1784,7 @@ async fn prompt_sudo_password_dialog(
             None => break,
         };
         match key {
-            Key::Enter => {
+            AppKey::Enter => {
                 println!();
                 if password.is_empty() {
                     println!("  {} Skipped - continuing without sudo\n", "⏭".dimmed());
@@ -1724,19 +1796,19 @@ async fn prompt_sudo_password_dialog(
                     return Some(password);
                 }
             }
-            Key::Escape | Key::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC => {
                 println!("\n  {} Cancelled - continuing without sudo\n", "⏭".dimmed());
                 let _ = io::stdout().flush();
                 return None;
             }
-            Key::Backspace => {
+            AppKey::Backspace => {
                 if !password.is_empty() {
                     password.pop();
                     print!("\x08 \x08");
                     let _ = io::stdout().flush();
                 }
             }
-            Key::Char(c) => {
+            AppKey::Char(c) => {
                 if c == '\n' || c == '\r' {
                     println!();
                     if password.is_empty() {

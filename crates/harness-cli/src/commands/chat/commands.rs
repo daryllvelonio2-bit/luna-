@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 use colored::Colorize;
-use dialoguer::console::Key;
 use tokio::sync::mpsc;
 
 use harness_core::{
@@ -14,7 +13,9 @@ use harness_providers::{
 };
 
 use super::clear_on_exit;
-use super::render::{render_all_turns, TurnRecord, PROMPT};
+use super::keys::AppKey;
+use super::render::{render_transcript, TurnRecord, PROMPT};
+use super::todo;
 use super::ui::{get_terminal_width, ChatUi};
 use super::ChatAgent;
 use crate::commands::sessions::{resolve_session, SessionSelection};
@@ -22,6 +23,23 @@ use crate::commands::sessions::{resolve_session, SessionSelection};
 pub struct SlashCommand {
     pub name: &'static str,
     pub details: &'static str,
+}
+
+/// Draw the transcript with the todo panel under it.
+fn draw_transcript(
+    turns: &[TurnRecord],
+    expanded: bool,
+    todo_collapsed: bool,
+    config: &Config,
+) {
+    let snapshot = todo::read_snapshot(&config.paths.workspace_root);
+    render_transcript(
+        turns,
+        expanded,
+        get_terminal_width(),
+        Some(&snapshot),
+        todo_collapsed,
+    );
 }
 
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
@@ -86,6 +104,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "List background task queue jobs",
     },
     SlashCommand {
+        name: "/todo",
+        details: "Fold or unfold the todo list (Ctrl+Shift+O)",
+    },
+    SlashCommand {
         name: "/clear",
         details: "Clear terminal screen",
     },
@@ -113,7 +135,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
 
 pub(crate) async fn execute_slash_command(
     cmd: &str,
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
@@ -127,6 +149,7 @@ pub(crate) async fn execute_slash_command(
     compact_model: &mut Option<String>,
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
+    todo_collapsed: &mut bool,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -288,7 +311,7 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = true;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                render_all_turns(turns, *process_expanded, get_terminal_width());
+                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
                 ui.draw_initial_box();
             }
             Ok(false)
@@ -297,7 +320,18 @@ pub(crate) async fn execute_slash_command(
             *process_expanded = false;
             if ui.is_attended {
                 crate::commands::clear_screen();
-                render_all_turns(turns, *process_expanded, get_terminal_width());
+                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
+                ui.draw_initial_box();
+            }
+            Ok(false)
+        }
+        "/todo" => {
+            // The same fold Ctrl+Shift+O does, for the terminals that cannot tell the
+            // two apart.
+            *todo_collapsed = !*todo_collapsed;
+            if ui.is_attended {
+                crate::commands::clear_screen();
+                draw_transcript(turns, *process_expanded, *todo_collapsed, config);
                 ui.draw_initial_box();
             }
             Ok(false)
@@ -363,7 +397,7 @@ pub(crate) async fn execute_slash_command(
 }
 
 pub(crate) async fn select_slash_command(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
 ) -> Option<String> {
     if !ui.is_attended {
@@ -499,13 +533,13 @@ pub(crate) async fn select_slash_command(
         let filtered = get_filtered(&filter_str);
 
         match key {
-            Key::ArrowDown => {
+            AppKey::Down => {
                 if !filtered.is_empty() {
                     selected = (selected + 1) % filtered.len();
                 }
                 draw_menu(selected, &filter_str, &filter_str);
             }
-            Key::ArrowUp => {
+            AppKey::Up => {
                 if !filtered.is_empty() {
                     selected = if selected == 0 {
                         filtered.len().saturating_sub(1)
@@ -515,7 +549,7 @@ pub(crate) async fn select_slash_command(
                 }
                 draw_menu(selected, &filter_str, &filter_str);
             }
-            Key::Enter => {
+            AppKey::Enter => {
                 if !filtered.is_empty() && selected < filtered.len() {
                     result = Some(filtered[selected].1.name.to_string());
                 } else if filter_str.starts_with('/') {
@@ -525,7 +559,7 @@ pub(crate) async fn select_slash_command(
                 }
                 break;
             }
-            Key::Tab => {
+            AppKey::Tab => {
                 if !filtered.is_empty() && selected < filtered.len() {
                     let cmd = filtered[selected].1.name;
                     let mut b = ui.input_buf.lock().unwrap();
@@ -536,11 +570,11 @@ pub(crate) async fn select_slash_command(
                     break;
                 }
             }
-            Key::Escape | Key::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC => {
                 ui.input_buf.lock().unwrap().clear();
                 break;
             }
-            Key::Backspace => {
+            AppKey::Backspace => {
                 let mut b = ui.input_buf.lock().unwrap();
                 b.pop();
                 let is_empty = b.is_empty();
@@ -555,7 +589,7 @@ pub(crate) async fn select_slash_command(
                     draw_menu(selected, &new_buf, &new_buf);
                 }
             }
-            Key::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
+            AppKey::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
                 let mut b = ui.input_buf.lock().unwrap();
                 b.push(c);
                 let new_buf = b.clone();
@@ -574,7 +608,7 @@ pub(crate) async fn select_slash_command(
 }
 
 async fn select_from_rx(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
     prompt: &str,
     items: &[String],
@@ -742,7 +776,7 @@ async fn select_from_rx(
         let filtered = get_filtered(&filter);
 
         match key {
-            Key::ArrowUp => {
+            AppKey::Up => {
                 if !filtered.is_empty() {
                     if selected_filtered_idx > 0 {
                         selected_filtered_idx -= 1;
@@ -751,7 +785,7 @@ async fn select_from_rx(
                     }
                 }
             }
-            Key::ArrowDown => {
+            AppKey::Down => {
                 if !filtered.is_empty() {
                     if selected_filtered_idx + 1 < filtered.len() {
                         selected_filtered_idx += 1;
@@ -760,23 +794,23 @@ async fn select_from_rx(
                     }
                 }
             }
-            Key::Backspace => {
+            AppKey::Backspace => {
                 if !filter.is_empty() {
                     filter.pop();
                     selected_filtered_idx = 0;
                 }
             }
-            Key::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
+            AppKey::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
                 filter.push(c);
                 selected_filtered_idx = 0;
             }
-            Key::Enter => {
+            AppKey::Enter => {
                 if !filtered.is_empty() && selected_filtered_idx < filtered.len() {
                     result = Some(filtered[selected_filtered_idx].0);
                 }
                 break;
             }
-            Key::Escape | Key::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC => {
                 if !filter.is_empty() {
                     filter.clear();
                     selected_filtered_idx = 0;
@@ -815,7 +849,7 @@ async fn select_from_rx(
 }
 
 async fn input_from_rx(
-    key_rx: &mut mpsc::UnboundedReceiver<Key>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     prompt: &str,
 ) -> Option<String> {
     print!("{}: ", prompt.bold().cyan());
@@ -824,18 +858,18 @@ async fn input_from_rx(
 
     while let Some(key) = key_rx.recv().await {
         match key {
-            Key::Char(c) => {
+            AppKey::Char(c) => {
                 buf.push(c);
                 print!("{}", c);
                 let _ = io::stdout().flush();
             }
-            Key::Backspace => {
+            AppKey::Backspace => {
                 if buf.pop().is_some() {
                     print!("\x08 \x08");
                     let _ = io::stdout().flush();
                 }
             }
-            Key::Enter => {
+            AppKey::Enter => {
                 print!("\r\x1b[2K");
                 let _ = io::stdout().flush();
                 let res = buf.trim().to_string();
@@ -844,7 +878,7 @@ async fn input_from_rx(
                 }
                 return Some(res);
             }
-            Key::Escape | Key::CtrlC => {
+            AppKey::Escape | AppKey::CtrlC => {
                 print!("\r\x1b[2K");
                 let _ = io::stdout().flush();
                 return None;
@@ -856,7 +890,7 @@ async fn input_from_rx(
 }
 
 async fn pick_provider_and_model(
-    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
@@ -992,7 +1026,7 @@ async fn pick_provider_and_model(
 }
 
 pub(crate) async fn handle_model_switch(
-    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
@@ -1122,7 +1156,7 @@ pub(crate) async fn handle_model_switch(
 }
 
 pub(crate) async fn handle_compact_model_switch(
-    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     config: &Config,
     cred_manager: &Arc<CredentialManager>,
@@ -1781,7 +1815,7 @@ pub(crate) async fn handle_compact_command(
 }
 
 pub(crate) async fn handle_reasoning_switch(
-    mut key_rx: Option<&mut mpsc::UnboundedReceiver<Key>>,
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     arg: Option<&str>,
