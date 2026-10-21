@@ -108,7 +108,10 @@ impl TerminalTool {
             return command.to_string();
         }
 
-        if self.rtk_rewrite {
+        // A rewriting daemon runs the command in *its* process, outside this one's seccomp filter,
+        // so under `tools.network = deny` the rewrite is skipped rather than allowed to hand the
+        // command to something the boundary does not cover. The boundary wins over the convenience.
+        if self.rtk_rewrite && !self.network.denies_sockets() {
             if let Some(rtk_path) = find_rtk_executable(self.prefix.as_deref()) {
                 if let Some(rewritten) = try_rtk_rewrite(trimmed, &rtk_path).await {
                     return rewritten;

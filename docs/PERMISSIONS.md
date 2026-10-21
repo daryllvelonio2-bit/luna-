@@ -131,8 +131,12 @@ This is kernel enforcement, not a command-string check. A prefix match on `curl`
 `sh -c`, `$(...)`, a wrapper script or an alias; a filter inherited across `exec` is not.
 
 `deny` fails **closed**: on a platform without seccomp the command is refused with an explanation
-rather than run unconfined. `rtk_rewrite` is independent — a rewritten command still runs inside the
-same filter, though a rewriting *daemon* is a separate process and therefore outside it.
+rather than run unconfined.
+
+`rtk_rewrite` is disabled automatically under `deny`: a rewriting daemon runs the command in *its*
+process, which the child's filter does not cover, so the boundary wins over the convenience. An
+explicit `terminal_prefix` still applies — a prefix is a child of the harness process and inherits
+the filter — but if that prefix is itself a daemon client, the command runs in the daemon.
 
 What it does not bound: an already-open descriptor (only stdio is inherited, so there is nothing
 else), and commands run outside the harness.

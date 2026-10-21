@@ -1075,6 +1075,27 @@ async fn test_terminal_rtk_rewrite_and_prefix() {
         assert_eq!(resolved, "cargo test");
     }
 
+    // 2b. Under `tools.network = deny` the rewrite is skipped: a rewriting daemon executes the
+    // command in its own process, which the child's seccomp filter does not cover.
+    let term_denied = TerminalTool::new(root.clone(), 5, 50_000)
+        .with_rtk_rewrite(true)
+        .with_network_policy(harness_core::tools::netguard::NetworkPolicy::Deny);
+    assert_eq!(
+        term_denied.resolve_command("cargo test").await,
+        "cargo test",
+        "deny must not hand the command to a daemon outside the filter"
+    );
+    // ...while an explicit prefix still applies, because a prefix is a child of this process and
+    // therefore inherits the filter.
+    let denied_prefixed = TerminalTool::new(root.clone(), 5, 50_000)
+        .with_rtk_rewrite(true)
+        .with_prefix(Some("rtk".to_string()))
+        .with_network_policy(harness_core::tools::netguard::NetworkPolicy::Deny);
+    assert_eq!(
+        denied_prefixed.resolve_command("cargo test").await,
+        "rtk cargo test"
+    );
+
     // 3. Config YAML parsing with terminal_prefix and rtk_rewrite
     let yaml = r#"
 tools:
