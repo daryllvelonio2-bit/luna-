@@ -328,7 +328,8 @@ pub async fn run_interactive_chat(
         )))
         .await;
 
-    let is_attended = Term::stdout().features().is_attended();
+    let in_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
+    let is_attended = Term::stdout().features().is_attended() || in_kitty;
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();
 
@@ -840,7 +841,13 @@ pub async fn run_interactive_chat(
 
     // Ask the terminal for unambiguous key codes. Without it ctrl+shift+o arrives as the
     // same byte as ctrl+o, and the todo panel could never have a key of its own.
-    let _kitty_guard = if Term::stdout().features().is_attended() {
+    //
+    // We enable the protocol when either the console crate thinks we're attended,
+    // or when KITTY_WINDOW_ID is set (a reliable indicator of running in kitty).
+    // The latter handles cases where the tool is invoked with redirected stdio but
+    // the controlling terminal is still kitty.
+    let in_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
+    let _kitty_guard = if Term::stdout().features().is_attended() || in_kitty {
         keys::enable_kitty_keyboard();
         Some(KittyKeyboardGuard)
     } else {
