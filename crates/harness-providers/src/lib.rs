@@ -9,8 +9,9 @@ pub mod supercode;
 
 pub use antigravity::{
     detect_antigravity_credentials, execute_antigravity_completion, extract_bearer_token,
-    fetch_antigravity_models, refresh_antigravity_token, retrieve_antigravity_quota,
-    AntigravityCredentials, AntigravityQuotaBucket, AntigravityQuotaGroup, AntigravityQuotaSummary,
+    fetch_antigravity_models, refresh_antigravity_token, resolve_antigravity_email_strict,
+    retrieve_antigravity_quota, AntigravityCredentials, AntigravityModelQuotaInfo,
+    AntigravityQuotaBucket, AntigravityQuotaGroup, AntigravityQuotaSummary,
 };
 pub use opencode::{
     detect_opencode_credentials, ensure_compat_tools, get_or_create_opencode_session_id,

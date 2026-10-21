@@ -1845,22 +1845,21 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
             .find(|c| c.is_priority && !c.is_temporarily_disabled)
             .or_else(|| creds.iter().find(|c| !c.is_temporarily_disabled))
         {
-            let account_name = if !primary.label.is_empty() {
-                primary.label.clone()
-            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key) {
-                val.get("email")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("antigravity")
-                    .to_string()
-            } else {
-                "antigravity".to_string()
-            };
-            ui.set_account_name(Some(account_name));
-
             let client = match harness_providers::build_http_client(30) {
                 Ok(c) => c,
                 Err(_) => return,
             };
+
+            let strict_email = harness_providers::resolve_antigravity_email_strict(&client, &primary.api_key).await;
+            let account_name = strict_email.clone().unwrap_or_else(|| {
+                if !primary.label.is_empty() {
+                    primary.label.clone()
+                } else {
+                    "antigravity".to_string()
+                }
+            });
+            ui.set_account_name(Some(account_name));
+
             if let Ok(summary) =
                 harness_providers::retrieve_antigravity_quota(&client, &primary.api_key, Some(cred_manager))
                     .await

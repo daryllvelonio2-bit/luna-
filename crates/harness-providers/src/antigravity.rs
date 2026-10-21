@@ -17,11 +17,13 @@ pub const CODE_ASSIST_ENDPOINT: &str =
 pub const FALLBACK_CODE_ASSIST_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 pub const USER_QUOTA_ENDPOINT: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-pub const FALLBACK_USER_QUOTA_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+pub const FALLBACK_USER_QUOTA_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 pub const MODELS_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+pub const FALLBACK_MODELS_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 pub const AGY_CLIENT_ID: &str =
@@ -56,9 +58,18 @@ pub struct AntigravityQuotaGroup {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityModelQuotaInfo {
+    pub remaining_fraction: Option<f64>,
+    pub reset_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AntigravityQuotaSummary {
     #[serde(default)]
     pub groups: Vec<AntigravityQuotaGroup>,
+    #[serde(default)]
+    pub models_quota: std::collections::HashMap<String, AntigravityModelQuotaInfo>,
 }
 
 impl AntigravityQuotaSummary {
@@ -69,6 +80,66 @@ impl AntigravityQuotaSummary {
             || lower.contains("opus")
             || lower.contains("sonnet")
             || lower.contains("gpt");
+
+        let resolved = resolve_antigravity_model(model, None);
+
+        // Check model-specific quotaInfo from fetchAvailableModels first if Gemini
+        if is_gemini {
+            if let Some(q_info) = self.models_quota.get(&resolved).or_else(|| {
+                self.models_quota
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase().contains("flash") || k.to_lowercase().contains("gemini"))
+                    .map(|(_, v)| v)
+            }) {
+                let weekly_part = q_info.remaining_fraction.map(|frac| {
+                    let pct_str = format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round());
+                    let time_str = q_info
+                        .reset_time
+                        .as_ref()
+                        .map(|t| format_reset_time_remaining(t))
+                        .unwrap_or_default();
+                    if time_str.is_empty() {
+                        format!("w {}", pct_str)
+                    } else {
+                        format!("w {} {}", pct_str, time_str)
+                    }
+                });
+
+                // Check if any group has 5h bucket for Gemini
+                let hourly_part = self
+                    .groups
+                    .iter()
+                    .find(|g| g.display_name.as_deref().unwrap_or("").to_lowercase().contains("gemini"))
+                    .and_then(|g| {
+                        g.buckets.iter().find(|b| {
+                            let w = b.window.as_deref().unwrap_or("").to_lowercase();
+                            let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
+                            w == "5h" || b_id.contains("5h")
+                        })
+                    })
+                    .map(|b| {
+                        let pct_str = if let Some(frac) = b.remaining_fraction {
+                            format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+                        } else {
+                            "100%".to_string()
+                        };
+                        let time_str = b.reset_time.as_ref().map(|t| format_reset_time_remaining(t)).unwrap_or_default();
+                        if time_str.is_empty() {
+                            format!("5h {}", pct_str)
+                        } else {
+                            format!("5h {} {}", pct_str, time_str)
+                        }
+                    })
+                    .or_else(|| Some("5h 100%".to_string()));
+
+                return match (hourly_part, weekly_part) {
+                    (Some(h), Some(w)) => Some(format!("{} · {}", h, w)),
+                    (Some(h), None) => Some(h),
+                    (None, Some(w)) => Some(w),
+                    (None, None) => None,
+                };
+            }
+        }
 
         // Pick target group based on active model:
         // Gemini models match groups mentioning "gemini"; Claude/GPT models match groups mentioning "claude" or "gpt".
@@ -792,16 +863,74 @@ pub async fn retrieve_antigravity_quota(
         }
     }
 
-    let resp = resp_opt.ok_or_else(|| HarnessError::ProviderError {
-        provider: "antigravity".to_string(),
-        message: "Failed to fetch quota summary".to_string(),
-    })?;
+    let mut summary = if let Some(resp) = resp_opt {
+        resp.json::<AntigravityQuotaSummary>().await.unwrap_or_default()
+    } else {
+        AntigravityQuotaSummary::default()
+    };
 
-    let summary: AntigravityQuotaSummary = resp.json().await.map_err(|e| HarnessError::SerializationError(
-        format!("Failed to parse quota summary JSON: {}", e),
-    ))?;
+    // Also query fetchAvailableModels to obtain exact per-model quotaInfo
+    let model_endpoints = [MODELS_ENDPOINT, FALLBACK_MODELS_ENDPOINT];
+    for ep in model_endpoints {
+        if let Ok(resp) = send(ep, bearer_token.clone()).await {
+            if resp.status().is_success() {
+                if let Ok(val) = resp.json::<serde_json::Value>().await {
+                    if let Some(models_map) = val.get("models").and_then(|m| m.as_object()) {
+                        for (model_name, m_val) in models_map {
+                            if let Some(q_val) = m_val.get("quotaInfo") {
+                                let frac = q_val.get("remainingFraction").and_then(|f| f.as_f64());
+                                let r_time = q_val.get("resetTime").and_then(|t| t.as_str()).map(|s| s.to_string());
+                                summary.models_quota.insert(
+                                    model_name.clone(),
+                                    AntigravityModelQuotaInfo {
+                                        remaining_fraction: frac,
+                                        reset_time: r_time,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     Ok(summary)
+}
+
+/// Strictly resolve the authentic user email belonging to the given Antigravity credential.
+/// Checks the JWT id_token first, then queries Google tokeninfo endpoint, ensuring the
+/// active display matches the real account and does not show an old or mismatched label.
+pub async fn resolve_antigravity_email_strict(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+) -> Option<String> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_secret) {
+        // 1. Check if email is embedded directly in jwt id_token
+        if let Some(email) = extract_email_from_jwt(&val) {
+            return Some(email);
+        }
+        // 2. Query Google tokeninfo with access_token
+        let tok = val.get("token").unwrap_or(&val);
+        if let Some(access) = tok.get("access_token").and_then(|a| a.as_str()) {
+            let url = format!("https://oauth2.googleapis.com/tokeninfo?access_token={}", access);
+            if let Ok(resp) = http_client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+                if resp.status().is_success() {
+                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                        if let Some(email) = info.get("email").and_then(|e| e.as_str()) {
+                            return Some(email.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // 3. Email property on JSON object
+        if let Some(email) = val.get("email").and_then(|e| e.as_str()) {
+            return Some(email.to_string());
+        }
+    }
+    None
 }
 
 /// POST one turn to Code Assist, refreshing the OAuth token once on a 401 and mapping the
@@ -1212,27 +1341,17 @@ mod tests {
 
     #[test]
     fn format_quota_display_separates_gemini_and_claude_groups() {
+        let mut models_quota = std::collections::HashMap::new();
+        models_quota.insert(
+            "gemini-3.8-flash-tiered".to_string(),
+            AntigravityModelQuotaInfo {
+                remaining_fraction: Some(0.0628),
+                reset_time: None,
+            },
+        );
+
         let summary = AntigravityQuotaSummary {
             groups: vec![
-                AntigravityQuotaGroup {
-                    display_name: Some("Gemini Models".to_string()),
-                    buckets: vec![
-                        AntigravityQuotaBucket {
-                            bucket_id: Some("gemini-5h".to_string()),
-                            display_name: Some("Five Hour Limit Remaining".to_string()),
-                            window: Some("5h".to_string()),
-                            reset_time: None,
-                            remaining_fraction: Some(1.0),
-                        },
-                        AntigravityQuotaBucket {
-                            bucket_id: Some("gemini-weekly".to_string()),
-                            display_name: Some("Weekly Limit Remaining".to_string()),
-                            window: Some("weekly".to_string()),
-                            reset_time: None,
-                            remaining_fraction: Some(0.50),
-                        },
-                    ],
-                },
                 AntigravityQuotaGroup {
                     display_name: Some("Claude and GPT models".to_string()),
                     buckets: vec![
@@ -1253,13 +1372,14 @@ mod tests {
                     ],
                 },
             ],
+            models_quota,
         };
 
-        // When active model is gemini, it must select the Gemini Models group
+        // When active model is gemini, it must select the 6% quotaInfo from models_quota
         let gemini_fmt = summary.format_quota_display("gemini-3.8-flash").expect("gemini quota");
-        assert_eq!(gemini_fmt, "5h 100% · w 50%");
+        assert_eq!(gemini_fmt, "5h 100% · w 6%");
 
-        // When active model is claude, it must select the Claude and GPT models group
+        // When active model is claude, it must select the Claude and GPT models group (46%)
         let claude_fmt = summary.format_quota_display("claude-sonnet-4-6").expect("claude quota");
         assert_eq!(claude_fmt, "5h 100% · w 46%");
     }
