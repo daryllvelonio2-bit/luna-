@@ -126,13 +126,13 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
 
 /// A `reqwest` client for one provider, with the per-provider timeout the config resolved
 /// (`providers.<id>.timeout_secs`, default `catalog::DEFAULT_TIMEOUT_SECS`).
-pub(crate) fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
+pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
     reqwest::Client::builder()
         .user_agent("luna-harness/0.1.0")
         .timeout(std::time::Duration::from_secs(timeout_secs.max(600)))
         .connect_timeout(std::time::Duration::from_secs(30))
         .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
-        .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+        .pool_idle_timeout(Some(std::time::Duration::from_secs(15)))
         .build()
         .map_err(|error| {
             HarnessError::ConfigurationError(format!("failed to build the HTTP client: {}", error))

@@ -14,6 +14,12 @@ use harness_core::{
 pub const DEFAULT_PROJECT: &str = "aicode-consumers";
 pub const CODE_ASSIST_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
+pub const FALLBACK_CODE_ASSIST_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
+pub const USER_QUOTA_ENDPOINT: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+pub const FALLBACK_USER_QUOTA_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 pub const MODELS_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -29,6 +35,110 @@ pub struct AntigravityCredentials {
     pub refresh_token: Option<String>,
     pub email: Option<String>,
     pub expiry: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityQuotaBucket {
+    pub bucket_id: Option<String>,
+    pub display_name: Option<String>,
+    pub window: Option<String>,
+    pub reset_time: Option<String>,
+    pub remaining_fraction: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityQuotaGroup {
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub buckets: Vec<AntigravityQuotaBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravityQuotaSummary {
+    #[serde(default)]
+    pub groups: Vec<AntigravityQuotaGroup>,
+}
+
+impl AntigravityQuotaSummary {
+    pub fn format_quota_display(&self) -> Option<String> {
+        let mut hourly_part = None;
+        let mut weekly_part = None;
+
+        for group in &self.groups {
+            for b in &group.buckets {
+                let w = b.window.as_deref().unwrap_or("").to_lowercase();
+                let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
+
+                let is_5h = w == "5h" || b_id.contains("5h");
+                let is_weekly = w == "weekly" || w == "w" || b_id.contains("weekly");
+
+                if !is_5h && !is_weekly {
+                    continue;
+                }
+
+                let pct_str = if let Some(frac) = b.remaining_fraction {
+                    format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+                } else {
+                    "100%".to_string()
+                };
+
+                let time_str = if let Some(ref r_time) = b.reset_time {
+                    format_reset_time_remaining(r_time)
+                } else {
+                    String::new()
+                };
+
+                if is_5h && hourly_part.is_none() {
+                    let part = if time_str.is_empty() {
+                        format!("5h {}", pct_str)
+                    } else {
+                        format!("5h {} {}", pct_str, time_str)
+                    };
+                    hourly_part = Some(part);
+                } else if is_weekly && weekly_part.is_none() {
+                    let part = if time_str.is_empty() {
+                        format!("w {}", pct_str)
+                    } else {
+                        format!("w {} {}", pct_str, time_str)
+                    };
+                    weekly_part = Some(part);
+                }
+            }
+        }
+
+        match (hourly_part, weekly_part) {
+            (Some(h), Some(w)) => Some(format!("{} · {}", h, w)),
+            (Some(h), None) => Some(h),
+            (None, Some(w)) => Some(w),
+            (None, None) => None,
+        }
+    }
+}
+
+pub fn format_reset_time_remaining(reset_time_str: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(reset_time_str) {
+        let now = chrono::Utc::now();
+        let diff = dt.with_timezone(&chrono::Utc) - now;
+        let total_secs = diff.num_seconds();
+        if total_secs <= 0 {
+            "(0m)".to_string()
+        } else {
+            let days = total_secs / 86400;
+            let hours = (total_secs % 86400) / 3600;
+            let minutes = (total_secs % 3600) / 60;
+            if days > 0 {
+                format!("({}d {}h)", days, hours)
+            } else if hours > 0 {
+                format!("({}h {}m)", hours, minutes)
+            } else {
+                format!("({}m)", minutes.max(1))
+            }
+        }
+    } else {
+        String::new()
+    }
 }
 
 /// Detect and copy logged-in Antigravity credentials from SecretService or Shiina.
@@ -556,6 +666,120 @@ fn build_antigravity_payload(
     })
 }
 
+async fn post_antigravity_with_transport_retry(
+    http_client: &reqwest::Client,
+    token: &str,
+    payload: &serde_json::Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let endpoints = [CODE_ASSIST_ENDPOINT, FALLBACK_CODE_ASSIST_ENDPOINT];
+    let mut last_err = None;
+
+    for (ep_idx, ep) in endpoints.iter().enumerate() {
+        for attempt in 0..2 {
+            let res = http_client
+                .post(*ep)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(CONTENT_TYPE, "application/json")
+                .json(payload)
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    let is_transport_error = err.is_connect()
+                        || err.is_request()
+                        || err.is_timeout()
+                        || err.is_body();
+                    last_err = Some(err);
+                    if !is_transport_error {
+                        return Err(last_err.unwrap());
+                    }
+                    if attempt == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                }
+            }
+        }
+        if ep_idx == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    Err(last_err.expect("at least one endpoint attempt was made"))
+}
+
+/// Retrieve Antigravity user quota summary (hourly and weekly buckets).
+pub async fn retrieve_antigravity_quota(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
+) -> Result<AntigravityQuotaSummary, HarnessError> {
+    let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
+
+    let send = |endpoint: &'static str, token: String| {
+        let client = http_client.clone();
+        async move {
+            client
+                .post(endpoint)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(CONTENT_TYPE, "application/json")
+                .json(&json!({}))
+                .send()
+                .await
+        }
+    };
+
+    let endpoints = [USER_QUOTA_ENDPOINT, FALLBACK_USER_QUOTA_ENDPOINT];
+    let mut resp_opt = None;
+
+    for ep in endpoints {
+        match send(ep, bearer_token.clone()).await {
+            Ok(r) => {
+                if r.status().as_u16() == 401 {
+                    if let Some(ref refresh_tok) = refresh_tok_opt {
+                        if let Ok(new_token) = refresh_antigravity_token(http_client, refresh_tok).await {
+                            bearer_token = new_token.clone();
+                            if let Some(cm) = cred_manager {
+                                let updated_secret = json!({
+                                    "access_token": new_token,
+                                    "refresh_token": refresh_tok,
+                                });
+                                let _ = cm
+                                    .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
+                                    .await;
+                            }
+                            if let Ok(r2) = send(ep, bearer_token.clone()).await {
+                                if r2.status().is_success() {
+                                    resp_opt = Some(r2);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if r.status().is_success() {
+                    resp_opt = Some(r);
+                    break;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let resp = resp_opt.ok_or_else(|| HarnessError::ProviderError {
+        provider: "antigravity".to_string(),
+        message: "Failed to fetch quota summary".to_string(),
+    })?;
+
+    let summary: AntigravityQuotaSummary = resp.json().await.map_err(|e| HarnessError::SerializationError(
+        format!("Failed to parse quota summary JSON: {}", e),
+    ))?;
+
+    Ok(summary)
+}
+
 /// POST one turn to Code Assist, refreshing the OAuth token once on a 401 and mapping the
 /// status codes the agent loop distinguishes.
 async fn post_antigravity_turn(
@@ -566,25 +790,12 @@ async fn post_antigravity_turn(
 ) -> Result<reqwest::Response, HarnessError> {
     let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
 
-    let send = |token: String| {
-        let client = http_client.clone();
-        let payload = payload.clone();
-        async move {
-            client
-                .post(CODE_ASSIST_ENDPOINT)
-                .header(AUTHORIZATION, format!("Bearer {}", token))
-                .header(USER_AGENT, DEFAULT_USER_AGENT)
-                .header(CONTENT_TYPE, "application/json")
-                .json(&payload)
-                .send()
-                .await
-        }
-    };
-
-    let mut resp = send(bearer_token.clone()).await.map_err(|e| HarnessError::ProviderError {
-        provider: "antigravity".to_string(),
-        message: format!("HTTP error: {}", e),
-    })?;
+    let mut resp = post_antigravity_with_transport_retry(http_client, &bearer_token, payload)
+        .await
+        .map_err(|e| HarnessError::ProviderError {
+            provider: "antigravity".to_string(),
+            message: format!("HTTP error: {}", e),
+        })?;
 
     if resp.status().as_u16() == 401 {
         if let Some(ref refresh_tok) = refresh_tok_opt {
@@ -599,10 +810,12 @@ async fn post_antigravity_turn(
                         .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
                         .await;
                 }
-                resp = send(bearer_token).await.map_err(|e| HarnessError::ProviderError {
-                    provider: "antigravity".to_string(),
-                    message: format!("HTTP error on retry: {}", e),
-                })?;
+                resp = post_antigravity_with_transport_retry(http_client, &bearer_token, payload)
+                    .await
+                    .map_err(|e| HarnessError::ProviderError {
+                        provider: "antigravity".to_string(),
+                        message: format!("HTTP error on retry: {}", e),
+                    })?;
             }
         }
     }
@@ -971,6 +1184,34 @@ mod tests {
         assert_eq!(model_parts[0]["thought"], json!(true));
         assert_eq!(model_parts[0]["text"], json!("I should list the files first."));
         assert_eq!(model_parts[1]["thoughtSignature"], json!("sig-1"));
+    }
+
+    #[test]
+    fn format_quota_display_extracts_hourly_and_weekly_buckets() {
+        let summary = AntigravityQuotaSummary {
+            groups: vec![AntigravityQuotaGroup {
+                display_name: Some("Claude and GPT models".to_string()),
+                buckets: vec![
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-5h".to_string()),
+                        display_name: Some("Five Hour Limit Remaining".to_string()),
+                        window: Some("5h".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(1.0),
+                    },
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-weekly".to_string()),
+                        display_name: Some("Weekly Limit Remaining".to_string()),
+                        window: Some("weekly".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(1.0),
+                    },
+                ],
+            }],
+        };
+
+        let formatted = summary.format_quota_display().expect("quota display");
+        assert_eq!(formatted, "5h 100% · w 100%");
     }
 }
 

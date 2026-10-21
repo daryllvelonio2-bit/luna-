@@ -958,24 +958,44 @@ async fn pick_provider_and_model(
         }
     };
 
-    let items: Vec<String> = available_catalog
-        .iter()
-        .map(|p| {
-            let mut tags = Vec::new();
-            if p.id.eq_ignore_ascii_case(current_provider) {
-                tags.push("active");
+    let mut items: Vec<String> = Vec::new();
+    for p in &available_catalog {
+        let mut tags = Vec::new();
+        if p.id.eq_ignore_ascii_case(current_provider) {
+            tags.push("active".to_string());
+        }
+        if loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id)) {
+            tags.push("configured".to_string());
+        }
+        if p.id.eq_ignore_ascii_case("antigravity") || p.id.eq_ignore_ascii_case("agy") {
+            let agy_creds = cred_manager.get_credentials("antigravity").await;
+            if let Some(primary) = agy_creds
+                .iter()
+                .find(|c| c.is_priority && !c.is_temporarily_disabled)
+                .or_else(|| agy_creds.iter().find(|c| !c.is_temporarily_disabled))
+            {
+                let acc = if !primary.label.is_empty() {
+                    primary.label.clone()
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key) {
+                    val.get("email")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                if !acc.is_empty() {
+                    tags.push(acc);
+                }
             }
-            if loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id)) {
-                tags.push("configured");
-            }
-            let tag_str = if tags.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", tags.join(", "))
-            };
-            format!("{:<28} ({}){}", p.display_name, p.id, tag_str)
-        })
-        .collect();
+        }
+        let tag_str = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", tags.join(", "))
+        };
+        items.push(format!("{:<28} ({}){}", p.display_name, p.id, tag_str));
+    }
 
     let default_idx = available_catalog
         .iter()
@@ -1190,6 +1210,7 @@ pub(crate) async fn handle_model_switch(
     // the bar to 0.
     let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     ui.set_model(&chosen_model, context_used, context_max);
+    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, cred_manager).await;
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 

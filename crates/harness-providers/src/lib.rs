@@ -9,7 +9,8 @@ pub mod supercode;
 
 pub use antigravity::{
     detect_antigravity_credentials, execute_antigravity_completion, extract_bearer_token,
-    fetch_antigravity_models, refresh_antigravity_token, AntigravityCredentials,
+    fetch_antigravity_models, refresh_antigravity_token, retrieve_antigravity_quota,
+    AntigravityCredentials, AntigravityQuotaBucket, AntigravityQuotaGroup, AntigravityQuotaSummary,
 };
 pub use opencode::{
     detect_opencode_credentials, ensure_compat_tools, get_or_create_opencode_session_id,
@@ -20,5 +21,5 @@ pub use catalog::{
     find_provider, get_default_model, get_provider_catalog, get_context_window, known_provider_ids, resolve_descriptor,
     AuthHeaderFormat, ProviderDescriptor, DEFAULT_TIMEOUT_SECS,
 };
-pub use client::GenericProviderClient;
+pub use client::{build_http_client, GenericProviderClient};
 pub use discovery::ModelDiscovery;

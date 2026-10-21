@@ -96,6 +96,8 @@ struct LiveRegion {
 #[derive(Clone)]
 struct ChatStatus {
     model: String,
+    account_name: Option<String>,
+    quota_display: Option<String>,
     context_used: u32,
     context_max: u32,
     yolo: bool,
@@ -165,7 +167,19 @@ pub struct ChatUi {
 /// Shortens a token count for the status line: 0→"0", 999→"999", 12_345→"12.3k", 272_000→"272k".
 /// Sub-k counts stay exact because that is the range where the digits still matter.
 fn humanize_tokens(count: u32) -> String {
-    if count >= 10_000 {
+    if count >= 1_000_000 {
+        let m = count as f64 / 1_000_000.0;
+        if count % 1_000_000 == 0 {
+            format!("{}M", (count / 1_000_000))
+        } else {
+            let rounded = (m * 10.0).round() / 10.0;
+            if rounded.fract() == 0.0 {
+                format!("{}M", rounded as u64)
+            } else {
+                format!("{:.1}M", rounded)
+            }
+        }
+    } else if count >= 10_000 {
         let k = count as f64 / 1_000.0;
         if k >= 100.0 || (count % 1_000 == 0) {
             format!("{}k", k.round() as u64)
@@ -367,18 +381,46 @@ impl ChatUi {
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap();
-        let (yolo, plan_mode, session_name) = match status.as_ref() {
-            Some(s) => (s.yolo, s.plan_mode, s.session_name.clone()),
-            None => (false, false, String::new()),
+        let (yolo, plan_mode, session_name, account_name, quota_display) = match status.as_ref() {
+            Some(s) => (
+                s.yolo,
+                s.plan_mode,
+                s.session_name.clone(),
+                s.account_name.clone(),
+                s.quota_display.clone(),
+            ),
+            None => (false, false, String::new(), None, None),
         };
         *status = Some(ChatStatus {
             model: model.to_string(),
+            account_name,
+            quota_display,
             context_used,
             context_max,
             yolo,
             plan_mode,
             session_name,
         });
+    }
+
+    pub fn set_account_name(&self, account: Option<String>) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.account_name = account;
+            }
+        }
+        self.redraw_status_line();
+    }
+
+    pub fn set_quota_display(&self, quota: Option<String>) {
+        {
+            let mut status = self.status.lock().unwrap();
+            if let Some(ref mut s) = *status {
+                s.quota_display = quota;
+            }
+        }
+        self.redraw_status_line();
     }
 
     pub fn set_model(&self, model: &str, context_used: u32, context_max: u32) {
@@ -488,15 +530,42 @@ impl ChatUi {
         let status = self.status.lock().unwrap();
         let s = status.as_ref()?;
 
-        let left = s.model.clone();
+        let left = if let Some(ref account) = s.account_name {
+            if !account.is_empty() {
+                format!("{} · {}", s.model, account)
+            } else {
+                s.model.clone()
+            }
+        } else {
+            s.model.clone()
+        };
         let center = if s.session_name.is_empty() {
             String::new()
         } else {
             format!("[{}]", s.session_name)
         };
-        // A raw five-to-six-digit token count reads as noise mid-session; the percentage is the
-        // glanceable fact ("how full is my window") and the pair keeps the absolute scale.
-        let mut right = if s.context_max > 0 {
+        // If a provider quota display is available, format as:
+        // "<used>/<max> · 5h <pct>% (<time>) · w <pct>% (<time>)"
+        // Otherwise, fall back to the standard context percentage and humanized tokens.
+        let mut right = if let Some(ref q) = s.quota_display {
+            if !q.is_empty() {
+                if s.context_max > 0 {
+                    format!("{}/{} · {}", humanize_tokens(s.context_used), humanize_tokens(s.context_max), q)
+                } else {
+                    format!("{} · {}", s.context_used, q)
+                }
+            } else if s.context_max > 0 {
+                let percent = (s.context_used as u64) * 100 / s.context_max as u64;
+                format!(
+                    "ctx: {}% ({}/{})",
+                    percent,
+                    humanize_tokens(s.context_used),
+                    humanize_tokens(s.context_max)
+                )
+            } else {
+                format!("ctx: {}/{}", s.context_used, s.context_max)
+            }
+        } else if s.context_max > 0 {
             let percent = (s.context_used as u64) * 100 / s.context_max as u64;
             format!(
                 "ctx: {}% ({}/{})",
@@ -1090,6 +1159,21 @@ mod tests {
         assert_eq!(humanize_tokens(10_000), "10k");
         assert_eq!(humanize_tokens(12_345), "12.3k");
         assert_eq!(humanize_tokens(272_000), "272k");
+        assert_eq!(humanize_tokens(1_000_000), "1M");
+        assert_eq!(humanize_tokens(2_000_000), "2M");
+    }
+
+    #[test]
+    fn status_line_displays_antigravity_account_and_quota_format() {
+        let ui = ChatUi::new(true);
+        ui.set_status("gemini-3.8-flash", 0, 1_000_000);
+        ui.set_account_name(Some("daryllvelonio9@gmail.com".to_string()));
+        ui.set_quota_display(Some("5h 100% (4h 59m) · w 100% (6d 23h)".to_string()));
+
+        let line = ui.format_status_line(120).expect("status line");
+        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
+        assert!(stripped.contains("gemini-3.8-flash · daryllvelonio9@gmail.com"), "{stripped}");
+        assert!(stripped.contains("0/1M · 5h 100% (4h 59m) · w 100% (6d 23h)"), "{stripped}");
     }
 
     #[test]
