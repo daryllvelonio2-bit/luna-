@@ -9,8 +9,8 @@ use serde_json::json;
 use tracing::{debug, warn};
 
 use harness_core::{
-    config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider, Role,
-    StreamEvent, TokenUsage, ToolCall, ToolDefinition,
+    config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider,
+    ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::auth::CredentialManager;
 use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
@@ -491,13 +491,15 @@ impl ModelProvider for GenericProviderClient {
                 body["max_tokens"] = json!(max_tok);
             }
             if let Some(effort) = options.reasoning_effort {
-                body["reasoning_effort"] = json!(effort.as_str());
+                if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
+                    body["reasoning_effort"] = json!(s);
+                }
             }
 
-            let resp = match self
+            let mut resp = match self
                 .http_client
                 .post(&url)
-                .headers(headers)
+                .headers(headers.clone())
                 .json(&body)
                 .send()
                 .await
@@ -510,6 +512,24 @@ impl ModelProvider for GenericProviderClient {
                     })
                 }
             };
+
+            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
+            // retry once without reasoning_effort for models that do not support it.
+            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+                if let Some(map) = body.as_object_mut() {
+                    map.remove("reasoning_effort");
+                }
+                if let Ok(retry_resp) = self
+                    .http_client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    resp = retry_resp;
+                }
+            }
 
         if resp.status().as_u16() == 429 {
             self.retire_failed_credential(&secret).await;
@@ -731,17 +751,19 @@ impl ModelProvider for GenericProviderClient {
             body["tools"] = self.serialize_tools(tools);
         }
         if let Some(effort) = options.reasoning_effort {
-            body["reasoning_effort"] = json!(effort.as_str());
+            if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
+                body["reasoning_effort"] = json!(s);
+            }
         }
 
         if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
             crate::opencode::ensure_compat_tools(&mut body);
         }
 
-        let resp = self
+        let mut resp = self
             .http_client
             .post(&url)
-            .headers(headers)
+            .headers(headers.clone())
             .json(&body)
             .send()
             .await
@@ -749,6 +771,24 @@ impl ModelProvider for GenericProviderClient {
                 provider: self.provider_id.clone(),
                 message: format!("HTTP error: {}", e),
             })?;
+
+        // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
+        // retry once without reasoning_effort for models that do not support it.
+        if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+            if let Some(map) = body.as_object_mut() {
+                map.remove("reasoning_effort");
+            }
+            if let Ok(retry_resp) = self
+                .http_client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+            {
+                resp = retry_resp;
+            }
+        }
 
         let status = resp.status();
         if status.as_u16() == 429 {
@@ -893,4 +933,62 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
     }
 
     json!(parts)
+}
+
+/// Normalize reasoning effort strings for providers with strict accepted-variant sets.
+/// NVIDIA NIM's DeepSeek deployment supports "low" and "high" (rejecting "minimal" and "medium" with HTTP 400).
+fn normalize_reasoning_effort(
+    provider_id: &str,
+    model: &str,
+    effort: ReasoningEffort,
+) -> Option<&'static str> {
+    let lower_model = model.to_lowercase();
+    if provider_id == "nvidia" && lower_model.contains("deepseek") {
+        match effort {
+            ReasoningEffort::Minimal | ReasoningEffort::Low => Some("low"),
+            ReasoningEffort::Medium
+            | ReasoningEffort::High
+            | ReasoningEffort::Xhigh
+            | ReasoningEffort::Max => Some("high"),
+        }
+    } else {
+        Some(effort.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nvidia_deepseek_reasoning_effort_normalization() {
+        // DeepSeek on NVIDIA NIM rejects "minimal" and "medium" with HTTP 400.
+        // It must normalize to "low" and "high".
+        assert_eq!(
+            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Minimal),
+            Some("low")
+        );
+        assert_eq!(
+            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Low),
+            Some("low")
+        );
+        assert_eq!(
+            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Medium),
+            Some("high")
+        );
+        assert_eq!(
+            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::High),
+            Some("high")
+        );
+
+        // Other models/providers should keep their original string
+        assert_eq!(
+            normalize_reasoning_effort("nvidia", "z-ai/glm-5.3-flash", ReasoningEffort::Medium),
+            Some("medium")
+        );
+        assert_eq!(
+            normalize_reasoning_effort("openrouter", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Medium),
+            Some("medium")
+        );
+    }
 }
