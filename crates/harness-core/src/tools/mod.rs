@@ -1,5 +1,6 @@
 pub mod delegate;
 pub mod fs;
+pub mod netguard;
 pub mod process;
 pub mod sandbox;
 pub mod shell;
@@ -45,9 +46,10 @@ pub async fn register_core_tools_with_sudo(
     sudo_prompter: Option<Arc<dyn SudoPrompter>>,
 ) -> Result<Arc<crate::tasks::BackgroundTaskQueue>, HarnessError> {
     // One queue shared by `terminal` (producer) and `process` (consumer) — see the doc comment.
-    let bg_queue = Arc::new(crate::tasks::BackgroundTaskQueue::new(
-        config.paths.jobs_dir.clone(),
-    ));
+    let bg_queue = Arc::new(
+        crate::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
+            .with_network_policy(config.tools.network),
+    );
     register_core_tools_shared_queue(
         registry,
         config,
@@ -133,6 +135,7 @@ pub async fn register_core_tools_shared_queue(
                 )
                 .with_background_queue(bg_queue.clone())
                 .with_extra_roots(extra_roots.clone())
+                .with_network_policy(config.tools.network)
                 .with_prefix(config.tools.terminal_prefix.clone())
                 .with_rtk_rewrite(config.tools.rtk_rewrite);
 

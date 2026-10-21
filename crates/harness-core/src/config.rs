@@ -201,6 +201,11 @@ pub struct ToolsSettings {
     pub approval_timeout_secs: u64,
     /// Tool names the gate must treat as mutating even when the tool says otherwise.
     pub mutating_overrides: Vec<String>,
+    /// Whether a `terminal` child may open sockets other than `AF_UNIX`.
+    ///
+    /// `deny` is enforced by seccomp inside the child (inherited by everything it spawns), not by
+    /// inspecting the command string. See `tools::netguard`.
+    pub network: crate::tools::netguard::NetworkPolicy,
     /// Maximum character budget for read_file before truncation.
     pub read_max_chars: usize,
     /// Terminal command execution timeout in seconds.
@@ -223,6 +228,7 @@ impl Default for ToolsSettings {
             approval: ApprovalMode::Ask,
             approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
             mutating_overrides: Vec::new(),
+            network: crate::tools::netguard::NetworkPolicy::Allow,
             read_max_chars: 100_000,
             terminal_timeout_secs: 120,
             terminal_output_max_bytes: 50_000,

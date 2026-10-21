@@ -783,3 +783,108 @@ fn luna_diff_refuses_a_turn_that_does_not_exist() {
     let output = run_luna(&dir, &config, &["diff", "--session", "does-not-exist"]);
     assert!(!output.status.success(), "an unknown session is an error");
 }
+
+// ---------------------------------------------------------------------------
+// `tools.network`: the socket boundary, as configured and as observed by a child.
+// ---------------------------------------------------------------------------
+
+/// Child half of the network tests: report what a socket attempt got, installing nothing itself.
+/// Run as the *tool's* child, so the only variable is the filter the tool put on it.
+#[test]
+fn network_probe_child() {
+    if std::env::var("LUNA_NETPROBE").is_err() {
+        return;
+    }
+    match std::os::unix::net::UnixDatagram::unbound() {
+        Ok(_) => println!("UNIX:OK"),
+        Err(error) => println!("UNIX:ERR:{}", error.raw_os_error().unwrap_or(-1)),
+    }
+    match std::net::TcpStream::connect(("127.0.0.1", 9)) {
+        Ok(_) => println!("PROBE:CONNECTED"),
+        Err(error) => println!("PROBE:ERR:{}", error.raw_os_error().unwrap_or(-1)),
+    }
+}
+
+fn terminal_turn(command: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "role": "assistant",
+            "content": "running",
+            "tool_calls": [{
+                "id": "call_net",
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "arguments": serde_json::to_string(&serde_json::json!({ "command": command }))
+                        .unwrap()
+                }
+            }]
+        }),
+        serde_json::json!({"role": "assistant", "content": "done"}),
+    ]
+}
+
+/// The command string that runs the probe child, with `rtk` rewriting off so the only thing being
+/// tested is the network policy.
+fn probe_command() -> String {
+    format!(
+        "LUNA_NETPROBE=1 {} --exact network_probe_child --nocapture",
+        std::env::current_exe().expect("test binary").display()
+    )
+}
+
+fn run_terminal_under(config_lines: &str, command: &str, name: &str) -> serde_json::Value {
+    let dir = scratch(name);
+    let (base_url, _served) = start_mock(terminal_turn(command));
+    let config = write_config(&dir, &base_url, true);
+    let text = fs::read_to_string(&config).expect("config");
+    let patched = text.replace("tools:\n", &format!("tools:\n{config_lines}"));
+    assert_ne!(patched, text, "the config rewrite must find the tools block");
+    fs::write(&config, patched).expect("patched config");
+
+    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "reach the network"]);
+    let events = events(&output.stdout);
+    events
+        .into_iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("the command ran")
+}
+
+#[test]
+fn tools_network_deny_is_enforced_in_the_child_process() {
+    let result = run_terminal_under(
+        "  network: deny\n  rtk_rewrite: false\n",
+        &probe_command(),
+        "network-deny",
+    );
+    let body = result["output"].as_str().unwrap_or_default();
+    assert!(
+        body.lines().any(|line| line.trim() == "UNIX:OK"),
+        "local IPC must keep working under deny: {body}"
+    );
+    assert!(
+        body.lines().any(|line| line.trim() == "PROBE:ERR:1"),
+        "a TCP socket must be refused with EPERM, not merely fail to connect: {body}"
+    );
+}
+
+#[test]
+fn tools_network_defaults_to_allow() {
+    // No `network:` key at all: the kernel's own answer (ECONNREFUSED on a closed local port), not
+    // a sandbox denial. That is what "the default changed nothing" has to mean.
+    let result = run_terminal_under("  rtk_rewrite: false\n", &probe_command(), "network-allow");
+    let body = result["output"].as_str().unwrap_or_default();
+    assert!(
+        body.lines().any(|line| line.trim() == "UNIX:OK"),
+        "got: {body}"
+    );
+    assert!(
+        !body.lines().any(|line| line.trim() == "PROBE:ERR:1"),
+        "allow must not install a filter: {body}"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.trim() == "PROBE:ERR:111" || line.trim() == "PROBE:CONNECTED"),
+        "the probe reached the kernel's own answer: {body}"
+    );
+}

@@ -106,3 +106,41 @@ luna config set tools.permissions.0.action deny     # write rules with config se
 luna config get tools.permissions.0.tool
 luna eval run --suite tests/eval --offline          # permission-rule-deny / permission-rule-allow
 ```
+
+## The third knob: `tools.network`
+
+Reach has two axes. `paths.workspace_root` bounds *files*; `tools.network` bounds *sockets*:
+
+```yaml
+tools:
+  network: deny      # default: allow
+```
+
+Under `deny`, every `terminal` child — and every background job, and everything they spawn — gets a
+seccomp-BPF filter installed between `fork` and `exec`, so:
+
+- `socket(2)` succeeds for `AF_UNIX` only; every other family returns `EPERM`;
+- DNS, `curl`, package managers and build scripts that fetch dependencies fail immediately, before a
+  packet leaves the machine;
+- local IPC keeps working, because it is not the network;
+- loopback is *denied* as well: "localhost" is a network too, and a boundary that special-cases it is
+  a heuristic;
+- `PR_SET_NO_NEW_PRIVS` is set first, so a setuid binary in the command cannot drop the filter.
+
+This is kernel enforcement, not a command-string check. A prefix match on `curl` is walked around by
+`sh -c`, `$(...)`, a wrapper script or an alias; a filter inherited across `exec` is not.
+
+`deny` fails **closed**: on a platform without seccomp the command is refused with an explanation
+rather than run unconfined. `rtk_rewrite` is independent — a rewritten command still runs inside the
+same filter, though a rewriting *daemon* is a separate process and therefore outside it.
+
+What it does not bound: an already-open descriptor (only stdio is inherited, so there is nothing
+else), and commands run outside the harness.
+
+Verify it by hand:
+
+```bash
+luna config set tools.network deny
+luna exec --yes "curl -sS http://example.com"   # EPERM, no packets
+luna config set tools.network allow
+```

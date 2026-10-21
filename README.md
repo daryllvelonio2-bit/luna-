@@ -240,6 +240,14 @@ comparison (so `ws-evil` is not inside `ws`), `~` expanded *before* the check. `
 opt in with `paths.extra_roots`. `--yes` approves a mutation, it does not widen the sandbox.
 Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
+### 2.13 `tools.network`: a socket boundary the child inherits
+
+`tools.network: allow | deny`. Under `deny`, every `terminal` child and background job gets a
+seccomp filter installed between `fork` and `exec`: `socket(2)` works for `AF_UNIX` only, everything
+else returns `EPERM` — `curl`, DNS and dependency fetches fail before a packet leaves the machine,
+while local IPC keeps working. Kernel enforcement, not a command-string match; fails closed where it
+cannot be enforced. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

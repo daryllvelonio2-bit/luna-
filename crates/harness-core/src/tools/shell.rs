@@ -20,6 +20,8 @@ pub struct TerminalTool {
     workspace_root: PathBuf,
     /// Additional roots allowed as a `workdir` (`paths.extra_roots`).
     extra_roots: Vec<PathBuf>,
+    /// Whether children may open sockets (`tools.network`).
+    network: crate::tools::netguard::NetworkPolicy,
     default_timeout_secs: u64,
     output_max_bytes: usize,
     env_vars: std::collections::HashMap<String, String>,
@@ -39,6 +41,7 @@ impl TerminalTool {
         Self {
             workspace_root,
             extra_roots: Vec::new(),
+            network: crate::tools::netguard::NetworkPolicy::Allow,
             default_timeout_secs,
             output_max_bytes,
             env_vars: std::collections::HashMap::new(),
@@ -48,6 +51,15 @@ impl TerminalTool {
             prefix: None,
             rtk_rewrite: true,
         }
+    }
+
+    /// `tools.network`: whether this tool's children may reach the network.
+    pub fn with_network_policy(
+        mut self,
+        policy: crate::tools::netguard::NetworkPolicy,
+    ) -> Self {
+        self.network = policy;
+        self
     }
 
     /// Extra roots a `workdir` may point at, mirroring the filesystem tools.
@@ -434,6 +446,19 @@ impl Tool for TerminalTool {
 
         for (k, v) in &self.env_vars {
             cmd.env(k, v);
+        }
+
+        // The network policy is installed in the child between fork and exec, so `sh` and everything
+        // it starts inherit it. A failure here is reported instead of running unconfined.
+        if let Err(error) = crate::tools::netguard::apply(&mut cmd, self.network) {
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Cannot enforce tools.network = {}: {}",
+                    self.network.as_str(),
+                    error
+                ),
+            ));
         }
 
         let mut child = match cmd.spawn() {

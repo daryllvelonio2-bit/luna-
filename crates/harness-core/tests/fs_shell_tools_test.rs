@@ -1166,3 +1166,79 @@ async fn test_todo_list_read_only_gating_and_status_aliases() {
     assert!(!update_res.is_error, "Status alias 'completed' must be accepted: {}", update_res.content);
     assert!(update_res.content.contains("done"));
 }
+
+// ---------------------------------------------------------------------------
+// `tools.network`: a socket boundary the child inherits.
+//
+// The probe runs as a *child of the tool*, not in this process: the whole point is what the child
+// inherits. CI has no network worth reaching, so the assertions are about errno values —
+// `EPERM` when the policy denies, `ECONNREFUSED` when it allows — which are stable either way.
+// ---------------------------------------------------------------------------
+
+/// Child half of the network test: report what a socket attempt got, without installing anything.
+/// Run by the tool under test, so the filter it installs (or does not) is the only variable.
+#[test]
+fn network_probe_child() {
+    if std::env::var("LUNA_NETPROBE").is_err() {
+        return;
+    }
+    // AF_UNIX is not the network: local IPC must keep working under `deny`.
+    match std::os::unix::net::UnixDatagram::unbound() {
+        Ok(_) => println!("UNIX:OK"),
+        Err(error) => println!("UNIX:ERR:{}", error.raw_os_error().unwrap_or(-1)),
+    }
+    match std::net::TcpStream::connect(("127.0.0.1", 9)) {
+        Ok(_) => println!("PROBE:CONNECTED"),
+        Err(error) => println!("PROBE:ERR:{}", error.raw_os_error().unwrap_or(-1)),
+    }
+}
+
+fn run_probe(network: harness_core::tools::netguard::NetworkPolicy) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let exe = std::env::current_exe().expect("test binary path");
+    let tool = TerminalTool::new(root, 30, 100_000)
+        .with_env("LUNA_NETPROBE", "1")
+        .with_network_policy(network);
+    let cancel = CancellationToken::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let result = tool
+            .execute(
+                "call_net",
+                &json!({
+                    "command": format!("{} --exact network_probe_child --nocapture", exe.display()),
+                }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        result.content
+    })
+}
+
+#[test]
+fn a_denied_network_is_enforced_in_the_child_and_keeps_local_sockets() {
+    let output = run_probe(harness_core::tools::netguard::NetworkPolicy::Deny);
+    assert!(
+        output.contains("UNIX:OK"),
+        "AF_UNIX must still work under deny: {output}"
+    );
+    assert!(
+        output.lines().any(|line| line.trim() == "PROBE:ERR:1"),
+        "a TCP socket must be refused with EPERM(1): {output}"
+    );
+}
+
+#[test]
+fn an_allowed_network_is_left_alone() {
+    let output = run_probe(harness_core::tools::netguard::NetworkPolicy::Allow);
+    assert!(output.contains("UNIX:OK"), "got: {output}");
+    assert!(
+        !output.lines().any(|line| line.trim() == "PROBE:ERR:1"),
+        "allow must not install a filter: {output}"
+    );
+    assert!(
+        output.contains("PROBE:ERR:111") || output.contains("PROBE:CONNECTED"),
+        "the probe reached the kernel's own answer (ECONNREFUSED): {output}"
+    );
+}

@@ -48,6 +48,9 @@ struct InternalJob {
 pub struct BackgroundTaskQueue {
     jobs_dir: PathBuf,
     jobs: Arc<Mutex<HashMap<String, InternalJob>>>,
+    /// `tools.network`: a backgrounded command is still a command the agent started, so it gets
+    /// the same boundary rather than escaping it by adding `&`.
+    network: crate::tools::netguard::NetworkPolicy,
 }
 
 impl BackgroundTaskQueue {
@@ -56,7 +59,14 @@ impl BackgroundTaskQueue {
         Self {
             jobs_dir,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            network: crate::tools::netguard::NetworkPolicy::Allow,
         }
+    }
+
+    /// Apply `tools.network` to every job this queue spawns.
+    pub fn with_network_policy(mut self, policy: crate::tools::netguard::NetworkPolicy) -> Self {
+        self.network = policy;
+        self
     }
 
     pub fn spawn(&self, command: &str, workdir: &Path) -> Result<String, HarnessError> {
@@ -74,6 +84,7 @@ impl BackgroundTaskQueue {
 
         let cmd_str = command.to_string();
         let workdir_buf = workdir.to_path_buf();
+        let network = self.network;
         let status_clone = status.clone();
 
         tokio::spawn(async move {
@@ -84,6 +95,15 @@ impl BackgroundTaskQueue {
                 .current_dir(&workdir_buf)
                 .stdout(std_file.try_clone().unwrap_or_else(|_| File::create("/dev/null").unwrap()))
                 .stderr(std_file);
+
+            if let Err(error) = crate::tools::netguard::apply(&mut cmd, network) {
+                let mut st = status_clone.lock().unwrap();
+                *st = format!(
+                    "failed to spawn: cannot enforce tools.network = {}: {error}",
+                    network.as_str()
+                );
+                return;
+            }
 
             let mut child = match cmd.spawn() {
                 Ok(c) => c,

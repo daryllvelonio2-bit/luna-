@@ -174,9 +174,10 @@ pub async fn run_exec(
     }
 
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
-    let bg_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
-        config.paths.jobs_dir.clone(),
-    ));
+    let bg_queue = Arc::new(
+        harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
+            .with_network_policy(config.tools.network),
+    );
     harness_core::tools::register_core_tools_shared_queue(
         &reg_dyn,
         &config,

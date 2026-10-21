@@ -254,9 +254,10 @@ pub async fn run_interactive_chat(
             .await?;
     }
 
-    let bg_queue = Arc::new(harness_core::tasks::BackgroundTaskQueue::new(
-        config.paths.jobs_dir.clone(),
-    ));
+    let bg_queue = Arc::new(
+        harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
+            .with_network_policy(config.tools.network),
+    );
     let delegate_tool = harness_core::tools::DelegateTaskTool::new(
         provider.clone(),
         memory.clone(),
