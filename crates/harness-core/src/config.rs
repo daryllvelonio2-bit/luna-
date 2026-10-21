@@ -103,6 +103,13 @@ pub struct CheckpointSettings {
     pub enabled: bool,
     /// Turns kept per session; the oldest are pruned.
     pub keep_turns: usize,
+    /// Watch the workspace for changes no file tool recorded, so a turn that ran `git checkout`
+    /// or `sed -i` is named in the review instead of being invisible.
+    ///
+    /// Metadata only (path, size, mtime) — no blobs, so this costs a directory walk and not disk.
+    pub track_external: bool,
+    /// Directory names the external scan skips. Matched against any path component.
+    pub ignore: Vec<String>,
 }
 
 impl Default for CheckpointSettings {
@@ -110,6 +117,11 @@ impl Default for CheckpointSettings {
         Self {
             enabled: true,
             keep_turns: crate::checkpoint::DEFAULT_KEEP_TURNS,
+            track_external: true,
+            ignore: crate::checkpoint::DEFAULT_IGNORED_DIRS
+                .iter()
+                .map(|dir| dir.to_string())
+                .collect(),
         }
     }
 }

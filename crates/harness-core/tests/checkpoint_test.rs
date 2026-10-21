@@ -154,6 +154,7 @@ async fn a_disabled_controller_opens_no_snapshot() {
         &CheckpointSettings {
             enabled: false,
             keep_turns: 5,
+            ..CheckpointSettings::default()
         },
     );
 
@@ -182,6 +183,7 @@ async fn capture_call_only_snapshots_path_mutating_tools() {
         &CheckpointSettings {
             enabled: true,
             keep_turns: 50,
+            ..CheckpointSettings::default()
         },
     ));
     controller.begin("s1", Some("edit"));
@@ -237,6 +239,7 @@ async fn the_middleware_snapshots_the_file_before_a_write_lands() {
         &CheckpointSettings {
             enabled: true,
             keep_turns: 50,
+            ..CheckpointSettings::default()
         },
     ));
     controller.begin("s1", None);
@@ -609,4 +612,139 @@ async fn diff_after_restore_shows_the_turn_s_work_is_undone() {
         turn.summary()
     );
     assert_eq!(turn.summary().unchanged, 1);
+}
+
+// ---------------------------------------------------------------------------
+// The blind spot, named: what a shell command changed that no file tool recorded.
+// ---------------------------------------------------------------------------
+
+/// A store with the external scan on, the way `CheckpointController::new` builds it from config.
+fn tracking_fixture() -> Fixture {
+    let mut fixture = fixture(50);
+    fixture.store = fixture.store.with_external_tracking(
+        true,
+        harness_core::checkpoint::DEFAULT_IGNORED_DIRS
+            .iter()
+            .map(|dir| dir.to_string())
+            .collect(),
+    );
+    fixture
+}
+
+#[tokio::test]
+async fn a_shell_edit_is_named_in_the_review_even_though_it_cannot_be_undone() {
+    let fixture = tracking_fixture();
+    write(&fixture.workspace, "tracked.txt", "one\n");
+    write(&fixture.workspace, "shell.txt", "before\n");
+
+    let snapshot = fixture.store.begin("s-external", Some("sed -i")).unwrap();
+    // The file tools recorded one file; the shell will change another behind their back.
+    snapshot.capture("tracked.txt").unwrap();
+    write(&fixture.workspace, "tracked.txt", "two\n");
+    write(&fixture.workspace, "shell.txt", "after\n");
+    write(&fixture.workspace, "shell_created.txt", "new\n");
+    std::fs::remove_file(fixture.workspace.join("tracked.txt")).ok();
+    write(&fixture.workspace, "tracked.txt", "two\n");
+    snapshot.finish();
+
+    let turn = fixture.store.diff("s-external", 1).unwrap();
+    let unrecorded: Vec<(&str, checkpoint::ChangeKind)> = turn
+        .unrecorded
+        .iter()
+        .map(|file| (file.path.as_str(), file.kind))
+        .collect();
+    assert!(
+        unrecorded.contains(&("shell.txt", checkpoint::ChangeKind::Modified)),
+        "a shell edit is named: {unrecorded:?}"
+    );
+    assert!(
+        unrecorded.contains(&("shell_created.txt", checkpoint::ChangeKind::Created)),
+        "a file the shell created is named: {unrecorded:?}"
+    );
+    assert!(
+        !unrecorded.iter().any(|(path, _)| *path == "tracked.txt"),
+        "a file with a snapshot is not reported twice: {unrecorded:?}"
+    );
+
+    // A rewind restores what it has and says what it cannot.
+    let report = fixture.store.restore("s-external", 1).unwrap();
+    assert!(report.restored.contains(&"tracked.txt".to_string()));
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.contains("shell.txt") && entry.contains("no snapshot")),
+        "the skip report must name the shell edit: {:?}",
+        report.skipped
+    );
+}
+
+#[tokio::test]
+async fn the_scan_ignores_build_output_and_version_control() {
+    let fixture = tracking_fixture();
+    write(&fixture.workspace, "src/main.rs", "fn main() {}\n");
+    write(&fixture.workspace, "target/debug/artifact", "binary\n");
+    write(&fixture.workspace, ".git/HEAD", "ref: main\n");
+
+    let snapshot = fixture.store.begin("s-ignore", None).unwrap();
+    write(&fixture.workspace, "target/debug/artifact", "rebuilt\n");
+    write(&fixture.workspace, ".git/HEAD", "ref: other\n");
+    write(&fixture.workspace, "src/main.rs", "fn main() { println!(); }\n");
+    snapshot.finish();
+
+    let turn = fixture.store.diff("s-ignore", 1).unwrap();
+    let unrecorded: Vec<String> = turn
+        .unrecorded
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    assert!(
+        unrecorded.iter().any(|path| path == "src/main.rs"),
+        "source changes are reported: {unrecorded:?}"
+    );
+    assert!(
+        !unrecorded.iter().any(|path| path.starts_with("target/")),
+        "build output is not a change: {unrecorded:?}"
+    );
+    assert!(
+        !unrecorded.iter().any(|path| path.starts_with(".git/")),
+        "git internals are not a change: {unrecorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_only_ran_a_shell_command_still_has_a_review() {
+    let fixture = tracking_fixture();
+    write(&fixture.workspace, "app.py", "print('hi')\n");
+
+    let snapshot = fixture.store.begin("s-shell-only", Some("format")).unwrap();
+    write(&fixture.workspace, "app.py", "print(\"hi\")\n");
+    snapshot.finish();
+
+    let turn = fixture.store.diff("s-shell-only", 1).unwrap();
+    assert!(
+        turn.is_empty(),
+        "no file tool recorded anything: {:?}",
+        turn.summary()
+    );
+    assert_eq!(turn.unrecorded.len(), 1);
+    assert_eq!(turn.unrecorded[0].path, "app.py");
+    assert_eq!(turn.unrecorded[0].kind, checkpoint::ChangeKind::Modified);
+}
+
+#[tokio::test]
+async fn tracking_off_means_no_scan_and_no_claims() {
+    let fixture = fixture(50);
+    write(&fixture.workspace, "file.txt", "one\n");
+
+    let snapshot = fixture.store.begin("s-untracked", None).unwrap();
+    write(&fixture.workspace, "file.txt", "two\n");
+    snapshot.finish();
+
+    let turn = fixture.store.diff("s-untracked", 1).unwrap();
+    assert!(
+        turn.unrecorded.is_empty(),
+        "with tracking off the review claims nothing: {:?}",
+        turn.unrecorded
+    );
 }

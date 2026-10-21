@@ -888,3 +888,82 @@ fn tools_network_defaults_to_allow() {
         "the probe reached the kernel's own answer: {body}"
     );
 }
+
+/// The review's blind spot, closed: a `terminal` command changes a file no file tool touched, and
+/// `luna diff` names it as un-undoable instead of leaving it out.
+#[test]
+fn luna_diff_names_files_a_shell_command_changed() {
+    let dir = scratch("diff-shell");
+    let command = "printf 'shell\\n' > shell.txt && printf 'preexisting\\n' > keep.txt";
+    let (base_url, _served) = start_mock(terminal_turn(command));
+    let config = write_config(&dir, &base_url, true);
+    // Seed a file that the command rewrites, so the change is a *modification* as well as a create.
+    fs::write(dir.join("ws").join("keep.txt"), "original\n").expect("seed");
+
+    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write via the shell"]);
+    assert!(
+        ran.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let output = run_luna(&dir, &config, &["diff", "--json"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let turn = &payload["turns"][0];
+
+    let unrecorded: Vec<&str> = turn["unrecorded"]
+        .as_array()
+        .expect("unrecorded list")
+        .iter()
+        .map(|file| file["path"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        unrecorded.contains(&"shell.txt"),
+        "a file the shell created is named: {unrecorded:?}"
+    );
+    assert!(
+        unrecorded.contains(&"keep.txt"),
+        "a file the shell overwrote is named: {unrecorded:?}"
+    );
+    assert!(
+        turn["files"].as_array().unwrap().is_empty(),
+        "no file tool ran, so no snapshots: {}",
+        turn["files"]
+    );
+
+    // Human output says plainly that a rewind cannot undo them.
+    let text = run_luna(&dir, &config, &["diff"]);
+    let stdout = String::from_utf8_lossy(&text.stdout).to_string();
+    assert!(stdout.contains("changed by a shell command"), "got: {stdout}");
+    assert!(stdout.contains("shell.txt"), "got: {stdout}");
+    assert!(stdout.contains("keep.txt"), "got: {stdout}");
+}
+
+/// With the scan off, the review makes no claim about shell changes — silent is better than wrong.
+#[test]
+fn luna_diff_is_quiet_about_shell_changes_when_tracking_is_off() {
+    let dir = scratch("diff-shell-off");
+    let (base_url, _served) = start_mock(terminal_turn("printf 'x\\n' > shell.txt"));
+    let config = write_config(&dir, &base_url, true);
+    let text = fs::read_to_string(&config).expect("config");
+    let checkpoints = if text.contains("checkpoints:") {
+        text.replace("checkpoints:", "checkpoints:\n  track_external: false")
+    } else {
+        format!("{text}checkpoints:\n  track_external: false\n")
+    };
+    fs::write(&config, checkpoints).expect("config with tracking off");
+
+    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write via the shell"]);
+    assert!(ran.status.success());
+
+    let output = run_luna(&dir, &config, &["diff", "--json"]);
+    assert!(output.status.success());
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let turn = &payload["turns"][0];
+    assert!(
+        turn["unrecorded"].as_array().map(|list| list.is_empty()).unwrap_or(true),
+        "tracking off must not claim anything: {}",
+        turn["unrecorded"]
+    );
+}

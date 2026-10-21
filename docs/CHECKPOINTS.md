@@ -14,9 +14,23 @@ The registry middleware copies a file immediately before a path-mutating tool to
 | `read_file`, `search_files`, `list_files` | no — they do not write |
 | `terminal` | **no** — a shell command's targets are not knowable from its argument string |
 
-The `terminal` gap is real and documented rather than hidden: `git checkout`, `sed -i` and
-`cargo fmt` write files the harness never sees. If you need undo across shell commands, keep the
-work inside the file tools or use version control.
+`terminal` is the exception, and the review says so rather than staying quiet. `git checkout`,
+`sed -i` and `cargo fmt` write files no middleware can intercept, so the turn also stamps the
+workspace (path, size, mtime — no contents) when it opens and walks it again when it closes. Files
+that changed without a file tool are listed as **unrecorded**: visible in `diff`, named in
+`/rewind`'s skip report, and explicitly *not undoable*. A review that hid them would be worse than
+none; a rewind that silently ignored them would be worse still.
+
+```yaml
+checkpoints:
+  track_external: true     # default: on — the walk costs a directory scan, not disk
+  ignore: [.git, node_modules, target, dist, build, .venv, __pycache__]
+```
+
+The walk stops after 20 000 files and the manifest carries a `scan_note` explaining that the list
+may be short, because "we did not look" must not read like "nothing happened". Set
+`track_external: false` for a workspace where a per-turn walk is too expensive: the review then
+claims nothing about shell changes instead of guessing.
 
 Each path is captured **once per turn**, before the first write — not before each call — so a turn
 that writes the same file five times still restores to the state at the start of the turn.

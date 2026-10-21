@@ -107,6 +107,7 @@ pub async fn run_diff(config: &Config, opts: DiffOptions) -> Result<(), HarnessE
                     "prompt": turn.prompt,
                     "summary": turn.summary(),
                     "files": turn.files,
+                    "unrecorded": turn.unrecorded,
                 })
             })
             .collect();
@@ -187,6 +188,22 @@ fn print_turn(turn: &TurnDiff, stat_only: bool) -> Result<bool, HarnessError> {
 
     if let Some(total) = totals_line(&summary) {
         println!("  {}", total.dimmed());
+    }
+    if !turn.unrecorded.is_empty() {
+        // Named, never hidden: these are the files a rewind cannot put back, and a review that
+        // stayed quiet about them would be worse than no review.
+        changed = true;
+        println!(
+            "  {}",
+            format!(
+                "! {} file(s) changed by a shell command — no snapshot, `luna rewind` cannot undo these:",
+                turn.unrecorded.len()
+            )
+            .yellow()
+        );
+        for file in &turn.unrecorded {
+            println!("      {:<9} {}", file.kind.as_str(), file.path.dimmed());
+        }
     }
     println!();
     Ok(changed)

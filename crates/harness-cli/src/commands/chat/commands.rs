@@ -1377,7 +1377,7 @@ pub(crate) async fn handle_diff_command(
             prompt
         ));
 
-        if turn.is_empty() {
+        if turn.is_empty() && turn.unrecorded.is_empty() {
             ui.emit_above(&format!(
                 "    {}",
                 "nothing changed (the workspace matches this turn's snapshot)".dimmed()
@@ -1418,6 +1418,23 @@ pub(crate) async fn handle_diff_command(
                     line.normal()
                 };
                 ui.emit_above(&format!("        {}", painted));
+            }
+        }
+        if !turn.unrecorded.is_empty() {
+            ui.emit_above(&format!(
+                "    {}",
+                format!(
+                    "! {} file(s) changed by a shell command — no snapshot, /rewind cannot undo these:",
+                    turn.unrecorded.len()
+                )
+                .yellow()
+            ));
+            for file in &turn.unrecorded {
+                ui.emit_above(&format!(
+                    "      {:<9} {}",
+                    file.kind.as_str(),
+                    file.path.dimmed()
+                ));
             }
         }
         ui.emit_above("");

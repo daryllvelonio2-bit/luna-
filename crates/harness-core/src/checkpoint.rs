@@ -35,6 +35,25 @@ use crate::types::{ToolCall, ToolResult};
 /// Default for `checkpoints.keep_turns`.
 pub const DEFAULT_KEEP_TURNS: usize = 50;
 
+/// Directories the external-change scan never walks into. Version-control internals and build
+/// output change constantly and are never what a person means by "what did that turn do".
+pub const DEFAULT_IGNORED_DIRS: [&str; 10] = [
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".mypy_cache",
+];
+
+/// Files past this many are not stamped: a workspace that large is better served by git than by a
+/// per-turn walk, and the manifest says so rather than silently pretending to have looked.
+pub const MAX_SCANNED_FILES: usize = 20_000;
+
 /// Tools whose `path` argument names a file the call will write. Anything else is left alone.
 const PATH_MUTATING_TOOLS: [&str; 2] = ["write_file", "patch"];
 
@@ -49,6 +68,17 @@ pub struct CheckpointFile {
     pub blob: Option<String>,
 }
 
+/// A file the turn changed that no file tool recorded — a `git checkout`, a `sed -i`, a formatter.
+///
+/// There is no blob behind these, by construction: the change happened inside a shell command, and
+/// snapshotting it would mean snapshotting the whole tree on every turn. They are *named* anyway, so
+/// a review can say what it cannot undo instead of quietly leaving it out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnrecordedFile {
+    pub path: String,
+    pub kind: ChangeKind,
+}
+
 /// One turn's snapshot, written to `manifest.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -58,6 +88,13 @@ pub struct Checkpoint {
     /// The prompt that opened the turn, when it is known.
     pub prompt: Option<String>,
     pub files: Vec<CheckpointFile>,
+    /// Files that changed without a file tool touching them. Empty on turn 1 of a session that was
+    /// opened before this scan existed, and empty when `checkpoints.track_external` is off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<UnrecordedFile>,
+    /// Why the scan is incomplete, when it is (a truncated walk, a filesystem that refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_note: Option<String>,
 }
 
 /// What a restore did, for the console.
@@ -135,6 +172,10 @@ pub struct TurnDiff {
     pub created_at: String,
     pub prompt: Option<String>,
     pub files: Vec<FileDiff>,
+    /// Changed by the turn, but outside the file tools: visible, not undoable. Kept separate from
+    /// `files` because a review that mixed them would imply a rewind can restore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<UnrecordedFile>,
 }
 
 impl TurnDiff {
@@ -207,6 +248,11 @@ pub struct TurnSnapshot {
     prompt: Option<String>,
     files: Mutex<Vec<CheckpointFile>>,
     next_blob: Mutex<u32>,
+    /// Path → stamp for the workspace when the turn opened; `None` when tracking is off.
+    baseline: Option<TreeScan>,
+    ignore: Vec<String>,
+    unrecorded: Mutex<Vec<UnrecordedFile>>,
+    scan_note: Mutex<Option<String>>,
 }
 
 impl TurnSnapshot {
@@ -262,6 +308,38 @@ impl TurnSnapshot {
             created_at: self.created_at.clone(),
             prompt: self.prompt.clone(),
             files: self.files.lock().unwrap().clone(),
+            unrecorded: self.unrecorded.lock().unwrap().clone(),
+            scan_note: self.scan_note.lock().unwrap().clone(),
+        }
+    }
+
+    /// Close the turn: rescan the workspace and record what changed without a file tool.
+    ///
+    /// Runs once, from the agent loop's guard, so a turn that errors still gets its review filled
+    /// in. A scan that cannot finish leaves a note rather than an empty list — "we did not look" and
+    /// "nothing happened" must not read the same.
+    pub fn finish(&self) {
+        let Some(baseline) = self.baseline.as_ref() else {
+            return;
+        };
+        let after = TreeScan::of(&self.workspace, &self.ignore);
+        let recorded: Vec<String> = self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        let changes = baseline.changes_against(&after, &recorded);
+        *self.unrecorded.lock().unwrap() = changes;
+        *self.scan_note.lock().unwrap() = after.truncated.then(|| {
+            format!(
+                "the workspace walk stopped early (more than {MAX_SCANNED_FILES} files, or an unreadable directory): \
+                 changes made by shell commands may be missing from this list"
+            )
+        });
+        if let Err(error) = self.persist() {
+            warn!(seq = self.seq, "cannot write the finished checkpoint: {error}");
         }
     }
 
@@ -298,7 +376,9 @@ pub struct CheckpointController {
 impl CheckpointController {
     pub fn new(root: PathBuf, workspace: PathBuf, settings: &CheckpointSettings) -> Self {
         Self {
-            store: CheckpointStore::new(root, workspace).with_keep_turns(settings.keep_turns),
+            store: CheckpointStore::new(root, workspace)
+                .with_keep_turns(settings.keep_turns)
+                .with_external_tracking(settings.track_external, settings.ignore.clone()),
             enabled: settings.enabled,
             current: Mutex::new(None),
         }
@@ -333,8 +413,14 @@ impl CheckpointController {
     }
 
     /// Close the open snapshot; later captures during the same process are dropped.
+    ///
+    /// The snapshot is finished (workspace rescan included) *before* it is dropped, so the manifest
+    /// on disk is complete even though the turn's guard is what triggers this.
     pub fn finish(&self) {
-        *self.current.lock().unwrap() = None;
+        let current = self.current.lock().unwrap().take();
+        if let Some(snapshot) = current {
+            snapshot.finish();
+        }
     }
 
     pub fn current(&self) -> Option<std::sync::Arc<TurnSnapshot>> {
@@ -392,6 +478,8 @@ pub struct CheckpointStore {
     root: PathBuf,
     workspace: PathBuf,
     keep_turns: usize,
+    track_external: bool,
+    ignore: Vec<String>,
 }
 
 impl CheckpointStore {
@@ -400,7 +488,18 @@ impl CheckpointStore {
             root,
             workspace,
             keep_turns: DEFAULT_KEEP_TURNS,
+            track_external: false,
+            ignore: DEFAULT_IGNORED_DIRS.iter().map(|dir| dir.to_string()).collect(),
         }
+    }
+
+    /// Watch the workspace for changes the file tools did not record (`checkpoints.track_external`).
+    pub fn with_external_tracking(mut self, enabled: bool, ignore: Vec<String>) -> Self {
+        self.track_external = enabled;
+        if !ignore.is_empty() {
+            self.ignore = ignore;
+        }
+        self
     }
 
     pub fn with_keep_turns(mut self, keep_turns: usize) -> Self {
@@ -429,6 +528,12 @@ impl CheckpointStore {
         let turn_dir = dir.join(turn_dir_name(seq));
         std::fs::create_dir_all(turn_dir.join("blobs"))?;
 
+        // Stamped before the turn runs, so a change made by a shell command has a "before" to be
+        // compared against. Metadata only: this is a directory walk, not a copy of the tree.
+        let baseline = self
+            .track_external
+            .then(|| TreeScan::of(&self.workspace, &self.ignore));
+
         let snapshot = TurnSnapshot {
             dir: turn_dir,
             workspace: self.workspace.clone(),
@@ -438,6 +543,10 @@ impl CheckpointStore {
             prompt: prompt.map(str::to_string),
             files: Mutex::new(Vec::new()),
             next_blob: Mutex::new(0),
+            baseline,
+            ignore: self.ignore.clone(),
+            unrecorded: Mutex::new(Vec::new()),
+            scan_note: Mutex::new(None),
         };
         snapshot.persist()?;
         self.prune(session_id)?;
@@ -529,11 +638,21 @@ impl CheckpointStore {
             }
         }
 
+        // Everything the shell changed is a file this manifest cannot put back. Saying so is the
+        // difference between a rewind that worked and a rewind that looked like it worked.
+        for unrecorded in &checkpoint.unrecorded {
+            report.skipped.push(format!(
+                "{} (changed by a shell command — no snapshot to restore)",
+                unrecorded.path
+            ));
+        }
+
         debug!(
             session = session_id,
             seq,
             restored = report.restored.len(),
             deleted = report.deleted.len(),
+            unrecorded = checkpoint.unrecorded.len(),
             "checkpoint restored"
         );
         Ok(report)
@@ -576,12 +695,26 @@ impl CheckpointStore {
             files.push(file_diff(&file.path, before, after));
         }
 
+        // A file that a tool recorded *and* the scan saw changed is covered by the blob: drop it
+        // from the unrecorded list rather than reporting the same edit twice.
+        let recorded: Vec<&str> = checkpoint
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        let unrecorded = checkpoint
+            .unrecorded
+            .into_iter()
+            .filter(|file| !recorded.contains(&file.path.as_str()))
+            .collect();
+
         Ok(TurnDiff {
             seq: checkpoint.seq,
             session_id: checkpoint.session_id,
             created_at: checkpoint.created_at,
             prompt: checkpoint.prompt,
             files,
+            unrecorded,
         })
     }
 
@@ -697,6 +830,121 @@ fn count_changes(diff: &str) -> (usize, usize) {
         }
     }
     (additions, deletions)
+}
+
+/// A file's identity without its contents: enough to notice a change, cheap enough to collect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    modified_ns: u128,
+}
+
+/// One walk of the workspace, keyed by workspace-relative path.
+#[derive(Debug, Default)]
+struct TreeScan {
+    files: std::collections::BTreeMap<String, FileStamp>,
+    truncated: bool,
+}
+
+impl TreeScan {
+    fn of(root: &Path, ignore: &[String]) -> Self {
+        let mut scan = Self::default();
+        let mut budget = MAX_SCANNED_FILES;
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // A directory the process may not read is not a reason to fail a turn; the note
+                // says the walk was partial, and "partial" is honest.
+                Err(_) => {
+                    scan.truncated = true;
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if ignore.iter().any(|ignored| ignored == &name) {
+                    continue;
+                }
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !file_type.is_file() {
+                    // Symlinks and devices are not files this can meaningfully stamp.
+                    continue;
+                }
+                if budget == 0 {
+                    scan.truncated = true;
+                    return scan;
+                }
+                budget -= 1;
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                let modified_ns = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or(0);
+                let relative = path
+                    .strip_prefix(root)
+                    .map(|rest| rest.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                scan.files.insert(
+                    relative,
+                    FileStamp {
+                        size: metadata.len(),
+                        modified_ns,
+                    },
+                );
+            }
+        }
+        scan
+    }
+
+    /// What changed between `self` (the baseline) and `after`, excluding paths the file tools
+    /// already recorded — those have a blob and a kind of their own, and listing them twice would
+    /// make a rewind look like it covered more than it does.
+    fn changes_against(&self, after: &TreeScan, recorded: &[String]) -> Vec<UnrecordedFile> {
+        let mut changes = Vec::new();
+        for (path, stamp) in &after.files {
+            if recorded.iter().any(|known| known == path) {
+                continue;
+            }
+            match self.files.get(path) {
+                None => changes.push(UnrecordedFile {
+                    path: path.clone(),
+                    kind: ChangeKind::Created,
+                }),
+                Some(before) if before != stamp => changes.push(UnrecordedFile {
+                    path: path.clone(),
+                    kind: ChangeKind::Modified,
+                }),
+                Some(_) => {}
+            }
+        }
+        for path in self.files.keys() {
+            if recorded.iter().any(|known| known == path) {
+                continue;
+            }
+            if !after.files.contains_key(path) {
+                changes.push(UnrecordedFile {
+                    path: path.clone(),
+                    kind: ChangeKind::Deleted,
+                });
+            }
+        }
+        changes.sort_by(|left, right| left.path.cmp(&right.path));
+        changes
+    }
 }
 
 fn turn_dir_name(seq: u32) -> String {
