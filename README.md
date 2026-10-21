@@ -197,6 +197,22 @@ them; `/rewind 3` restores turn 3's files and deletes what that turn created. `t
 intercepted — a shell command's targets are not knowable from its arguments. On by default
 (`checkpoints.enabled`, `checkpoints.keep_turns`). Details: [`docs/CHECKPOINTS.md`](docs/CHECKPOINTS.md).
 
+### 2.9 Headless runs: `luna exec`
+
+One prompt, one turn, scriptable output — the same agent, tools, rules and checkpoints as the chat,
+without the UI:
+
+```bash
+luna exec "which module owns the approval gate?"          # answer on stdout, trace on stderr
+luna exec --json "fix the failing test" | jq -c .         # NDJSON: start → tool_call → tool_result → result
+echo "summarise PROGRESS.md" | luna exec --json -         # prompt from stdin
+luna exec --json --session s3f2a1c9 "and then?"           # resume a stored session
+```
+
+Headless is **fail-closed**: a mutating call no `allow` rule covers is denied, and a denial exits
+non-zero (`--yes` approves all). `--strict` also fails on tool errors. Details:
+[`docs/EXEC.md`](docs/EXEC.md).
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

@@ -88,6 +88,30 @@ enum Commands {
         #[arg(long = "continue")]
         continue_session: bool,
     },
+    /// Run one prompt headlessly and print the result (`--json` for an event stream)
+    Exec {
+        /// The prompt; `-` or omitted reads it from stdin
+        #[arg(value_name = "PROMPT")]
+        prompt: Option<String>,
+        /// Emit NDJSON events on stdout instead of the plain answer
+        #[arg(long)]
+        json: bool,
+        /// Approve every mutating tool call without asking (headless default is deny)
+        #[arg(long)]
+        yes: bool,
+        /// Exit non-zero if any tool call failed, even when the turn completed
+        #[arg(long)]
+        strict: bool,
+        /// Resume a stored session by id or name; without it each run starts a fresh session
+        #[arg(long, conflicts_with_all = ["fork", "continue_session"])]
+        session: Option<String>,
+        /// Fork an existing session and run in the copy
+        #[arg(long, conflicts_with_all = ["session", "continue_session"])]
+        fork: Option<String>,
+        /// Continue the most recently updated session
+        #[arg(long = "continue")]
+        continue_session: bool,
+    },
     /// List stored chat sessions
     Sessions {
         #[command(subcommand)]
@@ -193,6 +217,7 @@ async fn main() -> Result<(), HarnessError> {
             model.as_ref().or(cli.model.as_ref()),
             *yes || cli.yes,
         ),
+        Some(Commands::Exec { yes, .. }) => (cli.provider.as_ref(), cli.model.as_ref(), *yes || cli.yes),
         None => (
             cli.provider.as_ref(),
             cli.model.as_ref(),
@@ -290,6 +315,32 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
+        }
+        Some(Commands::Exec {
+            prompt,
+            json,
+            yes,
+            strict,
+            session,
+            fork,
+            continue_session,
+        }) => {
+            // `--session`/`--continue`/`--fork` behave as they do in `chat`, so a headless run can
+            // pick up a conversation a person started.
+            let selection = match (session.or(cli.session), fork.or(cli.fork), continue_session || cli.continue_session) {
+                (Some(id), _, _) => SessionSelection::Resume(id),
+                (None, Some(fork_id), _) => SessionSelection::Fork(fork_id),
+                (None, None, true) => SessionSelection::Continue,
+                (None, None, false) => SessionSelection::New,
+            };
+            let options = commands::exec::ExecOptions {
+                prompt: prompt.clone(),
+                json,
+                selection,
+                yes,
+                strict,
+            };
+            commands::exec::run_exec(config, cred_manager, discovery, options).await?;
         }
         Some(Commands::Auth { subcommand }) => {
             if let Some(sub) = subcommand {

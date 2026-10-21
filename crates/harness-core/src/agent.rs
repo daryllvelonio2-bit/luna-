@@ -99,6 +99,10 @@ pub struct TurnToolCall {
     pub arguments: serde_json::Value,
     pub output: String,
     pub is_error: bool,
+    /// Refused by the gate or a permission rule rather than attempted and failing. A caller that
+    /// reports status (a headless run, CI) needs the difference: a denial means the work did not
+    /// happen on purpose, not that the tool misbehaved.
+    pub denied: bool,
 }
 
 /// Events emitted during agent execution loop for live observing.
@@ -258,6 +262,12 @@ where
     pub fn with_observer(mut self, observer: Arc<dyn Fn(AgentEvent) + Send + Sync>) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    /// Replace the observer after construction (the headless command picks its renderer once it
+    /// knows whether it is writing JSON or plain text).
+    pub fn set_observer(&mut self, observer: AgentObserver) {
+        self.observer = Some(observer);
     }
 
     /// Who answers the approval prompt, and the gate's timeout / override list.
@@ -862,6 +872,7 @@ where
                     arguments: tool_call.arguments.clone(),
                     output: execution_result.content.clone(),
                     is_error: execution_result.is_error,
+                    denied: is_denial,
                 });
 
                 // Track consecutive non-working calls (failure thrashing guardrail).
