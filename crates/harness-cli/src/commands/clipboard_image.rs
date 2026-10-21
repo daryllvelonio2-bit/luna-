@@ -1,6 +1,7 @@
 use arboard::ImageData;
 use base64::Engine;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// A screenshot pulled from the clipboard, ready to attach to a prompt.
 pub struct ClipboardImage {
@@ -25,7 +26,47 @@ impl ClipboardImage {
 
 /// Read an image (screenshot) from the system clipboard, if one is present.
 /// Returns `Ok(None)` when the clipboard holds no image (text or empty).
+///
+/// Wayland reads are flaky in practice: `wl-paste --watch cliphist store`
+/// (and clipboard managers generally) race the reader, and arboard's
+/// data-control backend surfaces that as a transient `ContentNotAvailable`
+/// right after a copy even though the image is there. So this retries the
+/// arboard read, then falls back to pasting the PNG directly via
+/// `wl-paste` (Wayland) and `xclip` (X11).
 pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+    const ATTEMPTS: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_millis(150);
+
+    // arboard's own view. Each attempt builds a fresh `Clipboard` so a
+    // transient Wayland init failure gets the Wayland backend again instead
+    // of being pinned to the X11 fallback for the lifetime of one instance.
+    let mut hard_err: Option<String> = None;
+    for attempt in 0..ATTEMPTS {
+        match try_arboard() {
+            Ok(Some(img)) => return Ok(Some(img)),
+            // Clipboard reachable, just no image in it (yet). A later attempt
+            // or the command fallbacks may still find one.
+            Ok(None) => hard_err = None,
+            Err(e) => hard_err = Some(e),
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(RETRY_DELAY);
+        }
+    }
+
+    if let Some(png) = fallback_image_bytes() {
+        return clipboard_image_from_png(png).map(Some);
+    }
+
+    // A hard error (e.g. no display/clipboard service at all) is more useful
+    // to surface than a bare "no image"; a steady no-image clipboard is None.
+    match hard_err {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
+}
+
+fn try_arboard() -> Result<Option<ClipboardImage>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
 
     let img: ImageData = match clipboard.get_image() {
@@ -52,6 +93,63 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
         width,
         height,
     }))
+}
+
+/// Last-resort reads that bypass arboard entirely, in case its Wayland or X11
+/// backend cannot see an image the compositor clearly has (verified live with
+/// `wl-paste` under Hyprland). Only `image/png` is accepted: the attach path
+/// labels every image `image/png`, and screenshot/copy tools always offer it.
+fn fallback_image_bytes() -> Option<Vec<u8>> {
+    // wl-paste asks the compositor's data-control protocol directly.
+    if let Some(bytes) = command_bytes("wl-paste", &["--type", "image/png"]) {
+        if png_sniff(&bytes) {
+            return Some(bytes);
+        }
+    }
+    // xclip for X11 sessions (no-op when it is not installed).
+    if let Some(bytes) = command_bytes("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]) {
+        if png_sniff(&bytes) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+fn clipboard_image_from_png(png: Vec<u8>) -> Result<ClipboardImage, String> {
+    let (width, height) = png_dimensions(&png).ok_or("clipboard image is not a valid PNG")?;
+    let saved_path = save_image_file(&png)?;
+    Ok(ClipboardImage {
+        png_bytes: png,
+        saved_path,
+        width,
+        height,
+    })
+}
+
+/// A PNG signature plus a decodable IHDR: dimensions live at a fixed offset,
+/// so no decoder is needed to size the attachment.
+fn png_dimensions(png: &[u8]) -> Option<(usize, usize)> {
+    if !png_sniff(png) || png.len() < 24 {
+        return None;
+    }
+    let width = u32::from_be_bytes(png[16..20].try_into().ok()?) as usize;
+    let height = u32::from_be_bytes(png[20..24].try_into().ok()?) as usize;
+    Some((width, height))
+}
+
+fn png_sniff(bytes: &[u8]) -> bool {
+    bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+}
+
+/// Run a helper binary and return its stdout, or `None` when the binary is
+/// missing, it fails, or it produces nothing (all mean "this source has no
+/// image", not an error worth reporting).
+fn command_bytes(program: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let out = std::process::Command::new(program).args(args).output().ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    Some(out.stdout)
 }
 
 fn save_image_file(png: &[u8]) -> Result<PathBuf, String> {
@@ -244,6 +342,27 @@ mod tests {
         // Fewer bytes than width*height*4: this is the shape a bad clipboard read takes.
         let err = encode_png_rgba(&[0u8; 4], 4, 4).expect_err("must refuse");
         assert!(err.contains("too small"), "got: {err}");
+    }
+
+    #[test]
+    fn dimensions_are_read_straight_from_the_ihdr() {
+        let png = encode_png_rgba(&vec![0u8; 9 * 7 * 4], 9, 7).expect("encode");
+        assert_eq!(png_dimensions(&png), Some((9, 7)), "IHDR width/height at bytes 16..24");
+    }
+
+    #[test]
+    fn dimension_parsing_refuses_non_png_input() {
+        assert_eq!(png_dimensions(b"not a png at all........"), None, "bad signature");
+        assert_eq!(png_dimensions(&[0x89, b'P', b'N', b'G']), None, "truncated header");
+    }
+
+    #[test]
+    fn helper_commands_that_are_missing_or_failing_yield_none() {
+        // A binary that does not exist is a silent "this source has nothing",
+        // not an error: the xclip fallback must no-op on Wayland-only boxes.
+        assert!(command_bytes("luna-nonexistent-helper", &["--version"]).is_none());
+        // A real binary with real output parses as bytes.
+        assert_eq!(command_bytes("/bin/echo", &["ok"]).as_deref(), Some(&b"ok\n"[..]));
     }
 
     /// Not ignored by default for CI cost, but kept as the out-of-process proof: the file this
