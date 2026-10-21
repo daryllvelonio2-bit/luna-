@@ -133,7 +133,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/todo",
-        details: "Fold or unfold the todo list (Ctrl+Shift+O)",
+        details: "Fold or unfold the todo list (Ctrl+T)",
     },
     SlashCommand {
         name: "/clear",

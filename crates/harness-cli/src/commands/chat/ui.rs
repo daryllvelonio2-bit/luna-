@@ -291,12 +291,17 @@ impl ChatUi {
     /// the box rather than a line in the transcript: it appears in place instead of
     /// scrolling up with the conversation.
     pub fn set_todo_panel(&self, snapshot: Option<TodoSnapshot>) {
-        {
+        let changed = {
             let mut panel = self.todo_snapshot.lock().unwrap();
             if *panel == snapshot {
-                return;
+                false
+            } else {
+                *panel = snapshot;
+                true
             }
-            *panel = snapshot;
+        };
+        if !changed {
+            return;
         }
         if !self.is_attended {
             // A headless run has no box to redraw, so the list is simply printed.
@@ -310,6 +315,11 @@ impl ChatUi {
         }
     }
 
+    /// Whether a todo panel snapshot is active.
+    pub fn has_todo_panel(&self) -> bool {
+        self.todo_snapshot.lock().unwrap().is_some()
+    }
+
     /// Whether the todo panel is folded to a single row.
     pub fn todo_collapsed(&self) -> bool {
         self.todo_collapsed.load(Ordering::SeqCst)
@@ -319,6 +329,9 @@ impl ChatUi {
     pub fn toggle_todo_collapsed(&self) -> bool {
         let folded = !self.todo_collapsed.load(Ordering::SeqCst);
         self.todo_collapsed.store(folded, Ordering::SeqCst);
+        if self.box_drawn.load(Ordering::SeqCst) {
+            self.redraw_box();
+        }
         folded
     }
 

@@ -1032,7 +1032,9 @@ pub async fn run_interactive_chat(
 
                 match key {
                     AppKey::Ctrl('o') => {
-                        // Ctrl+O: toggle process expansion
+                        // Ctrl+O: toggle process expansion if transcript turns exist.
+                        // In standard terminals where Ctrl+Shift+O arrives as 0x0F (Ctrl+O),
+                        // fall back to toggling the todo panel when no process turns exist.
                         if active_turn.is_none() && !turns.is_empty() {
                             process_expanded = !process_expanded;
                             if ui.is_attended {
@@ -1044,15 +1046,14 @@ pub async fn run_interactive_chat(
                                 }
                                 ui.draw_initial_box();
                             }
+                        } else if ui.has_todo_panel() {
+                            ui.toggle_todo_collapsed();
                         }
                         continue;
                     }
-                    AppKey::CtrlShiftO => {
-                        // Ctrl+Shift+O: fold or unfold the todo panel. The panel is
-                        // chrome, so it is redrawn in place rather than reprinted under
-                        // the transcript.
+                    AppKey::CtrlShiftO | AppKey::Ctrl('t') => {
+                        // Ctrl+T or Ctrl+Shift+O: fold or unfold the todo panel.
                         ui.toggle_todo_collapsed();
-                        todo::refresh_panel(&ui, &todo_scope);
                         continue;
                     }
                     AppKey::Ctrl('b') => {

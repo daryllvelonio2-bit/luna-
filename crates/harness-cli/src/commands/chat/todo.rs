@@ -55,12 +55,13 @@ pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool, width: usize) -> V
     }
 
     let width = width.max(MIN_PANEL_WIDTH);
+    let total = snapshot.items.len();
     let (done, active, pending) = snapshot.counts();
-    let counts = format!("{} done · {} active · {} pending", done, active, pending);
+    let counts = format!("{}/{} done · {} active · {} pending", done, total, active, pending);
     let hint = if collapsed {
-        "Ctrl+Shift+O to expand"
+        "Ctrl+T to expand"
     } else {
-        "Ctrl+Shift+O to collapse"
+        "Ctrl+T to collapse"
     };
 
     if collapsed {
@@ -70,8 +71,15 @@ pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool, width: usize) -> V
     let mut rows = Vec::with_capacity(snapshot.items.len() + 2);
     rows.push(top_border("Todo", &counts, width));
 
+    let max_id_digits = snapshot
+        .items
+        .iter()
+        .map(|i| format!("#{}", i.id).chars().count())
+        .max()
+        .unwrap_or(2);
+
     for item in &snapshot.items {
-        rows.push(task_row(item, width));
+        rows.push(task_row(item, max_id_digits, width));
     }
     rows.push(bottom_border(hint, width));
     rows
@@ -83,10 +91,12 @@ fn collapsed_row(counts: &str, hint: &str, width: usize) -> String {
     let used = left.chars().count() + hint.chars().count() + 8;
     let fill = width.saturating_sub(used);
     format!(
-        "╭─ {} {} {} ─╮",
+        "{} {} {} {} {}",
+        "╭─".dimmed(),
         left.bold().cyan(),
-        "─".repeat(fill),
-        hint.dimmed()
+        "─".repeat(fill).dimmed(),
+        hint.dimmed(),
+        "─╮".dimmed()
     )
 }
 
@@ -95,28 +105,40 @@ fn top_border(title: &str, right: &str, width: usize) -> String {
     let used = title.chars().count() + right.chars().count() + 8;
     let fill = width.saturating_sub(used);
     format!(
-        "╭─ {} {} {} ─╮",
+        "{} {} {} {} {}",
+        "╭─".dimmed(),
         title.bold().cyan(),
-        "─".repeat(fill),
-        right.dimmed()
+        "─".repeat(fill).dimmed(),
+        right.dimmed(),
+        "─╮".dimmed()
     )
 }
 
 /// The panel's bottom border, with the fold hint on the right.
 fn bottom_border(hint: &str, width: usize) -> String {
     let fill = width.saturating_sub(hint.chars().count() + 4);
-    format!("╰{} {} ╯", "─".repeat(fill), hint.dimmed())
+    format!(
+        "{}{} {} {}",
+        "╰".dimmed(),
+        "─".repeat(fill).dimmed(),
+        hint.dimmed(),
+        "╯".dimmed()
+    )
 }
 
 /// One task, in a row of the panel.
 ///
 /// The row is padded to the panel's width so the box's right edge stays a straight
-/// line whatever the task text says.
-fn task_row(item: &TodoItem, width: usize) -> String {
+/// line whatever the task text says. Task IDs are neatly aligned.
+fn task_row(item: &TodoItem, id_width: usize, width: usize) -> String {
     let icon = status_icon(item.status);
     let inner = width.saturating_sub(4);
-    // "icon #id  text": one space after the icon, two after the id.
-    let fixed = 1 + 1 + 1 + item.id.to_string().chars().count() + 2;
+    let id_str = format!("#{}", item.id);
+    let id_pad = id_width.saturating_sub(id_str.chars().count());
+    let id_col = format!("{}{}", id_str, " ".repeat(id_pad));
+
+    // "icon id_col  text": 1 + 1 + id_width + 2
+    let fixed = 1 + 1 + id_width + 2;
     // The text is cut to the room the row has, and the cut is marked: a task whose
     // text runs past the edge of the panel is still legible.
     let room = inner.saturating_sub(fixed);
@@ -135,15 +157,18 @@ fn task_row(item: &TodoItem, width: usize) -> String {
     };
     let styled_text = match item.status {
         TodoStatus::Done => text.dimmed().to_string(),
+        TodoStatus::InProgress => text.bold().to_string(),
         _ => text.normal().to_string(),
     };
 
     format!(
-        "│ {} {}  {}{} │",
+        "{} {} {}  {}{} {}",
+        "│".dimmed(),
         styled_icon,
-        format!("#{}", item.id).dimmed(),
+        id_col.dimmed(),
         styled_text,
-        " ".repeat(pad)
+        " ".repeat(pad),
+        "│".dimmed()
     )
 }
 
@@ -293,7 +318,7 @@ mod tests {
         assert!(text.contains("○"), "an open task is an empty circle: {}", text);
         assert!(text.contains("✔"), "a finished task is ticked: {}", text);
         assert!(text.contains("▸"), "a task in flight is a triangle: {}", text);
-        assert!(text.contains("Ctrl+Shift+O to collapse"), "got: {}", text);
+        assert!(text.contains("Ctrl+T to collapse"), "got: {}", text);
     }
 
     #[test]
@@ -360,11 +385,11 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "╭─ Todo ─────────────────────────────── 0 done · 1 active · 2 pending ─╮",
-                "│ ▸ #9  Add a regression test for the panel's erase accounting on res… │",
+                "╭─ Todo ───────────────────────────── 0/3 done · 1 active · 2 pending ─╮",
+                "│ ▸ #9   Add a regression test for the panel's erase accounting on re… │",
                 "│ ○ #10  Check the pinned panel in a narrow terminal (40 columns)      │",
                 "│ ○ #11  Document the pinned todo panel in the README                  │",
-                "╰──────────────────────────────────────────── Ctrl+Shift+O to collapse ╯",
+                "╰────────────────────────────────────────────────── Ctrl+T to collapse ╯",
             ]
         );
     }
@@ -375,7 +400,7 @@ mod tests {
         let rows = plain(&render_panel(&read_session_snapshot(&scope), true, 80));
         assert_eq!(rows.len(), 1, "got: {:?}", rows);
         assert_eq!(rows[0].chars().count(), 80, "got: {}", rows[0]);
-        assert!(rows[0].contains("Ctrl+Shift+O to expand"), "got: {}", rows[0]);
+        assert!(rows[0].contains("Ctrl+T to expand"), "got: {}", rows[0]);
     }
 
     #[test]
