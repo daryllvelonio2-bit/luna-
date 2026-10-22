@@ -199,6 +199,9 @@ enum Commands {
         #[command(subcommand)]
         subcommand: ConfigCommand,
     },
+    /// Run the setup / onboarding flow: choose a personality core and rewrite the config
+    #[command(name = "setup", alias = "onboard", alias = "onboarding")]
+    Setup,
     /// Run the scripted end-to-end scenario suite (offline fake provider, or live NIM)
     Eval {
         #[command(subcommand)]
@@ -300,6 +303,26 @@ async fn main() -> Result<(), HarnessError> {
         None | Some(Commands::Chat { .. }) => dialoguer::console::Term::stdout().features().is_attended(),
         _ => false,
     };
+
+    // First-run onboarding. It runs before telemetry, credentials or a session are touched, so a
+    // user who has never configured Luna gets the briefing instead of an agent loop that fails on a
+    // missing provider. It only ever runs on an attended `luna`/`luna chat`: `exec`, pipes and CI
+    // stay headless, and `LUNA_FIRST_RUN=false` or `luna config set first_run false` skips it.
+    if is_interactive_chat && harness_onboarding::needs_onboarding(&layers)? {
+        let outcome = harness_onboarding::run_interactive(&layers)?;
+        tracing::info!(
+            persona = outcome.persona.name,
+            config = %outcome.config_path.display(),
+            "first-run onboarding complete"
+        );
+        // Re-resolve so this same run uses the persona it just wrote.
+        config = config::resolve(&layers)?.into_config();
+    }
+
+    // The persona's voice is prefixed to the system prompt. An explicit
+    // `agent.system_prompt_prefix` in the config file outranks the menu answer, so this never
+    // replaces a prefix the user wrote by hand.
+    harness_onboarding::persona::apply_selected(&mut config)?;
 
     let log_file_path = if is_interactive_chat {
         let luna_dir = config.paths.sessions_db.parent().unwrap_or(std::path::Path::new("."));
@@ -466,6 +489,17 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Config { subcommand }) => {
             handle_config_command(subcommand, &layers)?;
+        }
+        // Explicitly re-runnable: the `first_run` gate is bypassed because asking for the flow is
+        // itself the intent. Recalibrating a core later is a config edit, not a memory wipe.
+        Some(Commands::Setup) => {
+            let outcome = harness_onboarding::run_interactive(&layers)?;
+            println!(
+                "persona.id = {} ({}) written to {}",
+                outcome.persona.id,
+                outcome.persona.name,
+                outcome.config_path.display()
+            );
         }
         Some(Commands::Eval { subcommand }) => {
             handle_eval_command(subcommand, cred_manager, discovery, &config).await?;
