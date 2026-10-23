@@ -72,11 +72,19 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
         ProviderDescriptor {
             id: "gemini".to_string(),
             display_name: "Google Gemini".to_string(),
-            default_base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            // The generic provider client speaks the OpenAI-compatible protocol. Gemini's native
+            // `/models/{model}:generateContent` route uses a different body and URL shape, while
+            // the `/openai` route accepts the same chat-completions body as every other provider.
+            // Pointing the base at the native namespace produced
+            // `POST /v1beta/chat/completions?key=...`, which Google rejects with
+            // "Missing or invalid Authorization header".
+            default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::QueryParam("key".to_string()),
+            // The OpenAI-compatible Gemini endpoint authenticates with `Authorization: Bearer …`.
+            auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
+                ("gemini-3.5-flash-lite", 1_000_000),
                 ("gemini-1.5-pro", 2_000_000),
                 ("gemini-1.5-flash", 1_000_000),
                 ("gemini-1.0-pro", 32_768),
@@ -563,7 +571,7 @@ pub fn get_default_model(provider: &str) -> &'static str {
         "nvidia" => "deepseek-ai/deepseek-v4.1-flash",
         "deepseek" => "deepseek-chat",
         "anthropic" => "claude-3-5-sonnet-20241022",
-        "gemini" => "gemini-1.5-pro",
+        "gemini" => "gemini-3.5-flash-lite",
         "groq" => "llama-3.3-70b-versatile",
         "ollama" => "llama3.2",
         "openrouter" => "anthropic/claude-3.5-sonnet",
@@ -688,6 +696,20 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_uses_its_openai_compatible_bearer_route() {
+        let descriptor = find_provider("gemini").expect("Gemini is a built-in provider");
+        assert_eq!(
+            descriptor.default_base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        assert!(matches!(
+            descriptor.auth_header_format,
+            AuthHeaderFormat::Bearer
+        ));
+        assert_eq!(get_default_model("gemini"), "gemini-3.5-flash-lite");
+    }
 
     #[test]
     fn test_context_window_1m_models() {
