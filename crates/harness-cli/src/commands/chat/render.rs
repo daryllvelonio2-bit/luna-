@@ -543,6 +543,18 @@ pub fn compaction_line(frame: usize, forced: bool, elapsed: Duration, width: usi
     format!("  {} {} {}", glyph, label.dimmed(), tail.dimmed())
 }
 
+/// The line a finished fold leaves in the transcript: what it folded, in the terms the fold itself
+/// happened in. `.turns` is zero for a fold that took no whole turn — one huge message — and saying
+/// "0 turns" there would read as if nothing had happened.
+pub fn compaction_report(notice: &harness_core::CompactionNotice) -> String {
+    let folded = if notice.turns > 0 {
+        format!("{} turns ({} messages)", notice.turns, notice.messages)
+    } else {
+        format!("{} messages", notice.messages)
+    };
+    format!("{} Compacted {} into 1 summary", "✔".green().bold(), folded)
+}
+
 /// What the activity line can say about a call beyond "still running": the size of the edit a
 /// mutating tool is about to make, so a patch shows its shape while it is applied.
 pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option<String> {

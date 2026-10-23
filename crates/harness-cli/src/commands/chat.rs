@@ -47,9 +47,9 @@ use commands::{
 };
 use keys::AppKey;
 use render::{
-    format_approval_verdict, format_patch_diff, format_tool_call, format_tool_result,
-    parse_turns_from_history, render_transcript, right_aligned_user_message, OutputBlockKind,
-    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    compaction_report, format_approval_verdict, format_patch_diff, format_tool_call,
+    format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
+    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, BackgroundTaskState, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -454,6 +454,11 @@ pub async fn run_interactive_chat(
     let in_flight_tools_obs = in_flight_tools.clone();
     // The observer reads the session's list back, so the transcript can show the tasks.
     let todo_scope_obs = todo_scope.clone();
+    // True for the whole duration of a fold, automatic or asked for. The input path reads it to
+    // decide between queueing a message and interrupting a turn: while the transcript is being
+    // rewritten, a turn started now would be built on history that is about to change.
+    let compacting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let compacting_obs = compacting.clone();
 
     // Lifecycle hooks: opt-in, loaded from the user file and (only when trusted) the project
     // file. Loading is fail-closed, so a missing file means an empty runner, not an error.
@@ -561,8 +566,19 @@ pub async fn run_interactive_chat(
                 });
                 ui_obs.emit_above(&line);
             }
-            harness_core::AgentEvent::CompactionStarted { .. } => {}
-            harness_core::AgentEvent::CompactionFinished { .. } => {}
+            harness_core::AgentEvent::CompactionStarted { forced } => {
+                compacting_obs.store(true, std::sync::atomic::Ordering::SeqCst);
+                ui_obs.start_compaction(forced);
+            }
+            harness_core::AgentEvent::CompactionFinished { folded, error } => {
+                ui_obs.finish_compaction();
+                compacting_obs.store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Some(err) = error {
+                    ui_obs.emit_above(&format!("{} Compaction failed: {}", "✖".red(), err));
+                } else if let Some(notice) = folded {
+                    ui_obs.emit_above(&compaction_report(&notice));
+                }
+            }
         }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
@@ -1120,6 +1136,24 @@ pub async fn run_interactive_chat(
 
             _ = animation.tick() => {
                 ui.animate_tick();
+                // The queue's second drain path: a fold the user asked for ends without a turn-end
+                // event, so the tick is what notices the agent is free and sends what was held.
+                if !compacting.load(std::sync::atomic::Ordering::SeqCst) {
+                    drain_queue(
+                        &mut queue,
+                        &ui,
+                        &turns,
+                        process_expanded,
+                        &pending_images,
+                        &plan_mode,
+                        &agent,
+                        &in_flight_tools,
+                        &mut current_cancel,
+                        &mut current_query,
+                        &mut turn_start,
+                        &mut active_turn,
+                    );
+                }
             }
 
             maybe_evolver = evolver_rx.recv() => {
@@ -1498,133 +1532,95 @@ pub async fn run_interactive_chat(
 
                         ui.clear_transient_error();
 
-                        if active_turn.is_some() {
-                            let steer_text = if let Some(stripped) = query.strip_prefix("/steer ") {
-                                stripped.trim().to_string()
-                            } else {
-                                query.clone()
-                            };
-
-                            steer_handle.lock().unwrap().push_back(steer_text.clone());
-
-                            let steer_display = format!("{} Steered into active turn: {}", "⏩".cyan().bold(), steer_text);
-                            in_flight_tools.lock().unwrap().push(TurnProcessItem {
-                                call_formatted: steer_display.clone(),
-                                result_formatted: String::new(),
-                                diff_lines: Vec::new(),
-                            });
-                            ui.emit_above(&steer_display);
-                        } else {
-                            // Attached screenshots become OpenAI-style data-URL blocks appended
-                            // to the prompt text; the provider layer expands them into
-                            // content parts. Each URL is one paste, oldest first.
-                            let images = std::mem::take(&mut *pending_images.lock().unwrap());
-                            let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
-                                format!(
-                                    "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
-                                    query
-                                )
-                            } else {
-                                query.clone()
-                            };
-                            let q_with_images = if images.is_empty() {
-                                q
-                            } else {
-                                format!("{}\n\n{}", q, images.join("\n\n"))
-                            };
-
-                            if ui.is_attended {
-                                crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded);
-                                println!();
-                                println!("{}", right_aligned_user_message(&query, get_terminal_width()));
-                                ui.draw_initial_box();
-                            } else {
-                                ui.begin_block(OutputBlockKind::User);
-                                ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
+                        // One decision for the whole input path: replace the turn, wait out the
+                        // fold, or just send. Anything queued is pumped by the animation tick once
+                        // the agent is free again.
+                        match submission(
+                            &query,
+                            active_turn.is_some(),
+                            compacting.load(std::sync::atomic::Ordering::SeqCst),
+                        ) {
+                            Submission::Queue => {
+                                queue.push_back(query.clone());
+                                ui.set_queue_depth(queue.len());
+                                ui.emit_above(&format!(
+                                    "{} Queued — sent when the agent is free",
+                                    "⏸".yellow().bold()
+                                ));
+                                continue;
                             }
-
-                            current_cancel = CancellationToken::new();
-                            let cancel_child = current_cancel.child_token();
-                            let ag_ref = agent.clone();
-                            current_query = query.clone();
-                            turn_start = std::time::Instant::now();
-                            in_flight_tools.lock().unwrap().clear();
-                            active_turn = Some(tokio::spawn(async move {
-                                let ag = ag_ref.lock().await;
-                                ag.run_turn(&q_with_images, cancel_child).await
-                            }));
+                            Submission::Interrupt => {
+                                cancel_running_turn(
+                                    &mut active_turn,
+                                    &current_cancel,
+                                    &ui,
+                                    &mut turns,
+                                    &in_flight_tools,
+                                    turn_start,
+                                    &current_query,
+                                    process_expanded,
+                                    &agent,
+                                    &current_provider,
+                                    &current_model,
+                                )
+                                .await;
+                            }
+                            Submission::Turn => {}
                         }
+
+                        launch_turn(
+                            &query,
+                            &ui,
+                            &turns,
+                            process_expanded,
+                            &pending_images,
+                            &plan_mode,
+                            &agent,
+                            &in_flight_tools,
+                            &mut current_cancel,
+                            &mut current_query,
+                            &mut turn_start,
+                            &mut active_turn,
+                        );
                     }
                     // Ctrl+C, and the ctrl+c a terminal may still report as a letter:
                     // a chat you cannot leave is worse than a stray key.
                     AppKey::CtrlC | AppKey::Ctrl('c') => {
-                        if let Some(handle) = active_turn.take() {
-                            current_cancel.cancel();
-                            handle.abort();
-                            ui.stop_activity();
-                            ui.clear_live_state();
-                            let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
-                            let turn_dur = turn_start.elapsed();
-
-                            let record = TurnRecord {
-                                user_query: current_query.clone(),
-                                reasoning: None,
-                                tools: Vec::new(),
-                                tool_items: current_tools,
-                                duration: turn_dur,
-                                reply: "✖ Cancelled".to_string(),
-                            };
-                            turns.push(record);
-
-                            if ui.is_attended {
-                                crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded);
-                                ui.draw_initial_box();
-                            } else {
-                                println!("{}", "✖ Cancelled".red());
-                            }
-
-                            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
-                            ui.update_status(context_used, context_max);
-                        } else {
+                        let cancelled = cancel_running_turn(
+                            &mut active_turn,
+                            &current_cancel,
+                            &ui,
+                            &mut turns,
+                            &in_flight_tools,
+                            turn_start,
+                            &current_query,
+                            process_expanded,
+                            &agent,
+                            &current_provider,
+                            &current_model,
+                        )
+                        .await;
+                        if !cancelled {
                             ui.clear_box_on_exit();
                             clear_on_exit();
                             break;
                         }
                     }
                     AppKey::Escape => {
-                        if let Some(handle) = active_turn.take() {
-                            current_cancel.cancel();
-                            handle.abort();
-                            ui.stop_activity();
-                            ui.clear_live_state();
-                            let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
-                            let turn_dur = turn_start.elapsed();
-
-                            let record = TurnRecord {
-                                user_query: current_query.clone(),
-                                reasoning: None,
-                                tools: Vec::new(),
-                                tool_items: current_tools,
-                                duration: turn_dur,
-                                reply: "✖ Cancelled".to_string(),
-                            };
-                            turns.push(record);
-
-                            if ui.is_attended {
-                                crate::commands::clear_screen();
-                                redraw_transcript(&turns, process_expanded);
-                                ui.draw_initial_box();
-                            } else {
-                                println!("{}", "✖ Cancelled".red());
-                            }
-
-                            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                            let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
-                            ui.update_status(context_used, context_max);
-                        }
+                        cancel_running_turn(
+                            &mut active_turn,
+                            &current_cancel,
+                            &ui,
+                            &mut turns,
+                            &in_flight_tools,
+                            turn_start,
+                            &current_query,
+                            process_expanded,
+                            &agent,
+                            &current_provider,
+                            &current_model,
+                        )
+                        .await;
                     }
                     _ => {}
                 }
@@ -1638,7 +1634,6 @@ pub async fn run_interactive_chat(
                 }
             } => {
                 active_turn = None;
-                let turn_succeeded = matches!(turn_res, Ok(Ok(_)));
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
@@ -1807,30 +1802,22 @@ pub async fn run_interactive_chat(
                     }
                 }
 
-                if turn_succeeded {
-                    if let Some(next_query) = queue.pop_front() {
-                        if ui.is_attended {
-                            crate::commands::clear_screen();
-                            redraw_transcript(&turns, process_expanded);
-                            println!();
-                            println!("{}", right_aligned_user_message(&next_query, get_terminal_width()));
-                            ui.draw_initial_box();
-                        } else {
-                            ui.begin_block(OutputBlockKind::User);
-                            ui.emit_above(&right_aligned_user_message(&next_query, get_terminal_width()));
-                        }
-                        current_cancel = CancellationToken::new();
-                        let cancel_child = current_cancel.child_token();
-                        let ag_ref = agent.clone();
-                        current_query = next_query.clone();
-                        turn_start = std::time::Instant::now();
-                        in_flight_tools.lock().unwrap().clear();
-                        active_turn = Some(tokio::spawn(async move {
-                            let ag = ag_ref.lock().await;
-                            ag.run_turn(&next_query, cancel_child).await
-                        }));
-                    }
-                }
+                // Whatever the turn did — finish, fail, get cancelled — what the user typed while
+                // it ran is still waiting, and the agent is free now.
+                drain_queue(
+                    &mut queue,
+                    &ui,
+                    &turns,
+                    process_expanded,
+                    &pending_images,
+                    &plan_mode,
+                    &agent,
+                    &in_flight_tools,
+                    &mut current_cancel,
+                    &mut current_query,
+                    &mut turn_start,
+                    &mut active_turn,
+                );
             }
         }
     }
@@ -1863,6 +1850,189 @@ pub async fn run_interactive_chat(
         );
     }
     Ok(())
+}
+
+/// What a submitted line does when the agent may not be free to take it.
+///
+/// The rule a user can hold onto: a plain message *replaces* what is running, `/steer` *adds* to
+/// it, and a message typed while the transcript is being folded waits — a turn started mid-fold
+/// would be built on a history that is about to be rewritten. (`/steer` never reaches here: it is
+/// a slash command, and the queue it feeds is pushed without taking the agent lock the running
+/// turn holds.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Submission {
+    /// Nothing is in flight: start a turn.
+    Turn,
+    /// Stop the running turn and start a new one with this line.
+    Interrupt,
+    /// Hold the line until the fold finishes; the queue pump sends it in order.
+    Queue,
+}
+
+fn submission(_line: &str, turn_active: bool, compacting: bool) -> Submission {
+    if compacting {
+        return Submission::Queue;
+    }
+    if turn_active {
+        return Submission::Interrupt;
+    }
+    Submission::Turn
+}
+
+/// Echo a submitted message the way the current mode shows it, then start the turn that answers it.
+///
+/// One body for the Enter path, the queue drain and the queue pump, so all three send turns the
+/// same way: prompt history, plan-mode decoration, attached images and the spawn itself cannot
+/// drift apart between them.
+#[allow(clippy::too_many_arguments)]
+fn launch_turn(
+    query: &str,
+    ui: &ChatUi,
+    turns: &[TurnRecord],
+    process_expanded: bool,
+    pending_images: &Arc<Mutex<Vec<String>>>,
+    plan_mode: &std::sync::atomic::AtomicBool,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    current_cancel: &mut CancellationToken,
+    current_query: &mut String,
+    turn_start: &mut std::time::Instant,
+    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+) {
+    // Attached screenshots become OpenAI-style data-URL blocks appended to the prompt text; the
+    // provider layer expands them into content parts. Each URL is one paste, oldest first.
+    let images = std::mem::take(&mut *pending_images.lock().unwrap());
+    let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
+        format!(
+            "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
+            query
+        )
+    } else {
+        query.to_string()
+    };
+    let q_with_images = if images.is_empty() {
+        q
+    } else {
+        format!("{}\n\n{}", q, images.join("\n\n"))
+    };
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        redraw_transcript(turns, process_expanded);
+        println!();
+        println!("{}", right_aligned_user_message(query, get_terminal_width()));
+        ui.draw_initial_box();
+    } else {
+        ui.begin_block(OutputBlockKind::User);
+        ui.emit_above(&right_aligned_user_message(query, get_terminal_width()));
+    }
+
+    *current_cancel = CancellationToken::new();
+    let cancel_child = current_cancel.child_token();
+    let ag_ref = agent.clone();
+    *current_query = query.to_string();
+    *turn_start = std::time::Instant::now();
+    in_flight_tools.lock().unwrap().clear();
+    *active_turn = Some(tokio::spawn(async move {
+        let ag = ag_ref.lock().await;
+        ag.run_turn(&q_with_images, cancel_child).await
+    }));
+}
+
+/// Stop the turn in flight and record it as cancelled: the body Ctrl+C, Escape and an interrupting
+/// message all share, so the three cannot drift apart. Reports whether there was a turn to stop.
+#[allow(clippy::too_many_arguments)]
+async fn cancel_running_turn(
+    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+    current_cancel: &CancellationToken,
+    ui: &ChatUi,
+    turns: &mut Vec<TurnRecord>,
+    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    turn_start: std::time::Instant,
+    current_query: &str,
+    process_expanded: bool,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    current_provider: &str,
+    current_model: &str,
+) -> bool {
+    let Some(handle) = active_turn.take() else {
+        return false;
+    };
+    current_cancel.cancel();
+    handle.abort();
+    ui.stop_activity();
+    ui.clear_live_state();
+    let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+
+    let record = TurnRecord {
+        user_query: current_query.to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: current_tools,
+        duration: turn_start.elapsed(),
+        reply: "✖ Cancelled".to_string(),
+    };
+    turns.push(record);
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        redraw_transcript(turns, process_expanded);
+        ui.draw_initial_box();
+    } else {
+        println!("{}", "✖ Cancelled".red());
+    }
+
+    let context_used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
+    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
+    ui.update_status(context_used, context_max);
+    true
+}
+
+/// Send the next queued message, if there is one and nothing is in the way.
+///
+/// Called when a turn ends and from the animation tick: the tick is what unblocks a queue built up
+/// during a fold the user asked for, because that fold produces no turn-end event to drain it.
+#[allow(clippy::too_many_arguments)]
+fn drain_queue(
+    queue: &mut VecDeque<String>,
+    ui: &ChatUi,
+    turns: &[TurnRecord],
+    process_expanded: bool,
+    pending_images: &Arc<Mutex<Vec<String>>>,
+    plan_mode: &std::sync::atomic::AtomicBool,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    current_cancel: &mut CancellationToken,
+    current_query: &mut String,
+    turn_start: &mut std::time::Instant,
+    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+) {
+    if active_turn.is_some() {
+        return;
+    }
+    let Some(next_query) = queue.pop_front() else {
+        return;
+    };
+    ui.set_queue_depth(queue.len());
+    launch_turn(
+        &next_query,
+        ui,
+        turns,
+        process_expanded,
+        pending_images,
+        plan_mode,
+        agent,
+        in_flight_tools,
+        current_cancel,
+        current_query,
+        turn_start,
+        active_turn,
+    );
 }
 
 async fn prompt_approval_choice(
@@ -2128,5 +2298,34 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
     } else {
         ui.set_account_name(None);
         ui.set_quota_display(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::submission;
+
+    /// The three states a submit can meet, and the one rule that must not wobble: while the
+    /// transcript is being folded, nothing starts a turn — not even an interrupting message,
+    /// because the history it would be built on is being rewritten underneath it.
+    #[test]
+    fn a_free_agent_takes_the_message_and_a_busy_one_replaces_the_turn() {
+        assert_eq!(submission("run the tests", false, false), super::Submission::Turn);
+        assert_eq!(
+            submission("run the tests", true, false),
+            super::Submission::Interrupt
+        );
+    }
+
+    #[test]
+    fn a_fold_holds_everything_back() {
+        assert_eq!(
+            submission("run the tests", false, true),
+            super::Submission::Queue
+        );
+        assert_eq!(
+            submission("run the tests", true, true),
+            super::Submission::Queue
+        );
     }
 }

@@ -1,6 +1,6 @@
+use colored::Colorize;
 use std::io::{self, Write};
 use std::sync::Arc;
-use colored::Colorize;
 use tokio::sync::mpsc;
 
 use harness_core::{
@@ -181,7 +181,11 @@ pub(crate) async fn execute_slash_command(
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
-    let arg = parts.get(1).copied().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let arg = parts
+        .get(1)
+        .copied()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
 
     match name {
         "/model" | "/models" | "/provider" => {
@@ -201,7 +205,11 @@ pub(crate) async fn execute_slash_command(
             )
             .await
             {
-                ui.emit_above(&format!("{} Failed to switch model: {}", "✖".red().bold(), e));
+                ui.emit_above(&format!(
+                    "{} Failed to switch model: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
@@ -222,21 +230,33 @@ pub(crate) async fn execute_slash_command(
             )
             .await
             {
-                ui.emit_above(&format!("{} Failed to set compaction model: {}", "✖".red().bold(), e));
+                ui.emit_above(&format!(
+                    "{} Failed to set compaction model: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
         "/reasoning" => {
             ui.redraw_input_line();
             if let Err(e) = handle_reasoning_switch(Some(key_rx), ui, agent, arg).await {
-                ui.emit_above(&format!("{} Failed to set reasoning effort: {}", "✖".red().bold(), e));
+                ui.emit_above(&format!(
+                    "{} Failed to set reasoning effort: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
         "/name" => {
             if let Some(a) = arg {
                 if let Err(e) = handle_name_command(ui, store.as_ref(), session_id, Some(a)).await {
-                    ui.emit_above(&format!("{} Failed to set session name: {}", "✖".red().bold(), e));
+                    ui.emit_above(&format!(
+                        "{} Failed to set session name: {}",
+                        "✖".red().bold(),
+                        e
+                    ));
                 }
             } else {
                 ui.input_buf.lock().unwrap().clear();
@@ -262,7 +282,11 @@ pub(crate) async fn execute_slash_command(
             .await
             {
                 ui.draw_initial_box();
-                ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+                ui.emit_above(&format!(
+                    "{} Failed to summarize session: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
@@ -279,8 +303,13 @@ pub(crate) async fn execute_slash_command(
             Ok(false)
         }
         "/compact" => {
-            if let Err(e) = handle_compact_command(ui, agent, current_provider, current_model).await {
-                ui.emit_above(&format!("{} Failed to compact session: {}", "✖".red().bold(), e));
+            if let Err(e) = handle_compact_command(ui, agent, current_provider, current_model).await
+            {
+                ui.emit_above(&format!(
+                    "{} Failed to compact session: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
@@ -299,7 +328,11 @@ pub(crate) async fn execute_slash_command(
             } else {
                 (false, "")
             };
-            let rem_opt = if remaining_arg.is_empty() { None } else { Some(remaining_arg) };
+            let rem_opt = if remaining_arg.is_empty() {
+                None
+            } else {
+                Some(remaining_arg)
+            };
             ui.clear_box_on_exit();
             if is_summarize {
                 if let Err(e) = handle_summarize_and_new_command(
@@ -316,7 +349,11 @@ pub(crate) async fn execute_slash_command(
                 .await
                 {
                     ui.draw_initial_box();
-                    ui.emit_above(&format!("{} Failed to summarize session: {}", "✖".red().bold(), e));
+                    ui.emit_above(&format!(
+                        "{} Failed to summarize session: {}",
+                        "✖".red().bold(),
+                        e
+                    ));
                 }
             } else {
                 if let Err(e) = handle_new_command(
@@ -333,7 +370,11 @@ pub(crate) async fn execute_slash_command(
                 .await
                 {
                     ui.draw_initial_box();
-                    ui.emit_above(&format!("{} Failed to start new session: {}", "✖".red().bold(), e));
+                    ui.emit_above(&format!(
+                        "{} Failed to start new session: {}",
+                        "✖".red().bold(),
+                        e
+                    ));
                 }
             }
             Ok(false)
@@ -416,7 +457,11 @@ pub(crate) async fn execute_slash_command(
             .await
             {
                 ui.draw_initial_box();
-                ui.emit_above(&format!("{} Failed to delete session: {}", "✖".red().bold(), e));
+                ui.emit_above(&format!(
+                    "{} Failed to delete session: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
@@ -443,7 +488,11 @@ pub(crate) async fn select_slash_command(
     let mut selected: usize = 0;
 
     let get_filtered = |filter: &str| -> Vec<(usize, &'static SlashCommand)> {
-        let f = filter.strip_prefix('/').unwrap_or(filter).trim().to_lowercase();
+        let f = filter
+            .strip_prefix('/')
+            .unwrap_or(filter)
+            .trim()
+            .to_lowercase();
         if f.is_empty() {
             return SLASH_COMMANDS.iter().enumerate().collect();
         }
@@ -451,8 +500,7 @@ pub(crate) async fn select_slash_command(
             .iter()
             .enumerate()
             .filter(|(_, cmd)| {
-                cmd.name.to_lowercase().contains(&f)
-                    || cmd.details.to_lowercase().contains(&f)
+                cmd.name.to_lowercase().contains(&f) || cmd.details.to_lowercase().contains(&f)
             })
             .collect();
         // The command the user named comes first. The filter matches on "contains", so
@@ -474,7 +522,11 @@ pub(crate) async fn select_slash_command(
         let filtered = get_filtered(filt);
 
         let mut lines = Vec::with_capacity(BOX_ROWS);
-        lines.push(format!("┌{}┐", "─".repeat(width.saturating_sub(2))).dimmed().to_string());
+        lines.push(
+            format!("┌{}┐", "─".repeat(width.saturating_sub(2)))
+                .dimmed()
+                .to_string(),
+        );
 
         if filtered.is_empty() {
             let empty_msg = "(no matching commands)";
@@ -494,8 +546,16 @@ pub(crate) async fn select_slash_command(
             for idx in start..end {
                 let (_, cmd) = filtered[idx];
                 let is_sel = idx == sel;
-                let pfx = if is_sel { "❯ ".cyan().bold().to_string() } else { "  ".to_string() };
-                let cmd_styled = if is_sel { cmd.name.bold().to_string() } else { cmd.name.cyan().to_string() };
+                let pfx = if is_sel {
+                    "❯ ".cyan().bold().to_string()
+                } else {
+                    "  ".to_string()
+                };
+                let cmd_styled = if is_sel {
+                    cmd.name.bold().to_string()
+                } else {
+                    cmd.name.cyan().to_string()
+                };
 
                 let pfx_len = 2;
                 let name_len = cmd.name.chars().count();
@@ -503,12 +563,19 @@ pub(crate) async fn select_slash_command(
                 let remaining_width = inner_width.saturating_sub(pfx_len + name_len + gap_len);
 
                 let details_disp = if cmd.details.chars().count() > remaining_width {
-                    format!("{}…", cmd.details.chars().take(remaining_width.saturating_sub(1)).collect::<String>())
+                    format!(
+                        "{}…",
+                        cmd.details
+                            .chars()
+                            .take(remaining_width.saturating_sub(1))
+                            .collect::<String>()
+                    )
                 } else {
                     cmd.details.to_string()
                 };
                 let details_len = details_disp.chars().count();
-                let pad_len = inner_width.saturating_sub(pfx_len + name_len + gap_len + details_len);
+                let pad_len =
+                    inner_width.saturating_sub(pfx_len + name_len + gap_len + details_len);
 
                 lines.push(format!(
                     "│ {}{}  {}{}{} │",
@@ -525,7 +592,11 @@ pub(crate) async fn select_slash_command(
             }
         }
 
-        lines.push(format!("└{}┘", "─".repeat(width.saturating_sub(2))).dimmed().to_string());
+        lines.push(
+            format!("└{}┘", "─".repeat(width.saturating_sub(2)))
+                .dimmed()
+                .to_string(),
+        );
         lines
     };
 
@@ -754,10 +825,7 @@ async fn select_from_rx(
                         display_item.bold()
                     ));
                 } else {
-                    lines.push(format!(
-                        "\r\x1b[2K    {}",
-                        display_item.dimmed()
-                    ));
+                    lines.push(format!("\r\x1b[2K    {}", display_item.dimmed()));
                 }
             }
 
@@ -978,7 +1046,8 @@ async fn pick_provider_and_model(
             {
                 let acc = if !primary.label.is_empty() {
                     primary.label.clone()
-                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key) {
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key)
+                {
                     val.get("email")
                         .and_then(|e| e.as_str())
                         .unwrap_or("")
@@ -1019,7 +1088,10 @@ async fn pick_provider_and_model(
     let chosen_provider = available_catalog[sel].id.clone();
 
     // Fetch models for chosen provider
-    let mut models = match discovery.get_models(&chosen_provider, cred_manager, false).await {
+    let mut models = match discovery
+        .get_models(&chosen_provider, cred_manager, false)
+        .await
+    {
         Ok(m) => m,
         Err(_) => Vec::new(),
     };
@@ -1129,7 +1201,10 @@ pub(crate) async fn handle_model_switch(
         ("off / disabled", None),
     ];
 
-    let reasoning_items: Vec<String> = reasoning_options.iter().map(|(label, _)| label.to_string()).collect();
+    let reasoning_items: Vec<String> = reasoning_options
+        .iter()
+        .map(|(label, _)| label.to_string())
+        .collect();
     let current_effort = agent.lock().await.reasoning_effort();
     let default_reasoning_idx = match current_effort {
         None => 0,
@@ -1143,7 +1218,17 @@ pub(crate) async fn handle_model_switch(
 
     let reasoning_sel = if let Some(ref mut rx) = key_rx {
         while rx.try_recv().is_ok() {}
-        match select_from_rx(rx, ui, "Select Reasoning Effort", &reasoning_items, default_reasoning_idx, true, false).await {
+        match select_from_rx(
+            rx,
+            ui,
+            "Select Reasoning Effort",
+            &reasoning_items,
+            default_reasoning_idx,
+            true,
+            false,
+        )
+        .await
+        {
             Some(i) => i,
             None => {
                 ui.clear_box_on_exit();
@@ -1181,7 +1266,10 @@ pub(crate) async fn handle_model_switch(
     // The switch is session state, not just process state: stamping the row means a later
     // `luna --session <id>` resumes on this pair instead of the config default. A failure to
     // persist is surfaced as a warning — the in-memory switch already happened.
-    if let Err(error) = store.set_model(session_id, &chosen_provider, &chosen_model).await {
+    if let Err(error) = store
+        .set_model(session_id, &chosen_provider, &chosen_model)
+        .await
+    {
         ui.emit_above(&format!(
             "{} Model switched in this session, but persisting it failed: {}",
             "⚠".yellow(),
@@ -1198,10 +1286,13 @@ pub(crate) async fn handle_model_switch(
             discovery.clone(),
             config.providers.get(&chosen_provider),
         ) {
-            agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
-                provider: Arc::new(comp_client),
-                model: chosen_model.clone(),
-            }));
+            agent
+                .lock()
+                .await
+                .set_compaction(Some(harness_core::CompactionSetup {
+                    provider: Arc::new(comp_client),
+                    model: chosen_model.clone(),
+                }));
         }
     }
 
@@ -1210,9 +1301,15 @@ pub(crate) async fn handle_model_switch(
     let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(128_000);
     // Switching models does not touch the transcript, so keep the real usage rather than resetting
     // the bar to 0.
-    let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    let context_used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
     ui.set_model(&chosen_model, context_used, context_max);
-    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, &chosen_model, cred_manager).await;
+    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, &chosen_model, cred_manager)
+        .await;
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 
@@ -1243,10 +1340,13 @@ pub(crate) async fn handle_compact_model_switch(
                 discovery.clone(),
                 config.providers.get(current_provider),
             )?;
-            agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
-                provider: Arc::new(comp_client),
-                model: current_model.to_string(),
-            }));
+            agent
+                .lock()
+                .await
+                .set_compaction(Some(harness_core::CompactionSetup {
+                    provider: Arc::new(comp_client),
+                    model: current_model.to_string(),
+                }));
             ui.clear_box_on_exit();
             ui.draw_initial_box();
             ui.emit_above(&format!(
@@ -1284,10 +1384,13 @@ pub(crate) async fn handle_compact_model_switch(
         config.providers.get(&chosen_provider),
     )?;
 
-    agent.lock().await.set_compaction(Some(harness_core::CompactionSetup {
-        provider: Arc::new(comp_client),
-        model: chosen_model.clone(),
-    }));
+    agent
+        .lock()
+        .await
+        .set_compaction(Some(harness_core::CompactionSetup {
+            provider: Arc::new(comp_client),
+            model: chosen_model.clone(),
+        }));
 
     *compact_provider = Some(chosen_provider.clone());
     *compact_model = Some(chosen_model.clone());
@@ -1501,20 +1604,23 @@ pub(crate) async fn handle_diff_command(
                 if budget == 0 {
                     ui.emit_above(&format!(
                         "        {}",
-                        "… more hunks not shown in chat — pipe `luna diff` for all of them".dimmed()
+                        "… more hunks not shown in chat — pipe `luna diff` for all of them"
+                            .dimmed()
                     ));
                     break;
                 }
                 budget -= 1;
-                let painted = if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
-                    line.cyan()
-                } else if line.starts_with('+') {
-                    line.green()
-                } else if line.starts_with('-') {
-                    line.red()
-                } else {
-                    line.normal()
-                };
+                let painted =
+                    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@")
+                    {
+                        line.cyan()
+                    } else if line.starts_with('+') {
+                        line.green()
+                    } else if line.starts_with('-') {
+                        line.red()
+                    } else {
+                        line.normal()
+                    };
                 ui.emit_above(&format!("        {}", painted));
             }
         }
@@ -1785,7 +1891,10 @@ pub(crate) async fn handle_summarize_and_new_command(
         .await?;
 
     let summary_header = if !name.is_empty() {
-        format!("Context summary from session '{}' ({}):\n{}", name, old_id, summary)
+        format!(
+            "Context summary from session '{}' ({}):\n{}",
+            name, old_id, summary
+        )
     } else {
         format!("Context summary from session {}:\n{}", old_id, summary)
     };
@@ -1831,11 +1940,7 @@ pub(crate) async fn handle_summarize_and_new_command(
                 old_id.dimmed()
             ));
         }
-        ui.emit_above(&format!(
-            "\n{}\n{}\n",
-            "Summary:".bold(),
-            summary.dimmed()
-        ));
+        ui.emit_above(&format!("\n{}\n{}\n", "Summary:".bold(), summary.dimmed()));
     } else {
         if name.is_empty() {
             println!(
@@ -1861,43 +1966,39 @@ pub(crate) async fn handle_summarize_and_new_command(
 
 /// `/compact`: fold the current session's oldest turns into a summary in place — the session
 /// keeps its id and name, only the context shrinks.
+///
+/// The fold runs as its own task and reports through the agent's compaction events, so the
+/// composer stays live and animates while the summary call is in flight. The agent lock is what
+/// arbitrates: a turn holds it for its whole run, so a fold asked for mid-turn is refused instead
+/// of being silently parked behind the turn.
 pub(crate) async fn handle_compact_command(
     ui: &ChatUi,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     current_provider: &str,
     current_model: &str,
 ) -> Result<(), HarnessError> {
-    ui.start_activity("compact context", "compact", &serde_json::json!({}));
-    let result = {
-        let ag = agent.lock().await;
-        ag.compact_current_session().await
-    };
-    ui.stop_activity();
-
-    match result {
-        Ok(notice) => {
-            // A fold that took no whole turn — one huge message, or a transcript with
-            // fewer turns than we keep — is still a fold, and saying "0 turns" would
-            // read as if nothing happened.
-            let folded = if notice.turns > 0 {
-                format!("{} turns ({} messages)", notice.turns, notice.messages)
-            } else {
-                format!("{} messages", notice.messages)
-            };
+    let ui = ui.clone();
+    let agent = agent.clone();
+    let current_provider = current_provider.to_string();
+    let current_model = current_model.to_string();
+    tokio::spawn(async move {
+        let Ok(ag) = agent.try_lock() else {
             ui.emit_above(&format!(
-                "{} Compacted {} into 1 summary",
-                "✔".green().bold(),
-                folded
+                "{} Cannot compact while a turn is running: interrupt it (send a message or press Escape), then run /compact",
+                "✖".red().bold()
             ));
+            return;
+        };
+        // Everything that happens inside the fold — the animation, the report, the failure — is
+        // emitted as compaction events, so this task only refreshes the gauge afterwards.
+        if ag.compact_current_session().await.is_ok() {
             // The summary replaced the folded turns, so the gauge drops for real.
-            let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-            let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
+            let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
+            let context_max =
+                get_context_window(&current_provider, &current_model).unwrap_or(128_000);
             ui.update_status(context_used, context_max);
         }
-        Err(e) => {
-            ui.emit_above(&format!("{} Failed to compact session: {}", "✖".red().bold(), e));
-        }
-    }
+    });
 
     Ok(())
 }
@@ -1935,7 +2036,10 @@ pub(crate) async fn handle_reasoning_switch(
             ("xhigh", Some(ReasoningEffort::Xhigh)),
             ("max", Some(ReasoningEffort::Max)),
         ];
-        let reasoning_items: Vec<String> = reasoning_options.iter().map(|(label, _)| label.to_string()).collect();
+        let reasoning_items: Vec<String> = reasoning_options
+            .iter()
+            .map(|(label, _)| label.to_string())
+            .collect();
         let current_effort = agent.lock().await.reasoning_effort();
         let default_idx = match current_effort {
             None => 0,
@@ -1949,7 +2053,17 @@ pub(crate) async fn handle_reasoning_switch(
 
         if let Some(ref mut rx) = key_rx {
             while rx.try_recv().is_ok() {}
-            match select_from_rx(rx, ui, "Select Reasoning Effort", &reasoning_items, default_idx, false, false).await {
+            match select_from_rx(
+                rx,
+                ui,
+                "Select Reasoning Effort",
+                &reasoning_items,
+                default_idx,
+                false,
+                false,
+            )
+            .await
+            {
                 Some(i) => reasoning_options[i].1,
                 None => {
                     return Ok(());
@@ -1977,4 +2091,3 @@ pub(crate) async fn handle_reasoning_switch(
 
     Ok(())
 }
-

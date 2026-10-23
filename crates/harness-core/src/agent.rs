@@ -591,26 +591,47 @@ where
     /// `agent.compact_at_tokens` — this is the `/compact` command. Nothing to fold (the session
     /// holds no more turns than `agent.keep_recent_turns`), no compaction setup, or a failed
     /// summary is an error, because the user asked for the fold explicitly.
+    ///
+    /// Every outcome is also announced as a [`AgentEvent::CompactionFinished`] with `forced: true`,
+    /// including the failures raised here before `compact_once` would have run — a UI that reports
+    /// folds from the events alone must never miss the reason a fold it asked for did not happen.
     pub async fn compact_current_session(&self) -> Result<CompactionNotice, HarnessError> {
         if self.compaction.is_none() {
-            return Err(HarnessError::SessionError(
+            let error = HarnessError::SessionError(
                 "compaction is unavailable: no compaction provider is configured — set agent.compaction_provider and agent.compaction_model, or pick one with /compact-model"
                     .to_string(),
-            ));
+            );
+            self.announce_compaction_failure(&error);
+            return Err(error);
         }
         let (history, _) = self.load_history().await?;
         let system_text = self.system_prompt("").await?;
         let mut messages = Vec::new();
-        let notice = self
+        let notice = match self
             .compact_once(&history, &system_text, &mut messages, true)
             .await?
-            .ok_or_else(|| {
-                HarnessError::SessionError(
+        {
+            Some(notice) => notice,
+            None => {
+                let error = HarnessError::SessionError(
                     "nothing to compact: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
                         .to_string(),
-                )
-            })?;
+                );
+                self.announce_compaction_failure(&error);
+                return Err(error);
+            }
+        };
         Ok(notice)
+    }
+
+    /// Tell the observer a fold the user asked for will not happen, and why.
+    fn announce_compaction_failure(&self, error: &HarnessError) {
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::CompactionFinished {
+                folded: None,
+                error: Some(error.to_string()),
+            });
+        }
     }
 
     /// Whether this call must be put to the human: the flag is on *and* the tool mutates (or

@@ -1139,7 +1139,6 @@ impl ChatUi {
         self.redraw_box();
     }
 
-    #[allow(dead_code)]
     pub fn redraw_queue_line(&self) {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
@@ -1280,6 +1279,76 @@ mod tests {
         assert!(ui.todo_collapsed());
         assert!(!ui.toggle_todo_collapsed(), "unfolding says it is open");
         assert!(!ui.todo_collapsed());
+    }
+
+    #[test]
+    fn queued_messages_get_a_line_and_lose_it_when_the_queue_drains() {
+        let ui = ChatUi::new(true);
+        assert!(ui.format_queue_line(80).is_none(), "nothing queued, no line");
+
+        ui.set_queue_depth(2);
+        assert_eq!(ui.queue_depth(), 2);
+        let line = ui
+            .format_queue_line(80)
+            .expect("queued messages are announced");
+        let plain = dialoguer::console::strip_ansi_codes(&line).to_string();
+        assert!(plain.contains('2'), "the count is shown: {plain}");
+        assert!(plain.contains("queued"), "the state is named: {plain}");
+
+        // Drained: the line goes away again, and the row count with it.
+        let with_line = ui.box_row_count();
+        ui.set_queue_depth(0);
+        assert!(ui.format_queue_line(80).is_none());
+        assert_eq!(ui.box_row_count(), with_line - 1);
+    }
+
+    /// A queued line sits in the composer like the background-task line it imitates, and the erase
+    /// metrics record it: a row the erase does not know about is left behind on the next redraw.
+    #[test]
+    fn the_queued_line_is_part_of_the_drawn_box() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 0, 1_000);
+        ui.set_queue_depth(1);
+
+        let rows = ui.composer_rows(80, "");
+        let queue_at = rows
+            .iter()
+            .position(|r| r.contains("queued"))
+            .expect("the queue line is drawn");
+        let status_at = rows
+            .iter()
+            .position(|r| r.contains("ctx"))
+            .expect("the status line is drawn");
+        assert!(
+            queue_at < status_at,
+            "the queue line sits above the status line: {:?}",
+            rows
+        );
+
+        let boxed = ui.clone();
+        capture_stdout(move || boxed.draw_box(80, ""));
+        let metrics = ui.drawn_metrics.lock().unwrap();
+        let drawn = metrics.as_ref().expect("the box was drawn");
+        assert!(drawn.queued_line_len > 0, "the drawn row is measured");
+    }
+
+    #[test]
+    fn compaction_animates_between_start_and_finish() {
+        let ui = ChatUi::new(true);
+        assert!(!ui.is_compacting(), "no fold is running");
+
+        ui.start_compaction(false);
+        assert!(ui.is_compacting(), "the fold is marked as running");
+
+        ui.start_compaction(true);
+        assert!(ui.is_compacting(), "a second start replaces, not duplicates");
+
+        ui.finish_compaction();
+        assert!(!ui.is_compacting(), "the fold is over");
+
+        // Finishing with nothing running is a no-op, not a panic.
+        ui.finish_compaction();
+        assert!(!ui.is_compacting());
     }
 
     /// Replays the shape of a turn: the composer is drawn, the agent answers, the
