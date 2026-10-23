@@ -2,11 +2,12 @@ use colored::Colorize;
 use dialoguer::console::Term;
 use harness_core::tools::todo::TodoSnapshot;
 use std::io::{self, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, needs_separator, reasoning_rows, tool_activity_detail, OutputBlockKind, PROMPT,
+    activity_line, compaction_line, needs_separator, reasoning_rows, tool_activity_detail,
+    OutputBlockKind, PROMPT,
 };
 
 /// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
@@ -83,12 +84,29 @@ struct Activity {
     frame: usize,
 }
 
+/// A fold of the oldest turns, as far as the animation is concerned.
+///
+/// Carried in the live region rather than printed once, because the summary call takes seconds and
+/// the user is watching a transcript that is about to be rewritten underneath them.
+#[derive(Clone)]
+struct Compaction {
+    /// True for `/compact`, false for the automatic pass at the top of a turn: the row says which,
+    /// so a fold the user did not ask for is never mistaken for one they did.
+    forced: bool,
+    started: std::time::Instant,
+    frame: usize,
+}
+
 /// The in-place region between the transcript and the composer: the tail of the reasoning as it
-/// streams in, and the animated line for a running tool.
+/// streams in, the animated line for a running tool, and the sweep shown while the transcript is
+/// being folded.
 #[derive(Default)]
 struct LiveRegion {
     reasoning: String,
     activity: Option<Activity>,
+    /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
+    /// only thing happening that the user cannot see the shape of.
+    compaction: Option<Compaction>,
     patch_diff: Option<Vec<String>>,
     rows: Vec<String>,
 }
@@ -119,6 +137,7 @@ pub struct BackgroundTaskState {
 struct BoxDrawnMetrics {
     width: usize,
     bg_line_len: usize,
+    queued_line_len: usize,
     status_line_len: usize,
     divider_len: usize,
     prompt_len: usize,
@@ -159,6 +178,9 @@ pub struct ChatUi {
     todo_snapshot: Arc<Mutex<Option<TodoSnapshot>>>,
     /// Whether the panel is folded to a single row.
     todo_collapsed: Arc<AtomicBool>,
+    /// Messages the user submitted while the agent could not take them yet, still waiting to be
+    /// sent. Only the count lives here: the queue itself belongs to the loop that drains it.
+    queue_depth: Arc<AtomicUsize>,
     box_drawn: Arc<AtomicBool>,
     drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
     pub is_attended: bool,
@@ -218,6 +240,7 @@ impl ChatUi {
             bg_task: Arc::new(Mutex::new(None)),
             todo_snapshot: Arc::new(Mutex::new(None)),
             todo_collapsed: Arc::new(AtomicBool::new(false)),
+            queue_depth: Arc::new(AtomicUsize::new(0)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             drawn_metrics: Arc::new(Mutex::new(None)),
             is_attended,
@@ -333,6 +356,7 @@ impl ChatUi {
 
     pub fn box_row_count(&self) -> usize {
         4 + if self.has_background_task() { 1 } else { 0 }
+            + if self.queue_depth() > 0 { 1 } else { 0 }
             + self.todo_panel_rows(get_terminal_width()).len()
     }
 
@@ -377,11 +401,56 @@ impl ChatUi {
         self.live.lock().unwrap().activity = None;
     }
 
+    /// A fold of the oldest turns has started: animate it until [`Self::finish_compaction`].
+    ///
+    /// Nothing is printed here in either mode. In the TUI the row is drawn by the animation tick,
+    /// and an unattended run says what is happening with the summary line that follows — a static
+    /// "compacting…" line with no way to ever update it would be worse than silence.
+    pub fn start_compaction(&self, forced: bool) {
+        let mut live = self.live.lock().unwrap();
+        live.compaction = Some(Compaction {
+            forced,
+            started: std::time::Instant::now(),
+            frame: 0,
+        });
+    }
+
+    /// The fold is over, whatever it produced: stop animating it. Reporting what was folded is the
+    /// caller's job, because the same event carries the failure to report.
+    pub fn finish_compaction(&self) {
+        let had = {
+            let mut live = self.live.lock().unwrap();
+            live.compaction.take().is_some()
+        };
+        if had {
+            // One final draw without the row, so the sweep does not stay frozen on screen while the
+            // transcript below it is rewritten.
+            self.animate_tick();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_compacting(&self) -> bool {
+        self.live.lock().unwrap().compaction.is_some()
+    }
+
+    /// How many submitted messages are waiting to be sent.
+    #[allow(dead_code)]
+    pub fn set_queue_depth(&self, depth: usize) {
+        self.queue_depth.store(depth, Ordering::SeqCst);
+        self.redraw_queue_line();
+    }
+
+    pub fn queue_depth(&self) -> usize {
+        self.queue_depth.load(Ordering::SeqCst)
+    }
+
     pub fn clear_live_state(&self) {
         let mut live = self.live.lock().unwrap();
         live.reasoning.clear();
         live.rows.clear();
         live.activity = None;
+        live.compaction = None;
         live.patch_diff = None;
     }
 
@@ -562,6 +631,33 @@ impl ChatUi {
         }
     }
 
+    /// The line that says messages are waiting, drawn above the status line.
+    ///
+    /// A message the user submitted while the agent could not take it is acknowledged here instead
+    /// of the transcript: it has not been sent, so it does not belong in the conversation yet, but
+    /// silently swallowing it would look like the keystroke was lost.
+    pub fn format_queue_line(&self, width: usize) -> Option<String> {
+        let queued = self.queue_depth();
+        if queued == 0 {
+            return None;
+        }
+        let left = format!(
+            "{} {} queued — sent when the agent is free",
+            "⏸".yellow().bold(),
+            queued
+        );
+        let left_visible = dialoguer::console::strip_ansi_codes(&left).to_string();
+        if dialoguer::console::measure_text_width(&left_visible) <= width {
+            return Some(left);
+        }
+        // Narrower than the sentence: keep the count, drop the explanation.
+        let short_visible = format!("⏸ {} queued", queued);
+        if dialoguer::console::measure_text_width(&short_visible) <= width {
+            return Some(short_visible.yellow().to_string());
+        }
+        None
+    }
+
     pub fn format_status_line(&self, width: usize) -> Option<String> {
         let status = self.status.lock().unwrap();
         let s = status.as_ref()?;
@@ -704,6 +800,11 @@ impl ChatUi {
             } else {
                 0
             };
+            let queued_rows = if m.queued_line_len > 0 {
+                physical_line_count(m.queued_line_len, current_width)
+            } else {
+                0
+            };
             let live_rows: usize = m
                 .live_rows_lens
                 .iter()
@@ -721,6 +822,7 @@ impl ChatUi {
                 + top_divider_rows
                 + status_rows
                 + bg_rows
+                + queued_rows
                 + live_rows
                 + panel_rows;
             (below, above)
@@ -811,6 +913,16 @@ impl ChatUi {
                 ));
             }
 
+            if let Some(compaction) = &mut live.compaction {
+                compaction.frame = compaction.frame.wrapping_add(1);
+                rows.push(compaction_line(
+                    compaction.frame,
+                    compaction.forced,
+                    compaction.started.elapsed(),
+                    width,
+                ));
+            }
+
             if let Some(diff) = &live.patch_diff {
                 const MAX_LIVE_DIFF: usize = 20;
                 if diff.len() <= MAX_LIVE_DIFF {
@@ -851,6 +963,9 @@ impl ChatUi {
         if let Some(bg) = self.format_background_task_line(width) {
             rows.push(bg);
         }
+        if let Some(queued) = self.format_queue_line(width) {
+            rows.push(queued);
+        }
         if let Some(status) = self.format_status_line(width) {
             rows.push(status);
         }
@@ -880,11 +995,13 @@ impl ChatUi {
 
         let panel = self.todo_panel_rows(width);
         let bg_line = self.format_background_task_line(width);
+        let queue_line = self.format_queue_line(width);
         let status_str = self.format_status_line(width);
 
         *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
             width,
             bg_line_len: bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
+            queued_line_len: queue_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             status_line_len: status_str.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             divider_len: width,
             prompt_len: visible_width(&prompt_str),
@@ -1017,6 +1134,14 @@ impl ChatUi {
             || !self.box_drawn.load(Ordering::SeqCst)
             || !self.has_background_task()
         {
+            return;
+        }
+        self.redraw_box();
+    }
+
+    #[allow(dead_code)]
+    pub fn redraw_queue_line(&self) {
+        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
         self.redraw_box();
