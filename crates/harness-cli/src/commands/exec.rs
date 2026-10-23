@@ -37,7 +37,6 @@ use super::approval::approval_settings;
 use super::chat::ChatAgent;
 use super::sessions::{open_store, resolve_session, SessionSelection};
 
-
 /// How `luna exec` was invoked.
 pub struct ExecOptions {
     /// The prompt, or `None` to read it from stdin.
@@ -99,7 +98,9 @@ pub async fn run_exec(
         config.providers.get(&provider_id),
     )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+    let memory = Arc::new(SqliteMemoryEngine::new(Some(
+        config.paths.memory_db.clone(),
+    ))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
     let evolver = Arc::new(
         CodebaseEvolver::new(
@@ -179,7 +180,8 @@ pub async fn run_exec(
             .with_network_policy(config.tools.network),
     );
     // The todo list belongs to the session this run belongs to.
-    let todo_scope = harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
+    let todo_scope =
+        harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
     harness_core::tools::register_core_tools_shared_queue(
         &reg_dyn,
         &config,
@@ -212,6 +214,7 @@ pub async fn run_exec(
         ..AgentConfig::default()
     };
     agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
+    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     if let Some(skills_summary) = skills_summary(&config) {
         agent_cfg.skills_summary = Some(skills_summary);
     }
@@ -267,6 +270,9 @@ pub async fn run_exec(
                 AgentEvent::ContextTokensUpdated { tokens_used } => {
                     serde_json::json!({"type": "context_tokens", "tokens_used": tokens_used})
                 }
+                // Compaction is reported by the turn's own output in headless mode, where there is
+                // no animation to drive.
+                _ => return,
             };
             emit(&line);
         });
@@ -402,7 +408,9 @@ fn read_prompt(prompt: Option<String>) -> Result<String, HarnessError> {
             let mut buffer = String::new();
             std::io::stdin()
                 .read_to_string(&mut buffer)
-                .map_err(|error| HarnessError::Io(format!("cannot read the prompt from stdin: {error}")))?;
+                .map_err(|error| {
+                    HarnessError::Io(format!("cannot read the prompt from stdin: {error}"))
+                })?;
             Ok(buffer)
         }
         Some(text) => Ok(text.to_string()),

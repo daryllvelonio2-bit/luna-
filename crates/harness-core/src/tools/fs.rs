@@ -1,8 +1,8 @@
+use async_trait::async_trait;
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use async_trait::async_trait;
-use serde_json::json;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -103,7 +103,6 @@ fn char_safe_cut(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
-
 /// Opt-in extra reach for every filesystem tool: `paths.extra_roots`.
 ///
 /// The default is the workspace and nothing else. An operator who wants `/tmp` (or a scratch
@@ -176,31 +175,49 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolResult, HarnessError> {
         let path_str = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'path'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'path'",
+                ))
+            }
         };
 
-        let resolved = match self.sandbox().resolve(path_str) {
+        let mut resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            return Ok(ToolResult::error(
-                call_id,
-                format!("File not found: {}", path_str),
-            ));
+            let crates_alt = self.workspace_root.join("crates").join(path_str.trim_start_matches("./"));
+            if crates_alt.exists() && crates_alt.is_file() {
+                resolved = crates_alt;
+            } else {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("File not found: '{}' (relative to workspace root '{}')", path_str, self.workspace_root.display()),
+                ));
+            }
         }
 
         let content = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
-            Err(e) => return Ok(ToolResult::error(call_id, format!("Failed to read file: {}", e))),
+            Err(e) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Failed to read file: {}", e),
+                ))
+            }
         };
 
         // Cache content for read-before-write verification
         self.read_cache.record_read(&resolved, &content).await;
 
         let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(1) as usize;
-        let limit = args.get("limit").and_then(|l| l.as_u64()).map(|l| l as usize);
+        let limit = args
+            .get("limit")
+            .and_then(|l| l.as_u64())
+            .map(|l| l as usize);
 
         let lines: Vec<&str> = content.lines().collect();
         let start = if offset > 0 { offset - 1 } else { 0 };
@@ -315,11 +332,21 @@ impl Tool for WriteFileTool {
     ) -> Result<ToolResult, HarnessError> {
         let path_str = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'path'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'path'",
+                ))
+            }
         };
         let content = match args.get("content").and_then(|c| c.as_str()) {
             Some(c) => c,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'content'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'content'",
+                ))
+            }
         };
 
         let resolved = match self.sandbox().resolve(path_str) {
@@ -331,9 +358,18 @@ impl Tool for WriteFileTool {
         if resolved.exists() {
             let current = match tokio::fs::read_to_string(&resolved).await {
                 Ok(c) => c,
-                Err(e) => return Ok(ToolResult::error(call_id, format!("Failed to read existing file: {}", e))),
+                Err(e) => {
+                    return Ok(ToolResult::error(
+                        call_id,
+                        format!("Failed to read existing file: {}", e),
+                    ))
+                }
             };
-            if let Err(refusal) = self.read_cache.verify_and_update(&resolved, &current, content).await {
+            if let Err(refusal) = self
+                .read_cache
+                .verify_and_update(&resolved, &current, content)
+                .await
+            {
                 return Ok(ToolResult::error(call_id, refusal));
             }
         } else {
@@ -411,9 +447,18 @@ impl Tool for PatchTool {
         let path = args.get("path").and_then(|p| p.as_str())?;
         let old_str = args.get("old_string").and_then(|s| s.as_str())?;
         let new_str = args.get("new_string").and_then(|s| s.as_str())?;
-        let replace_all = args.get("replace_all").and_then(|r| r.as_bool()).unwrap_or(false);
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false);
 
-        let resolved = self.sandbox().resolve(path).ok()?;
+        let mut resolved = self.sandbox().resolve(path).ok()?;
+        if !resolved.exists() {
+            let crates_alt = self.workspace_root.join("crates").join(path.trim_start_matches("./"));
+            if crates_alt.exists() && crates_alt.is_file() {
+                resolved = crates_alt;
+            }
+        }
         let current = std::fs::read_to_string(&resolved).ok()?;
 
         let patched = if replace_all {
@@ -437,33 +482,61 @@ impl Tool for PatchTool {
     ) -> Result<ToolResult, HarnessError> {
         let path_str = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'path'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'path'",
+                ))
+            }
         };
         let old_str = match args.get("old_string").and_then(|s| s.as_str()) {
             Some(s) => s,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'old_string'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'old_string'",
+                ))
+            }
         };
         let new_str = match args.get("new_string").and_then(|s| s.as_str()) {
             Some(s) => s,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'new_string'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'new_string'",
+                ))
+            }
         };
-        let replace_all = args.get("replace_all").and_then(|r| r.as_bool()).unwrap_or(false);
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false);
 
-        let resolved = match self.sandbox().resolve(path_str) {
+        let mut resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            return Ok(ToolResult::error(
-                call_id,
-                format!("File not found: {}", path_str),
-            ));
+            let crates_alt = self.workspace_root.join("crates").join(path_str.trim_start_matches("./"));
+            if crates_alt.exists() && crates_alt.is_file() {
+                resolved = crates_alt;
+            } else {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("File not found: '{}' (relative to workspace root '{}')", path_str, self.workspace_root.display()),
+                ));
+            }
         }
 
         let current = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
-            Err(e) => return Ok(ToolResult::error(call_id, format!("Failed to read file: {}", e))),
+            Err(e) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Failed to read file: {}", e),
+                ))
+            }
         };
 
         let count = current.matches(old_str).count();
@@ -489,7 +562,11 @@ impl Tool for PatchTool {
             current.replacen(old_str, new_str, 1)
         };
 
-        if let Err(refusal) = self.read_cache.verify_and_update_patch(&resolved, &current, &patched).await {
+        if let Err(refusal) = self
+            .read_cache
+            .verify_and_update_patch(&resolved, &current, &patched)
+            .await
+        {
             return Ok(ToolResult::error(call_id, refusal));
         }
 
@@ -632,22 +709,39 @@ impl Tool for SearchFilesTool {
     ) -> Result<ToolResult, HarnessError> {
         let pattern = match args.get("pattern").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'pattern'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'pattern'",
+                ))
+            }
         };
         let search_path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
         let file_glob = args.get("file_glob").and_then(|g| g.as_str());
-        let output_mode = args.get("output_mode").and_then(|m| m.as_str()).unwrap_or("content");
+        let output_mode = args
+            .get("output_mode")
+            .and_then(|m| m.as_str())
+            .unwrap_or("content");
 
-        let resolved = match self.sandbox().resolve(search_path_str) {
+        let mut resolved = match self.sandbox().resolve(search_path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            return Ok(ToolResult::error(
-                call_id,
-                format!("Directory not found: {}", search_path_str),
-            ));
+            let crates_alt = self.workspace_root.join("crates").join(search_path_str.trim_start_matches("./"));
+            if crates_alt.exists() {
+                resolved = crates_alt;
+            } else {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!(
+                        "Path not found: '{}' (relative to workspace root '{}')",
+                        search_path_str,
+                        self.workspace_root.display()
+                    ),
+                ));
+            }
         }
 
         // The walk and the file reads are blocking syscalls. Running them on the async
@@ -660,7 +754,14 @@ impl Tool for SearchFilesTool {
         let cancel = cancel_token.clone();
 
         let scan = tokio::task::spawn_blocking(move || {
-            scan_files(&root, &resolved, &pattern, file_glob.as_deref(), &scan_mode, &cancel)
+            scan_files(
+                &root,
+                &resolved,
+                &pattern,
+                file_glob.as_deref(),
+                &scan_mode,
+                &cancel,
+            )
         })
         .await
         .map_err(|e| HarnessError::Io(format!("search task failed: {}", e)))??;
@@ -922,11 +1023,10 @@ impl Tool for ListFilesTool {
         // The walk is a blocking syscall; owning a blocking thread keeps a large tree from
         // parking an async worker, the same reason `search_files` runs its scan this way.
         let request_glob = glob.clone();
-        let (entries, truncated) = tokio::task::spawn_blocking(move || {
-            list_entries(&root, &resolved, glob.as_deref())
-        })
-        .await
-        .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
+        let (entries, truncated) =
+            tokio::task::spawn_blocking(move || list_entries(&root, &resolved, glob.as_deref()))
+                .await
+                .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
 
         // An empty result must say *why* it is empty: a silent success reads as "nothing to
         // see here" when the truth is a glob that matched nothing or an empty directory.
@@ -952,11 +1052,7 @@ impl Tool for ListFilesTool {
 
 /// Recursively list entries under `resolved`, skipping noise directories and applying the
 /// optional glob. Returns the sorted entries and whether the cap stopped the walk early.
-fn list_entries(
-    workspace_root: &Path,
-    resolved: &Path,
-    glob: Option<&str>,
-) -> (Vec<String>, bool) {
+fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (Vec<String>, bool) {
     let mut entries: Vec<String> = Vec::new();
     let mut truncated = false;
 
@@ -1071,7 +1167,10 @@ mod tests {
         assert_eq!(entries.len(), MAX_LISTED_ENTRIES);
         assert_eq!(entries.first().map(String::as_str), Some("00000.txt"));
         let expected_last = format!("{:05}.txt", MAX_LISTED_ENTRIES - 1);
-        assert_eq!(entries.last().map(String::as_str), Some(expected_last.as_str()));
+        assert_eq!(
+            entries.last().map(String::as_str),
+            Some(expected_last.as_str())
+        );
     }
 
     /// A bare glob matches the entry *name*, so `*rust-harness*` finds `rust-harness.md` but
@@ -1091,7 +1190,10 @@ mod tests {
         assert_eq!(dirs, vec!["rust-agent-harness/".to_string()]);
 
         let (nothing, _) = list_entries(root, root, Some("*nope*"));
-        assert!(nothing.is_empty(), "an unmatched glob returns nothing, not a guess");
+        assert!(
+            nothing.is_empty(),
+            "an unmatched glob returns nothing, not a guess"
+        );
     }
 
     #[test]

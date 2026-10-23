@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use colored::Colorize;
 use futures_util::stream::BoxStream;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
@@ -9,9 +9,7 @@ use harness_evolver::{
     CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, InspectSourceTool,
     VerifyAndStageUpdateTool,
 };
-use harness_memory::{
-    ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
-};
+use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
     UpdateNoteTool,
@@ -69,10 +67,24 @@ pub async fn run_voice_loop(
     let provider_id = config.model.provider.clone();
 
     crate::commands::clear_screen();
-    println!("{}", "==================================================".cyan());
-    println!("{}", "   Luna Hands-Free Voice Interface (\"Luna\")        ".bold().cyan());
-    println!("{}", "==================================================".cyan());
-    println!("Wake word: {}\nListening on microphone...", "Luna".green().bold());
+    println!(
+        "{}",
+        "==================================================".cyan()
+    );
+    println!(
+        "{}",
+        "   Luna Hands-Free Voice Interface (\"Luna\")        "
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "==================================================".cyan()
+    );
+    println!(
+        "Wake word: {}\nListening on microphone...",
+        "Luna".green().bold()
+    );
 
     let provider = Arc::new(GenericProviderClient::new(
         provider_id.clone(),
@@ -82,7 +94,9 @@ pub async fn run_voice_loop(
         config.providers.get(&provider_id),
     )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+    let memory = Arc::new(SqliteMemoryEngine::new(Some(
+        config.paths.memory_db.clone(),
+    ))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
     let evolver = Arc::new(
         CodebaseEvolver::new(
@@ -93,19 +107,45 @@ pub async fn run_voice_loop(
     );
     let registry = Arc::new(DefaultToolRegistry::new());
 
-    registry.register(Arc::new(SaveMemoryTool::new(memory.clone()))).await?;
-    registry.register(Arc::new(UpdateMemoryTool::new(memory.clone()))).await?;
-    registry.register(Arc::new(ForgetMemoryTool::new(memory.clone()))).await?;
-    registry.register(Arc::new(SaveNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(ListNotesTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(InspectSourceTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone()))).await?;
+    registry
+        .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(SaveNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(SearchNotesTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ListNotesTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ReadNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(InspectSourceTool::new(evolver.clone())))
+        .await?;
+    registry
+        .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
+        .await?;
+    registry
+        .register(Arc::new(CheckImprovementTool::new(evolver.clone())))
+        .await?;
+    registry
+        .register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone())))
+        .await?;
 
     // Register core filesystem and shell tools (§2.2)
     let read_cache = harness_core::tools::ReadCache::new();
@@ -119,7 +159,8 @@ pub async fn run_voice_loop(
 
     let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
-    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
+    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
+    {
         all_skills.extend(skills);
     }
     let workspace_skills = config.paths.workspace_root.join(".harness/skills");
@@ -142,7 +183,9 @@ pub async fn run_voice_loop(
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
         registry
-            .register(Arc::new(harness_plugins::SkillViewTool::new(skills_arc.clone())))
+            .register(Arc::new(harness_plugins::SkillViewTool::new(
+                skills_arc.clone(),
+            )))
             .await?;
         registry
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
@@ -151,20 +194,14 @@ pub async fn run_voice_loop(
 
     let mut agent_cfg = config.agent.clone();
     agent_cfg.skills_summary = skills_summary;
+    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
 
     let agent = Arc::new(
-        Agent::new(
-            provider,
-            memory,
-            notes,
-            evolver,
-            registry,
-            agent_cfg,
-        )
-        .with_permissions(harness_core::PermissionEngine::validate(
-            config.tools.permissions.clone(),
-        )?)
-        .with_approval(build_approver(&config), approval_settings(&config)),
+        Agent::new(provider, memory, notes, evolver, registry, agent_cfg)
+            .with_permissions(harness_core::PermissionEngine::validate(
+                config.tools.permissions.clone(),
+            )?)
+            .with_approval(build_approver(&config), approval_settings(&config)),
     );
 
     let session = VoiceSession::new(

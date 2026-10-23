@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -43,6 +44,9 @@ pub struct AgentConfig {
     /// Compact one-line summary index of available skills (e.g. "- name: description")
     #[serde(default)]
     pub skills_summary: Option<String>,
+    /// Root directory of the workspace. Injected into system prompt so the model knows its working directory.
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -59,6 +63,7 @@ impl Default for AgentConfig {
             engineer_model: None,
             engineer_provider: None,
             skills_summary: None,
+            workspace_root: None,
         }
     }
 }
@@ -127,6 +132,20 @@ pub enum AgentEvent {
     /// A steering message arrived and was injected mid-turn into conversation context.
     Steered {
         text: String,
+    },
+    /// A fold of the oldest turns is underway: the summary call is in flight and the transcript
+    /// will be rewritten when it lands. Emitted for both the automatic pass at the top of a turn
+    /// and an explicit `/compact`, which is why it carries `forced`.
+    ///
+    /// A UI needs this to animate: the fold can take seconds, and without a start event the only
+    /// evidence of it is the summary that appears afterwards.
+    CompactionStarted { forced: bool },
+    /// The fold finished, whatever came of it: `folded` is the summary that replaced the oldest
+    /// turns, `error` is why a fold the user asked for did not happen. Both `None` means there was
+    /// nothing to fold (or an automatic fold failed and the turn continued on the full transcript).
+    CompactionFinished {
+        folded: Option<CompactionNotice>,
+        error: Option<String>,
     },
     ContextTokensUpdated {
         tokens_used: u32,
@@ -1371,13 +1390,34 @@ where
             .as_deref()
             .unwrap_or("(no specialized skills installed)");
 
-        Ok(crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
+        let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
             .replace(
                 "{{SYSTEM_PROMPT_PREFIX}}",
                 self.config.system_prompt_prefix.as_deref().unwrap_or(""),
             )
             .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
-            .replace("{{AVAILABLE_SKILLS}}", skills_prompt))
+            .replace("{{AVAILABLE_SKILLS}}", skills_prompt);
+
+        let env_info = if let Some(ref root) = self.config.workspace_root {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
+            format!(
+                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root. Changing directory with cd in terminal does not persist to native tools or across turns.",
+                root.display(),
+                cwd.display(),
+                std::env::consts::OS,
+            )
+        } else if let Ok(cwd) = std::env::current_dir() {
+            format!(
+                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root.",
+                cwd.display(),
+                cwd.display(),
+                std::env::consts::OS,
+            )
+        } else {
+            String::new()
+        };
+
+        Ok(format!("{}{}", base, env_info))
     }
 
     /// The session's recent transcript, plus the notice the console prints about the bound.
@@ -1434,6 +1474,13 @@ where
             );
         }
 
+        // From here on the fold really happens, so the observer is told before the summary call is
+        // made: the wait is seconds long and a UI that only learns about it afterwards has nothing
+        // to show while the user is waiting.
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::CompactionStarted { forced: force });
+        }
+
         let outcome: CompactionOutcome = match compact(
             setup.provider.as_ref(),
             &setup.model,
@@ -1444,6 +1491,12 @@ where
         {
             Ok(Some(outcome)) => outcome,
             Ok(None) => {
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::CompactionFinished {
+                        folded: None,
+                        error: None,
+                    });
+                }
                 debug!(
                         "Nothing to fold: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
                     );
@@ -1453,6 +1506,12 @@ where
                 // The user asked for the fold: a failure is the answer, not a silent
                 // "there was nothing to compact". Say what actually went wrong.
                 if force {
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: None,
+                            error: Some(failure.to_string()),
+                        });
+                    }
                     return Err(failure);
                 }
                 // Non-fatal by design: the transcript is unchanged, the turn runs on the full
@@ -1461,6 +1520,12 @@ where
                     "Compaction failed, continuing on the full transcript: {}",
                     failure
                 );
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::CompactionFinished {
+                        folded: None,
+                        error: None,
+                    });
+                }
                 return Ok(None);
             }
         };
@@ -1478,11 +1543,18 @@ where
         *messages = outcome.bounded_messages(system_text.to_string());
         messages.extend(user_line);
 
-        Ok(Some(CompactionNotice {
+        let notice = CompactionNotice {
             session_id: binding.session_id.clone(),
             turns: outcome.folded_turns,
             messages: outcome.folded_messages,
-        }))
+        };
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::CompactionFinished {
+                folded: Some(notice.clone()),
+                error: None,
+            });
+        }
+        Ok(Some(notice))
     }
 
     /// Append to the session store, if this run is bound to one. A failed write is an error: the
