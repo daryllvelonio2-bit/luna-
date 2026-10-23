@@ -1,8 +1,8 @@
+use async_trait::async_trait;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use async_trait::async_trait;
-use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
@@ -54,10 +54,7 @@ impl TerminalTool {
     }
 
     /// `tools.network`: whether this tool's children may reach the network.
-    pub fn with_network_policy(
-        mut self,
-        policy: crate::tools::netguard::NetworkPolicy,
-    ) -> Self {
+    pub fn with_network_policy(mut self, policy: crate::tools::netguard::NetworkPolicy) -> Self {
         self.network = policy;
         self
     }
@@ -179,10 +176,11 @@ pub async fn try_rtk_rewrite(command: &str, rtk_path: &Path) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
 
-    let output = match tokio::time::timeout(std::time::Duration::from_millis(1500), cmd.output()).await {
-        Ok(Ok(out)) => out,
-        _ => return None,
-    };
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_millis(1500), cmd.output()).await {
+            Ok(Ok(out)) => out,
+            _ => return None,
+        };
 
     if output.status.code() == Some(0) || output.status.code() == Some(3) {
         let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -307,6 +305,31 @@ pub async fn check_sudo_nopasswd(workdir: &Path) -> bool {
     }
 }
 
+/// In Unix/POSIX environments, exit code 1 from query tools (grep, diff, cmp, test)
+/// signals "zero matches" or "inputs differ", not an operational or syntax failure.
+/// Treating these as successful returns keeps benign negative searches from littering
+/// the chat transcript with red `(failed)` badges.
+fn is_benign_exit(cmd: &str, code: i32) -> bool {
+    if code != 1 {
+        return false;
+    }
+    let last_pipeline_segment = cmd.split('|').last().unwrap_or(cmd).trim();
+    let mut words = last_pipeline_segment.split_whitespace();
+    let mut bin = words.next().unwrap_or("").trim_start_matches("./");
+
+    // Skip wrapping runners like rtk, sudo, env, etc.
+    while matches!(bin, "rtk" | "sudo" | "env" | "nohup" | "time") {
+        bin = words.next().unwrap_or("").trim_start_matches("./");
+    }
+
+    let bin_name = bin.rsplit('/').next().unwrap_or(bin);
+
+    matches!(
+        bin_name,
+        "grep" | "egrep" | "fgrep" | "rg" | "rgrep" | "diff" | "cmp" | "test" | "["
+    )
+}
+
 #[async_trait]
 impl Tool for TerminalTool {
     fn name(&self) -> &str {
@@ -314,7 +337,7 @@ impl Tool for TerminalTool {
     }
 
     fn description(&self) -> &str {
-        "Execute shell commands in the workspace with bounded timeout and output capture."
+        "Execute shell commands in the workspace (builds, tests, git, package managers, processes). Do NOT use for inspecting or searching files — use read_file and search_files instead."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -351,7 +374,12 @@ impl Tool for TerminalTool {
     ) -> Result<ToolResult, HarnessError> {
         let command = match args.get("command").and_then(|c| c.as_str()) {
             Some(c) => c,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'command'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'command'",
+                ))
+            }
         };
 
         let effective_command = self.resolve_command(command).await;
@@ -366,7 +394,10 @@ impl Tool for TerminalTool {
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
-        let background = args.get("background").and_then(|b| b.as_bool()).unwrap_or(false);
+        let background = args
+            .get("background")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         if background {
             if let Some(ref q) = self.queue {
                 return match q.spawn(&effective_command, &resolved_workdir) {
@@ -377,9 +408,15 @@ impl Tool for TerminalTool {
                             "status": "running",
                             "message": format!("Task running in background. Use process(action='poll', job_id='{}') to check progress.", job_id),
                         });
-                        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&msg).unwrap_or_default()))
+                        Ok(ToolResult::success(
+                            call_id,
+                            serde_json::to_string_pretty(&msg).unwrap_or_default(),
+                        ))
                     }
-                    Err(e) => Ok(ToolResult::error(call_id, format!("Failed to queue background task: {}", e))),
+                    Err(e) => Ok(ToolResult::error(
+                        call_id,
+                        format!("Failed to queue background task: {}", e),
+                    )),
                 };
             }
         }
@@ -509,11 +546,20 @@ impl Tool for TerminalTool {
                                 *self.sudo_cache.lock().unwrap() = None;
                             }
                             let code = output.status.code().unwrap_or(-1);
-                            Ok(ToolResult {
-                                call_id: call_id.to_string(),
-                                content: format!("exit code: {}\n{}", code, stdout),
-                                is_error: true,
-                            })
+                            if is_benign_exit(&final_exec_command, code) {
+                                let content = if stdout.trim().is_empty() {
+                                    "(no matches found)".to_string()
+                                } else {
+                                    stdout
+                                };
+                                Ok(ToolResult::success(call_id, content))
+                            } else {
+                                Ok(ToolResult {
+                                    call_id: call_id.to_string(),
+                                    content: format!("exit code: {}\n{}", code, stdout),
+                                    is_error: true,
+                                })
+                            }
                         }
                     }
                     Ok(Err(e)) => {
