@@ -308,6 +308,7 @@ async fn main() -> Result<(), HarnessError> {
     // user who has never configured Luna gets the briefing instead of an agent loop that fails on a
     // missing provider. It only ever runs on an attended `luna`/`luna chat`: `exec`, pipes and CI
     // stay headless, and `LUNA_FIRST_RUN=false` or `luna config set first_run false` skips it.
+    let mut ran_first_run_onboarding = false;
     if is_interactive_chat && harness_onboarding::needs_onboarding(&layers)? {
         let outcome = harness_onboarding::run_interactive(&layers)?;
         tracing::info!(
@@ -317,6 +318,7 @@ async fn main() -> Result<(), HarnessError> {
         );
         // Re-resolve so this same run uses the persona it just wrote.
         config = config::resolve(&layers)?.into_config();
+        ran_first_run_onboarding = true;
     }
 
     // The persona's voice is prefixed to the system prompt. An explicit
@@ -341,6 +343,11 @@ async fn main() -> Result<(), HarnessError> {
     // corrupt-store defect this merge fixes is exactly a `CredentialManager::new` that used to
     // silently fall back to an empty store. It now reads the config-resolved path.
     let cred_manager = CredentialManager::new(Some(config.paths.credentials.clone()))?;
+
+    if is_interactive_chat && ran_first_run_onboarding {
+        commands::auth::handle_interactive_auth(cred_manager.clone()).await?;
+        config = config::resolve(&layers)?.into_config();
+    }
     let discovery = Arc::new(ModelDiscovery::new(
         Some(config.paths.models_cache.clone()),
         MODEL_CACHE_TTL_HOURS,
@@ -500,6 +507,7 @@ async fn main() -> Result<(), HarnessError> {
                 outcome.persona.name,
                 outcome.config_path.display()
             );
+            handle_interactive_auth(cred_manager).await?;
         }
         Some(Commands::Eval { subcommand }) => {
             handle_eval_command(subcommand, cred_manager, discovery, &config).await?;

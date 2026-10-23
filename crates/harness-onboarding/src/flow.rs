@@ -42,7 +42,7 @@ pub const MISSION: [&str; 3] = [
 /// The line that hands the floor to the user.
 pub const TRANSITION: &str = "── Let's tune my neural core to your style ──";
 /// The confirmation headline.
-pub const LINK_TITLE: &str = "🌙  Neural link established.";
+pub const LINK_TITLE: &str = "🌙  Persona configured.";
 /// How many rejected answers are tolerated before the flow gives up instead of looping forever.
 pub const MAX_ATTEMPTS: usize = 10;
 
@@ -249,7 +249,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(block.contains("Neural link established"));
+        assert!(block.contains("Persona configured"));
         assert!(block.contains(&persona.labelled()));
         assert!(block.contains("/home/janelle/.luna/config.yaml"));
         assert!(block.contains(persona.tagline));

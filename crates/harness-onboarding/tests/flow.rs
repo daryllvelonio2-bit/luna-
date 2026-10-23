@@ -96,7 +96,7 @@ fn a_fresh_install_is_onboarded_and_the_choice_is_persisted() {
     assert_eq!(config["persona"]["name"].as_str(), Some("Celestial Oracle"));
     assert_eq!(config["first_run"].as_bool(), Some(false));
 
-    assert!(rendered.contains("Neural link established"));
+    assert!(rendered.contains("Persona configured"));
     assert!(rendered.contains("Celestial Oracle (id 3)"));
     assert!(rendered.contains("Config written to"));
 }

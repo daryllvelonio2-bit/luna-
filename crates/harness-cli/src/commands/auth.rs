@@ -1,9 +1,13 @@
+use std::io::Write;
 use std::sync::Arc;
 use clap::Subcommand;
 use colored::Colorize;
 use dialoguer::{Input, Password, Select};
 
 use harness_core::HarnessError;
+use harness_onboarding::menu::{panel_header, Panel};
+use harness_onboarding::screen::{self, Size};
+use harness_onboarding::style::Line;
 use harness_providers::{
     get_provider_catalog, CredentialManager, RotationStrategy,
 };
@@ -262,104 +266,273 @@ pub async fn handle_auth_command(
     Ok(())
 }
 
-/// Interactive credential pool management when `luna auth` is called bare.
-pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
-    println!("{}", "Credential Pool Status".bold().underline());
-    println!("{}", "==================================================".dimmed());
-    handle_auth_command(AuthCommand::List { provider: None }, cred_manager.clone()).await?;
-    println!();
+fn current_terminal_size() -> Size {
+    match crossterm::terminal::size() {
+        Ok((cols, rows)) => Size::new(cols, rows),
+        _ => Size::fallback(),
+    }
+}
 
-    let choices = [
-        "Add a credential",
-        "Remove a credential",
-        "Reset cooldowns for a provider",
-        "Set rotation strategy for a provider",
-        "Copy Antigravity credentials (from logged-in session)",
-        "Copy OpenCode credentials (from OpenCode CLI / Shiina)",
-        "Exit",
-    ];
-
-    println!("{}", "What would you like to do?".bold());
-    for (i, choice) in choices.iter().enumerate() {
-        println!("  {}. {}", i + 1, choice);
+fn print_styled_line(line: &Line) {
+    for span in &line.spans {
+        let mut text = span.text.clone();
+        if span.bold {
+            text = text.bold().to_string();
+        }
+        if let Some(c) = span.color {
+            text = match c {
+                crossterm::style::Color::Cyan => text.cyan().to_string(),
+                crossterm::style::Color::Yellow => text.yellow().to_string(),
+                crossterm::style::Color::DarkGrey => text.dimmed().to_string(),
+                crossterm::style::Color::Green => text.green().to_string(),
+                crossterm::style::Color::Red => text.red().to_string(),
+                crossterm::style::Color::White => text.white().to_string(),
+                _ => text,
+            };
+        }
+        print!("{}", text);
     }
     println!();
+}
 
-    let selection = match Input::<String>::new().with_prompt("Choice [1-7]").interact_text() {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return Ok(()),
-    };
+pub const AUTH_PANEL: Panel = Panel {
+    title: "🌙  LUNA",
+    subtitle: "MODEL PROVIDER SETUP",
+    caption: "Connect your AI model providers and API keys",
+};
 
-    match selection.as_str() {
-        "1" => interactive_add(cred_manager).await?,
-        "2" => interactive_remove(cred_manager).await?,
-        "3" => interactive_reset(cred_manager).await?,
-        "4" => interactive_strategy(cred_manager).await?,
-        "5" => {
-            handle_auth_command(
-                AuthCommand::Antigravity {
-                    subcommand: AntigravitySubcommand::Copy,
-                },
-                cred_manager,
-            )
-            .await?;
+async fn get_configured_summary(cred_manager: Arc<CredentialManager>) -> Vec<String> {
+    let catalog = get_provider_catalog();
+    let mut configured = Vec::new();
+    for p in &catalog {
+        let creds = cred_manager.get_credentials(&p.id).await;
+        if !creds.is_empty() {
+            configured.push(format!("{} ({} key{})", p.display_name, creds.len(), if creds.len() > 1 { "s" } else { "" }));
         }
-        "6" => {
-            handle_auth_command(
-                AuthCommand::Opencode {
-                    subcommand: OpencodeSubcommand::Copy,
-                },
-                cred_manager,
-            )
-            .await?;
+    }
+    configured
+}
+
+fn pause_prompt() {
+    println!();
+    print!("  Press Enter to continue...");
+    let _ = std::io::stdout().flush();
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_line(&mut buf);
+}
+
+/// Interactive credential pool management when `luna auth` or `luna setup` is called.
+pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+    loop {
+        let size = current_terminal_size();
+        let widest = 68;
+
+        print!("\x1b[2J\x1b[H");
+
+        let header_lines = panel_header(size, &AUTH_PANEL, widest);
+        for line in &header_lines {
+            print_styled_line(line);
         }
-        _ => {}
+        println!();
+
+        let configured = get_configured_summary(cred_manager.clone()).await;
+        let status_text = if configured.is_empty() {
+            "Status: No providers connected yet. Choose an option below to connect.".dimmed().to_string()
+        } else {
+            format!("{} {}", "Status: Connected:".green().bold(), configured.join(", ").cyan())
+        };
+        println!("{}", screen::centered(&status_text, size.columns));
+        println!();
+
+        let options = [
+            ("1", "Add Provider API Key", "Connect NVIDIA NIM, OpenRouter, Anthropic, OpenAI, etc."),
+            ("2", "Import Antigravity / Google", "Use Google login session from Antigravity"),
+            ("3", "Import OpenCode / Shiina", "Use credentials from local OpenCode / Shiina"),
+            ("4", "List Configured Credentials", "Inspect active keys, usage counts, and status"),
+            ("5", "Remove a Credential", "Delete an API key from the local pool"),
+            ("6", "Advanced Settings", "Reset cooldowns or configure rotation strategies"),
+            ("7", "Finish Setup", "Save and proceed"),
+        ];
+
+        let menu_lines: Vec<String> = options
+            .iter()
+            .map(|(num, label, desc)| {
+                format!(
+                    "  {}  {:<26} {}",
+                    num.bold().cyan(),
+                    label.bold(),
+                    desc.dimmed()
+                )
+            })
+            .collect();
+
+        for line in screen::center_group(menu_lines.iter().map(String::as_str), size.columns) {
+            println!("{}", line);
+        }
+        println!();
+
+        let prompt = screen::centered("Select 1-7 [default: 1] ▸ ", size.columns);
+        print!("{}", prompt);
+        let _ = std::io::stdout().flush();
+
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            return Ok(());
+        }
+        let choice = input.trim();
+        let choice = if choice.is_empty() { "1" } else { choice };
+
+        match choice {
+            "1" => {
+                interactive_add(cred_manager.clone()).await?;
+            }
+            "2" => {
+                println!();
+                handle_auth_command(
+                    AuthCommand::Antigravity {
+                        subcommand: AntigravitySubcommand::Copy,
+                    },
+                    cred_manager.clone(),
+                )
+                .await?;
+                pause_prompt();
+            }
+            "3" => {
+                println!();
+                handle_auth_command(
+                    AuthCommand::Opencode {
+                        subcommand: OpencodeSubcommand::Copy,
+                    },
+                    cred_manager.clone(),
+                )
+                .await?;
+                pause_prompt();
+            }
+            "4" => {
+                println!();
+                handle_auth_command(AuthCommand::List { provider: None }, cred_manager.clone()).await?;
+                pause_prompt();
+            }
+            "5" => {
+                interactive_remove(cred_manager.clone()).await?;
+            }
+            "6" => {
+                println!();
+                let adv_choices = [
+                    "Reset cooldowns for a provider",
+                    "Set rotation strategy for a provider",
+                    "Back",
+                ];
+                let sel = Select::new()
+                    .with_prompt("Advanced Action")
+                    .items(&adv_choices)
+                    .default(0)
+                    .interact()
+                    .unwrap_or(2);
+                if sel == 0 {
+                    interactive_reset(cred_manager.clone()).await?;
+                } else if sel == 1 {
+                    interactive_strategy(cred_manager.clone()).await?;
+                }
+            }
+            "7" | "q" | "exit" => {
+                println!();
+                println!("{}", screen::centered(&format!("{} Setup complete. You are ready to chat with Luna.", "🌙".cyan()), size.columns));
+                println!();
+                break;
+            }
+            _ => {}
+        }
     }
 
     Ok(())
 }
 
 async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
-    let catalog = get_provider_catalog();
-    let items: Vec<String> = catalog
+    println!();
+    let popular_providers = [
+        ("nvidia", "NVIDIA NIM", "Fast DeepSeek-V3, DeepSeek-R1, Llama 3.3"),
+        ("openrouter", "OpenRouter", "Unified access to Claude, GPT-4o, DeepSeek, etc."),
+        ("gemini", "Google Gemini", "Gemini 2.0 Flash, Gemini 1.5 Pro"),
+        ("anthropic", "Anthropic", "Claude 3.5 Sonnet, Claude 3.5 Haiku"),
+        ("openai", "OpenAI", "GPT-4o, o3-mini"),
+        ("deepseek", "DeepSeek", "Official DeepSeek API (deepseek-chat, deepseek-reasoner)"),
+        ("groq", "Groq", "High-speed inference (Llama 3.3 70B, Mixtral)"),
+        ("ollama", "Ollama", "Local models (no API key required)"),
+        ("custom", "Custom Endpoint", "OpenAI-compatible server (vLLM, LM Studio, local)"),
+    ];
+
+    let mut items: Vec<String> = popular_providers
         .iter()
-        .map(|c| format!("{} ({})", c.display_name, c.id))
+        .map(|(id, name, desc)| format!("{:<14} - {:<16} ({})", id.cyan(), name.bold(), desc.dimmed()))
         .collect();
+    items.push(format!("{:<14} - {:<16} ({})", "other".cyan(), "Other Providers".bold(), "Pick from full catalog".dimmed()));
+    items.push(format!("{:<14} - Back to menu", "cancel".dimmed()));
+
     let selection = Select::new()
-        .with_prompt("Select Provider")
+        .with_prompt("Select AI Provider")
         .items(&items)
         .default(0)
         .interact()
         .map_err(|e| HarnessError::Io(e.to_string()))?;
-    let provider_id = catalog[selection].id.clone();
 
+    if selection == items.len() - 1 {
+        return Ok(());
+    }
+
+    let provider_id = if selection < popular_providers.len() {
+        popular_providers[selection].0.to_string()
+    } else {
+        let catalog = get_provider_catalog();
+        let cat_items: Vec<String> = catalog
+            .iter()
+            .map(|c| format!("{} ({})", c.display_name, c.id))
+            .collect();
+        let cat_sel = Select::new()
+            .with_prompt("Select Provider from Catalog")
+            .items(&cat_items)
+            .default(0)
+            .interact()
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
+        catalog[cat_sel].id.clone()
+    };
+
+    println!();
+    let default_label = format!("{}-primary", provider_id);
     let label = Input::<String>::new()
-        .with_prompt("Credential Label (e.g. 'work-account', 'backup-key')")
+        .with_prompt("Credential Label")
+        .default(default_label)
         .interact_text()
         .map_err(|e| HarnessError::Io(e.to_string()))?;
 
-    let api_key = Password::new()
-        .with_prompt("API Key (masked)")
-        .interact()
-        .map_err(|e| HarnessError::Io(e.to_string()))?;
+    let api_key = if provider_id == "ollama" {
+        "ollama-local".to_string()
+    } else {
+        Password::new()
+            .with_prompt("API Key (masked)")
+            .interact()
+            .map_err(|e| HarnessError::Io(e.to_string()))?
+    };
 
     let is_priority = dialoguer::Confirm::new()
-        .with_prompt("Set as priority/primary credential?")
-        .default(false)
+        .with_prompt("Set as primary credential for this provider?")
+        .default(true)
         .interact()
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     let id = cred_manager
         .add_credential(&provider_id, &label, &api_key, is_priority)
         .await?;
 
+    println!();
     println!(
-        "{} Credential '{}' registered for provider '{}' (ID: {})",
+        "  {} Credential '{}' registered for provider '{}' (ID: {})",
         "✔".green().bold(),
         label.bold(),
         provider_id.cyan(),
         id
     );
+    pause_prompt();
     Ok(())
 }
 
