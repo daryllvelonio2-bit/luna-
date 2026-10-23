@@ -369,6 +369,8 @@ pub(crate) async fn execute_slash_command(
         }
         "/clear" => {
             turns.clear();
+            let _ = std::fs::remove_file(todo_scope.path());
+            ui.set_todo_panel(None);
             crate::commands::clear_screen();
             ui.draw_initial_box();
             Ok(false)

@@ -50,7 +50,7 @@ const MIN_PANEL_WIDTH: usize = 40;
 /// The panel is a box: a header carrying the counts, one row per task, and a footer
 /// with the fold hint. Collapsed it is a single row.
 pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool, width: usize) -> Vec<String> {
-    if snapshot.items.is_empty() {
+    if snapshot.items.is_empty() || snapshot.is_finished() {
         return Vec::new();
     }
 
@@ -176,10 +176,28 @@ fn task_row(item: &TodoItem, id_width: usize, width: usize) -> String {
 ///
 /// The panel is drawn from the file the tool writes, so it shows the list as it
 /// stands now rather than as it stood when the turn started.
+///
+/// A list with nothing left to do retires the panel: a checklist that stays on screen
+/// at "3/3 done" is stale chrome the user has to read past. The tasks are not
+/// forgotten — the file keeps them, every `todo_list` call stays in the transcript —
+/// and the panel comes back the moment the session has open work again.
 pub fn refresh_panel(ui: &ChatUi, scope: &TodoScope) {
     let snapshot = read_session_snapshot(scope);
-    let empty = snapshot.items.is_empty();
-    ui.set_todo_panel(if empty { None } else { Some(snapshot) });
+    let finished = snapshot.is_finished();
+    let was_visible = ui.has_todo_panel();
+    ui.set_todo_panel(if finished { None } else { Some(snapshot.clone()) });
+
+    // Say why the panel went away, once. A checklist that vanishes silently reads as
+    // a bug; a line saying the work is done reads as an ending.
+    if finished && was_visible && !snapshot.items.is_empty() {
+        let (done, total) = (snapshot.counts().0, snapshot.items.len());
+        ui.emit_above(&format!(
+            "{} todo list complete ({}/{} done) — panel cleared",
+            "✔".green().bold(),
+            done,
+            total
+        ));
+    }
 }
 
 /// Render one `todo_list` call as the task it acts on, rather than as its arguments.
@@ -467,6 +485,82 @@ mod tests {
 
         assert_eq!(read_session_snapshot(&first).items.len(), 1);
         assert_eq!(read_session_snapshot(&second).items.len(), 0);
+    }
+
+    /// Write a list of `(text, status)` tasks to the session's file.
+    fn write_list(scope: &TodoScope, tasks: &[(&str, &str)]) {
+        let items: Vec<serde_json::Value> = tasks
+            .iter()
+            .enumerate()
+            .map(|(id, (text, status))| json!({ "id": id, "text": text, "status": status }))
+            .collect();
+        std::fs::create_dir_all(scope.path().parent().unwrap()).unwrap();
+        std::fs::write(
+            scope.path(),
+            serde_json::to_string_pretty(&json!({
+                "next_id": tasks.len(),
+                "items": items,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A finished list retires the panel: a box parked at "2/2 done" is chrome the user
+    /// has to read past, and the work it describes is over.
+    #[test]
+    fn a_finished_list_retires_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = TodoScope::new(dir.path().join("todos"), "s1");
+        let ui = ChatUi::new(false);
+
+        write_list(&scope, &[("one", "done"), ("two", "done")]);
+        refresh_panel(&ui, &scope);
+        assert!(!ui.has_todo_panel(), "an all-done list must not keep its panel");
+        assert!(ui.todo_panel_rows(80).is_empty());
+
+        // Open work brings the panel straight back.
+        write_list(&scope, &[("one", "done"), ("two", "pending")]);
+        refresh_panel(&ui, &scope);
+        assert!(ui.has_todo_panel(), "open work must show the panel again");
+        assert_eq!(
+            ui.todo_panel_rows(80).len(),
+            4,
+            "border, two tasks, border"
+        );
+
+        // An emptied list drops the panel too.
+        write_list(&scope, &[]);
+        refresh_panel(&ui, &scope);
+        assert!(!ui.has_todo_panel());
+    }
+
+    /// The panel follows the list step by step, not only when the turn ends: every
+    /// `todo_list` call replays the file, so a task marked done is ticked at once.
+    #[test]
+    fn every_change_to_the_list_repaints_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = TodoScope::new(dir.path().join("todos"), "s1");
+        let ui = ChatUi::new(false);
+
+        write_list(&scope, &[("one", "pending"), ("two", "pending"), ("three", "pending")]);
+        refresh_panel(&ui, &scope);
+        assert!(ui.todo_panel_rows(80)[0].contains("0/3 done"), "got: {:?}", ui.todo_panel_rows(80));
+
+        write_list(&scope, &[("one", "done"), ("two", "pending"), ("three", "pending")]);
+        refresh_panel(&ui, &scope);
+        assert!(
+            ui.todo_panel_rows(80)[0].contains("1/3 done"),
+            "the first task must be ticked while the others are still open: {:?}",
+            ui.todo_panel_rows(80)
+        );
+
+        write_list(&scope, &[("one", "done"), ("two", "done"), ("three", "done")]);
+        refresh_panel(&ui, &scope);
+        assert!(
+            !ui.has_todo_panel(),
+            "the panel retires as soon as the last task is done"
+        );
     }
 }
 

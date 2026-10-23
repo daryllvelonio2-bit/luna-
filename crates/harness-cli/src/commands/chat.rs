@@ -431,12 +431,11 @@ pub async fn run_interactive_chat(
                     format_tool_result(is_error, &output)
                 }
             };
-            ui_obs.emit_above(&line);
-            // The list changed: the panel above the composer is redrawn with it, so
-            // the user watches the tasks move rather than finding them in the scroll.
+            // The list changed: refresh before drawing so the panel displays the new state immediately
             if name == "todo_list" {
                 todo::refresh_panel(&ui_obs, &todo_scope_obs);
             }
+            ui_obs.emit_above(&line);
         }
         harness_core::AgentEvent::Steered { text } => {
             ui_obs.finish_reasoning();
@@ -1468,6 +1467,7 @@ pub async fn run_interactive_chat(
                         turns.push(record);
 
                         if ui.is_attended {
+                            todo::refresh_panel(&ui, &todo_scope);
                             crate::commands::clear_screen();
                             redraw_transcript(&turns, process_expanded);
                             ui.draw_initial_box();
@@ -1499,6 +1499,7 @@ pub async fn run_interactive_chat(
                         turns.push(record);
 
                         if ui.is_attended {
+                            todo::refresh_panel(&ui, &todo_scope);
                             crate::commands::clear_screen();
                             redraw_transcript(&turns, process_expanded);
                             ui.draw_initial_box();
@@ -1530,6 +1531,7 @@ pub async fn run_interactive_chat(
                             *ui.input_buf.lock().unwrap() = "continue".to_string();
 
                             if ui.is_attended {
+                                todo::refresh_panel(&ui, &todo_scope);
                                 crate::commands::clear_screen();
                                 redraw_transcript(&turns, process_expanded);
                                 ui.draw_initial_box();
@@ -1579,6 +1581,7 @@ pub async fn run_interactive_chat(
                             *ui.input_buf.lock().unwrap() = "continue".to_string();
 
                             if ui.is_attended {
+                                todo::refresh_panel(&ui, &todo_scope);
                                 crate::commands::clear_screen();
                                 redraw_transcript(&turns, process_expanded);
                                 ui.draw_initial_box();

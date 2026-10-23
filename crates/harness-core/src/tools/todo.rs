@@ -132,7 +132,9 @@ impl TodoStatus {
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_lowercase().as_str() {
             "pending" | "todo" | "open" => Some(Self::Pending),
-            "in_progress" | "in-progress" | "inprogress" | "doing" | "working" => Some(Self::InProgress),
+            "in_progress" | "in-progress" | "inprogress" | "doing" | "working" => {
+                Some(Self::InProgress)
+            }
             "done" | "completed" | "complete" | "finished" | "closed" => Some(Self::Done),
             _ => None,
         }
@@ -173,6 +175,16 @@ impl TodoSnapshot {
     /// The task with this id, if the list still has it.
     pub fn find(&self, id: u64) -> Option<&TodoItem> {
         self.items.iter().find(|item| item.id == id)
+    }
+
+    /// Whether the list has work left, i.e. at least one task that is not finished.
+    ///
+    /// An empty list is *finished*, not complete: there is nothing to track, so a host that draws a
+    /// checklist should retire it either way.
+    pub fn is_finished(&self) -> bool {
+        self.items
+            .iter()
+            .all(|item| item.status == TodoStatus::Done)
     }
 }
 
@@ -228,10 +240,11 @@ impl TodoListTool {
             let _ = std::fs::create_dir_all(parent);
         }
         let tmp = path.with_extension("json.tmp");
-        let raw = serde_json::to_string_pretty(file).map_err(|e| HarnessError::ToolExecutionFailed {
-            tool: self.name().to_string(),
-            reason: format!("cannot serialize todo list: {}", e),
-        })?;
+        let raw =
+            serde_json::to_string_pretty(file).map_err(|e| HarnessError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("cannot serialize todo list: {}", e),
+            })?;
         std::fs::write(&tmp, raw).map_err(|e| HarnessError::ToolExecutionFailed {
             tool: self.name().to_string(),
             reason: format!("cannot write {}: {}", tmp.display(), e),
@@ -249,7 +262,12 @@ impl TodoListTool {
         }
         let mut lines = Vec::with_capacity(file.items.len());
         for item in &file.items {
-            lines.push(format!("[{}] {} {}", item.id, item.status.as_str(), item.text));
+            lines.push(format!(
+                "[{}] {} {}",
+                item.id,
+                item.status.as_str(),
+                item.text
+            ));
         }
         lines.join("\n")
     }
@@ -300,7 +318,10 @@ impl Tool for TodoListTool {
     }
 
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("list");
         let target = match action {
             "add" => {
                 if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
@@ -321,10 +342,7 @@ impl Tool for TodoListTool {
             )),
             _ => None,
         };
-        Some(ToolPreview {
-            target,
-            diff: None,
-        })
+        Some(ToolPreview { target, diff: None })
     }
 
     async fn execute(
@@ -333,7 +351,10 @@ impl Tool for TodoListTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("list");
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("list");
 
         // The whole read-modify-write runs under one lock; SQLite-style per-statement locking
         // would let two interleaved calls drop each other's items.
@@ -348,18 +369,30 @@ impl Tool for TodoListTool {
             "list" => Self::render(&file),
             "add" => {
                 let mut texts_to_add = Vec::new();
-                if let Some(arr) = args.get("tasks").or_else(|| args.get("items")).and_then(|v| v.as_array()) {
+                if let Some(arr) = args
+                    .get("tasks")
+                    .or_else(|| args.get("items"))
+                    .and_then(|v| v.as_array())
+                {
                     for v in arr {
                         if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
                             texts_to_add.push(s.to_string());
                         }
                     }
-                } else if let Some(t) = args.get("text").and_then(|t| t.as_str()).map(str::trim).filter(|t| !t.is_empty()) {
+                } else if let Some(t) = args
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
                     if t.contains('\n') {
                         for line in t.lines() {
-                            let clean = line.trim()
+                            let clean = line
+                                .trim()
                                 .trim_start_matches(['-', '*', '+', '•'])
-                                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+                                .trim_start_matches(|c: char| {
+                                    c.is_ascii_digit() || c == '.' || c == ')'
+                                })
                                 .trim();
                             if !clean.is_empty() {
                                 texts_to_add.push(clean.to_string());
@@ -386,11 +419,17 @@ impl Tool for TodoListTool {
                     added_msgs.push(format!("[{}] (pending): {}", id, text));
                 }
                 self.store(&file)?;
-                if added_msgs.len() == 1 {
+                let mut out = if added_msgs.len() == 1 {
                     format!("added {}", added_msgs[0])
                 } else {
-                    format!("added {} tasks:\n{}", added_msgs.len(), added_msgs.join("\n"))
-                }
+                    format!(
+                        "added {} tasks:\n{}",
+                        added_msgs.len(),
+                        added_msgs.join("\n")
+                    )
+                };
+                out.push_str("\n\nReminder: Keep this checklist updated in real time. Call `todo_list(action: \"update\", id: <id>, status: \"in_progress\"|\"done\")` immediately after each step is finished so the user sees live progress.");
+                out
             }
             "update" => {
                 let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
@@ -416,7 +455,8 @@ impl Tool for TodoListTool {
                 }
                 let rendered = format!("[{}] {} {}", item.id, item.status.as_str(), item.text);
                 self.store(&file)?;
-                rendered
+                let done = file.items.iter().filter(|i| i.status == TodoStatus::Done).count();
+                format!("{} ({}/{} tasks completed)", rendered, done, file.items.len())
             }
             "remove" => {
                 let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
@@ -437,11 +477,17 @@ impl Tool for TodoListTool {
                 self.store(&file)?;
                 format!("cleared {} done task(s)", removed)
             }
+            "clear" | "clear_all" | "reset" => {
+                let count = file.items.len();
+                file.items.clear();
+                self.store(&file)?;
+                format!("cleared all {} task(s)", count)
+            }
             other => {
                 return Ok(ToolResult::error(
                     call_id,
                     format!(
-                        "unknown action '{}': use list, add, update, remove or clear_done",
+                        "unknown action '{}': use list, add, update, remove, clear_done or clear",
                         other
                     ),
                 ));
@@ -538,7 +584,11 @@ mod tests {
         run(&t, json!({"action": "add", "text": "on disk"})).await;
 
         let path = shared.path();
-        assert!(path.exists(), "the list should be a file at {}", path.display());
+        assert!(
+            path.exists(),
+            "the list should be a file at {}",
+            path.display()
+        );
         assert!(path.starts_with(dir.path()), "got: {}", path.display());
 
         let snapshot = read_snapshot(&path);
@@ -572,6 +622,11 @@ mod tests {
         let r = run(&t, json!({"action": "list"})).await;
         assert!(r.content.contains("open thing"));
         assert!(!r.content.contains("done thing"));
+
+        let r_all = run(&t, json!({"action": "clear"})).await;
+        assert!(r_all.content.contains("cleared all 1"));
+        let r_empty = run(&t, json!({"action": "list"})).await;
+        assert!(r_empty.content.contains("[todo list is empty]"));
     }
 
     #[tokio::test]
@@ -583,7 +638,11 @@ mod tests {
         assert!(r.is_error);
         let r = run(&t, json!({"action": "update", "id": 9, "status": "done"})).await;
         assert!(r.is_error);
-        let r = run(&t, json!({"action": "update", "id": 0, "status": "finished"})).await;
+        let r = run(
+            &t,
+            json!({"action": "update", "id": 0, "status": "finished"}),
+        )
+        .await;
         assert!(r.is_error);
         let r = run(&t, json!({"action": "explode"})).await;
         assert!(r.is_error);
@@ -602,7 +661,11 @@ mod tests {
     #[tokio::test]
     async fn state_persists_across_instances() {
         let dir = tempfile::tempdir().unwrap();
-        run(&tool(&dir, "s1"), json!({"action": "add", "text": "survives"})).await;
+        run(
+            &tool(&dir, "s1"),
+            json!({"action": "add", "text": "survives"}),
+        )
+        .await;
         let r = run(&tool(&dir, "s1"), json!({"action": "list"})).await;
         assert!(r.content.contains("survives"));
     }
@@ -613,7 +676,11 @@ mod tests {
         let t = tool(&dir, "s1");
 
         // 1. Array of tasks
-        let r = run(&t, json!({"action": "add", "tasks": ["Task one", "Task two", "Task three"]})).await;
+        let r = run(
+            &t,
+            json!({"action": "add", "tasks": ["Task one", "Task two", "Task three"]}),
+        )
+        .await;
         assert!(!r.is_error);
         assert!(r.content.contains("added 3 tasks"));
 
@@ -623,7 +690,11 @@ mod tests {
         assert!(list.content.contains("[2] pending Task three"));
 
         // 2. Multiline list with markdown bullets
-        let r2 = run(&t, json!({"action": "add", "text": "- First step\n- Second step\n- Third step"})).await;
+        let r2 = run(
+            &t,
+            json!({"action": "add", "text": "- First step\n- Second step\n- Third step"}),
+        )
+        .await;
         assert!(!r2.is_error);
         assert!(r2.content.contains("added 3 tasks"));
 
@@ -640,5 +711,36 @@ mod tests {
         let path = scope.path();
         assert_eq!(path.parent().unwrap(), dir.path());
         assert!(!path.to_string_lossy().contains(".."));
+    }
+
+    /// A list with nothing left to do is what a host retires its checklist on.
+    #[test]
+    fn a_list_with_nothing_left_is_finished() {
+        let item = |status| TodoItem {
+            id: 0,
+            text: "task".to_string(),
+            status,
+        };
+
+        assert!(
+            !TodoSnapshot {
+                items: vec![item(TodoStatus::Done), item(TodoStatus::Pending)]
+            }
+            .is_finished(),
+            "a pending task means the list is still live"
+        );
+        assert!(
+            !TodoSnapshot {
+                items: vec![item(TodoStatus::InProgress)]
+            }
+            .is_finished(),
+            "a task in flight means the list is still live"
+        );
+        assert!(TodoSnapshot {
+            items: vec![item(TodoStatus::Done), item(TodoStatus::Done)]
+        }
+        .is_finished());
+        // An empty list has nothing to track, so it is finished too.
+        assert!(TodoSnapshot::default().is_finished());
     }
 }
