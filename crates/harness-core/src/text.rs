@@ -68,9 +68,9 @@ pub fn strip_dsml_artifacts(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The exact artifact observed in stored transcripts: the scaffolding is a *single* tag whose
-    /// name was itself tokenised on the wire, so it reaches us as one run with no closing tag.
-    const OBSERVED_ARTIFACT: &str = "\n\n<｜tool｜ calls>\n\n";
+    /// The exact artifact observed in stored transcripts: one tag naming the tool-call block, whose
+    /// two inner bars are U+FF5C (written as an escape here so it cannot be mistaken for `|`).
+    const OBSERVED_ARTIFACT: &str = "\n\n<\u{FF5C}DSML\u{FF5C} calls>\n\n";
 
     #[test]
     fn the_observed_dsml_artifact_is_dropped_entirely() {
@@ -83,18 +83,19 @@ mod tests {
 
     #[test]
     fn a_well_formed_dsml_wrapper_is_dropped() {
-        let text = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"terminal\">\n</｜ invoke>\n</｜｜DSML｜｜tool_calls>";
+        let text = "<\u{FF5C}｜DSML｜\u{FF5C}tool_calls>\n<\u{FF5C}｜DSML｜\u{FF5C}invoke name=\"terminal\">\n</\u{FF5C} invoke>\n</\u{FF5C}｜DSML｜\u{FF5C}tool_calls>";
         let stripped = strip_dsml_artifacts(text);
         assert!(stripped.trim().is_empty(), "left over: {stripped:?}");
     }
 
     #[test]
     fn prose_around_the_artifact_survives() {
-        let text = "Installing the CLI now.\n\n<｜tool｜ calls>\n\nThen I will run the tests.";
+        let text =
+            "Installing the CLI now.\n\n<\u{FF5C}DSML\u{FF5C} calls>\n\nThen I will run the tests.";
         let stripped = strip_dsml_artifacts(text);
         assert!(stripped.contains("Installing the CLI now."));
         assert!(stripped.contains("Then I will run the tests."));
-        assert!(!stripped.contains("DSML") && !stripped.contains('｜'));
+        assert!(!stripped.contains("DSML") && !stripped.contains('\u{FF5C}'));
     }
 
     #[test]
