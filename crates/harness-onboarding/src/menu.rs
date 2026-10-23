@@ -31,8 +31,9 @@ pub const SUBTITLE: &str = "NEURAL CORE CALIBRATION";
 pub const CAPTION: &str = "Pick the voice your agent speaks with";
 /// Footer explaining what to type.
 pub const HINT: &str = "Enter a number, then press Enter — blank picks the default (1). Your choice is written to the config file.";
-/// Marker on the persona a blank answer would take.
+/// Marker on the option a blank answer takes.
 pub const DEFAULT_MARKER: &str = "◂ default";
+
 /// Widest the header box is allowed to grow, so it stays a header and not a banner.
 pub const HEADER_MAX: usize = 78;
 /// Narrowest the header box may be, however narrow the terminal.
@@ -50,7 +51,7 @@ const ID_COLUMNS: usize = 4;
 /// Lines a tagline may occupy in a grid cell, so every row is the same height.
 const GRID_TAGLINE_LINES: usize = 2;
 /// Hanging indent for a tagline: aligns it under the name, not under the selection number.
-const ENTRY_INDENT: usize = ID_COLUMNS;
+pub const ENTRY_INDENT: usize = ID_COLUMNS;
 
 /// Why an answer was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,17 +110,42 @@ pub enum BodyLayout {
     Stack,
 }
 
+/// The boxed panel above a list of choices: identity, section, question.
+///
+/// A screen is a `Panel` plus a list. Both the persona menu and the memory-core step draw the same
+/// box; only the words in it and the entries underneath differ, so the box lives here once.
+#[derive(Debug, Clone, Copy)]
+pub struct Panel {
+    /// The brand line, in the crest colour.
+    pub title: &'static str,
+    /// What this screen configures, in the name colour.
+    pub subtitle: &'static str,
+    /// The question the entries answer, muted.
+    pub caption: &'static str,
+}
+
+/// The persona menu's panel.
+pub const PANEL: Panel = Panel {
+    title: TITLE,
+    subtitle: SUBTITLE,
+    caption: CAPTION,
+};
+
 /// The header box: the screen's identity, drawn once at the top.
 ///
-/// It exists because the persona list alone gives the eye nowhere to land — the header states what
-/// the screen is, and the box separates it from the choices underneath.
-pub fn header(size: Size) -> Vec<Line> {
-    let inner = header_inner_width(size);
+/// It exists because the list alone gives the eye nowhere to land — the header states what the
+/// screen is, and the box separates it from the choices underneath. `widest` is the widest line the
+/// caller's body will draw, measured before centring: a centred line reports the terminal's width,
+/// not the width the box has to span.
+pub fn panel_header(size: Size, panel: &Panel, widest: usize) -> Vec<Line> {
+    let inner = widest
+        .clamp(HEADER_MIN, HEADER_MAX)
+        .min(screen::body_limit(size.columns));
     let mut lines = vec![Line::of(Span::colored(
         format!("╭{}╮", screen::rule(inner + 2, '─')),
         BORDER_COLOR,
     ))];
-    for content in header_content(inner) {
+    for content in panel_content(panel, inner) {
         let pad = inner.saturating_sub(content.width());
         lines.push(
             Line::of(Span::colored("│ ", BORDER_COLOR))
@@ -137,20 +163,12 @@ pub fn header(size: Size) -> Vec<Line> {
     screen::center_lines(lines, size.columns)
 }
 
-/// The interior width of the header box.
-///
-/// The box frames the choices, so it is measured from them: as wide as the widest body line, within
-/// bounds. A fixed-width header over a wider body reads as two unrelated blocks.
-fn header_inner_width(size: Size) -> usize {
-    body_widest(size)
-        .clamp(HEADER_MIN, HEADER_MAX)
-        .min(screen::body_limit(size.columns))
+/// The box for this crate's persona menu.
+pub fn header(size: Size) -> Vec<Line> {
+    panel_header(size, &PANEL, body_widest(size))
 }
 
 /// The widest line the body will draw, which is what the header frames.
-///
-/// Measured before centring: a centred line reports the terminal's width, not the width the header
-/// has to span.
 fn body_widest(size: Size) -> usize {
     let layout = choose_layout(size, body_budget(size));
     render_layout(size, layout)
@@ -161,12 +179,17 @@ fn body_widest(size: Size) -> usize {
 }
 
 /// The three header lines: crest, title, caption.
-fn header_content(inner: usize) -> Vec<Line> {
+fn panel_content(panel: &Panel, inner: usize) -> Vec<Line> {
     vec![
-        Line::of(Span::strong(TITLE, CREST_COLOR)),
-        Line::of(Span::strong(SUBTITLE, NAME_COLOR)),
-        Line::of(Span::muted(screen::fit(CAPTION, inner))),
+        Line::of(Span::strong(panel.title, CREST_COLOR)),
+        Line::of(Span::strong(panel.subtitle, NAME_COLOR)),
+        Line::of(Span::muted(screen::fit(panel.caption, inner))),
     ]
+}
+
+/// The widest line of a rendered body, for sizing a panel to it.
+pub fn widest_of(lines: &[Line]) -> usize {
+    lines.iter().map(Line::width).max().unwrap_or(0)
 }
 
 /// The whole frame for a terminal of `size`.
@@ -186,13 +209,32 @@ pub fn render(size: Size) -> Vec<Line> {
 
 /// The footer: what to type, muted so it never competes with the choices.
 pub fn hint_lines(size: Size) -> Vec<Line> {
+    muted_wrapped(HINT, size)
+}
+
+/// A muted paragraph, wrapped to the terminal and centred line by line.
+///
+/// Shared by every screen's footer and by the memory step's explanations, so muted prose has one
+/// wrap-and-centre implementation.
+pub fn muted_wrapped(text: &str, size: Size) -> Vec<Line> {
     screen::center_lines(
-        screen::wrap(HINT, screen::body_limit(size.columns))
+        screen::wrap(text, screen::body_limit(size.columns))
             .into_iter()
             .map(|line| Line::of(Span::muted(line)))
             .collect(),
         size.columns,
     )
+}
+
+/// Centre a block of already-built lines as a group, trimming each one's tail.
+///
+/// A list keeps one left edge this way: centring each line on its own width would make every entry
+/// drift to its own middle.
+pub fn place_block(lines: Vec<Line>, size: Size) -> Vec<Line> {
+    screen::center_group_lines(lines, size.columns)
+        .into_iter()
+        .map(Line::trim_end)
+        .collect()
 }
 
 /// The plain text of the frame, for tests and snapshots.
@@ -396,15 +438,23 @@ fn cell_tagline(
 }
 
 /// The id and name of one persona, clipped to `width` columns, with the default marked.
-///
-/// The marker is dropped before the name is clipped to nothing: a long name in a narrow cell is
-/// worth more than the hint, and an entry that overflows its column breaks the grid alignment.
 fn name_line(persona: &Persona, width: usize) -> Line {
     let marker = if persona.id == persona::DEFAULT_ID {
-        DEFAULT_MARKER
+        Some(DEFAULT_MARKER)
     } else {
-        ""
+        None
     };
+    entry_line(persona.id, persona.name, marker, width)
+}
+
+/// `  1  Name ◂ default`, clipped to `width` columns.
+///
+/// Shared by every numbered list in the flow (personas, memory modes): one implementation of the
+/// id column, the marker's budget and the clipping rule. The marker is dropped before the name is
+/// clipped to nothing — a long name in a narrow cell is worth more than the hint, and an entry that
+/// overflows its column breaks the alignment of the list.
+pub fn entry_line(id: u8, name: &str, marker: Option<&str>, width: usize) -> Line {
+    let marker = marker.unwrap_or("");
     let marker_columns = if marker.is_empty() {
         0
     } else {
@@ -418,14 +468,11 @@ fn name_line(persona: &Persona, width: usize) -> Line {
         width.saturating_sub(ID_COLUMNS)
     };
 
-    let mut line = Line::of(Span::strong(format!("{:>2}", persona.id), ACCENT_COLOR))
+    let mut line = Line::of(Span::strong(format!("{:>2}", id), ACCENT_COLOR))
         .then("  ")
-        .with(Span::strong(
-            screen::fit(persona.name, name_columns),
-            NAME_COLOR,
-        ));
+        .with(Span::strong(screen::fit(name, name_columns), NAME_COLOR));
     if show_marker {
-        line = line.then(" ").then_muted(DEFAULT_MARKER);
+        line = line.then(" ").then_muted(marker);
     }
     line
 }

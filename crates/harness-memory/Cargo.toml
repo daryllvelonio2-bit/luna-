@@ -17,3 +17,8 @@ tracing = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+# The saver's tests need a real notes engine to prove the pointer bridge it writes; the library
+# itself stays independent of the notes crate and takes the engine as a trait object.
+harness-notes = { workspace = true }

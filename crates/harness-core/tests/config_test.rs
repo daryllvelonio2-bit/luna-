@@ -201,6 +201,83 @@ fn set_then_load_round_trips() {
 }
 
 #[test]
+fn memory_settings_default_to_the_session_writer() {
+    let settings = MemorySettings::default();
+    assert_eq!(settings.mode, MemoryMode::Session);
+    assert_eq!(settings.mode.to_string(), "session");
+    assert!(settings.background_notes);
+    assert_eq!(settings.background_every_turns, 1);
+    assert_eq!(settings.background_tail_messages, 24);
+    assert!(settings.background_model.is_none());
+    assert!(settings.background_provider.is_none());
+    assert!(!settings.mode.is_background());
+    // A config file written before these keys existed keeps the old behaviour.
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "persona:\n  id: 3\n");
+    let resolved = resolve(&layers(Some(path))).unwrap();
+    assert_eq!(resolved.config().memory, MemorySettings::default());
+    assert_eq!(resolved.get("memory.mode").unwrap(), "session");
+}
+
+#[test]
+fn memory_mode_accepts_its_aliases_and_rejects_everything_else() {
+    use std::str::FromStr;
+
+    assert_eq!(
+        MemoryMode::from_str("background").unwrap(),
+        MemoryMode::Background
+    );
+    assert_eq!(
+        MemoryMode::from_str("  BACKGROUND ").unwrap(),
+        MemoryMode::Background
+    );
+    assert_eq!(
+        MemoryMode::from_str("saver").unwrap(),
+        MemoryMode::Background
+    );
+    assert_eq!(MemoryMode::from_str("agent").unwrap(), MemoryMode::Session);
+    assert_eq!(MemoryMode::from_str("main").unwrap(), MemoryMode::Session);
+
+    let error = MemoryMode::from_str("telepathy").unwrap_err();
+    assert!(
+        error.contains("session") && error.contains("background"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_memory_mode_is_settable_and_survives_a_reload() {
+    let dir = TempDir::new().unwrap();
+    let layers = layers(Some(config_path(&dir)));
+
+    set_in_file(&layers, "memory.mode", "background").unwrap();
+    set_in_file(&layers, "memory.background_notes", "false").unwrap();
+    set_in_file(&layers, "memory.background_every_turns", "3").unwrap();
+
+    let resolved = resolve(&layers).unwrap();
+    assert_eq!(resolved.get("memory.mode").unwrap(), "background");
+    assert_eq!(resolved.config().memory.mode, MemoryMode::Background);
+    assert!(resolved.config().memory.mode.is_background());
+    assert!(!resolved.config().memory.background_notes);
+    assert_eq!(resolved.config().memory.background_every_turns, 3);
+    assert_eq!(resolved.source("memory.mode").unwrap(), Source::File);
+
+    // A typo is refused before the file is touched, exactly like any other key.
+    let error = set_in_file(&layers, "memory.mode", "telepathy")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unknown variant") || error.contains("telepathy"),
+        "{error}"
+    );
+    assert_eq!(
+        resolve(&layers).unwrap().config().memory.mode,
+        MemoryMode::Background,
+        "the failed write clobbered the stored value"
+    );
+}
+
+#[test]
 fn set_rejects_unknown_keys_and_bad_values() {
     let dir = TempDir::new().unwrap();
     let layers = layers(Some(config_path(&dir)));

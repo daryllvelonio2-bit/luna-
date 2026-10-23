@@ -20,6 +20,7 @@
 //! text and a persona's voice can be edited without touching a config file or a build.
 
 pub mod flow;
+pub mod memory_step;
 pub mod menu;
 pub mod persona;
 pub mod screen;
@@ -29,6 +30,7 @@ pub mod style;
 pub mod typewriter;
 
 pub use flow::{needs_onboarding, run, run_interactive, Outcome};
+pub use memory_step::Choice as MemoryChoice;
 pub use persona::{Persona, CATALOG};
 pub use screen::Size;
 pub use store::persist;

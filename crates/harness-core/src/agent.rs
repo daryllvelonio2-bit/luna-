@@ -1,16 +1,18 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSettings, Approver, DenyAll};
-use crate::error::HarnessError;
 use crate::checkpoint::CheckpointController;
+use crate::error::HarnessError;
 use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::permission::{PermissionEngine, RuleVerdict};
+use crate::saver::{transcript_tail, BackgroundSaver, SaverHook};
 use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
 use crate::traits::*;
 use crate::types::*;
@@ -174,6 +176,10 @@ where
     observer: Option<AgentObserver>,
     reasoning_effort: Option<ReasoningEffort>,
     steer_queue: Arc<Mutex<VecDeque<String>>>,
+    /// The independent memory writer, when `memory.mode` is `background`.
+    saver: Option<SaverHook>,
+    /// Completed turns in this agent's lifetime; the saver's interval counts turns, not wall time.
+    turns_completed: AtomicUsize,
 }
 
 /// Closes the turn's checkpoint on every exit path, including `?` and panics.
@@ -232,7 +238,61 @@ where
             observer: None,
             reasoning_effort: None,
             steer_queue: Arc::new(Mutex::new(VecDeque::new())),
+            saver: None,
+            turns_completed: AtomicUsize::new(0),
         }
+    }
+
+    /// Attach an independent memory saver (see [`crate::saver`]).
+    ///
+    /// With one attached, a session configured as `memory.mode: background` still writes memory
+    /// through the same tools — just from a separate pass over the finished turn instead of from
+    /// the turn's own tool calls.
+    pub fn with_background_saver(mut self, saver: Arc<dyn BackgroundSaver>) -> Self {
+        self.saver = Some(SaverHook::from_saver(saver));
+        self
+    }
+
+    /// Replace (or clear) the memory saver at runtime.
+    pub fn set_background_saver(&mut self, saver: Option<Arc<dyn BackgroundSaver>>) {
+        self.saver = saver.map(SaverHook::from_saver);
+    }
+
+    /// The attached saver, if any (used by the CLI to report the mode).
+    pub fn background_saver(&self) -> Option<&SaverHook> {
+        self.saver.as_ref()
+    }
+
+    /// Hand the finished turn to the saver when its interval is due.
+    ///
+    /// Detached on purpose: the reply is already written by now, so a second model call must not
+    /// hold the terminal. A failure is logged, never returned — a saver that cannot reach its
+    /// provider must not turn a completed turn into a failed one.
+    fn spawn_background_saver(&self, messages: &[Message]) {
+        let Some(hook) = self.saver.as_ref() else {
+            return;
+        };
+        let completed = self.turns_completed.fetch_add(1, Ordering::Relaxed) + 1;
+        if !hook.due(completed) {
+            return;
+        }
+        let tail = transcript_tail(messages, hook.saver.tail_limit());
+        if tail.is_empty() {
+            return;
+        }
+        let saver = hook.saver.clone();
+        debug!(
+            "dispatching background memory saver after turn {} ({} messages, model {})",
+            completed,
+            tail.len(),
+            saver.model()
+        );
+        tokio::spawn(async move {
+            match saver.distil(&tail).await {
+                Ok(report) => info!("background memory saver: {}", report.summary()),
+                Err(error) => warn!("background memory saver failed: {}", error),
+            }
+        });
     }
 
     /// Queue guidance to steer the active turn mid-run without cancelling or restarting.
@@ -241,7 +301,10 @@ where
         if trimmed.is_empty() {
             return false;
         }
-        self.steer_queue.lock().unwrap().push_back(trimmed.to_string());
+        self.steer_queue
+            .lock()
+            .unwrap()
+            .push_back(trimmed.to_string());
         true
     }
 
@@ -278,7 +341,11 @@ where
     }
 
     /// Who answers the approval prompt, and the gate's timeout / override list.
-    pub fn with_approval(mut self, approver: Arc<dyn Approver>, approval: ApprovalSettings) -> Self {
+    pub fn with_approval(
+        mut self,
+        approver: Arc<dyn Approver>,
+        approval: ApprovalSettings,
+    ) -> Self {
         self.approver = approver;
         self.approval = approval;
         self
@@ -363,7 +430,10 @@ where
         let Some(hooks) = self.hooks.as_ref() else {
             return Ok(());
         };
-        let session_id = self.session.as_ref().map(|binding| binding.session_id.as_str());
+        let session_id = self
+            .session
+            .as_ref()
+            .map(|binding| binding.session_id.as_str());
         let context = HookContext {
             session_id,
             message,
@@ -380,7 +450,11 @@ where
                 format!("{} hook refused: {reason}", event.as_str()),
             )),
             Some(reason) => {
-                warn!("{} hook refused, which this event cannot do: {}", event.as_str(), reason);
+                warn!(
+                    "{} hook refused, which this event cannot do: {}",
+                    event.as_str(),
+                    reason
+                );
                 Ok(())
             }
             None => Ok(()),
@@ -388,7 +462,10 @@ where
     }
 
     /// Apply an editable SurfaceSpec (Harness² c1–c8 components) to the agent loop.
-    pub fn with_surface(mut self, surface: crate::surface::SurfaceSpec) -> Result<Self, HarnessError> {
+    pub fn with_surface(
+        mut self,
+        surface: crate::surface::SurfaceSpec,
+    ) -> Result<Self, HarnessError> {
         surface.validate()?;
         self.config.max_consecutive_failures = surface.c2_guardrails.max_consecutive_failures;
         self.config.require_hitl_for_mutation = surface.c2_guardrails.require_hitl_for_mutation;
@@ -436,7 +513,10 @@ where
 
     /// Summarise the current session's conversation history using the configured
     /// compaction model (or the session's active provider and `fallback_model`).
-    pub async fn summarize_current_session(&self, fallback_model: &str) -> Result<String, HarnessError> {
+    pub async fn summarize_current_session(
+        &self,
+        fallback_model: &str,
+    ) -> Result<String, HarnessError> {
         let Some(binding) = &self.session else {
             return Err(HarnessError::SessionError(
                 "no session bound to agent".to_string(),
@@ -474,11 +554,16 @@ where
             .rev()
             .find_map(|stored| stored.message.usage.as_ref())
         {
-            return Ok(latest_usage.prompt_tokens.saturating_add(latest_usage.completion_tokens));
+            return Ok(latest_usage
+                .prompt_tokens
+                .saturating_add(latest_usage.completion_tokens));
         }
 
         // 2. Otherwise estimate accurately from session messages
-        let messages: Vec<Message> = history.iter().map(|stored| stored.message.clone()).collect();
+        let messages: Vec<Message> = history
+            .iter()
+            .map(|stored| stored.message.clone())
+            .collect();
         let estimate = estimate_tokens(&messages);
         Ok(estimate.tokens)
     }
@@ -515,7 +600,12 @@ where
         if !self.config.require_hitl_for_mutation {
             return false;
         }
-        if self.approval.mutating_overrides.iter().any(|tool| tool == &call.name) {
+        if self
+            .approval
+            .mutating_overrides
+            .iter()
+            .any(|tool| tool == &call.name)
+        {
             return true;
         }
         match self.registry.is_mutating_call(call).await {
@@ -577,13 +667,14 @@ where
             Ok(Ok(ApprovalDecision::RunWithArguments(arguments))) => {
                 GateOutcome::Run(Some(arguments))
             }
-            Ok(Ok(ApprovalDecision::Deny)) => GateOutcome::Denied("denied at the prompt".to_string()),
+            Ok(Ok(ApprovalDecision::Deny)) => {
+                GateOutcome::Denied("denied at the prompt".to_string())
+            }
             Ok(Err(HarnessError::ApprovalRejected(reason))) => GateOutcome::Denied(reason),
             Ok(Err(error)) => GateOutcome::Denied(error.to_string()),
-            Err(_elapsed) => GateOutcome::Denied(format!(
-                "no answer within {}s",
-                timeout.as_secs()
-            )),
+            Err(_elapsed) => {
+                GateOutcome::Denied(format!("no answer within {}s", timeout.as_secs()))
+            }
         }
     }
 
@@ -621,7 +712,9 @@ where
 
         // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
         // or fails and leaves the transcript alone. No retry inside the turn.
-        let compaction = self.compact_once(&history, &system_text, &mut messages, false).await?;
+        let compaction = self
+            .compact_once(&history, &system_text, &mut messages, false)
+            .await?;
 
         // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
         // ones, so a later turn cannot silently capture into the wrong checkpoint.
@@ -666,7 +759,11 @@ where
                 });
             }
 
-            debug!("Invoking model completion with {} messages and {} tools", messages.len(), tools.len());
+            debug!(
+                "Invoking model completion with {} messages and {} tools",
+                messages.len(),
+                tools.len()
+            );
             let mut options = CompletionOptions::default();
             options.reasoning_effort = self.reasoning_effort;
 
@@ -674,7 +771,10 @@ where
             let max_retries = 3;
             let mut response = None;
             for attempt in 0..=max_retries {
-                match self.stream_completion(&messages, &tools, &options, &cancel_token).await {
+                match self
+                    .stream_completion(&messages, &tools, &options, &cancel_token)
+                    .await
+                {
                     Ok(res) => {
                         response = Some(res);
                         break;
@@ -683,12 +783,18 @@ where
                         let delay_secs = 2u64.pow(attempt as u32);
                         warn!(
                             "Model request failed ({}), retrying attempt {}/{} in {}s...",
-                            e, attempt + 1, max_retries, delay_secs
+                            e,
+                            attempt + 1,
+                            max_retries,
+                            delay_secs
                         );
                         if let Some(ref observer) = self.observer {
                             observer(AgentEvent::ReasoningDelta(format!(
                                 "\n[Model busy/overloaded: {}. Retrying in {}s (attempt {}/{})]…\n",
-                                e, delay_secs, attempt + 1, max_retries
+                                e,
+                                delay_secs,
+                                attempt + 1,
+                                max_retries
                             )));
                         }
                         tokio::select! {
@@ -707,11 +813,15 @@ where
 
             if let Some(ref usage) = response.usage {
                 let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
-                accumulated.prompt_tokens = accumulated.prompt_tokens.saturating_add(usage.prompt_tokens);
+                accumulated.prompt_tokens = accumulated
+                    .prompt_tokens
+                    .saturating_add(usage.prompt_tokens);
                 accumulated.completion_tokens = accumulated
                     .completion_tokens
                     .saturating_add(usage.completion_tokens);
-                accumulated.total_tokens = accumulated.prompt_tokens.saturating_add(accumulated.completion_tokens);
+                accumulated.total_tokens = accumulated
+                    .prompt_tokens
+                    .saturating_add(accumulated.completion_tokens);
 
                 let actual_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
                 if let Some(ref observer) = self.observer {
@@ -752,9 +862,7 @@ where
                     self.append(&steer_msg, false).await?;
                     messages.push(steer_msg);
                     if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::Steered {
-                            text: joined_steer,
-                        });
+                        observer(AgentEvent::Steered { text: joined_steer });
                     }
                     continue;
                 }
@@ -780,7 +888,14 @@ where
                 let mut final_response = response.clone();
                 final_response.content = Some(final_reply.clone());
                 self.append(&final_response, false).await?;
-                self.emit_hook_event(HookEvent::Stop, Some(&final_reply)).await?;
+                self.emit_hook_event(HookEvent::Stop, Some(&final_reply))
+                    .await?;
+                // The saver reads the turn as the user saw it, reply included. The transcript is
+                // dropped when this function returns, so appending the final message here changes
+                // nothing for the next turn (which replays from the session store).
+                messages.push(final_response);
+                // The reply is final: anything the saver does now is off the critical path.
+                self.spawn_background_saver(&messages);
                 return Ok(TurnOutcome {
                     reply: final_reply,
                     reasoning: last_reasoning,
@@ -807,7 +922,10 @@ where
                     return Err(HarnessError::Cancelled);
                 }
 
-                debug!("Dispatching tool call: '{}' (call id: {})", tool_call.name, tool_call.id);
+                debug!(
+                    "Dispatching tool call: '{}' (call id: {})",
+                    tool_call.name, tool_call.id
+                );
 
                 // Hooks run before the human gate and can only narrow the call: a denial replaces
                 // its result, an argument rewrite is what the gate and the tool then see. A hook
@@ -947,9 +1065,7 @@ where
                     consecutive_failures += 1;
                     warn!(
                         "Tool '{}' failed (consecutive failures: {}/{})",
-                        tool_call.name,
-                        consecutive_failures,
-                        self.config.max_consecutive_failures
+                        tool_call.name, consecutive_failures, self.config.max_consecutive_failures
                     );
 
                     if consecutive_failures >= self.config.max_consecutive_failures {
@@ -965,7 +1081,10 @@ where
                 } else {
                     // Reset consecutive failures on successful execution
                     if consecutive_failures > 0 {
-                        debug!("Resetting consecutive failures counter from {} to 0", consecutive_failures);
+                        debug!(
+                            "Resetting consecutive failures counter from {} to 0",
+                            consecutive_failures
+                        );
                     }
                     consecutive_failures = 0;
                 }
@@ -973,8 +1092,15 @@ where
                 // If a note was saved successfully, ensure memory pointer bridge is updated
                 if tool_call.name == "save_note" && !execution_result.is_error {
                     if let Ok(note) = serde_json::from_str::<Note>(&execution_result.content) {
-                        debug!("Registering 1-5 word note pointer: '{}' -> '{}'", note.id, note.summary_pointer);
-                        if let Err(e) = self.memory.add_note_pointer(&note.id, &note.summary_pointer).await {
+                        debug!(
+                            "Registering 1-5 word note pointer: '{}' -> '{}'",
+                            note.id, note.summary_pointer
+                        );
+                        if let Err(e) = self
+                            .memory
+                            .add_note_pointer(&note.id, &note.summary_pointer)
+                            .await
+                        {
                             warn!("Failed to add note pointer to memory: {}", e);
                         }
                     }
@@ -983,8 +1109,11 @@ where
                 // ...and if a note was deleted, drop its pointer so memory holds no dangling
                 // reference to a document that no longer exists.
                 if tool_call.name == "delete_note" && !execution_result.is_error {
-                    if let Ok(removed) = serde_json::from_str::<serde_json::Value>(&execution_result.content) {
-                        let deleted = removed.get("status").and_then(|s| s.as_str()) == Some("deleted");
+                    if let Ok(removed) =
+                        serde_json::from_str::<serde_json::Value>(&execution_result.content)
+                    {
+                        let deleted =
+                            removed.get("status").and_then(|s| s.as_str()) == Some("deleted");
                         if deleted {
                             if let Some(note_id) = removed.get("note_id").and_then(|n| n.as_str()) {
                                 debug!("Removing note pointer for deleted note '{}'", note_id);
@@ -1024,9 +1153,7 @@ where
                 self.append(&steer_msg, false).await?;
                 messages.push(steer_msg);
                 if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::Steered {
-                        text: joined_steer,
-                    });
+                    observer(AgentEvent::Steered { text: joined_steer });
                 }
             }
         }
@@ -1080,7 +1207,10 @@ where
                     // Nothing arrived, or only reasoning arrived without content/tools:
                     // the buffered path or a clean retry can recover without failing the turn.
                     if content.is_empty() && calls.is_empty() {
-                        debug!("Stream failed before any content/tool output ({}), retrying buffered", error);
+                        debug!(
+                            "Stream failed before any content/tool output ({}), retrying buffered",
+                            error
+                        );
                         return self.provider.complete(messages, tools, options).await;
                     }
                     return Err(error);
@@ -1095,7 +1225,13 @@ where
                     reasoning.push_str(&text);
                 }
                 StreamEvent::ContentDelta(text) => content.push_str(&text),
-                StreamEvent::ToolCallDelta { index, id, name, arguments_delta, signature } => {
+                StreamEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                    signature,
+                } => {
                     let slot = match calls.iter_mut().find(|(i, _)| *i == index) {
                         Some((_, call)) => call,
                         None => {
@@ -1131,7 +1267,9 @@ where
                         slot.arguments = serde_json::Value::String(raw);
                     }
                 }
-                StreamEvent::Completed { usage: event_usage, .. } => {
+                StreamEvent::Completed {
+                    usage: event_usage, ..
+                } => {
                     if event_usage.is_some() {
                         usage = event_usage;
                     }
@@ -1145,7 +1283,9 @@ where
             .enumerate()
             .map(|(position, (_, mut call))| {
                 call.arguments = match call.arguments {
-                    serde_json::Value::String(raw) => serde_json::from_str(&raw).unwrap_or(json!({})),
+                    serde_json::Value::String(raw) => {
+                        serde_json::from_str(&raw).unwrap_or(json!({}))
+                    }
                     value => value,
                 };
                 if call.id.is_empty() {
@@ -1158,8 +1298,14 @@ where
         if content.trim().is_empty() && tool_calls.is_empty() {
             debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
             let buffered = self.provider.complete(messages, tools, options).await?;
-            if buffered.content.as_deref().unwrap_or("").trim().is_empty() && buffered.tool_calls.is_empty() {
-                if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() { None } else { Some(reasoning) }) {
+            if buffered.content.as_deref().unwrap_or("").trim().is_empty()
+                && buffered.tool_calls.is_empty()
+            {
+                if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                }) {
                     return Ok(Message {
                         role: Role::Assistant,
                         content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
@@ -1182,7 +1328,10 @@ where
                 if let Some(start) = content.find(open_tag) {
                     if let Some(end) = content.find(close_tag) {
                         let think_text = content[start + open_tag.len()..end].trim().to_string();
-                        let rest = format!("{}{}", &content[..start], &content[end + close_tag.len()..]).trim().to_string();
+                        let rest =
+                            format!("{}{}", &content[..start], &content[end + close_tag.len()..])
+                                .trim()
+                                .to_string();
                         if !think_text.is_empty() {
                             reasoning = think_text;
                         }
@@ -1194,7 +1343,11 @@ where
         }
 
         let mut response = Message::assistant(content);
-        response.reasoning = if reasoning.is_empty() { None } else { Some(reasoning) };
+        response.reasoning = if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        };
         response.tool_calls = tool_calls;
         response.usage = usage;
         Ok(response)
@@ -1228,7 +1381,9 @@ where
     }
 
     /// The session's recent transcript, plus the notice the console prints about the bound.
-    async fn load_history(&self) -> Result<(Vec<StoredMessage>, Option<ReplayNotice>), HarnessError> {
+    async fn load_history(
+        &self,
+    ) -> Result<(Vec<StoredMessage>, Option<ReplayNotice>), HarnessError> {
         let Some(binding) = &self.session else {
             return Ok((Vec::new(), None));
         };
@@ -1279,29 +1434,36 @@ where
             );
         }
 
-        let outcome: CompactionOutcome =
-            match compact(setup.provider.as_ref(), &setup.model, history, self.config.keep_recent_turns)
-                .await
-            {
-                Ok(Some(outcome)) => outcome,
-                Ok(None) => {
-                    debug!(
+        let outcome: CompactionOutcome = match compact(
+            setup.provider.as_ref(),
+            &setup.model,
+            history,
+            self.config.keep_recent_turns,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => {
+                debug!(
                         "Nothing to fold: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
                     );
-                    return Ok(None);
+                return Ok(None);
+            }
+            Err(failure) => {
+                // The user asked for the fold: a failure is the answer, not a silent
+                // "there was nothing to compact". Say what actually went wrong.
+                if force {
+                    return Err(failure);
                 }
-                Err(failure) => {
-                    // The user asked for the fold: a failure is the answer, not a silent
-                    // "there was nothing to compact". Say what actually went wrong.
-                    if force {
-                        return Err(failure);
-                    }
-                    // Non-fatal by design: the transcript is unchanged, the turn runs on the full
-                    // history, and this turn makes no second attempt.
-                    warn!("Compaction failed, continuing on the full transcript: {}", failure);
-                    return Ok(None);
-                }
-            };
+                // Non-fatal by design: the transcript is unchanged, the turn runs on the full
+                // history, and this turn makes no second attempt.
+                warn!(
+                    "Compaction failed, continuing on the full transcript: {}",
+                    failure
+                );
+                return Ok(None);
+            }
+        };
 
         // The summary row is what a later resume replays, and the folded rows stay readable
         // (`compacted_at` set) for a future rewind. A store failure here is an error, not a

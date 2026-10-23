@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use harness_core::config::{self, Layers};
 use harness_core::error::HarnessError;
+use harness_core::MemoryMode;
 
 use crate::menu;
 use crate::persona::Persona;
@@ -51,6 +52,8 @@ pub const MAX_ATTEMPTS: usize = 10;
 pub struct Outcome {
     /// The chosen personality core.
     pub persona: &'static Persona,
+    /// Who writes durable memory from now on.
+    pub memory: MemoryMode,
     /// The config file the choice was written to.
     pub config_path: PathBuf,
 }
@@ -85,13 +88,17 @@ where
     briefing(&mut writer)?;
     let persona = select_persona(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, persona)?;
+    // Phase 2b: who writes memory. A separate screen, same box, same list language.
+    let memory = select_memory(&mut writer, reader)?;
+
+    let config_path = store::persist(layers, persona, memory)?;
 
     let mut writer = Typewriter::new(out, pacer, size);
-    confirmation(&mut writer, persona, &config_path)?;
+    confirmation(&mut writer, persona, memory, &config_path)?;
 
     Ok(Outcome {
         persona,
+        memory,
         config_path,
     })
 }
@@ -186,21 +193,38 @@ fn select_persona<R: BufRead, W: Write, P: Pacer>(
     )))
 }
 
+/// Phase 2b: the memory-core screen, then its answer loop.
+///
+/// The step owns its own screen and retry loop ([`crate::memory_step::select`]); the flow only has
+/// to place it between the two phases it already had.
+fn select_memory<R: BufRead, W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    reader: &mut R,
+) -> Result<MemoryMode, HarnessError> {
+    crate::memory_step::select(writer, reader)
+}
+
 /// Phase 3: the handshake.
 fn confirmation<W: Write, P: Pacer>(
     writer: &mut Typewriter<'_, W, P>,
     persona: &Persona,
+    memory: MemoryMode,
     config_path: &Path,
 ) -> Result<(), HarnessError> {
     writer.clear_screen()?;
     writer.show_cursor()?;
-    let lines = confirmation_lines(persona, config_path, writer.size());
+    let lines = confirmation_lines(persona, memory, config_path, writer.size());
     writer.write_block(&lines)?;
     Ok(())
 }
 
 /// The centered confirmation block, sized for the terminal it will land in.
-pub fn confirmation_lines(persona: &Persona, config_path: &Path, size: Size) -> Vec<Line> {
+pub fn confirmation_lines(
+    persona: &Persona,
+    memory: MemoryMode,
+    config_path: &Path,
+    size: Size,
+) -> Vec<Line> {
     let columns = size.columns;
     let limit = (columns as usize)
         .saturating_sub(2 * screen::MARGIN)
@@ -215,6 +239,21 @@ pub fn confirmation_lines(persona: &Persona, config_path: &Path, size: Size) -> 
         lines.push(Line::of(Span::muted(wrapped)));
     }
     lines.push(Line::blank());
+    // Same shape as the persona block above: label, then the value — on one line when it fits and
+    // wrapped under the label when the terminal is too narrow for both.
+    let label = "Memory writer";
+    let summary = crate::memory_step::summary(memory);
+    if label.len() + 2 + summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{label}  "))).with(Span::strong(summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(label)));
+        for wrapped in screen::wrap(summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
+    lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
         limit,
@@ -222,7 +261,7 @@ pub fn confirmation_lines(persona: &Persona, config_path: &Path, size: Size) -> 
         lines.push(Line::of(Span::muted(wrapped)));
     }
     for wrapped in screen::wrap(
-        "Verify with `luna config get persona.id`, or switch cores later with `luna config set persona.id <1-10>`.",
+        "Verify with `luna config get persona.id` and `luna config get memory.mode`, or change them later with `luna config set`.",
         limit,
     ) {
         lines.push(Line::of(Span::muted(wrapped)));
@@ -243,7 +282,7 @@ mod tests {
     fn the_confirmation_names_the_persona_and_the_file() {
         let persona = persona::by_id(3).expect("in the catalog");
         let path = PathBuf::from("/home/janelle/.luna/config.yaml");
-        let block = confirmation_lines(persona, &path, Size::new(90, 24))
+        let block = confirmation_lines(persona, MemoryMode::Background, &path, Size::new(90, 24))
             .iter()
             .map(Line::text)
             .collect::<Vec<_>>()
@@ -253,6 +292,9 @@ mod tests {
         assert!(block.contains(&persona.labelled()));
         assert!(block.contains("/home/janelle/.luna/config.yaml"));
         assert!(block.contains(persona.tagline));
+        // Both answers are reported, so the screen states the whole outcome.
+        assert!(block.contains("Background saver"), "{block}");
+        assert!(block.contains("memory.mode"), "{block}");
     }
 
     #[test]
@@ -261,6 +303,7 @@ mod tests {
         for columns in [40u16, 80, 120] {
             for line in confirmation_lines(
                 persona,
+                MemoryMode::Session,
                 &PathBuf::from("~/.luna/config.yaml"),
                 Size::new(columns, 24),
             ) {

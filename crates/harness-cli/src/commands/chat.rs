@@ -15,10 +15,7 @@ use harness_evolver::{
     apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
     ListImprovementJobsTool,
 };
-use harness_memory::{
-    ForgetMemoryTool, MemorySaver, SaveMemoryTool, SaverPolicy, SqliteMemoryEngine,
-    UpdateMemoryTool,
-};
+use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
     UpdateNoteTool,
@@ -36,6 +33,7 @@ use tokio::sync::oneshot;
 
 pub mod commands;
 pub(crate) mod keys;
+pub(crate) mod memory_writer;
 pub(crate) mod render;
 pub mod todo;
 pub mod ui;
@@ -126,68 +124,6 @@ fn append_prompt_history(path: Option<&std::path::Path>, prompt: &str) {
             let _ = writeln!(file, "{}", prompt);
         }
     }
-}
-
-/// Build the independent memory writer, or `None` when the config keeps the session as the writer.
-///
-/// The saver gets its own provider client so it can be pointed at a cheaper model
-/// (`memory.background_model`) than the session's, the same way compaction is configured. It bills
-/// to that client, never to the turn's.
-///
-/// One caveat worth knowing: the client is resolved at startup, so `/model` changes the session
-/// mid-conversation without moving the saver. Point `memory.background_model` at something cheap
-/// and stable and the two never need to agree.
-#[allow(clippy::too_many_arguments)]
-fn build_memory_saver(
-    config: &Config,
-    memory: &Arc<SqliteMemoryEngine>,
-    notes: &Arc<SqliteNotesEngine>,
-    session_provider: &str,
-    session_model: &str,
-    cred_manager: Arc<CredentialManager>,
-    discovery: Arc<ModelDiscovery>,
-) -> Option<Arc<MemorySaver>> {
-    if !config.memory.mode.is_background() {
-        return None;
-    }
-    let provider_id = config
-        .memory
-        .background_provider
-        .clone()
-        .unwrap_or_else(|| session_provider.to_string());
-    let model = config
-        .memory
-        .background_model
-        .clone()
-        .unwrap_or_else(|| session_model.to_string());
-    let client = match GenericProviderClient::new(
-        provider_id.clone(),
-        model.clone(),
-        cred_manager,
-        discovery,
-        config.providers.get(&provider_id),
-    ) {
-        Ok(client) => client,
-        // Unusable saver config is a warning, not a startup failure: the session runs either way,
-        // and the missing pass is visible in the log.
-        Err(error) => {
-            eprintln!(
-                "warning: the background memory saver is off (provider '{provider_id}', model '{model}'): {error}"
-            );
-            return None;
-        }
-    };
-
-    let mut policy = SaverPolicy::new(model);
-    policy.every_turns = config.memory.background_every_turns;
-    policy.tail_messages = config.memory.background_tail_messages;
-    policy.notes = config.memory.background_notes;
-    Some(Arc::new(MemorySaver::new(
-        Arc::new(client),
-        memory.clone(),
-        notes.clone(),
-        policy,
-    )))
 }
 
 pub async fn run_interactive_chat(
@@ -294,7 +230,7 @@ pub async fn run_interactive_chat(
     // independent saver that reads each finished turn and writes the same records through the same
     // tool, so the write tools are withheld from the session to keep exactly one writer.
     let background_mode = config.memory.mode.is_background();
-    let memory_saver = build_memory_saver(
+    let memory_saver = memory_writer::build_saver(
         &config,
         &memory,
         &notes,
@@ -351,12 +287,11 @@ pub async fn run_interactive_chat(
             .await?;
     }
 
-    if let Some(saver) = memory_saver.as_ref() {
-        eprintln!(
-            "memory: background saver on ({}), after every {} turn(s) — memories land after each reply",
-            saver.model(),
-            config.memory.background_every_turns
-        );
+    // One line of notice, because a mode that changes *where* records come from is worth stating.
+    if memory_saver.is_some() {
+        if let Some(line) = memory_writer::notice(&config) {
+            eprintln!("{line}");
+        }
     }
 
     // Register self-improvement evolver tools (delegated background engineer)

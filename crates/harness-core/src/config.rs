@@ -45,7 +45,7 @@ const PROVIDER_FIELDS: [&str; 3] = ["base_url", "models_endpoint", "timeout_secs
 const DISTANCE_BUCKET: usize = 2;
 
 /// The whole effective configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub model: ModelSettings,
@@ -58,6 +58,53 @@ pub struct Config {
     pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
     pub usage: UsageSettings,
+    /// Who writes durable memory, and with what budget. See [`MemorySettings`].
+    pub memory: MemorySettings,
+    /// Which personality core the first-run onboarding selected. Written by
+    /// `harness-onboarding`; the prompt text itself lives in `prompts.md`.
+    pub persona: PersonaSettings,
+    /// `false` once the first-run onboarding has completed.
+    ///
+    /// Defaults to `true`, so an install with no config file — and a config file that predates the
+    /// onboarding — both take the tour. `LUNA_FIRST_RUN=false` skips it through the env layer
+    /// without touching the file.
+    pub first_run: bool,
+}
+
+/// Written by hand rather than derived so `first_run` starts at `true`. A derived `Default` would
+/// report `false`, which would silently skip onboarding on a machine with no config file.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: ModelSettings::default(),
+            paths: PathsSettings::default(),
+            providers: BTreeMap::new(),
+            agent: AgentConfig::default(),
+            tools: ToolsSettings::default(),
+            hooks: HooksSettings::default(),
+            checkpoints: CheckpointSettings::default(),
+            session: SessionSettings::default(),
+            telemetry: TelemetrySettings::default(),
+            usage: UsageSettings::default(),
+            memory: MemorySettings::default(),
+            persona: PersonaSettings::default(),
+            first_run: true,
+        }
+    }
+}
+
+/// The persona recorded by the first-run onboarding flow (`harness-onboarding`).
+///
+/// Only the *choice* is persisted here: the prompt block of persona `id` is read from
+/// `crates/harness-core/prompts.md` at load time, so prompt text has exactly one home and editing a
+/// persona's voice does not require rewriting every user's config file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersonaSettings {
+    /// Persona id `1..=10`; `0` means "not chosen yet".
+    pub id: u8,
+    /// The persona's display name, stored next to the id so the file reads as intent, not a code.
+    pub name: String,
 }
 
 /// Lifecycle-hook settings.
@@ -139,6 +186,102 @@ impl Default for ModelSettings {
         Self {
             provider: String::new(),
             default: String::new(),
+        }
+    }
+}
+
+/// Who writes durable memory.
+///
+/// `Session` is the original design: the agent decides, mid-turn, to call `save_memory` /
+/// `save_note`, so a record exists exactly when the model chose to write one. `Background` hands
+/// that job to a separate saver that reads the finished conversation and writes the same records
+/// through the same tools — same output, decided by a second pass instead of by the turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryMode {
+    /// The session's agent writes memories with its own tool calls (default).
+    #[default]
+    Session,
+    /// An independent saver distils the conversation after the turn.
+    Background,
+}
+
+impl MemoryMode {
+    /// Every accepted spelling, for error messages and the setup flow.
+    pub const VALUES: [&'static str; 2] = ["session", "background"];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryMode::Session => "session",
+            MemoryMode::Background => "background",
+        }
+    }
+
+    /// Whether an independent saver should be attached to the session.
+    pub fn is_background(self) -> bool {
+        matches!(self, MemoryMode::Background)
+    }
+}
+
+impl std::fmt::Display for MemoryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MemoryMode {
+    type Err = String;
+
+    /// Accepts the canonical spellings plus the words people reach for first ("agent", "main",
+    /// "auto"), because this value is typed at a prompt as often as it is written in a file.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "session" | "agent" | "main" | "inline" => Ok(MemoryMode::Session),
+            "background" | "saver" | "independent" | "auto" => Ok(MemoryMode::Background),
+            other => Err(format!(
+                "unknown memory mode '{other}': expected one of {}",
+                Self::VALUES.join(", ")
+            )),
+        }
+    }
+}
+
+/// Memory and note persistence: who writes it, and with what budget.
+///
+/// The *engines* are chosen by `paths.memory_db` / `paths.notes_db`; these keys only decide who
+/// drives them. Both modes write through the same `save_memory` / `save_note` code path, so
+/// switching modes changes when a memory appears, not what a memory looks like.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemorySettings {
+    /// `session` (default) | `background`.
+    ///
+    /// `background` is wired by the interactive session (`luna chat`), which attaches the saver and
+    /// withholds `save_memory` / `save_note` so the store has one writer. A one-shot `luna exec`
+    /// has no post-turn pass to hand writing to, so it always keeps the session's own tools.
+    pub mode: MemoryMode,
+    /// Also let the background saver write notes, not just memory records.
+    pub background_notes: bool,
+    /// Distil after every Nth completed turn. `1` means every turn; `0` disables the saver.
+    pub background_every_turns: usize,
+    /// How many trailing messages the saver reads. A saver that sees the whole session would
+    /// re-derive the same facts on every turn and pay for the tokens twice.
+    pub background_tail_messages: usize,
+    /// Model used by the saver; `None` means the session's model.
+    pub background_model: Option<String>,
+    /// Provider used by the saver; `None` means the session's provider.
+    pub background_provider: Option<String>,
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            mode: MemoryMode::Session,
+            background_notes: true,
+            background_every_turns: 1,
+            background_tail_messages: 24,
+            background_model: None,
+            background_provider: None,
         }
     }
 }

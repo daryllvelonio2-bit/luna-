@@ -1,13 +1,16 @@
 //! Persistence of the onboarding result.
 //!
-//! The flow records three keys in the harness config file (`$LUNA_CONFIG`, else
-//! `~/.luna/config.yaml`): `persona.id`, `persona.name`, and `first_run: false`.
+//! The flow records four keys in the harness config file (`$LUNA_CONFIG`, else
+//! `~/.luna/config.yaml`): `persona.id`, `persona.name`, `memory.mode`, and `first_run: false`.
 //!
 //! What is deliberately *not* written is the persona's prompt block. Prompt text has exactly one
 //! home — `crates/harness-core/prompts.md` — so an install stores the *choice* and the block is
 //! resolved from that file at load time ([`crate::persona::Persona::prompt_block`]). Copying the
 //! prose into every user's YAML would freeze it at the version they onboarded with, and editing a
 //! persona's voice would then require migrating config files instead of shipping a rebuild.
+//!
+//! `memory.mode` is stored the same way: the mode names a behaviour the harness already implements
+//! (`session` or `background`), not a copy of anything.
 //!
 //! Writes go through [`harness_core::config::set_in_file`], so each one is validated against the
 //! config schema before it lands: a failed write leaves the previous file intact rather than a
@@ -17,6 +20,7 @@ use std::path::PathBuf;
 
 use harness_core::config::{self, Layers};
 use harness_core::error::HarnessError;
+use harness_core::MemoryMode;
 
 use crate::persona::Persona;
 
@@ -24,13 +28,20 @@ use crate::persona::Persona;
 pub const PERSONA_ID_KEY: &str = "persona.id";
 /// The config key holding the selected persona's display name.
 pub const PERSONA_NAME_KEY: &str = "persona.name";
+/// The config key holding who writes durable memory: `session` or `background`.
+pub const MEMORY_MODE_KEY: &str = "memory.mode";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
 
-/// Write the selection, returning the path that was written.
-pub fn persist(layers: &Layers, persona: &Persona) -> Result<PathBuf, HarnessError> {
+/// Write the selections, returning the path that was written.
+pub fn persist(
+    layers: &Layers,
+    persona: &Persona,
+    memory: MemoryMode,
+) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
     config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
+    config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
     config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
     config_file(layers)
 }
