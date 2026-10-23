@@ -283,15 +283,15 @@ pub async fn run_interactive_chat(
         harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
             .with_network_policy(config.tools.network),
     );
-    let delegate_tool = harness_core::tools::DelegateTaskTool::new(
+    let delegate_tool = Arc::new(harness_core::tools::DelegateTaskTool::new(
         provider.clone(),
         memory.clone(),
         notes.clone(),
         evolver.clone(),
         Some(store.clone()),
         config.clone(),
-    );
-    registry.register(Arc::new(delegate_tool)).await?;
+    ));
+    registry.register(delegate_tool.clone()).await?;
 
     // Register core filesystem and shell tools (§2.2)
     let sudo_cache = Arc::new(std::sync::Mutex::new(std::env::var("SUDO_PASSWORD").ok()));
@@ -453,6 +453,42 @@ pub async fn run_interactive_chat(
 
     let steer_handle = agent.steer_handle();
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
+
+    delegate_tool.set_steer_handle(steer_handle.clone());
+    let ui_delegate = ui.clone();
+    let store_delegate = store.clone();
+    let session_id_delegate = session_id.clone();
+    delegate_tool.set_notifier(Arc::new(move |record| {
+        let is_ok = matches!(
+            record.status,
+            harness_core::tools::delegate::SubagentStatus::Completed { .. }
+        );
+        let summary = match &record.status {
+            harness_core::tools::delegate::SubagentStatus::Completed { reply, .. } => {
+                reply.lines().next().unwrap_or("completed").to_string()
+            }
+            harness_core::tools::delegate::SubagentStatus::Failed { error, .. } => error.clone(),
+            _ => "finished".to_string(),
+        };
+        let notice = format!(
+            "{} Subagent task [{}] finished: {}",
+            if is_ok {
+                "✔".green().bold()
+            } else {
+                "✖".red().bold()
+            },
+            record.id.cyan(),
+            summary
+        );
+        ui_delegate.emit_above(&notice);
+        let s_id = session_id_delegate.clone();
+        let s_store = store_delegate.clone();
+        tokio::spawn(async move {
+            let _ = s_store
+                .append(&s_id, &harness_core::Message::system(&notice), false)
+                .await;
+        });
+    }));
 
     {
         let ag = agent.lock().await;

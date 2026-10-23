@@ -788,6 +788,13 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             return format!("{} {}{}", glyph, verb_col(action), job_id);
         }
         "delegate_task" => {
+            let action = text("action").unwrap_or("spawn");
+            if action != "spawn" {
+                let detail = text("task_id")
+                    .map(|id| format!(" [{}]", id.cyan()))
+                    .unwrap_or_default();
+                return format!("{} {} ({}){}", glyph, verb_col(verb), action.dimmed(), detail);
+            }
             let task_count = arguments
                 .get("tasks")
                 .and_then(|t| t.as_array())
