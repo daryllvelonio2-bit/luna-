@@ -2245,7 +2245,11 @@ mod tests {
         );
         let fitted = fit_diff_line_to_width(&long_line, 50);
         let visible_len = dialoguer::console::measure_text_width(&fitted);
-        assert!(visible_len <= 50, "visible_len {} exceeds width 50", visible_len);
+        assert!(
+            visible_len <= 50,
+            "visible_len {} exceeds width 50",
+            visible_len
+        );
         assert!(fitted.contains("0;160;0"), "style preserved");
         assert!(fitted.contains("+"), "prefix preserved");
     }
