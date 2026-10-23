@@ -1915,6 +1915,8 @@ fn launch_turn(
         format!("{}\n\n{}", q, images.join("\n\n"))
     };
 
+    ui.clear_patch_diff();
+
     if ui.is_attended {
         crate::commands::clear_screen();
         redraw_transcript(turns, process_expanded);

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, compaction_line, needs_separator, reasoning_rows, tool_activity_detail,
-    OutputBlockKind, PROMPT,
+    activity_line, compaction_line, fit_diff_line_to_width, needs_separator, reasoning_rows,
+    tool_activity_detail, OutputBlockKind, PROMPT,
 };
 
 /// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
@@ -842,7 +842,8 @@ impl ChatUi {
             print!("\x1b[{}B", rows_below);
         }
 
-        let total_rows = rows_below + rows_above + 1;
+        let term_height = get_terminal_height();
+        let total_rows = (rows_below + rows_above + 1).min(term_height);
         for i in 0..total_rows {
             print!("\r\x1b[2K");
             if i + 1 < total_rows {
@@ -963,21 +964,29 @@ impl ChatUi {
 
         let prompt = self.prompt_row(buf);
         let mut sequence = String::new();
-        // The offset of the last row that was rewritten, so the cursor can walk back down.
-        let mut last_offset: Option<usize> = None;
+        // Tracks the cursor's current vertical offset above the prompt row (0 = on prompt row).
+        let mut current_offset = 0usize;
         for (i, row) in block.iter().enumerate() {
             if old_block.get(i).map(|old| old == row).unwrap_or(false) {
                 continue;
             }
             // Block row `i` sits this many rows above the prompt row.
-            let offset = old_block.len() - i;
-            sequence.push_str(&format!("\r\x1b[{offset}A\r\x1b[2K{row}"));
-            last_offset = Some(offset);
+            let target_offset = old_block.len() - i;
+            if target_offset > current_offset {
+                let up = target_offset - current_offset;
+                sequence.push_str(&format!("\r\x1b[{up}A\x1b[2K{row}"));
+            } else if target_offset < current_offset {
+                let down = current_offset - target_offset;
+                sequence.push_str(&format!("\r\x1b[{down}B\x1b[2K{row}"));
+            } else {
+                sequence.push_str(&format!("\r\x1b[2K{row}"));
+            }
+            current_offset = target_offset;
         }
         // The cursor belongs back on the prompt row: the caret lives there, and the next keypress
         // is written there.
-        if let Some(offset) = last_offset {
-            sequence.push_str(&format!("\r\x1b[{offset}B"));
+        if current_offset > 0 {
+            sequence.push_str(&format!("\r\x1b[{current_offset}B"));
         }
         if prompt != metrics.prompt_drawn {
             sequence.push_str("\r\x1b[2K");
@@ -1046,15 +1055,18 @@ impl ChatUi {
             }
 
             if let Some(diff) = &live.patch_diff {
-                const MAX_LIVE_DIFF: usize = 20;
-                if diff.len() <= MAX_LIVE_DIFF {
-                    rows.extend(diff.iter().cloned());
-                } else {
-                    rows.extend(diff[..MAX_LIVE_DIFF - 1].iter().cloned());
+                let term_height = get_terminal_height();
+                let max_live_diff = term_height.saturating_sub(10).clamp(2, 6);
+                let count = diff.len();
+                let display_count = count.min(max_live_diff);
+                for line in &diff[..display_count] {
+                    rows.push(fit_diff_line_to_width(line, width));
+                }
+                if count > display_count {
                     rows.push(
                         format!(
-                            "    ... ({} more changed lines)",
-                            diff.len() - (MAX_LIVE_DIFF - 1)
+                            "    ... ({} more changed lines, Ctrl+O to expand)",
+                            count - display_count
                         )
                         .dimmed()
                         .to_string(),
@@ -1644,6 +1656,72 @@ mod tests {
         assert!(
             sequence.contains("\x1b[2K"),
             "the changed row is cleared before it is rewritten"
+        );
+    }
+
+    #[test]
+    fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 10_000, 100_000);
+        let width = get_terminal_width();
+        let status = ui.format_status_line(width).expect("status line");
+        let divider = "─".repeat(width).dimmed().to_string();
+
+        {
+            let mut metrics = ui.drawn_metrics.lock().unwrap();
+            *metrics = Some(BoxDrawnMetrics {
+                width,
+                bg_line_len: 0,
+                queued_line_len: 0,
+                status_line_len: visible_width(&status),
+                divider_len: width,
+                prompt_len: visible_width(&ui.prompt_row("")),
+                live_rows_lens: vec![
+                    visible_width("thinking row 1"),
+                    visible_width("thinking row 2"),
+                ],
+                panel_rows_lens: Vec::new(),
+                block_rows: vec![
+                    "thinking row 1".to_string(),
+                    "thinking row 2".to_string(),
+                    status.clone(),
+                    divider.clone(),
+                ],
+                prompt_drawn: ui.prompt_row(""),
+            });
+        }
+        ui.box_drawn.store(true, Ordering::SeqCst);
+
+        // Both rows change at the same time:
+        {
+            let mut live = ui.live.lock().unwrap();
+            live.rows = vec![
+                "updated thinking 1".to_string(),
+                "updated thinking 2".to_string(),
+            ];
+        }
+        let sequence = ui
+            .repaint_block_sequence(width, "")
+            .expect("repaints in place");
+
+        // The sequence should move up to the first row (offset 4), then move DOWN by 1 to the second row (offset 3),
+        // and finally move DOWN by 3 back to the prompt line.
+        assert!(
+            sequence.contains("\x1b[4A"),
+            "moves up to top row: {sequence}"
+        );
+        assert!(
+            sequence.contains("\x1b[1B"),
+            "steps down to next row: {sequence}"
+        );
+        assert!(
+            sequence.contains("\x1b[3B"),
+            "returns down to prompt row: {sequence}"
+        );
+        // It must NOT compound moves up (e.g. \x1b[4A followed by \x1b[3A) which would blast off the top of screen!
+        assert!(
+            !sequence.contains("\x1b[3A"),
+            "must not compound upward movements: {sequence}"
         );
     }
 

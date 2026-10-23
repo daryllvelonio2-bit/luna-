@@ -577,6 +577,30 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
 }
 
 /// Formats the diff between `old_string` and `new_string` for a patch tool call.
+/// Truncates a formatted patch diff line to fit within `width` terminal cells so it never wraps in the live region.
+pub fn fit_diff_line_to_width(line: &str, width: usize) -> String {
+    let visible = dialoguer::console::measure_text_width(line);
+    if visible <= width {
+        return line.to_string();
+    }
+    let raw = dialoguer::console::strip_ansi_codes(line);
+    let trimmed = raw.trim_start();
+    let truncated_raw = truncate_to_cells(&raw, width);
+    if trimmed.starts_with("- ") {
+        format!(
+            "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m{}\x1b[0m",
+            truncated_raw
+        )
+    } else if trimmed.starts_with("+ ") {
+        format!(
+            "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m{}\x1b[0m",
+            truncated_raw
+        )
+    } else {
+        format!("\x1b[2m{}\x1b[0m", truncated_raw)
+    }
+}
+
 /// Deletions are styled with a red background; additions are styled with a green background.
 pub fn format_patch_diff(old_string: &str, new_string: &str) -> Vec<String> {
     if old_string.is_empty() && new_string.is_empty() {
@@ -2211,5 +2235,18 @@ mod tests {
         assert!(tool.diff_lines[0].contains("200;0;0"));
         assert!(tool.diff_lines[1].contains("+"));
         assert!(tool.diff_lines[1].contains("0;160;0"));
+    }
+
+    #[test]
+    fn fit_diff_line_to_width_truncates_long_lines_cleanly() {
+        let long_line = format!(
+            "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
+            "x".repeat(120)
+        );
+        let fitted = fit_diff_line_to_width(&long_line, 50);
+        let visible_len = dialoguer::console::measure_text_width(&fitted);
+        assert!(visible_len <= 50, "visible_len {} exceeds width 50", visible_len);
+        assert!(fitted.contains("0;160;0"), "style preserved");
+        assert!(fitted.contains("+"), "prefix preserved");
     }
 }
