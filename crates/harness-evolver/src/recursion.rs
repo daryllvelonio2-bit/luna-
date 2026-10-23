@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    HarnessError, RolloutLedger, RolloutRecord, StageKind, Substrate, SubstrateOutcome,
-    SurfaceSpec,
+    HarnessError, RolloutLedger, RolloutRecord, StageKind, Substrate, SubstrateOutcome, SurfaceSpec,
 };
 
 /// Recursion mode for task-level harness refinement
@@ -77,7 +76,9 @@ impl TaskHarnessRefiner {
                         if !cand.c1_system_prompt.always_on_prose.is_empty() {
                             cand.c1_system_prompt.always_on_prose.push('\n');
                         }
-                        cand.c1_system_prompt.always_on_prose.push_str(&failure_advice);
+                        cand.c1_system_prompt
+                            .always_on_prose
+                            .push_str(&failure_advice);
                     }
                     cand.c2_guardrails.max_consecutive_failures = 3;
                 }
@@ -87,7 +88,8 @@ impl TaskHarnessRefiner {
                         "Domain guidance for task '{}': prefer atomic edits and verify output.",
                         evidence.task_instruction
                     );
-                    cand.c5_tool_guidance.insert("task_discipline".into(), tool_guidance);
+                    cand.c5_tool_guidance
+                        .insert("task_discipline".into(), tool_guidance);
                 }
                 StageKind::Composition | StageKind::Baseline => {}
             }
@@ -151,11 +153,16 @@ impl TaskHarnessRefiner {
             if probe.outcome.success {
                 // Adopt improved tool guidance
                 for (tool, guidance) in &probe.surface.c5_tool_guidance {
-                    composite.c5_tool_guidance.insert(tool.clone(), guidance.clone());
+                    composite
+                        .c5_tool_guidance
+                        .insert(tool.clone(), guidance.clone());
                 }
                 // Adopt tighter guardrails
-                if probe.surface.c2_guardrails.max_consecutive_failures < composite.c2_guardrails.max_consecutive_failures {
-                    composite.c2_guardrails.max_consecutive_failures = probe.surface.c2_guardrails.max_consecutive_failures;
+                if probe.surface.c2_guardrails.max_consecutive_failures
+                    < composite.c2_guardrails.max_consecutive_failures
+                {
+                    composite.c2_guardrails.max_consecutive_failures =
+                        probe.surface.c2_guardrails.max_consecutive_failures;
                 }
                 // Adopt valid skills
                 for skill in &probe.surface.c4_skills {
@@ -195,18 +202,26 @@ impl TaskHarnessRefiner {
                     self.k,
                 );
                 let inv_results = self
-                    .probe_candidates(&inv_candidates, task_instruction, StageKind::Invariant, substrate, cancel_token)
+                    .probe_candidates(
+                        &inv_candidates,
+                        task_instruction,
+                        StageKind::Invariant,
+                        substrate,
+                        cancel_token,
+                    )
                     .await?;
 
                 // Probe k domain (DOM) candidates
-                let dom_candidates = self.propose_candidates(
-                    &current_surface,
-                    &evidence,
-                    StageKind::Domain,
-                    self.k,
-                );
+                let dom_candidates =
+                    self.propose_candidates(&current_surface, &evidence, StageKind::Domain, self.k);
                 let dom_results = self
-                    .probe_candidates(&dom_candidates, task_instruction, StageKind::Domain, substrate, cancel_token)
+                    .probe_candidates(
+                        &dom_candidates,
+                        task_instruction,
+                        StageKind::Domain,
+                        substrate,
+                        cancel_token,
+                    )
                     .await?;
 
                 let mut all_results = inv_results;
@@ -233,7 +248,13 @@ impl TaskHarnessRefiner {
                         1,
                     );
                     let probes = self
-                        .probe_candidates(&cands, task_instruction, StageKind::Invariant, substrate, cancel_token)
+                        .probe_candidates(
+                            &cands,
+                            task_instruction,
+                            StageKind::Invariant,
+                            substrate,
+                            cancel_token,
+                        )
                         .await?;
 
                     current_surface = self.compose(&current_surface, &probes);
@@ -268,12 +289,19 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let refined = refiner
-            .run_recursion(&base_surface, "Optimize matrix multiplication", &substrate, &cancel)
+            .run_recursion(
+                &base_surface,
+                "Optimize matrix multiplication",
+                &substrate,
+                &cancel,
+            )
             .await;
 
         assert!(refined.is_ok());
         let refined_spec = refined.unwrap();
-        assert!(refined_spec.c5_tool_guidance.contains_key("task_discipline"));
+        assert!(refined_spec
+            .c5_tool_guidance
+            .contains_key("task_discipline"));
         assert_eq!(refiner.ledger.completed_rollouts.len(), 2); // 1 INV + 1 DOM
     }
 }

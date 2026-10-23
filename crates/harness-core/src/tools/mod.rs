@@ -6,7 +6,6 @@ pub mod sandbox;
 pub mod shell;
 pub mod todo;
 
-use std::sync::{Arc, Mutex};
 pub use delegate::DelegateTaskTool;
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
 pub use process::ProcessTool;
@@ -14,6 +13,7 @@ pub use shell::{
     check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,
     TerminalTool,
 };
+use std::sync::{Arc, Mutex};
 pub use todo::{read_snapshot, TodoItem, TodoListTool, TodoScope, TodoSnapshot, TodoStatus};
 
 use crate::config::Config;
@@ -154,7 +154,9 @@ pub async fn register_core_tools_shared_queue(
                 registry.register(Arc::new(term)).await?;
             }
             "process" => {
-                registry.register(Arc::new(ProcessTool::new(bg_queue.clone()))).await?;
+                registry
+                    .register(Arc::new(ProcessTool::new(bg_queue.clone())))
+                    .await?;
             }
             _ => {}
         }

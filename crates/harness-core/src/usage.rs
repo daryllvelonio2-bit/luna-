@@ -103,7 +103,8 @@ impl PriceTable {
     }
 
     pub fn cost(&self, provider: &str, model: &str, usage: &TokenUsage) -> Option<f64> {
-        self.lookup(provider, model).and_then(|price| price.cost(usage))
+        self.lookup(provider, model)
+            .and_then(|price| price.cost(usage))
     }
 
     pub fn len(&self) -> usize {
@@ -399,7 +400,8 @@ impl UsageLedger {
         let Some(usage) = outcome.usage.clone() else {
             return Ok(());
         };
-        let mut record = UsageRecord::for_turn(provider, model, &usage, outcome.duration_ms, prices);
+        let mut record =
+            UsageRecord::for_turn(provider, model, &usage, outcome.duration_ms, prices);
         record.session_id = session_id.map(|id| id.to_string());
         record.tool_calls = outcome.tool_calls.len() as u32;
         record.denied_calls = outcome.tool_calls.iter().filter(|call| call.denied).count() as u32;

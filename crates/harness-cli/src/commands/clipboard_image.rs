@@ -67,7 +67,8 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
 }
 
 fn try_arboard() -> Result<Option<ClipboardImage>, String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
 
     let img: ImageData = match clipboard.get_image() {
         Ok(i) => i,
@@ -107,7 +108,10 @@ fn fallback_image_bytes() -> Option<Vec<u8>> {
         }
     }
     // xclip for X11 sessions (no-op when it is not installed).
-    if let Some(bytes) = command_bytes("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]) {
+    if let Some(bytes) = command_bytes(
+        "xclip",
+        &["-selection", "clipboard", "-t", "image/png", "-o"],
+    ) {
         if png_sniff(&bytes) {
             return Some(bytes);
         }
@@ -145,7 +149,10 @@ fn png_sniff(bytes: &[u8]) -> bool {
 /// missing, it fails, or it produces nothing (all mean "this source has no
 /// image", not an error worth reporting).
 fn command_bytes(program: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let out = std::process::Command::new(program).args(args).output().ok()?;
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() || out.stdout.is_empty() {
         return None;
     }
@@ -256,7 +263,11 @@ fn crc32(data: &[u8]) -> u32 {
     for (i, entry) in table.iter_mut().enumerate() {
         let mut c = i as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         *entry = c;
     }
@@ -284,7 +295,11 @@ mod tests {
 
         let png = encode_png_rgba(&rgba, width, height).expect("encode");
 
-        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A], "signature");
+        assert_eq!(
+            &png[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            "signature"
+        );
 
         // Walk the chunk list, checking each declared length and CRC.
         let mut pos = 8usize;
@@ -293,9 +308,8 @@ mod tests {
             let len = u32::from_be_bytes(png[pos..pos + 4].try_into().unwrap()) as usize;
             let kind = String::from_utf8(png[pos + 4..pos + 8].to_vec()).unwrap();
             let data = png[pos + 8..pos + 8 + len].to_vec();
-            let stored_crc = u32::from_be_bytes(
-                png[pos + 8 + len..pos + 12 + len].try_into().unwrap(),
-            );
+            let stored_crc =
+                u32::from_be_bytes(png[pos + 8 + len..pos + 12 + len].try_into().unwrap());
             let mut crc_input = kind.as_bytes().to_vec();
             crc_input.extend_from_slice(&data);
             assert_eq!(stored_crc, crc32(&crc_input), "bad CRC on {kind} chunk");
@@ -309,8 +323,16 @@ mod tests {
         );
 
         let ihdr = &chunks[0].1;
-        assert_eq!(u32::from_be_bytes(ihdr[0..4].try_into().unwrap()), 3, "width");
-        assert_eq!(u32::from_be_bytes(ihdr[4..8].try_into().unwrap()), 2, "height");
+        assert_eq!(
+            u32::from_be_bytes(ihdr[0..4].try_into().unwrap()),
+            3,
+            "width"
+        );
+        assert_eq!(
+            u32::from_be_bytes(ihdr[4..8].try_into().unwrap()),
+            2,
+            "height"
+        );
         assert_eq!(&ihdr[8..], &[8, 6, 0, 0, 0], "8-bit RGBA, no interlace");
 
         // Inflate the stored-block zlib stream and compare to the raw scanlines.
@@ -334,7 +356,10 @@ mod tests {
             expected.push(0u8);
             expected.extend_from_slice(&rgba[y * width * 4..(y + 1) * width * 4]);
         }
-        assert_eq!(inflated, expected, "decoded scanlines differ from the input pixels");
+        assert_eq!(
+            inflated, expected,
+            "decoded scanlines differ from the input pixels"
+        );
     }
 
     #[test]
@@ -347,13 +372,25 @@ mod tests {
     #[test]
     fn dimensions_are_read_straight_from_the_ihdr() {
         let png = encode_png_rgba(&vec![0u8; 9 * 7 * 4], 9, 7).expect("encode");
-        assert_eq!(png_dimensions(&png), Some((9, 7)), "IHDR width/height at bytes 16..24");
+        assert_eq!(
+            png_dimensions(&png),
+            Some((9, 7)),
+            "IHDR width/height at bytes 16..24"
+        );
     }
 
     #[test]
     fn dimension_parsing_refuses_non_png_input() {
-        assert_eq!(png_dimensions(b"not a png at all........"), None, "bad signature");
-        assert_eq!(png_dimensions(&[0x89, b'P', b'N', b'G']), None, "truncated header");
+        assert_eq!(
+            png_dimensions(b"not a png at all........"),
+            None,
+            "bad signature"
+        );
+        assert_eq!(
+            png_dimensions(&[0x89, b'P', b'N', b'G']),
+            None,
+            "truncated header"
+        );
     }
 
     #[test]
@@ -362,7 +399,10 @@ mod tests {
         // not an error: the xclip fallback must no-op on Wayland-only boxes.
         assert!(command_bytes("luna-nonexistent-helper", &["--version"]).is_none());
         // A real binary with real output parses as bytes.
-        assert_eq!(command_bytes("/bin/echo", &["ok"]).as_deref(), Some(&b"ok\n"[..]));
+        assert_eq!(
+            command_bytes("/bin/echo", &["ok"]).as_deref(),
+            Some(&b"ok\n"[..])
+        );
     }
 
     /// Not ignored by default for CI cost, but kept as the out-of-process proof: the file this

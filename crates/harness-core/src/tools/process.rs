@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::HarnessError;
@@ -58,7 +58,12 @@ impl Tool for ProcessTool {
     ) -> Result<ToolResult, HarnessError> {
         let action = match args.get("action").and_then(|a| a.as_str()) {
             Some(a) => a,
-            None => return Ok(ToolResult::error(call_id, "Missing required argument 'action'")),
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'action'",
+                ))
+            }
         };
 
         match action {
@@ -73,7 +78,12 @@ impl Tool for ProcessTool {
             "poll" => {
                 let job_id = match args.get("job_id").and_then(|j| j.as_str()) {
                     Some(j) => j,
-                    None => return Ok(ToolResult::error(call_id, "Missing argument 'job_id' for poll action")),
+                    None => {
+                        return Ok(ToolResult::error(
+                            call_id,
+                            "Missing argument 'job_id' for poll action",
+                        ))
+                    }
                 };
                 let tail = args.get("tail").and_then(|t| t.as_u64()).unwrap_or(40) as usize;
                 match self.queue.poll(job_id, tail) {
@@ -87,17 +97,31 @@ impl Tool for ProcessTool {
             "kill" => {
                 let job_id = match args.get("job_id").and_then(|j| j.as_str()) {
                     Some(j) => j,
-                    None => return Ok(ToolResult::error(call_id, "Missing argument 'job_id' for kill action")),
+                    None => {
+                        return Ok(ToolResult::error(
+                            call_id,
+                            "Missing argument 'job_id' for kill action",
+                        ))
+                    }
                 };
                 match self.queue.kill(job_id) {
-                    Ok(true) => Ok(ToolResult::success(call_id, format!("Process '{}' killed.", job_id))),
-                    Ok(false) => Ok(ToolResult::error(call_id, format!("Process '{}' not found or already stopped.", job_id))),
+                    Ok(true) => Ok(ToolResult::success(
+                        call_id,
+                        format!("Process '{}' killed.", job_id),
+                    )),
+                    Ok(false) => Ok(ToolResult::error(
+                        call_id,
+                        format!("Process '{}' not found or already stopped.", job_id),
+                    )),
                     Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
                 }
             }
             other => Ok(ToolResult::error(
                 call_id,
-                format!("Unknown action '{}'. Valid actions: list, poll, kill", other),
+                format!(
+                    "Unknown action '{}'. Valid actions: list, poll, kill",
+                    other
+                ),
             )),
         }
     }

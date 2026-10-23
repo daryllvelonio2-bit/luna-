@@ -300,7 +300,10 @@ pub async fn compact(
     debug!(
         "Compacting {} messages ({} turns) with model '{}'",
         folded.len(),
-        folded.iter().filter(|stored| stored.message.role == Role::User).count(),
+        folded
+            .iter()
+            .filter(|stored| stored.message.role == Role::User)
+            .count(),
         model
     );
 

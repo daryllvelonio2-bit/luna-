@@ -5,8 +5,8 @@
 //! the ones documented in `hooks.rs`.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -50,7 +50,9 @@ async fn disabled_hooks_run_nothing() {
     // `enabled: false` — even with trust_workspace set, nothing runs.
     let runner = HookRunner::load(dir.path(), &settings(false, true)).unwrap();
     assert!(runner.is_empty(), "disabled hooks must not load");
-    runner.run(HookEvent::SessionStart, &HookContext::default()).await;
+    runner
+        .run(HookEvent::SessionStart, &HookContext::default())
+        .await;
     assert!(!marker.exists(), "a disabled hook must not execute");
 }
 
@@ -71,12 +73,16 @@ async fn project_hooks_need_trust() {
         untrusted.is_empty(),
         "a repository-supplied hook file must be ignored until it is trusted"
     );
-    untrusted.run(HookEvent::SessionStart, &HookContext::default()).await;
+    untrusted
+        .run(HookEvent::SessionStart, &HookContext::default())
+        .await;
     assert!(!marker.exists());
 
     let trusted = HookRunner::load(dir.path(), &settings(true, true)).unwrap();
     assert_eq!(trusted.len(), 1);
-    trusted.run(HookEvent::SessionStart, &HookContext::default()).await;
+    trusted
+        .run(HookEvent::SessionStart, &HookContext::default())
+        .await;
     assert!(marker.exists(), "a trusted project hook must execute");
 }
 
@@ -97,8 +103,13 @@ async fn user_hooks_load_without_workspace_trust() {
         HookRunner::load_with_user_file(workspace.path(), &settings(true, false), Some(&user_file))
             .unwrap();
     assert_eq!(runner.len(), 1);
-    runner.run(HookEvent::SessionStart, &HookContext::default()).await;
-    assert!(marker.exists(), "the user's own hooks run without project trust");
+    runner
+        .run(HookEvent::SessionStart, &HookContext::default())
+        .await;
+    assert!(
+        marker.exists(),
+        "the user's own hooks run without project trust"
+    );
 }
 
 #[tokio::test]
@@ -108,12 +119,9 @@ async fn exit_code_two_denies_with_stderr_as_the_reason() {
         dir.path(),
         r#"{"hooks":{"pre_tool_use":[{"command":"echo 'rm -rf is forbidden' >&2; exit 2"}]}}"#,
     );
-    let runner = HookRunner::load_with_user_file(
-        dir.path(),
-        &settings(true, false),
-        Some(&user_file),
-    )
-    .unwrap();
+    let runner =
+        HookRunner::load_with_user_file(dir.path(), &settings(true, false), Some(&user_file))
+            .unwrap();
 
     let outcome = runner
         .run(
@@ -138,7 +146,8 @@ async fn json_decision_deny_is_honoured() {
         r#"{"hooks":{"pre_tool_use":[{"command":"echo '{\"decision\":\"deny\",\"reason\":\"not on main\"}'"}]}}"#,
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     let outcome = runner
         .run(
@@ -150,7 +159,10 @@ async fn json_decision_deny_is_honoured() {
         )
         .await;
 
-    assert_eq!(outcome.verdict, HookVerdict::Deny("not on main".to_string()));
+    assert_eq!(
+        outcome.verdict,
+        HookVerdict::Deny("not on main".to_string())
+    );
 }
 
 #[tokio::test]
@@ -161,7 +173,8 @@ async fn updated_input_rewrites_the_arguments() {
         r#"{"hooks":{"pre_tool_use":[{"command":"echo '{\"updatedInput\":{\"command\":\"ls\"}}'"}]}}"#,
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     let outcome = runner
         .run(
@@ -192,7 +205,8 @@ async fn matcher_scopes_a_hook_to_one_tool() {
         ),
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     runner
         .run(
@@ -203,7 +217,10 @@ async fn matcher_scopes_a_hook_to_one_tool() {
             },
         )
         .await;
-    assert!(!marker.exists(), "a non-matching tool must not trigger the hook");
+    assert!(
+        !marker.exists(),
+        "a non-matching tool must not trigger the hook"
+    );
 
     runner
         .run(
@@ -229,7 +246,8 @@ async fn the_payload_carries_the_event_and_the_tool_arguments() {
         ),
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     runner
         .run(
@@ -260,7 +278,8 @@ async fn a_timed_out_gating_hook_denies() {
         r#"{"hooks":{"pre_tool_use":[{"command":"sleep 5","timeout_secs":1}]}}"#,
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     let outcome = runner
         .run(
@@ -273,16 +292,20 @@ async fn a_timed_out_gating_hook_denies() {
         .await;
 
     // Fail closed: a guardrail that cannot answer in time has not said yes.
-    assert!(outcome.is_denied(), "gating events must fail closed on timeout");
+    assert!(
+        outcome.is_denied(),
+        "gating events must fail closed on timeout"
+    );
 }
 
 #[tokio::test]
 async fn an_unknown_event_name_is_a_configuration_error() {
     let dir = tempfile::tempdir().unwrap();
     let user_file = write_hooks(dir.path(), r#"{"hooks":{"pre_tool_usee":[]}}"#);
-    let error = HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
-        .err()
-        .expect("a typo in an event name must not silently disable a guardrail");
+    let error =
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .err()
+            .expect("a typo in an event name must not silently disable a guardrail");
     assert!(
         error.to_string().contains("pre_tool_usee"),
         "the error must name the offending event: {error}"
@@ -303,7 +326,9 @@ async fn disabled_events_are_skipped() {
     let mut config = settings(true, true);
     config.disabled = vec!["session_start".to_string()];
     let runner = HookRunner::load_with_user_file(dir.path(), &config, Some(&user_file)).unwrap();
-    runner.run(HookEvent::SessionStart, &HookContext::default()).await;
+    runner
+        .run(HookEvent::SessionStart, &HookContext::default())
+        .await;
     assert!(!marker.exists());
 }
 
@@ -315,7 +340,8 @@ async fn a_non_blocking_hook_failure_does_not_break_the_event() {
         r#"{"hooks":{"post_tool_use":[{"command":"echo boom >&2; exit 9"}]}}"#,
     );
     let runner =
-        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file)).unwrap();
+        HookRunner::load_with_user_file(dir.path(), &settings(true, true), Some(&user_file))
+            .unwrap();
 
     let outcome = runner
         .run(
@@ -373,11 +399,14 @@ impl ModelProvider for OneCallProvider {
     }
 }
 
-
 struct StubMemory;
 #[async_trait]
 impl MemoryEngine for StubMemory {
-    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
         Ok(vec![])
     }
     async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -400,7 +429,12 @@ impl MemoryEngine for StubMemory {
 struct StubNotes;
 #[async_trait]
 impl NotesEngine for StubNotes {
-    async fn save_note(&self, _title: &str, _content: &str, _tags: &[String]) -> Result<Note, HarnessError> {
+    async fn save_note(
+        &self,
+        _title: &str,
+        _content: &str,
+        _tags: &[String],
+    ) -> Result<Note, HarnessError> {
         unimplemented!()
     }
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {

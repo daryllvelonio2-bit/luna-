@@ -1,10 +1,10 @@
+use harness_core::HarnessError;
+use rand::Rng;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use rand::Rng;
-use serde_json::json;
-use harness_core::HarnessError;
 
 const BASE62_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const ID_CEILING: u64 = 1 << 48;
@@ -141,11 +141,21 @@ pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, 
         if let Ok(content) = std::fs::read_to_string(&shiina_auth) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                 let pool = val.get("credential_pool");
-                if let Some(creds) = pool.and_then(|p| p.get("opencode-zen")).and_then(|c| c.as_array()) {
+                if let Some(creds) = pool
+                    .and_then(|p| p.get("opencode-zen"))
+                    .and_then(|c| c.as_array())
+                {
                     for c in creds {
-                        if let Some(tok) = c.get("access_token").or_else(|| c.get("api_key")).and_then(|t| t.as_str()) {
+                        if let Some(tok) = c
+                            .get("access_token")
+                            .or_else(|| c.get("api_key"))
+                            .and_then(|t| t.as_str())
+                        {
                             if !tok.is_empty() && tok != "public" {
-                                let label = c.get("label").and_then(|l| l.as_str()).unwrap_or("opencode-zen");
+                                let label = c
+                                    .get("label")
+                                    .and_then(|l| l.as_str())
+                                    .unwrap_or("opencode-zen");
                                 detected.push(DetectedOpencodeCredential {
                                     provider: "opencode".to_string(),
                                     label: label.to_string(),
@@ -160,7 +170,11 @@ pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, 
     }
 
     // 3. ~/.local/share/opencode/auth.json (Groq integration)
-    let local_auth = PathBuf::from(&home).join(".local").join("share").join("opencode").join("auth.json");
+    let local_auth = PathBuf::from(&home)
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("auth.json");
     if local_auth.is_file() {
         if let Ok(content) = std::fs::read_to_string(&local_auth) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -224,7 +238,11 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
 
     // 2. Try ~/.local/state/opencode/model.json
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let state_file = PathBuf::from(&home).join(".local").join("state").join("opencode").join("model.json");
+    let state_file = PathBuf::from(&home)
+        .join(".local")
+        .join("state")
+        .join("opencode")
+        .join("model.json");
     if state_file.is_file() {
         if let Ok(content) = std::fs::read_to_string(&state_file) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -254,5 +272,8 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
     }
 
     // 3. Fallback to constant verified free models
-    Ok(OPENCODE_FREE_MODELS.iter().map(|&s| s.to_string()).collect())
+    Ok(OPENCODE_FREE_MODELS
+        .iter()
+        .map(|&s| s.to_string())
+        .collect())
 }

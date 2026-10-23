@@ -78,7 +78,10 @@ pub async fn run_diff(config: &Config, opts: DiffOptions) -> Result<(), HarnessE
     } else {
         let seq = match opts.turn {
             Some(seq) => seq,
-            None => checkpoints.last().map(|checkpoint| checkpoint.seq).unwrap_or(1),
+            None => checkpoints
+                .last()
+                .map(|checkpoint| checkpoint.seq)
+                .unwrap_or(1),
         };
         if !checkpoints.iter().any(|checkpoint| checkpoint.seq == seq) {
             return Err(HarnessError::ConfigurationError(format!(

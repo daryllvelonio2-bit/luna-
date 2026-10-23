@@ -1,6 +1,6 @@
-use std::io::Cursor;
-use hound::{WavSpec, WavWriter};
 use harness_core::HarnessError;
+use hound::{WavSpec, WavWriter};
+use std::io::Cursor;
 
 pub struct AudioProcessor;
 
@@ -16,13 +16,14 @@ impl AudioProcessor {
 
         let mut cursor = Cursor::new(Vec::new());
         {
-            let mut writer = WavWriter::new(&mut cursor, spec)
-                .map_err(|e| HarnessError::VoiceError(format!("Failed to create WAV writer: {}", e)))?;
+            let mut writer = WavWriter::new(&mut cursor, spec).map_err(|e| {
+                HarnessError::VoiceError(format!("Failed to create WAV writer: {}", e))
+            })?;
 
             for &s in samples {
-                writer
-                    .write_sample(s)
-                    .map_err(|e| HarnessError::VoiceError(format!("Failed to write sample: {}", e)))?;
+                writer.write_sample(s).map_err(|e| {
+                    HarnessError::VoiceError(format!("Failed to write sample: {}", e))
+                })?;
             }
             writer
                 .finalize()

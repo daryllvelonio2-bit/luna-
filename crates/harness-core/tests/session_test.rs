@@ -246,7 +246,11 @@ struct MockMemory;
 
 #[async_trait]
 impl MemoryEngine for MockMemory {
-    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
         Ok(Vec::new())
     }
     async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -270,7 +274,12 @@ struct MockNotes;
 
 #[async_trait]
 impl NotesEngine for MockNotes {
-    async fn save_note(&self, title: &str, content: &str, _tags: &[String]) -> Result<Note, HarnessError> {
+    async fn save_note(
+        &self,
+        title: &str,
+        content: &str,
+        _tags: &[String],
+    ) -> Result<Note, HarnessError> {
         Ok(Note {
             id: "n1".to_string(),
             title: title.to_string(),
@@ -288,7 +297,9 @@ impl NotesEngine for MockNotes {
         Ok(Vec::new())
     }
     async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
-        Err(HarnessError::NotesError("no notes in this test".to_string()))
+        Err(HarnessError::NotesError(
+            "no notes in this test".to_string(),
+        ))
     }
     async fn update_note(
         &self,
@@ -297,10 +308,14 @@ impl NotesEngine for MockNotes {
         _content: Option<&str>,
         _tags: Option<&[String]>,
     ) -> Result<Note, HarnessError> {
-        Err(HarnessError::NotesError("no notes in this test".to_string()))
+        Err(HarnessError::NotesError(
+            "no notes in this test".to_string(),
+        ))
     }
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
-        Err(HarnessError::NotesError("no notes in this test".to_string()))
+        Err(HarnessError::NotesError(
+            "no notes in this test".to_string(),
+        ))
     }
 }
 
@@ -400,14 +415,23 @@ fn stored_with(
 #[tokio::test]
 async fn append_assigns_sequence_and_replay_returns_it_in_order() {
     let (_dir, _path, store) = temp_store();
-    store.ensure_session("s1").await.expect("create the session");
+    store
+        .ensure_session("s1")
+        .await
+        .expect("create the session");
 
-    store.append("s1", &Message::user("first"), false).await.unwrap();
+    store
+        .append("s1", &Message::user("first"), false)
+        .await
+        .unwrap();
     store
         .append("s1", &Message::assistant("second"), false)
         .await
         .unwrap();
-    store.append("s1", &Message::user("third"), false).await.unwrap();
+    store
+        .append("s1", &Message::user("third"), false)
+        .await
+        .unwrap();
 
     let replay = store.replay("s1", 200).await.unwrap();
     assert_eq!(replay.total, 3);
@@ -444,7 +468,10 @@ async fn replay_bound_keeps_the_newest_and_reports_the_total() {
     let replay = store.replay("s1", 3).await.unwrap();
     assert_eq!(replay.total, 10);
     assert_eq!(replay.replayed, 3);
-    assert!(replay.truncated(), "the bound dropped messages, so it must say so");
+    assert!(
+        replay.truncated(),
+        "the bound dropped messages, so it must say so"
+    );
 
     let bodies: Vec<Option<String>> = replay
         .history
@@ -465,10 +492,22 @@ async fn replay_bound_keeps_the_newest_and_reports_the_total() {
 async fn record_compaction_writes_a_summary_and_keeps_the_folded_rows() {
     let (_dir, path, store) = temp_store();
     store.ensure_session("s1").await.unwrap();
-    store.append("s1", &Message::user("one"), false).await.unwrap();
-    store.append("s1", &Message::assistant("two"), false).await.unwrap();
-    store.append("s1", &Message::user("three"), false).await.unwrap();
-    store.append("s1", &Message::assistant("four"), false).await.unwrap();
+    store
+        .append("s1", &Message::user("one"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("two"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::user("three"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("four"), false)
+        .await
+        .unwrap();
 
     let summary_id = store
         .record_compaction("s1", &[1, 2], "the user asked one")
@@ -484,7 +523,11 @@ async fn record_compaction_writes_a_summary_and_keeps_the_folded_rows() {
     );
     assert_eq!(replay.history[0].message.role, Role::System);
     assert_eq!(
-        replay.history.iter().filter(|stored| !stored.is_summary).count(),
+        replay
+            .history
+            .iter()
+            .filter(|stored| !stored.is_summary)
+            .count(),
         2,
         "the two unfolded rows are what is left to replay"
     );
@@ -500,10 +543,17 @@ async fn list_reports_the_first_user_line_and_the_most_recent_session() {
     let (_dir, _path, store) = temp_store();
     store.ensure_session("s1").await.unwrap();
     store
-        .append("s1", &Message::user("  what is a compaction boundary?  "), false)
+        .append(
+            "s1",
+            &Message::user("  what is a compaction boundary?  "),
+            false,
+        )
         .await
         .unwrap();
-    store.append("s1", &Message::assistant("a boundary"), false).await.unwrap();
+    store
+        .append("s1", &Message::assistant("a boundary"), false)
+        .await
+        .unwrap();
 
     let sessions = store.list().await.unwrap();
     assert_eq!(sessions.len(), 1);
@@ -519,16 +569,28 @@ async fn delete_session_removes_the_session_and_its_messages() {
     let (_dir, path, store) = temp_store();
     store.ensure_session("s1").await.unwrap();
     store.ensure_session("s2").await.unwrap();
-    store.append("s1", &Message::user("keep me"), false).await.unwrap();
-    store.append("s2", &Message::user("delete me"), false).await.unwrap();
-    store.append("s2", &Message::assistant("gone"), false).await.unwrap();
+    store
+        .append("s1", &Message::user("keep me"), false)
+        .await
+        .unwrap();
+    store
+        .append("s2", &Message::user("delete me"), false)
+        .await
+        .unwrap();
+    store
+        .append("s2", &Message::assistant("gone"), false)
+        .await
+        .unwrap();
     assert_eq!(count_rows(&path, "1 = 1"), 3);
 
     assert!(store.delete_session("s2").await.unwrap());
 
     // The foreign key cascade takes the messages with the session.
     assert_eq!(count_rows(&path, "1 = 1"), 1);
-    assert!(store.get("s2").await.is_err(), "the deleted session is gone");
+    assert!(
+        store.get("s2").await.is_err(),
+        "the deleted session is gone"
+    );
 
     let sessions = store.list().await.unwrap();
     assert_eq!(sessions.len(), 1);
@@ -545,7 +607,10 @@ async fn delete_all_sessions_empties_the_store() {
     for id in ["s1", "s2", "s3"] {
         store.ensure_session(id).await.unwrap();
         store.append(id, &Message::user("hi"), false).await.unwrap();
-        store.append(id, &Message::assistant("hello"), false).await.unwrap();
+        store
+            .append(id, &Message::assistant("hello"), false)
+            .await
+            .unwrap();
     }
     assert_eq!(count_rows(&path, "1 = 1"), 6);
 
@@ -598,7 +663,11 @@ async fn naming_tolerates_databases_written_before_the_column_existed() {
     }
 
     let store = SqliteSessionStore::new(Some(path)).expect("opening migrates the table");
-    assert_eq!(store.get("s1").await.unwrap().name, "", "backfilled as empty");
+    assert_eq!(
+        store.get("s1").await.unwrap().name,
+        "",
+        "backfilled as empty"
+    );
     store.set_name("s1", "migrated").await.unwrap();
     assert_eq!(store.get("s1").await.unwrap().name, "migrated");
 }
@@ -611,10 +680,7 @@ async fn set_model_is_persisted_and_reported_by_get_and_list() {
     // A session that has not picked a model reports none, not a zero pair.
     assert_eq!(store.get("s1").await.unwrap().model, None);
 
-    store
-        .set_model("s1", "deepseek", "glm-4.6")
-        .await
-        .unwrap();
+    store.set_model("s1", "deepseek", "glm-4.6").await.unwrap();
     assert_eq!(
         store.get("s1").await.unwrap().model,
         Some(("deepseek".to_string(), "glm-4.6".to_string()))
@@ -678,7 +744,11 @@ async fn model_tolerates_databases_written_before_the_column_existed() {
     }
 
     let store = SqliteSessionStore::new(Some(path)).expect("opening migrates the table");
-    assert_eq!(store.get("s1").await.unwrap().model, None, "backfilled as unset");
+    assert_eq!(
+        store.get("s1").await.unwrap().model,
+        None,
+        "backfilled as unset"
+    );
     store.set_model("s1", "deepseek", "glm-4.6").await.unwrap();
     assert_eq!(
         store.get("s1").await.unwrap().model,
@@ -727,7 +797,11 @@ async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
 
     let estimate = estimate_tokens(&[with_usage, tail]);
     assert_eq!(estimate.source, EstimateSource::Reported);
-    assert_eq!(estimate.tokens, 1_200 + 100, "reported (prompt+completion) plus the 400-char tail");
+    assert_eq!(
+        estimate.tokens,
+        1_200 + 100,
+        "reported (prompt+completion) plus the 400-char tail"
+    );
 
     let heuristic_only = estimate_tokens(&[Message::user("x".repeat(400))]);
     assert_eq!(heuristic_only.source, EstimateSource::Heuristic);
@@ -773,7 +847,9 @@ async fn compact_folds_nothing_when_the_history_is_short_enough() {
 
     assert_eq!(fold_boundary(&history, 2), 0);
     assert_eq!(fold_boundary(&history, 8), 0);
-    let outcome = compact(&provider, "canned-model", &history, 2).await.unwrap();
+    let outcome = compact(&provider, "canned-model", &history, 2)
+        .await
+        .unwrap();
     assert!(outcome.is_none());
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
@@ -788,7 +864,10 @@ async fn compact_returns_an_error_when_the_provider_fails() {
     let provider = FailingProvider::new();
 
     let result = compact(&provider, "unconfigured", &history, 2).await;
-    assert!(result.is_err(), "the caller decides what a failed summary means");
+    assert!(
+        result.is_err(),
+        "the caller decides what a failed summary means"
+    );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -813,8 +892,15 @@ async fn a_big_transcript_with_few_turns_is_folded_at_a_message_boundary() {
         vec![big[0].id],
         "the huge message is what gets folded"
     );
-    assert_eq!(outcome.kept.len(), 3, "the most recent messages stay verbatim");
-    assert_eq!(outcome.folded_turns, 1, "the fold took the turn the huge message was in");
+    assert_eq!(
+        outcome.kept.len(),
+        3,
+        "the most recent messages stay verbatim"
+    );
+    assert_eq!(
+        outcome.folded_turns, 1,
+        "the fold took the turn the huge message was in"
+    );
     assert_eq!(outcome.folded_messages, 1);
 }
 
@@ -860,12 +946,7 @@ async fn the_kept_tail_never_starts_with_a_tool_result() {
     };
     let mut transcript = vec![
         stored(Role::User, "look at this".to_string()),
-        stored_with(
-            Role::Assistant,
-            String::new(),
-            vec![call],
-            None,
-        ),
+        stored_with(Role::Assistant, String::new(), vec![call], None),
         stored_with(
             Role::Tool,
             String::new(),
@@ -905,7 +986,9 @@ async fn a_small_transcript_with_few_turns_is_left_alone() {
     let provider = CannedProvider::new("unused");
 
     assert_eq!(fold_boundary(&history, 8), 0);
-    let outcome = compact(&provider, "canned-model", &history, 8).await.unwrap();
+    let outcome = compact(&provider, "canned-model", &history, 8)
+        .await
+        .unwrap();
     assert!(outcome.is_none());
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
@@ -953,8 +1036,15 @@ async fn a_summary_that_never_arrives_is_an_error() {
 
     let result = compact(&provider, "silent-model", &big, 8).await;
 
-    assert!(result.is_err(), "a fold with no summary must not go through");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "one call, one retry");
+    assert!(
+        result.is_err(),
+        "a fold with no summary must not go through"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "one call, one retry"
+    );
 }
 
 // ---------------------------------------------------------------- the agent loop
@@ -976,11 +1066,7 @@ async fn seeded_store(turns: usize) -> (TempDir, std::path::PathBuf, Arc<SqliteS
             .await
             .unwrap();
         store
-            .append(
-                "s1",
-                &Message::assistant(format!("answer {}", turn)),
-                false,
-            )
+            .append("s1", &Message::assistant(format!("answer {}", turn)), false)
             .await
             .unwrap();
     }
@@ -1011,7 +1097,10 @@ async fn run_turn_compacts_once_and_sends_the_summary_first() {
         model: "canned-model".to_string(),
     });
 
-    let outcome = agent.run_turn("hello", CancellationToken::new()).await.unwrap();
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(outcome.reply, "done");
     assert_eq!(
         outcome.compaction,
@@ -1021,14 +1110,22 @@ async fn run_turn_compacts_once_and_sends_the_summary_first() {
             messages: 8,
         })
     );
-    assert_eq!(summariser.calls.load(Ordering::SeqCst), 1, "one summarising call");
+    assert_eq!(
+        summariser.calls.load(Ordering::SeqCst),
+        1,
+        "one summarising call"
+    );
     assert_eq!(main.call_count(), 1);
 
     let sent = main.last_request();
     assert_eq!(sent[0].role, Role::System);
     assert_eq!(sent[1].content.as_deref(), Some("FOLDED"));
     assert_eq!(sent[sent.len() - 1].content.as_deref(), Some("hello"));
-    assert_eq!(sent.len(), 7, "system + summary + 4 kept turns + the new user line");
+    assert_eq!(
+        sent.len(),
+        7,
+        "system + summary + 4 kept turns + the new user line"
+    );
     assert!(
         sent.len() < 1 + 12 + 1,
         "the request is smaller than the full transcript it replaced"
@@ -1065,8 +1162,14 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
         model: "unconfigured".to_string(),
     });
 
-    let outcome = agent.run_turn("hello", CancellationToken::new()).await.unwrap();
-    assert_eq!(outcome.reply, "done", "the turn proceeds on the full history");
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.reply, "done",
+        "the turn proceeds on the full history"
+    );
     assert!(outcome.compaction.is_none());
     assert_eq!(
         summariser.calls.load(Ordering::SeqCst),
@@ -1075,12 +1178,20 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
     );
 
     let sent = main.last_request();
-    assert_eq!(sent.len(), 14, "system + the full 12-message transcript + the user line");
+    assert_eq!(
+        sent.len(),
+        14,
+        "system + the full 12-message transcript + the user line"
+    );
     assert_eq!(sent[1].role, Role::User);
     assert_eq!(sent[1].content.as_deref(), Some("question 0"));
 
     // Every original message is still there, none folded, no summary written.
-    assert_eq!(count_rows(&path, "1 = 1"), 14, "12 replayed + the user line + the reply");
+    assert_eq!(
+        count_rows(&path, "1 = 1"),
+        14,
+        "12 replayed + the user line + the reply"
+    );
     assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 0);
     assert_eq!(count_rows(&path, "is_summary = 1"), 0);
 }
@@ -1159,7 +1270,8 @@ async fn the_explicit_compact_says_when_no_compaction_provider_is_set_up() {
 }
 
 #[tokio::test]
-async fn summarize_session_produces_compact_summary() {    let (_dir, _path, store) = seeded_store(3).await;
+async fn summarize_session_produces_compact_summary() {
+    let (_dir, _path, store) = seeded_store(3).await;
     let replayed = store.replay("s1", usize::MAX).await.unwrap();
     let provider = CannedProvider::new("The user asked 3 questions and got 3 answers.");
 
@@ -1208,7 +1320,10 @@ async fn agent_summarize_current_session_works_and_rejects_empty() {
         resume_max_messages: 200,
     });
 
-    assert!(empty_agent.summarize_current_session("test-model").await.is_err());
+    assert!(empty_agent
+        .summarize_current_session("test-model")
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -1216,7 +1331,10 @@ async fn fork_session_copies_all_messages_and_metadata() {
     let (_tmp, _path, store) = seeded_store(5).await;
 
     // Set model on s1
-    store.set_model("s1", "nvidia", "deepseek-v4.1").await.unwrap();
+    store
+        .set_model("s1", "nvidia", "deepseek-v4.1")
+        .await
+        .unwrap();
     store.set_name("s1", "feature-work").await.unwrap();
 
     let forked_id = store.fork_session("s1", Some("My Fork")).await.unwrap();
@@ -1225,7 +1343,10 @@ async fn fork_session_copies_all_messages_and_metadata() {
     let forked_rec = store.get(&forked_id).await.unwrap();
     assert_eq!(forked_rec.title, "My Fork");
     assert_eq!(forked_rec.name, "feature-work");
-    assert_eq!(forked_rec.model, Some(("nvidia".to_string(), "deepseek-v4.1".to_string())));
+    assert_eq!(
+        forked_rec.model,
+        Some(("nvidia".to_string(), "deepseek-v4.1".to_string()))
+    );
 
     // Verify messages
     let orig_replay = store.replay("s1", 100).await.unwrap();

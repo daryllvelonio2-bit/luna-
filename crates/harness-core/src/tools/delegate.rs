@@ -1,11 +1,11 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -17,12 +17,9 @@ use crate::config::Config;
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
 use crate::session::{SessionStore, SqliteSessionStore};
-use crate::traits::{
-    EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry,
-};
+use crate::traits::{EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry};
 use crate::types::{
-    CompletionOptions, MemoryRecord, Message, Note, StreamEvent, ToolDefinition,
-    ToolResult,
+    CompletionOptions, MemoryRecord, Message, Note, StreamEvent, ToolDefinition, ToolResult,
 };
 
 #[derive(Clone)]
@@ -146,8 +143,14 @@ impl EvolverEngine for DynEvolver {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubagentStatus {
     Running,
-    Completed { reply: String, finished_at: DateTime<Utc> },
-    Failed { error: String, finished_at: DateTime<Utc> },
+    Completed {
+        reply: String,
+        finished_at: DateTime<Utc>,
+    },
+    Failed {
+        error: String,
+        finished_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,10 +248,8 @@ async fn run_single_subagent(
     let read_cache = crate::tools::ReadCache::new();
     let sudo_cache = Arc::new(std::sync::Mutex::new(None));
     let reg_dyn: Arc<dyn ToolRegistry> = child_registry.clone();
-    let todo_scope = crate::tools::TodoScope::new(
-        config.paths.todos_dir.clone(),
-        &child_session_id,
-    );
+    let todo_scope =
+        crate::tools::TodoScope::new(config.paths.todos_dir.clone(), &child_session_id);
     if let Err(e) = crate::tools::register_core_tools_with_sudo(
         &reg_dyn,
         &config,
@@ -259,7 +260,10 @@ async fn run_single_subagent(
     )
     .await
     {
-        warn!("Failed to register tools for subagent {}: {}", child_session_id, e);
+        warn!(
+            "Failed to register tools for subagent {}: {}",
+            child_session_id, e
+        );
         return (
             child_session_id,
             task.goal,
@@ -276,19 +280,12 @@ async fn run_single_subagent(
     let notes = Arc::new(DynNotes(notes));
     let evolver = Arc::new(DynEvolver(evolver));
 
-    let mut agent = Agent::new(
-        provider,
-        memory,
-        notes,
-        evolver,
-        child_registry,
-        child_cfg,
-    )
-    .with_permissions(
-        crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
-            .unwrap_or_default(),
-    )
-    .with_approval(Arc::new(AllowAll), ApprovalSettings::default());
+    let mut agent = Agent::new(provider, memory, notes, evolver, child_registry, child_cfg)
+        .with_permissions(
+            crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
+                .unwrap_or_default(),
+        )
+        .with_approval(Arc::new(AllowAll), ApprovalSettings::default());
 
     if let Some(s) = store {
         let _ = s.ensure_session(&child_session_id).await;
@@ -571,10 +568,7 @@ impl Tool for DelegateTaskTool {
                             ));
                         }
                         SubagentStatus::Failed { error, .. } => {
-                            out.push_str(&format!(
-                                "**Status:** Failed\n**Error:** {}\n\n",
-                                error
-                            ));
+                            out.push_str(&format!("**Status:** Failed\n**Error:** {}\n\n", error));
                         }
                         SubagentStatus::Running => {
                             out.push_str("**Status:** Running\n\n");
@@ -634,11 +628,8 @@ impl Tool for DelegateTaskTool {
                         let config = self.config.clone();
                         let sub_cancel = cancel_token.child_token();
                         let sub_idx = idx + 1;
-                        let child_session_id = format!(
-                            "sub_{}_{}",
-                            Utc::now().format("%Y%m%d_%H%M%S"),
-                            sub_idx
-                        );
+                        let child_session_id =
+                            format!("sub_{}_{}", Utc::now().format("%Y%m%d_%H%M%S"), sub_idx);
 
                         join_set.spawn(async move {
                             let (id, goal, res) = run_single_subagent(
@@ -685,7 +676,11 @@ impl Tool for DelegateTaskTool {
                                 results.push((idx, goal, outcome));
                             }
                             Err(e) => {
-                                results.push((0, "unknown".to_string(), Err(format!("task panicked or failed: {e}"))));
+                                results.push((
+                                    0,
+                                    "unknown".to_string(),
+                                    Err(format!("task panicked or failed: {e}")),
+                                ));
                             }
                         }
                     }
@@ -718,11 +713,8 @@ impl Tool for DelegateTaskTool {
 
                 for (idx, task) in tasks_to_run.into_iter().enumerate() {
                     let sub_idx = idx + 1;
-                    let child_session_id = format!(
-                        "sub_{}_{}",
-                        now.format("%Y%m%d_%H%M%S"),
-                        sub_idx
-                    );
+                    let child_session_id =
+                        format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
 
                     let record = SubagentTaskRecord {
                         id: child_session_id.clone(),
@@ -772,14 +764,8 @@ impl Tool for DelegateTaskTool {
 
                         let finished_at = Utc::now();
                         let status = match res {
-                            Ok(reply) => SubagentStatus::Completed {
-                                reply,
-                                finished_at,
-                            },
-                            Err(error) => SubagentStatus::Failed {
-                                error,
-                                finished_at,
-                            },
+                            Ok(reply) => SubagentStatus::Completed { reply, finished_at },
+                            Err(error) => SubagentStatus::Failed { error, finished_at },
                         };
 
                         let finished_record = SubagentTaskRecord {
@@ -806,9 +792,7 @@ impl Tool for DelegateTaskTool {
                                 SubagentStatus::Completed { reply, .. } => {
                                     ("completed", reply.as_str())
                                 }
-                                SubagentStatus::Failed { error, .. } => {
-                                    ("failed", error.as_str())
-                                }
+                                SubagentStatus::Failed { error, .. } => ("failed", error.as_str()),
                                 _ => ("finished", ""),
                             };
                             let steer_notice = format!(
@@ -825,7 +809,10 @@ impl Tool for DelegateTaskTool {
                     dispatched.len()
                 );
                 for (id, goal) in &dispatched {
-                    out.push_str(&format!("- **[{}]** Goal: {}\n  Status: running\n", id, goal));
+                    out.push_str(&format!(
+                        "- **[{}]** Goal: {}\n  Status: running\n",
+                        id, goal
+                    ));
                 }
                 out.push_str("\nSubagents are running concurrently in the background. Luna can now reply to the user or proceed with other tasks without waiting.\nWhen subagents complete, their results will be notified automatically into the conversation, or you can query them at any time with `delegate_task(action: \"list\")` or `delegate_task(action: \"poll\", task_id: \"...\")`.");
 

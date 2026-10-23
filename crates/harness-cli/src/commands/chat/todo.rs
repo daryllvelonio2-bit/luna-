@@ -57,7 +57,10 @@ pub fn render_panel(snapshot: &TodoSnapshot, collapsed: bool, width: usize) -> V
     let width = width.max(MIN_PANEL_WIDTH);
     let total = snapshot.items.len();
     let (done, active, pending) = snapshot.counts();
-    let counts = format!("{}/{} done · {} active · {} pending", done, total, active, pending);
+    let counts = format!(
+        "{}/{} done · {} active · {} pending",
+        done, total, active, pending
+    );
     let hint = if collapsed {
         "Ctrl+T to expand"
     } else {
@@ -185,7 +188,11 @@ pub fn refresh_panel(ui: &ChatUi, scope: &TodoScope) {
     let snapshot = read_session_snapshot(scope);
     let finished = snapshot.is_finished();
     let was_visible = ui.has_todo_panel();
-    ui.set_todo_panel(if finished { None } else { Some(snapshot.clone()) });
+    ui.set_todo_panel(if finished {
+        None
+    } else {
+        Some(snapshot.clone())
+    });
 
     // Say why the panel went away, once. A checklist that vanishes silently reads as
     // a bug; a line saying the work is done reads as an ending.
@@ -337,9 +344,17 @@ mod tests {
         assert!(text.contains("write the parser"), "got: {}", text);
         assert!(text.contains("test it"), "got: {}", text);
         assert!(text.contains("ship it"), "got: {}", text);
-        assert!(text.contains("○"), "an open task is an empty circle: {}", text);
+        assert!(
+            text.contains("○"),
+            "an open task is an empty circle: {}",
+            text
+        );
         assert!(text.contains("✔"), "a finished task is ticked: {}", text);
-        assert!(text.contains("▸"), "a task in flight is a triangle: {}", text);
+        assert!(
+            text.contains("▸"),
+            "a task in flight is a triangle: {}",
+            text
+        );
         assert!(text.contains("Ctrl+T to collapse"), "got: {}", text);
     }
 
@@ -349,11 +364,28 @@ mod tests {
         let rows = plain(&render_panel(&read_session_snapshot(&scope), false, 80));
         assert_eq!(rows.len(), 5, "got: {:?}", rows);
         for row in &rows {
-            assert_eq!(row.chars().count(), 80, "row is not the panel's width: {}", row);
+            assert_eq!(
+                row.chars().count(),
+                80,
+                "row is not the panel's width: {}",
+                row
+            );
         }
-        assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "got: {}", rows[0]);
-        assert!(rows[1].starts_with('│') && rows[1].ends_with('│'), "got: {}", rows[1]);
-        assert!(rows[4].starts_with('╰') && rows[4].ends_with('╯'), "got: {}", rows[4]);
+        assert!(
+            rows[0].starts_with('╭') && rows[0].ends_with('╮'),
+            "got: {}",
+            rows[0]
+        );
+        assert!(
+            rows[1].starts_with('│') && rows[1].ends_with('│'),
+            "got: {}",
+            rows[1]
+        );
+        assert!(
+            rows[4].starts_with('╰') && rows[4].ends_with('╯'),
+            "got: {}",
+            rows[4]
+        );
     }
 
     #[test]
@@ -373,7 +405,12 @@ mod tests {
 
         let rows = plain(&render_panel(&read_session_snapshot(&scope), false, 60));
         for row in &rows {
-            assert_eq!(row.chars().count(), 60, "row is not the panel's width: {}", row);
+            assert_eq!(
+                row.chars().count(),
+                60,
+                "row is not the panel's width: {}",
+                row
+            );
         }
         assert!(rows[1].contains('…'), "the cut is marked: {}", rows[1]);
     }
@@ -436,7 +473,10 @@ mod tests {
     fn an_add_call_names_the_task_it_creates() {
         let dir = tempfile::tempdir().unwrap();
         let scope = TodoScope::new(dir.path().join("todos"), "s1");
-        let line = format_call(&json!({ "action": "add", "text": "write the parser" }), &scope);
+        let line = format_call(
+            &json!({ "action": "add", "text": "write the parser" }),
+            &scope,
+        );
         assert_eq!(line, "○ write the parser");
 
         let many = format_call(
@@ -520,18 +560,17 @@ mod tests {
 
         write_list(&scope, &[("one", "done"), ("two", "done")]);
         refresh_panel(&ui, &scope);
-        assert!(!ui.has_todo_panel(), "an all-done list must not keep its panel");
+        assert!(
+            !ui.has_todo_panel(),
+            "an all-done list must not keep its panel"
+        );
         assert!(ui.todo_panel_rows(80).is_empty());
 
         // Open work brings the panel straight back.
         write_list(&scope, &[("one", "done"), ("two", "pending")]);
         refresh_panel(&ui, &scope);
         assert!(ui.has_todo_panel(), "open work must show the panel again");
-        assert_eq!(
-            ui.todo_panel_rows(80).len(),
-            4,
-            "border, two tasks, border"
-        );
+        assert_eq!(ui.todo_panel_rows(80).len(), 4, "border, two tasks, border");
 
         // An emptied list drops the panel too.
         write_list(&scope, &[]);
@@ -547,11 +586,21 @@ mod tests {
         let scope = TodoScope::new(dir.path().join("todos"), "s1");
         let ui = ChatUi::new(false);
 
-        write_list(&scope, &[("one", "pending"), ("two", "pending"), ("three", "pending")]);
+        write_list(
+            &scope,
+            &[("one", "pending"), ("two", "pending"), ("three", "pending")],
+        );
         refresh_panel(&ui, &scope);
-        assert!(ui.todo_panel_rows(80)[0].contains("0/3 done"), "got: {:?}", ui.todo_panel_rows(80));
+        assert!(
+            ui.todo_panel_rows(80)[0].contains("0/3 done"),
+            "got: {:?}",
+            ui.todo_panel_rows(80)
+        );
 
-        write_list(&scope, &[("one", "done"), ("two", "pending"), ("three", "pending")]);
+        write_list(
+            &scope,
+            &[("one", "done"), ("two", "pending"), ("three", "pending")],
+        );
         refresh_panel(&ui, &scope);
         assert!(
             ui.todo_panel_rows(80)[0].contains("1/3 done"),
@@ -559,7 +608,10 @@ mod tests {
             ui.todo_panel_rows(80)
         );
 
-        write_list(&scope, &[("one", "done"), ("two", "done"), ("three", "done")]);
+        write_list(
+            &scope,
+            &[("one", "done"), ("two", "done"), ("three", "done")],
+        );
         refresh_panel(&ui, &scope);
         assert!(
             !ui.has_todo_panel(),
@@ -567,5 +619,3 @@ mod tests {
         );
     }
 }
-
-

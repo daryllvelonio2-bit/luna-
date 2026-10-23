@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{EvolverEngine, HarnessError, Tool, ToolResult};
 use crate::engine::CodebaseEvolver;
+use harness_core::{EvolverEngine, HarnessError, Tool, ToolResult};
 
 pub struct InspectSourceTool {
     engine: Arc<dyn EvolverEngine>,
@@ -99,7 +99,10 @@ impl Tool for DelegateImprovementTool {
     ) -> Result<ToolResult, HarnessError> {
         let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("");
         if task.trim().is_empty() {
-            return Ok(ToolResult::error(call_id, "task description cannot be empty"));
+            return Ok(ToolResult::error(
+                call_id,
+                "task description cannot be empty",
+            ));
         }
         let evidence = args.get("evidence").and_then(|e| e.as_str());
 
@@ -159,12 +162,22 @@ impl Tool for CheckImprovementTool {
             Ok(job) => {
                 let status_str = match &job.status {
                     crate::JobStatus::Queued => "queued (waiting to start)".to_string(),
-                    crate::JobStatus::Running => "running (actively executing in background worktree)".to_string(),
-                    crate::JobStatus::Verified => "verified (fix verified and tests clean)".to_string(),
-                    crate::JobStatus::ReadyForReenactment { .. } => "ready for reenactment (update staged)".to_string(),
-                    crate::JobStatus::ScheduledUpdate { .. } => "scheduled update (will apply on restart)".to_string(),
+                    crate::JobStatus::Running => {
+                        "running (actively executing in background worktree)".to_string()
+                    }
+                    crate::JobStatus::Verified => {
+                        "verified (fix verified and tests clean)".to_string()
+                    }
+                    crate::JobStatus::ReadyForReenactment { .. } => {
+                        "ready for reenactment (update staged)".to_string()
+                    }
+                    crate::JobStatus::ScheduledUpdate { .. } => {
+                        "scheduled update (will apply on restart)".to_string()
+                    }
                     crate::JobStatus::FailedTest { error } => format!("failed test: {}", error),
-                    crate::JobStatus::FailedVerification { reason } => format!("failed verification: {}", reason),
+                    crate::JobStatus::FailedVerification { reason } => {
+                        format!("failed verification: {}", reason)
+                    }
                 };
 
                 let recent_logs = if job.logs.len() > 15 {
@@ -181,7 +194,10 @@ impl Tool for CheckImprovementTool {
                     out_text.push_str(&format!("Current Activity: {}\n", current));
                 }
                 if !job.modified_files.is_empty() {
-                    out_text.push_str(&format!("Modified Files: {}\n", job.modified_files.join(", ")));
+                    out_text.push_str(&format!(
+                        "Modified Files: {}\n",
+                        job.modified_files.join(", ")
+                    ));
                 }
                 if let Some(ref sum) = job.summary {
                     out_text.push_str(&format!("Engineer Summary: {}\n", sum));
@@ -234,7 +250,10 @@ impl Tool for ListImprovementJobsTool {
         match self.evolver.list_jobs().await {
             Ok(jobs) => {
                 if jobs.is_empty() {
-                    return Ok(ToolResult::success(call_id, "No harness improvement jobs found."));
+                    return Ok(ToolResult::success(
+                        call_id,
+                        "No harness improvement jobs found.",
+                    ));
                 }
                 let mut out = format!("Found {} improvement jobs:\n", jobs.len());
                 for job in &jobs {
@@ -252,7 +271,10 @@ impl Tool for ListImprovementJobsTool {
                         out.push_str(&format!("    Current activity: {}\n", current));
                     }
                     if !job.modified_files.is_empty() {
-                        out.push_str(&format!("    Modified: {}\n", job.modified_files.join(", ")));
+                        out.push_str(&format!(
+                            "    Modified: {}\n",
+                            job.modified_files.join(", ")
+                        ));
                     }
                 }
                 Ok(ToolResult::success(call_id, out))
@@ -308,7 +330,11 @@ impl Tool for VerifyAndStageUpdateTool {
         let scenario_input = args.get("scenario_input").and_then(|s| s.as_str());
         let absent_pattern = args.get("absent_pattern").and_then(|p| p.as_str());
 
-        match self.evolver.verify_and_stage(job_id, scenario_input, absent_pattern).await {
+        match self
+            .evolver
+            .verify_and_stage(job_id, scenario_input, absent_pattern)
+            .await
+        {
             Ok(msg) => Ok(ToolResult::success(call_id, msg)),
             Err(e) => Ok(ToolResult::error(call_id, e.to_string())),
         }

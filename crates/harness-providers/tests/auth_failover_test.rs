@@ -25,9 +25,15 @@ fn manager(dir: &tempfile::TempDir) -> Arc<CredentialManager> {
 }
 
 async fn seed_two_keys(mgr: &Arc<CredentialManager>) {
-    mgr.add_credential("openai", "first", "sk-11111", false).await.unwrap();
-    mgr.add_credential("openai", "priority", "sk-22222", true).await.unwrap();
-    mgr.set_rotation_strategy("openai", RotationStrategy::FillFirst).await.unwrap();
+    mgr.add_credential("openai", "first", "sk-11111", false)
+        .await
+        .unwrap();
+    mgr.add_credential("openai", "priority", "sk-22222", true)
+        .await
+        .unwrap();
+    mgr.set_rotation_strategy("openai", RotationStrategy::FillFirst)
+        .await
+        .unwrap();
 }
 
 fn disabled_labels(creds: &[harness_providers::CredentialEntry]) -> Vec<String> {
@@ -62,7 +68,11 @@ async fn stub_provider(status_line: &'static str) -> (String, JoinHandle<String>
     (format!("http://{}", addr), handle)
 }
 
-fn client_for(base_url: String, mgr: &Arc<CredentialManager>, dir: &tempfile::TempDir) -> GenericProviderClient {
+fn client_for(
+    base_url: String,
+    mgr: &Arc<CredentialManager>,
+    dir: &tempfile::TempDir,
+) -> GenericProviderClient {
     // The base URL is a `providers.<id>.*` config override now, not a constructor argument.
     let overrides = ProviderOverride {
         base_url: Some(base_url),
@@ -129,7 +139,10 @@ async fn only_the_reported_key_is_disabled() {
         vec!["priority".to_string()]
     );
     assert_eq!(
-        mgr.acquire_credential("openai").await.unwrap().expose_secret(),
+        mgr.acquire_credential("openai")
+            .await
+            .unwrap()
+            .expose_secret(),
         "sk-11111"
     );
 }
@@ -159,7 +172,10 @@ async fn client_retires_the_rate_limited_key_on_429() {
         "a rate-limited key must be retired so the next turn fails over"
     );
     assert_eq!(
-        mgr.acquire_credential("openai").await.unwrap().expose_secret(),
+        mgr.acquire_credential("openai")
+            .await
+            .unwrap()
+            .expose_secret(),
         "sk-11111"
     );
 }
@@ -195,7 +211,10 @@ async fn client_retires_the_rejected_key_on_401() {
         "the key the provider rejected is the one retired by the client path"
     );
     assert_eq!(
-        mgr.acquire_credential("openai").await.unwrap().expose_secret(),
+        mgr.acquire_credential("openai")
+            .await
+            .unwrap()
+            .expose_secret(),
         "sk-11111"
     );
 }
@@ -233,7 +252,10 @@ async fn client_retires_the_rejected_key_on_stream_401() {
         "stream path must retire the rejected key so the next call fails over"
     );
     assert_eq!(
-        mgr.acquire_credential("openai").await.unwrap().expose_secret(),
+        mgr.acquire_credential("openai")
+            .await
+            .unwrap()
+            .expose_secret(),
         "sk-11111"
     );
 }

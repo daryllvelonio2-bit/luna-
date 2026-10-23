@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use colored::Colorize;
+use std::sync::Arc;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use harness_core::config::{self, Config};
@@ -24,7 +24,12 @@ use eval::command::{handle_eval_command, EvalCommand};
 const MODEL_CACHE_TTL_HOURS: i64 = 24;
 
 #[derive(Parser, Debug)]
-#[command(name = "luna", author = "Luna AI", version = "0.1.0", about = "Autonomous AI Agent Harness in Rust")]
+#[command(
+    name = "luna",
+    author = "Luna AI",
+    version = "0.1.0",
+    about = "Autonomous AI Agent Harness in Rust"
+)]
 struct Cli {
     #[arg(long, global = true, help = "Output telemetry logs in JSON format")]
     json: bool,
@@ -256,31 +261,45 @@ async fn main() -> Result<(), HarnessError> {
 
     // CLI flags are the highest-precedence layer.
     let (chat_provider, chat_model, chat_yes) = match &cli.command {
-        Some(Commands::Chat { provider, model, yes, .. })
-        | Some(Commands::Voice { provider, model, yes, .. }) => (
+        Some(Commands::Chat {
+            provider,
+            model,
+            yes,
+            ..
+        })
+        | Some(Commands::Voice {
+            provider,
+            model,
+            yes,
+            ..
+        }) => (
             provider.as_ref().or(cli.provider.as_ref()),
             model.as_ref().or(cli.model.as_ref()),
             *yes || cli.yes,
         ),
-        Some(Commands::Exec { yes, .. }) => (cli.provider.as_ref(), cli.model.as_ref(), *yes || cli.yes),
-        None => (
-            cli.provider.as_ref(),
-            cli.model.as_ref(),
-            cli.yes,
-        ),
+        Some(Commands::Exec { yes, .. }) => {
+            (cli.provider.as_ref(), cli.model.as_ref(), *yes || cli.yes)
+        }
+        None => (cli.provider.as_ref(), cli.model.as_ref(), cli.yes),
         _ => (cli.provider.as_ref(), cli.model.as_ref(), cli.yes),
     };
 
     if let Some(provider) = chat_provider {
-        layers.flags.insert("model.provider".to_string(), provider.clone());
+        layers
+            .flags
+            .insert("model.provider".to_string(), provider.clone());
     }
     if let Some(model) = chat_model {
-        layers.flags.insert("model.default".to_string(), model.clone());
+        layers
+            .flags
+            .insert("model.default".to_string(), model.clone());
     }
     // `--yes` is the flag layer of `tools.approval`, so the effective mode is the same
     // value the gate reads and `luna config get` reports.
     if chat_yes {
-        layers.flags.insert("tools.approval".to_string(), "allow".to_string());
+        layers
+            .flags
+            .insert("tools.approval".to_string(), "allow".to_string());
     }
 
     // A CLI `--provider`/`--model` is a deliberate choice for the run; the chat then knows not
@@ -293,14 +312,18 @@ async fn main() -> Result<(), HarnessError> {
             ModelsCommand::Refresh { provider, .. } => provider,
         };
         if let Some(provider) = provider {
-            layers.flags.insert("model.provider".to_string(), provider.clone());
+            layers
+                .flags
+                .insert("model.provider".to_string(), provider.clone());
         }
     }
 
     let mut config: Config = config::resolve(&layers)?.into_config();
 
     let is_interactive_chat = match &cli.command {
-        None | Some(Commands::Chat { .. }) => dialoguer::console::Term::stdout().features().is_attended(),
+        None | Some(Commands::Chat { .. }) => {
+            dialoguer::console::Term::stdout().features().is_attended()
+        }
         _ => false,
     };
 
@@ -327,7 +350,11 @@ async fn main() -> Result<(), HarnessError> {
     harness_onboarding::persona::apply_selected(&mut config)?;
 
     let log_file_path = if is_interactive_chat {
-        let luna_dir = config.paths.sessions_db.parent().unwrap_or(std::path::Path::new("."));
+        let luna_dir = config
+            .paths
+            .sessions_db
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
         Some(luna_dir.join("luna.log"))
     } else {
         None
@@ -383,16 +410,14 @@ async fn main() -> Result<(), HarnessError> {
                 (None, None, true) => SessionSelection::Continue,
                 (None, None, false) => SessionSelection::New,
             };
-            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
+            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
+                .await?;
         }
         Some(Commands::Voice { .. }) => {
             run_voice_loop(config, cred_manager, discovery).await?;
         }
         Some(Commands::Hooks { json }) => {
-            commands::hooks::run_hooks(
-                config,
-                commands::hooks::HooksOptions { json },
-            )?;
+            commands::hooks::run_hooks(config, commands::hooks::HooksOptions { json })?;
         }
         Some(Commands::Usage {
             since,
@@ -426,7 +451,11 @@ async fn main() -> Result<(), HarnessError> {
         }) => {
             // `--session`/`--continue`/`--fork` behave as they do in `chat`, so a headless run can
             // pick up a conversation a person started.
-            let selection = match (session.or(cli.session), fork.or(cli.fork), continue_session || cli.continue_session) {
+            let selection = match (
+                session.or(cli.session),
+                fork.or(cli.fork),
+                continue_session || cli.continue_session,
+            ) {
                 (Some(id), _, _) => SessionSelection::Resume(id),
                 (None, Some(fork_id), _) => SessionSelection::Fork(fork_id),
                 (None, None, true) => SessionSelection::Continue,
@@ -455,10 +484,20 @@ async fn main() -> Result<(), HarnessError> {
         Some(Commands::Fetch { provider, refresh }) => {
             let default_provider = config.model.provider.clone();
             let provider = provider.unwrap_or_else(|| default_provider);
-            println!("Fetching models for provider '{}'...", provider.cyan().bold());
-            match discovery.get_models(&provider, &cred_manager, refresh).await {
+            println!(
+                "Fetching models for provider '{}'...",
+                provider.cyan().bold()
+            );
+            match discovery
+                .get_models(&provider, &cred_manager, refresh)
+                .await
+            {
                 Ok(models) => {
-                    println!("\n{} Available Models for {}:", "✔".green().bold(), provider.cyan().bold());
+                    println!(
+                        "\n{} Available Models for {}:",
+                        "✔".green().bold(),
+                        provider.cyan().bold()
+                    );
                     for m in &models {
                         println!("  • {}", m);
                     }
@@ -567,7 +606,8 @@ async fn main() -> Result<(), HarnessError> {
                 (None, None, true) => SessionSelection::Continue,
                 (None, None, false) => SessionSelection::New,
             };
-            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model).await?;
+            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
+                .await?;
         }
     }
 
@@ -576,8 +616,14 @@ async fn main() -> Result<(), HarnessError> {
 
 /// Rebuild the clap command so `--help` reports the *resolved* provider and model defaults.
 fn build_command(resolved: &config::Resolved) -> clap::Command {
-    let provider = resolved.get("model.provider").unwrap_or("(unset)").to_string();
-    let model = resolved.get("model.default").unwrap_or("(unset)").to_string();
+    let provider = resolved
+        .get("model.provider")
+        .unwrap_or("(unset)")
+        .to_string();
+    let model = resolved
+        .get("model.default")
+        .unwrap_or("(unset)")
+        .to_string();
     let provider_help = format!("Provider id (config default: {})", provider);
     let model_help = format!("Model id (config default: {})", model);
 

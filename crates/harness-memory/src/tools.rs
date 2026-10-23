@@ -1,10 +1,12 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, Tool, ToolPreview, ToolResult};
+use harness_core::{
+    HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, Tool, ToolPreview, ToolResult,
+};
 
 pub struct SaveMemoryTool {
     engine: Arc<dyn MemoryEngine>,
@@ -56,7 +58,9 @@ impl Tool for SaveMemoryTool {
             target: Some(format!(
                 "{}: {}",
                 args.get("subject").and_then(|s| s.as_str()).unwrap_or("?"),
-                args.get("predicate").and_then(|p| p.as_str()).unwrap_or("?")
+                args.get("predicate")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("?")
             )),
             diff: None,
         })
@@ -68,11 +72,26 @@ impl Tool for SaveMemoryTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let subject = args.get("subject").and_then(|s| s.as_str()).unwrap_or_default();
-        let predicate = args.get("predicate").and_then(|p| p.as_str()).unwrap_or_default();
-        let object = args.get("object").and_then(|o| o.as_str()).unwrap_or_default();
-        let cat_str = args.get("category").and_then(|c| c.as_str()).unwrap_or("fact");
-        let confidence = args.get("confidence").and_then(|c| c.as_f64()).unwrap_or(1.0) as f32;
+        let subject = args
+            .get("subject")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default();
+        let predicate = args
+            .get("predicate")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        let object = args
+            .get("object")
+            .and_then(|o| o.as_str())
+            .unwrap_or_default();
+        let cat_str = args
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("fact");
+        let confidence = args
+            .get("confidence")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(1.0) as f32;
 
         let category = match cat_str {
             "user_profile" => MemoryCategory::UserProfile,
@@ -84,13 +103,25 @@ impl Tool for SaveMemoryTool {
 
         let s_sub = subject
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
         let s_pred = predicate
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
@@ -177,7 +208,10 @@ impl Tool for UpdateMemoryTool {
     /// The id of the record the call would supersede.
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         Some(ToolPreview {
-            target: args.get("memory_id").and_then(|i| i.as_str()).map(str::to_string),
+            target: args
+                .get("memory_id")
+                .and_then(|i| i.as_str())
+                .map(str::to_string),
             diff: None,
         })
     }
@@ -188,11 +222,26 @@ impl Tool for UpdateMemoryTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let old_id = args.get("memory_id").and_then(|id| id.as_str()).unwrap_or_default();
-        let subject = args.get("subject").and_then(|s| s.as_str()).unwrap_or_default();
-        let predicate = args.get("predicate").and_then(|p| p.as_str()).unwrap_or_default();
-        let object = args.get("object").and_then(|o| o.as_str()).unwrap_or_default();
-        let cat_str = args.get("category").and_then(|c| c.as_str()).unwrap_or("fact");
+        let old_id = args
+            .get("memory_id")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default();
+        let subject = args
+            .get("subject")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default();
+        let predicate = args
+            .get("predicate")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        let object = args
+            .get("object")
+            .and_then(|o| o.as_str())
+            .unwrap_or_default();
+        let cat_str = args
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("fact");
 
         let category = match cat_str {
             "user_profile" => MemoryCategory::UserProfile,
@@ -204,13 +253,25 @@ impl Tool for UpdateMemoryTool {
 
         let s_sub = subject
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
         let s_pred = predicate
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
@@ -288,7 +349,10 @@ impl Tool for ForgetMemoryTool {
     /// The id of the record the call would deactivate.
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         Some(ToolPreview {
-            target: args.get("memory_id").and_then(|i| i.as_str()).map(str::to_string),
+            target: args
+                .get("memory_id")
+                .and_then(|i| i.as_str())
+                .map(str::to_string),
             diff: None,
         })
     }
@@ -299,7 +363,10 @@ impl Tool for ForgetMemoryTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let memory_id = args.get("memory_id").and_then(|id| id.as_str()).unwrap_or_default();
+        let memory_id = args
+            .get("memory_id")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default();
         self.engine.forget(memory_id).await?;
         Ok(ToolResult::success(
             call_id,

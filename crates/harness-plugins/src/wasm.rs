@@ -22,7 +22,10 @@ pub struct SandboxedPlugin {
 
 impl SandboxedPlugin {
     pub fn new(manifest: WasmPluginManifest, wasm_bytes: Vec<u8>) -> Self {
-        Self { manifest, wasm_bytes }
+        Self {
+            manifest,
+            wasm_bytes,
+        }
     }
 }
 

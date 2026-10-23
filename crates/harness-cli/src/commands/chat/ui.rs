@@ -1284,7 +1284,10 @@ mod tests {
     #[test]
     fn queued_messages_get_a_line_and_lose_it_when_the_queue_drains() {
         let ui = ChatUi::new(true);
-        assert!(ui.format_queue_line(80).is_none(), "nothing queued, no line");
+        assert!(
+            ui.format_queue_line(80).is_none(),
+            "nothing queued, no line"
+        );
 
         ui.set_queue_depth(2);
         assert_eq!(ui.queue_depth(), 2);
@@ -1341,7 +1344,10 @@ mod tests {
         assert!(ui.is_compacting(), "the fold is marked as running");
 
         ui.start_compaction(true);
-        assert!(ui.is_compacting(), "a second start replaces, not duplicates");
+        assert!(
+            ui.is_compacting(),
+            "a second start replaces, not duplicates"
+        );
 
         ui.finish_compaction();
         assert!(!ui.is_compacting(), "the fold is over");

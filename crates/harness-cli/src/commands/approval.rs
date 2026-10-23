@@ -37,8 +37,7 @@ pub fn render_approval_box(
     width: usize,
 ) -> (String, usize) {
     let total = width.clamp(32, 76);
-    let visible_len =
-        |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
+    let visible_len = |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
     let cut = |s: &str, room: usize| -> String {
         if visible_len(s) > room {
             format!(
@@ -75,11 +74,7 @@ pub fn render_approval_box(
     };
     let inner_top = |label: &str| -> String {
         let dashes = total.saturating_sub(label.len() + 11);
-        row(&format!(
-            " ┌─ {} {}┐ ",
-            label.cyan(),
-            "─".repeat(dashes)
-        ))
+        row(&format!(" ┌─ {} {}┐ ", label.cyan(), "─".repeat(dashes)))
     };
     let inner_bottom =
         || -> String { row(&format!(" └{}┘ ", "─".repeat(total.saturating_sub(8)))) };
@@ -93,11 +88,7 @@ pub fn render_approval_box(
         "Approval"
     };
     let dashes = total.saturating_sub(title.len() + 5);
-    lines.push(format!(
-        "╭─ {} {}╮",
-        title.bold(),
-        "─".repeat(dashes)
-    ));
+    lines.push(format!("╭─ {} {}╮", title.bold(), "─".repeat(dashes)));
 
     lines.push(blank.clone());
     let tool_msg = if total >= 50 {
@@ -177,10 +168,7 @@ pub fn render_approval_box(
     } else {
         "↑/↓ • Enter or y/a/n to confirm"
     };
-    lines.push(row(&format!(
-        " {}",
-        hint.dimmed()
-    )));
+    lines.push(row(&format!(" {}", hint.dimmed())));
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
 
     let count = lines.len();
@@ -221,7 +209,11 @@ impl Approver for ChatApprover {
             return Ok(ApprovalDecision::Run);
         }
         let (decision_tx, decision_rx) = oneshot::channel();
-        if self.request_tx.send((request.clone(), decision_tx)).is_err() {
+        if self
+            .request_tx
+            .send((request.clone(), decision_tx))
+            .is_err()
+        {
             return Ok(ApprovalDecision::Deny);
         }
         match decision_rx.await {
@@ -365,7 +357,10 @@ mod tests {
         let approver = ChatApprover::new(tx, allow_all, plan_mode);
 
         let req = ApprovalRequest::default();
-        let err = approver.approve(&req).await.expect_err("must reject in plan mode");
+        let err = approver
+            .approve(&req)
+            .await
+            .expect_err("must reject in plan mode");
         assert!(matches!(err, HarnessError::ApprovalRejected(_)));
     }
 
@@ -408,7 +403,11 @@ mod render_tests {
             .lines()
             .map(|l| dialoguer::console::strip_ansi_codes(l).chars().count())
             .collect();
-        assert!(widths.iter().all(|&w| w == widths[0]), "widths: {:?}", widths);
+        assert!(
+            widths.iter().all(|&w| w == widths[0]),
+            "widths: {:?}",
+            widths
+        );
     }
 
     #[test]
@@ -424,7 +423,11 @@ mod render_tests {
             let (text, _) = render_approval_box(&request, selected, 74);
             let plain = dialoguer::console::strip_ansi_codes(&text).to_string();
             let focused = plain.lines().filter(|l| l.contains('❯')).count();
-            assert_eq!(focused, 1, "selected={} must mark exactly one action", selected);
+            assert_eq!(
+                focused, 1,
+                "selected={} must mark exactly one action",
+                selected
+            );
             assert!(plain.contains("Diff"), "diff panel must render");
             assert!(plain.contains("+new"));
         }
@@ -435,7 +438,9 @@ mod render_tests {
         let request = ApprovalRequest {
             tool: "terminal".to_string(),
             call_id: "c3".to_string(),
-            target: Some("ls -la ~/Downloads/rust-agent-harness 2>/dev/null; echo '---'; ls".to_string()),
+            target: Some(
+                "ls -la ~/Downloads/rust-agent-harness 2>/dev/null; echo '---'; ls".to_string(),
+            ),
             diff: None,
             arguments: serde_json::json!({"command": "ls -la"}),
         };
@@ -446,8 +451,18 @@ mod render_tests {
                 .lines()
                 .map(|l| dialoguer::console::strip_ansi_codes(l).chars().count())
                 .collect();
-            assert!(widths.iter().all(|&w| w == widths[0]), "widths at width={}: {:?}", width, widths);
-            assert!(widths[0] <= width, "box width {} exceeds terminal width {}", widths[0], width);
+            assert!(
+                widths.iter().all(|&w| w == widths[0]),
+                "widths at width={}: {:?}",
+                width,
+                widths
+            );
+            assert!(
+                widths[0] <= width,
+                "box width {} exceeds terminal width {}",
+                widths[0],
+                width
+            );
         }
     }
 }

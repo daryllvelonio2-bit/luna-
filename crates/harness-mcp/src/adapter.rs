@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{HarnessError, Tool, ToolResult};
 use crate::stdio::McpStdioClient;
 use crate::types::McpToolInfo;
+use harness_core::{HarnessError, Tool, ToolResult};
 
 pub struct McpToolAdapter {
     info: McpToolInfo,

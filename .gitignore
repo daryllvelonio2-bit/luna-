@@ -1,5 +1,6 @@
 /target
 /.worktrees
+/patches
 *.db
 eval-report.json
 .luna-todo.json

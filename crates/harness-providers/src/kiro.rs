@@ -1,17 +1,17 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use futures_util::stream::{BoxStream, StreamExt};
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::auth::CredentialManager;
 use harness_core::types::{
     CompletionOptions, Message, Role, StreamEvent, TokenUsage, ToolDefinition,
 };
 use harness_core::HarnessError;
-use crate::auth::CredentialManager;
 
 pub const MANAGEMENT_ENDPOINT: &str = "https://management.us-east-1.kiro.dev/";
 pub const RUNTIME_ENDPOINT: &str = "https://runtime.us-east-1.kiro.dev/";
@@ -115,7 +115,10 @@ pub async fn refresh_kiro_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<KiroCredentials, HarnessError> {
-    info!("Refreshing Kiro social access token via {}", REFRESH_ENDPOINT);
+    info!(
+        "Refreshing Kiro social access token via {}",
+        REFRESH_ENDPOINT
+    );
     let payload = json!({ "refreshToken": refresh_token });
 
     let resp = http_client
@@ -209,7 +212,9 @@ pub fn resolve_kiro_credentials(secret_str: &str) -> KiroCredentials {
     }
 }
 
-pub async fn sync_kiro_credential_if_needed(cred_manager: &CredentialManager) -> Result<(), HarnessError> {
+pub async fn sync_kiro_credential_if_needed(
+    cred_manager: &CredentialManager,
+) -> Result<(), HarnessError> {
     let creds = match extract_kiro_credentials_from_db() {
         Some(c) => c,
         None => return Ok(()),
@@ -227,7 +232,9 @@ pub async fn sync_kiro_credential_if_needed(cred_manager: &CredentialManager) ->
             Ok(existing) => {
                 let existing_str = existing.expose_secret();
                 if existing_str != &serialized {
-                    let _ = cred_manager.update_credential_key(prov, existing_str, &serialized).await;
+                    let _ = cred_manager
+                        .update_credential_key(prov, existing_str, &serialized)
+                        .await;
                 }
             }
             Err(_) => {
@@ -258,7 +265,10 @@ pub async fn fetch_kiro_models(
                 .post(MANAGEMENT_ENDPOINT)
                 .header("Authorization", format!("Bearer {}", token))
                 .header(CONTENT_TYPE, "application/x-amz-json-1.0")
-                .header("x-amz-target", "AmazonCodeWhispererService.ListAvailableModels")
+                .header(
+                    "x-amz-target",
+                    "AmazonCodeWhispererService.ListAvailableModels",
+                )
                 .header(USER_AGENT, KIRO_USER_AGENT)
                 .json(&body)
                 .send()
@@ -266,12 +276,16 @@ pub async fn fetch_kiro_models(
         }
     };
 
-    let mut resp = send(&creds).await.map_err(|e| HarnessError::ProviderError {
-        provider: "kiro".to_string(),
-        message: format!("HTTP error listing models: {}", e),
-    })?;
+    let mut resp = send(&creds)
+        .await
+        .map_err(|e| HarnessError::ProviderError {
+            provider: "kiro".to_string(),
+            message: format!("HTTP error listing models: {}", e),
+        })?;
 
-    if (resp.status().as_u16() == 401 || resp.status().as_u16() == 400 || resp.status().as_u16() == 403)
+    if (resp.status().as_u16() == 401
+        || resp.status().as_u16() == 400
+        || resp.status().as_u16() == 403)
         && creds.refresh_token.is_some()
     {
         if let Some(ref rt) = creds.refresh_token.clone() {
@@ -445,12 +459,16 @@ pub async fn stream_kiro_completion(
         }
     };
 
-    let mut resp = send(&creds, &payload).await.map_err(|e| HarnessError::ProviderError {
-        provider: "kiro".to_string(),
-        message: format!("HTTP error: {}", e),
-    })?;
+    let mut resp = send(&creds, &payload)
+        .await
+        .map_err(|e| HarnessError::ProviderError {
+            provider: "kiro".to_string(),
+            message: format!("HTTP error: {}", e),
+        })?;
 
-    if (resp.status().as_u16() == 401 || resp.status().as_u16() == 400 || resp.status().as_u16() == 403)
+    if (resp.status().as_u16() == 401
+        || resp.status().as_u16() == 400
+        || resp.status().as_u16() == 403)
         && creds.refresh_token.is_some()
     {
         if let Some(ref rt) = creds.refresh_token.clone() {
@@ -464,7 +482,9 @@ pub async fn stream_kiro_completion(
                     })
                     .to_string();
                     for prov in ["kiro", "kiro-cli"] {
-                        let _ = cm.update_credential_key(prov, raw_secret, &serialized).await;
+                        let _ = cm
+                            .update_credential_key(prov, raw_secret, &serialized)
+                            .await;
                     }
                 }
                 let retry_payload =
@@ -525,17 +545,23 @@ pub async fn stream_kiro_completion(
                             if let Ok(data) =
                                 serde_json::from_slice::<serde_json::Value>(payload_bytes)
                             {
-                                if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
+                                if let Some(content) = data.get("content").and_then(|c| c.as_str())
+                                {
                                     if !content.is_empty() {
                                         let _ = tx
-                                            .send(Ok(StreamEvent::ContentDelta(content.to_string())))
+                                            .send(Ok(StreamEvent::ContentDelta(
+                                                content.to_string(),
+                                            )))
                                             .await;
                                     }
                                 }
 
-                                if let Some(reasoning) = data
-                                    .get("reasoningContent")
-                                    .and_then(|r| r.get("text").and_then(|t| t.as_str()).or_else(|| r.as_str()))
+                                if let Some(reasoning) =
+                                    data.get("reasoningContent").and_then(|r| {
+                                        r.get("text")
+                                            .and_then(|t| t.as_str())
+                                            .or_else(|| r.as_str())
+                                    })
                                 {
                                     if !reasoning.is_empty() {
                                         let _ = tx
@@ -554,8 +580,10 @@ pub async fn stream_kiro_completion(
                                             .get("toolUseId")
                                             .and_then(|s| s.as_str())
                                             .map(str::to_string);
-                                        let name =
-                                            tu.get("name").and_then(|s| s.as_str()).map(str::to_string);
+                                        let name = tu
+                                            .get("name")
+                                            .and_then(|s| s.as_str())
+                                            .map(str::to_string);
                                         let args = tu.get("input").map(|v| v.to_string());
                                         let _ = tx
                                             .send(Ok(StreamEvent::ToolCallDelta {
@@ -635,7 +663,12 @@ pub async fn execute_kiro_completion(
         }
     }
 
-    let prompt_tokens = (messages.iter().map(|m| m.content.as_deref().unwrap_or("").len()).sum::<usize>() / 4).max(1) as u32;
+    let prompt_tokens = (messages
+        .iter()
+        .map(|m| m.content.as_deref().unwrap_or("").len())
+        .sum::<usize>()
+        / 4)
+    .max(1) as u32;
     let completion_tokens = (full_text.len() / 4).max(1) as u32;
 
     Ok(Message {

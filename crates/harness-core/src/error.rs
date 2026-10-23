@@ -3,16 +3,10 @@ use thiserror::Error;
 #[derive(Error, Debug, Clone)]
 pub enum HarnessError {
     #[error("Authentication failed for provider '{provider}': {message}")]
-    AuthenticationFailed {
-        provider: String,
-        message: String,
-    },
+    AuthenticationFailed { provider: String, message: String },
 
     #[error("Adaptive failure detector triggered: {failures} consecutive non-working tool calls. Last failing tool: '{last_tool}'")]
-    ConsecutiveFailuresExceeded {
-        failures: usize,
-        last_tool: String,
-    },
+    ConsecutiveFailuresExceeded { failures: usize, last_tool: String },
 
     #[error("Rate limited by provider '{provider}'. Retry after: {retry_after_secs:?} seconds")]
     RateLimited {
@@ -21,10 +15,7 @@ pub enum HarnessError {
     },
 
     #[error("Tool '{tool}' execution failed: {reason}")]
-    ToolExecutionFailed {
-        tool: String,
-        reason: String,
-    },
+    ToolExecutionFailed { tool: String, reason: String },
 
     #[error("Tool '{0}' not found in registry")]
     ToolNotFound(String),
@@ -33,10 +24,7 @@ pub enum HarnessError {
     Cancelled,
 
     #[error("Provider '{provider}' error: {message}")]
-    ProviderError {
-        provider: String,
-        message: String,
-    },
+    ProviderError { provider: String, message: String },
 
     #[error("Memory engine error: {0}")]
     MemoryError(String),

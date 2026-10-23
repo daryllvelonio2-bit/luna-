@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -31,7 +31,8 @@ impl SqliteMemoryEngine {
             })?;
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let conn =
+            Connection::open(&db_path).map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         // Schema is applied to the owned connection before it is shared behind the mutex: the
         // constructors are reachable from async callers (`chat.rs`, `voice.rs`), and taking a
         // tokio lock there would panic inside the runtime.
@@ -44,7 +45,8 @@ impl SqliteMemoryEngine {
     }
 
     pub fn in_memory() -> Result<Self, HarnessError> {
-        let conn = Connection::open_in_memory().map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let conn =
+            Connection::open_in_memory().map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         Self::init_schema(&conn)?;
         Ok(Self {
             db_path: PathBuf::from(":memory:"),
@@ -54,8 +56,9 @@ impl SqliteMemoryEngine {
 
     fn init_schema(conn: &Connection) -> Result<(), HarnessError> {
         let schema_sql = include_str!("../schema.sql");
-        conn.execute_batch(schema_sql)
-            .map_err(|e| HarnessError::MemoryError(format!("Schema initialization failed: {}", e)))?;
+        conn.execute_batch(schema_sql).map_err(|e| {
+            HarnessError::MemoryError(format!("Schema initialization failed: {}", e))
+        })?;
         Ok(())
     }
 
@@ -67,7 +70,10 @@ impl SqliteMemoryEngine {
     /// target rewrites the row in place instead. `created_at` is deliberately left untouched so
     /// the age of the fact survives edits, and `superseded_by` is cleared because the row is
     /// active again.
-    fn upsert_row(tx: &rusqlite::Transaction<'_>, record: &MemoryRecord) -> Result<(), HarnessError> {
+    fn upsert_row(
+        tx: &rusqlite::Transaction<'_>,
+        record: &MemoryRecord,
+    ) -> Result<(), HarnessError> {
         tx.execute(
             "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -102,9 +108,16 @@ impl SqliteMemoryEngine {
     /// Resolves the id a caller meant. The system prompt renders records as `subject.predicate`,
     /// which is not always the stored primary key (ids are derived from a sanitized subject), so
     /// an exact miss falls back to the rendered display name.
-    fn resolve_id(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Option<String>, HarnessError> {
+    fn resolve_id(
+        tx: &rusqlite::Transaction<'_>,
+        id: &str,
+    ) -> Result<Option<String>, HarnessError> {
         let exact: Option<String> = tx
-            .query_row("SELECT id FROM memories WHERE id = ?1", params![id], |row| row.get(0))
+            .query_row(
+                "SELECT id FROM memories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         if exact.is_some() {
@@ -277,7 +290,10 @@ impl MemoryEngine for SqliteMemoryEngine {
         Self::upsert_row(&tx, record)?;
 
         for old_id in old_ids {
-            debug!("Superseding prior memory '{}' with new memory '{}'", old_id, record.id);
+            debug!(
+                "Superseding prior memory '{}' with new memory '{}'",
+                old_id, record.id
+            );
             tx.execute(
                 "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
                 params![record.id, Utc::now().to_rfc3339(), old_id],
@@ -288,7 +304,10 @@ impl MemoryEngine for SqliteMemoryEngine {
         tx.commit()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        info!("Saved memory '{}' [{}: {} -> {}]", record.id, record.category, record.subject, record.object);
+        info!(
+            "Saved memory '{}' [{}: {} -> {}]",
+            record.id, record.category, record.subject, record.object
+        );
         Ok(())
     }
 
@@ -399,10 +418,7 @@ impl MemoryEngine for SqliteMemoryEngine {
                     MemoryCategory::Fact => "Fact",
                     MemoryCategory::NotePointer => "Note",
                 };
-                lines.push(format!(
-                    "- [{}] {}: {}",
-                    display_cat, name, m.object
-                ));
+                lines.push(format!("- [{}] {}: {}", display_cat, name, m.object));
             }
         }
         lines.join("\n")

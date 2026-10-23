@@ -527,11 +527,7 @@ pub fn compaction_line(frame: usize, forced: bool, elapsed: Duration, width: usi
         0
     };
     let tail = if bar_cells > 0 {
-        format!(
-            "{}  {}",
-            compaction_bar(frame, bar_cells).cyan(),
-            words
-        )
+        format!("{}  {}", compaction_bar(frame, bar_cells).cyan(), words)
     } else {
         words
     };
@@ -594,11 +590,17 @@ pub fn format_patch_diff(old_string: &str, new_string: &str) -> Vec<String> {
         match change.tag() {
             similar::ChangeTag::Delete => {
                 // Pure red background with bold white text
-                lines.push(format!("\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m", val));
+                lines.push(format!(
+                    "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m",
+                    val
+                ));
             }
             similar::ChangeTag::Insert => {
                 // Pure green background with bold white text
-                lines.push(format!("\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m", val));
+                lines.push(format!(
+                    "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
+                    val
+                ));
             }
             similar::ChangeTag::Equal => {
                 lines.push(format!("\x1b[2m    {}\x1b[0m", val));
@@ -1639,7 +1641,10 @@ mod tests {
         ))
         .to_string();
         assert!(!narrow.contains('█'), "no bar in 24 columns: {narrow}");
-        assert!(narrow.contains("requested"), "the reason survives: {narrow}");
+        assert!(
+            narrow.contains("requested"),
+            "the reason survives: {narrow}"
+        );
     }
 
     /// A row is measured in terminal cells, not chars: `💻` is one char but two cells, so a

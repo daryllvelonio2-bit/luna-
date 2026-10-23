@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentConfig};
@@ -166,7 +166,9 @@ mod tests {
 
         let surface = SurfaceSpec::default();
         let cancel = CancellationToken::new();
-        let outcome = substrate.execute_task(&surface, "Write test", &cancel).await;
+        let outcome = substrate
+            .execute_task(&surface, "Write test", &cancel)
+            .await;
         assert!(outcome.is_ok());
         assert_eq!(outcome.unwrap().tokens_used, 120);
     }

@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use futures_util::stream::{BoxStream, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use secrecy::ExposeSecret;
 use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::auth::CredentialManager;
 use harness_core::types::{
     CompletionOptions, Message, Role, StreamEvent, TokenUsage, ToolDefinition,
 };
 use harness_core::HarnessError;
-use crate::auth::CredentialManager;
 
 pub const SUPERCODE_ENDPOINT: &str = "https://supercode-8w7e.onrender.com/api/ai/chat";
 pub const SUPERCODE_USER_AGENT: &str = "supercode-cli/0.1.99";
@@ -169,7 +169,8 @@ pub async fn stream_supercode_completion(
     let resolved_token = if raw_secret.is_empty() {
         extract_supercode_token_from_file().ok_or_else(|| HarnessError::AuthenticationFailed {
             provider: "supercode".to_string(),
-            message: "No credential found in ~/.better-auth/token.json or credential manager".to_string(),
+            message: "No credential found in ~/.better-auth/token.json or credential manager"
+                .to_string(),
         })?
     } else {
         raw_secret.to_string()
@@ -233,58 +234,99 @@ pub async fn stream_supercode_completion(
                         }
 
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            let event_type =
+                                event.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             match event_type {
                                 "status" => {
                                     // Status notifications (accepted, plan_gate, budget, streaming, etc.)
                                 }
                                 "text" => {
-                                    if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                                    if let Some(content) =
+                                        event.get("content").and_then(|c| c.as_str())
+                                    {
                                         if !content.is_empty() {
                                             has_received_content = true;
-                                            let _ = tx.send(Ok(StreamEvent::ContentDelta(content.to_string()))).await;
+                                            let _ = tx
+                                                .send(Ok(StreamEvent::ContentDelta(
+                                                    content.to_string(),
+                                                )))
+                                                .await;
                                         }
                                     }
                                 }
                                 "reasoning" => {
-                                    if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                                    if let Some(content) =
+                                        event.get("content").and_then(|c| c.as_str())
+                                    {
                                         if !content.is_empty() {
-                                            let _ = tx.send(Ok(StreamEvent::ReasoningDelta(content.to_string()))).await;
+                                            let _ = tx
+                                                .send(Ok(StreamEvent::ReasoningDelta(
+                                                    content.to_string(),
+                                                )))
+                                                .await;
                                         }
                                     }
                                 }
                                 "tool-call" => {
-                                    let name = event.get("toolName").and_then(|n| n.as_str()).map(str::to_string);
+                                    let name = event
+                                        .get("toolName")
+                                        .and_then(|n| n.as_str())
+                                        .map(str::to_string);
                                     let args = event.get("args").map(|a| a.to_string());
-                                    let id = event.get("toolCallId").and_then(|i| i.as_str()).map(str::to_string);
-                                    let _ = tx.send(Ok(StreamEvent::ToolCallDelta {
-                                        index: 0,
-                                        id,
-                                        name,
-                                        arguments_delta: args,
-                                        signature: None,
-                                    })).await;
+                                    let id = event
+                                        .get("toolCallId")
+                                        .and_then(|i| i.as_str())
+                                        .map(str::to_string);
+                                    let _ = tx
+                                        .send(Ok(StreamEvent::ToolCallDelta {
+                                            index: 0,
+                                            id,
+                                            name,
+                                            arguments_delta: args,
+                                            signature: None,
+                                        }))
+                                        .await;
                                 }
                                 "error" => {
-                                    let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("Supercode upstream error");
+                                    let msg = event
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("Supercode upstream error");
                                     last_error = Some(msg.to_string());
                                 }
                                 "finish" => {
-                                    let reason = event.get("reason").and_then(|r| r.as_str()).map(str::to_string);
+                                    let reason = event
+                                        .get("reason")
+                                        .and_then(|r| r.as_str())
+                                        .map(str::to_string);
                                     let usage = event.get("usage").and_then(|u| {
-                                        let prompt_tokens = u.get("inputTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                                        let completion_tokens = u.get("outputTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                                        let total_tokens = u.get("totalTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                                        let prompt_tokens = u
+                                            .get("inputTokens")
+                                            .and_then(|n| n.as_u64())
+                                            .unwrap_or(0)
+                                            as u32;
+                                        let completion_tokens = u
+                                            .get("outputTokens")
+                                            .and_then(|n| n.as_u64())
+                                            .unwrap_or(0)
+                                            as u32;
+                                        let total_tokens = u
+                                            .get("totalTokens")
+                                            .and_then(|n| n.as_u64())
+                                            .unwrap_or(0)
+                                            as u32;
                                         Some(TokenUsage {
                                             prompt_tokens,
                                             completion_tokens,
                                             total_tokens,
                                         })
                                     });
-                                    let _ = tx.send(Ok(StreamEvent::Completed {
-                                        finish_reason: reason.or(Some("stop".to_string())),
-                                        usage,
-                                    })).await;
+                                    let _ = tx
+                                        .send(Ok(StreamEvent::Completed {
+                                            finish_reason: reason.or(Some("stop".to_string())),
+                                            usage,
+                                        }))
+                                        .await;
                                 }
                                 _ => {}
                             }
@@ -292,10 +334,12 @@ pub async fn stream_supercode_completion(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(HarnessError::ProviderError {
-                        provider: "supercode".to_string(),
-                        message: format!("Stream read error: {}", e),
-                    })).await;
+                    let _ = tx
+                        .send(Err(HarnessError::ProviderError {
+                            provider: "supercode".to_string(),
+                            message: format!("Stream read error: {}", e),
+                        }))
+                        .await;
                     break;
                 }
             }
@@ -303,10 +347,12 @@ pub async fn stream_supercode_completion(
 
         if !has_received_content {
             if let Some(err_msg) = last_error {
-                let _ = tx.send(Err(HarnessError::ProviderError {
-                    provider: "supercode".to_string(),
-                    message: err_msg,
-                })).await;
+                let _ = tx
+                    .send(Err(HarnessError::ProviderError {
+                        provider: "supercode".to_string(),
+                        message: err_msg,
+                    }))
+                    .await;
             }
         }
     });
@@ -348,7 +394,12 @@ pub async fn execute_supercode_completion(
         }
     }
 
-    let prompt_tokens = (messages.iter().map(|m| m.content.as_deref().unwrap_or("").len()).sum::<usize>() / 4).max(1) as u32;
+    let prompt_tokens = (messages
+        .iter()
+        .map(|m| m.content.as_deref().unwrap_or("").len())
+        .sum::<usize>()
+        / 4)
+    .max(1) as u32;
     let completion_tokens = (full_text.len() / 4).max(1) as u32;
 
     Ok(Message {

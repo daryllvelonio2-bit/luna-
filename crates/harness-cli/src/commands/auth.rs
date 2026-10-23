@@ -1,16 +1,14 @@
-use std::io::Write;
-use std::sync::Arc;
 use clap::Subcommand;
 use colored::Colorize;
 use dialoguer::{Input, Password, Select};
+use std::io::Write;
+use std::sync::Arc;
 
 use harness_core::HarnessError;
 use harness_onboarding::menu::{panel_header, Panel};
 use harness_onboarding::screen::{self, Size};
 use harness_onboarding::style::Line;
-use harness_providers::{
-    get_provider_catalog, CredentialManager, RotationStrategy,
-};
+use harness_providers::{get_provider_catalog, CredentialManager, RotationStrategy};
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
@@ -153,8 +151,16 @@ pub async fn handle_auth_command(
                 }
                 println!("\nProvider: {}", p_id.cyan().bold());
                 for c in creds {
-                    let prio = if c.is_priority { " [PRIORITY]".yellow().bold() } else { "".normal() };
-                    let status = if c.is_temporarily_disabled { " [COOLDOWN/DISABLED]".red().bold() } else { "".normal() };
+                    let prio = if c.is_priority {
+                        " [PRIORITY]".yellow().bold()
+                    } else {
+                        "".normal()
+                    };
+                    let status = if c.is_temporarily_disabled {
+                        " [COOLDOWN/DISABLED]".red().bold()
+                    } else {
+                        "".normal()
+                    };
                     println!(
                         "  - Label: {:<16} ID: {:<36} Used: {:<5}{}{}",
                         c.label.green(),
@@ -177,9 +183,18 @@ pub async fn handle_auth_command(
         AuthCommand::Reset { provider } => {
             let count = cred_manager.reset_cooldowns(provider.as_deref()).await?;
             if let Some(ref p) = provider {
-                println!("{} Reset cooldowns for provider '{}' ({} credentials re-enabled)", "✔".green(), p, count);
+                println!(
+                    "{} Reset cooldowns for provider '{}' ({} credentials re-enabled)",
+                    "✔".green(),
+                    p,
+                    count
+                );
             } else {
-                println!("{} Reset cooldowns across all providers ({} credentials re-enabled)", "✔".green(), count);
+                println!(
+                    "{} Reset cooldowns across all providers ({} credentials re-enabled)",
+                    "✔".green(),
+                    count
+                );
             }
         }
         AuthCommand::Strategy { provider, strategy } => {
@@ -189,17 +204,31 @@ pub async fn handle_auth_command(
                 "random" => RotationStrategy::Random,
                 "least_used" | "leastused" => RotationStrategy::LeastUsed,
                 _ => {
-                    eprintln!("Invalid strategy. Choose: round_robin, fill_first, random, least_used");
+                    eprintln!(
+                        "Invalid strategy. Choose: round_robin, fill_first, random, least_used"
+                    );
                     return Ok(());
                 }
             };
             cred_manager.set_rotation_strategy(&provider, strat).await?;
-            println!("{} Rotation strategy for '{}' set to {:?}", "✔".green(), provider, strat);
+            println!(
+                "{} Rotation strategy for '{}' set to {:?}",
+                "✔".green(),
+                provider,
+                strat
+            );
         }
         AuthCommand::Priority { provider, target } => {
-            let updated = cred_manager.set_priority_credential(&provider, &target).await?;
+            let updated = cred_manager
+                .set_priority_credential(&provider, &target)
+                .await?;
             if updated {
-                println!("{} Credential '{}' set as priority for '{}'", "✔".green(), target, provider);
+                println!(
+                    "{} Credential '{}' set as priority for '{}'",
+                    "✔".green(),
+                    target,
+                    provider
+                );
                 // Honesty check: only fill_first consults is_priority, so say so instead of letting
                 // the flag sit there looking effective under round_robin/random/least_used.
                 println!(
@@ -218,14 +247,17 @@ pub async fn handle_auth_command(
                     .email
                     .clone()
                     .unwrap_or_else(|| "antigravity-user".to_string());
-                let secret_payload = serde_json::to_string(&creds)
-                    .unwrap_or_else(|_| creds.access_token.clone());
+                let secret_payload =
+                    serde_json::to_string(&creds).unwrap_or_else(|_| creds.access_token.clone());
 
                 let id = cred_manager
                     .add_credential("antigravity", &label, &secret_payload, true)
                     .await?;
                 let _ = cred_manager
-                    .set_rotation_strategy("antigravity", harness_providers::RotationStrategy::FillFirst)
+                    .set_rotation_strategy(
+                        "antigravity",
+                        harness_providers::RotationStrategy::FillFirst,
+                    )
                     .await;
 
                 println!(
@@ -307,7 +339,12 @@ async fn get_configured_summary(cred_manager: Arc<CredentialManager>) -> Vec<Str
     for p in &catalog {
         let creds = cred_manager.get_credentials(&p.id).await;
         if !creds.is_empty() {
-            configured.push(format!("{} ({} key{})", p.display_name, creds.len(), if creds.len() > 1 { "s" } else { "" }));
+            configured.push(format!(
+                "{} ({} key{})",
+                p.display_name,
+                creds.len(),
+                if creds.len() > 1 { "s" } else { "" }
+            ));
         }
     }
     configured
@@ -322,7 +359,9 @@ fn pause_prompt() {
 }
 
 /// Interactive credential pool management when `luna auth` or `luna setup` is called.
-pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
+pub async fn handle_interactive_auth(
+    cred_manager: Arc<CredentialManager>,
+) -> Result<(), HarnessError> {
     loop {
         let size = current_terminal_size();
         let widest = 68;
@@ -337,20 +376,50 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
 
         let configured = get_configured_summary(cred_manager.clone()).await;
         let status_text = if configured.is_empty() {
-            "Status: No providers connected yet. Choose an option below to connect.".dimmed().to_string()
+            "Status: No providers connected yet. Choose an option below to connect."
+                .dimmed()
+                .to_string()
         } else {
-            format!("{} {}", "Status: Connected:".green().bold(), configured.join(", ").cyan())
+            format!(
+                "{} {}",
+                "Status: Connected:".green().bold(),
+                configured.join(", ").cyan()
+            )
         };
         println!("{}", screen::centered(&status_text, size.columns));
         println!();
 
         let options = [
-            ("1", "Add Provider API Key", "Connect NVIDIA NIM, OpenRouter, Anthropic, OpenAI, etc."),
-            ("2", "Import Antigravity / Google", "Use Google login session from Antigravity"),
-            ("3", "Import OpenCode / Shiina", "Use credentials from local OpenCode / Shiina"),
-            ("4", "List Configured Credentials", "Inspect active keys, usage counts, and status"),
-            ("5", "Remove a Credential", "Delete an API key from the local pool"),
-            ("6", "Advanced Settings", "Reset cooldowns or configure rotation strategies"),
+            (
+                "1",
+                "Add Provider API Key",
+                "Connect NVIDIA NIM, OpenRouter, Anthropic, OpenAI, etc.",
+            ),
+            (
+                "2",
+                "Import Antigravity / Google",
+                "Use Google login session from Antigravity",
+            ),
+            (
+                "3",
+                "Import OpenCode / Shiina",
+                "Use credentials from local OpenCode / Shiina",
+            ),
+            (
+                "4",
+                "List Configured Credentials",
+                "Inspect active keys, usage counts, and status",
+            ),
+            (
+                "5",
+                "Remove a Credential",
+                "Delete an API key from the local pool",
+            ),
+            (
+                "6",
+                "Advanced Settings",
+                "Reset cooldowns or configure rotation strategies",
+            ),
             ("7", "Finish Setup", "Save and proceed"),
         ];
 
@@ -410,7 +479,8 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
             }
             "4" => {
                 println!();
-                handle_auth_command(AuthCommand::List { provider: None }, cred_manager.clone()).await?;
+                handle_auth_command(AuthCommand::List { provider: None }, cred_manager.clone())
+                    .await?;
                 pause_prompt();
             }
             "5" => {
@@ -437,7 +507,16 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
             }
             "7" | "q" | "exit" => {
                 println!();
-                println!("{}", screen::centered(&format!("{} Setup complete. You are ready to chat with Luna.", "🌙".cyan()), size.columns));
+                println!(
+                    "{}",
+                    screen::centered(
+                        &format!(
+                            "{} Setup complete. You are ready to chat with Luna.",
+                            "🌙".cyan()
+                        ),
+                        size.columns
+                    )
+                );
                 println!();
                 break;
             }
@@ -451,22 +530,62 @@ pub async fn handle_interactive_auth(cred_manager: Arc<CredentialManager>) -> Re
 async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
     println!();
     let popular_providers = [
-        ("nvidia", "NVIDIA NIM", "Fast DeepSeek-V3, DeepSeek-R1, Llama 3.3"),
-        ("openrouter", "OpenRouter", "Unified access to Claude, GPT-4o, DeepSeek, etc."),
-        ("gemini", "Google Gemini", "Gemini 2.0 Flash, Gemini 1.5 Pro"),
-        ("anthropic", "Anthropic", "Claude 3.5 Sonnet, Claude 3.5 Haiku"),
+        (
+            "nvidia",
+            "NVIDIA NIM",
+            "Fast DeepSeek-V3, DeepSeek-R1, Llama 3.3",
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "Unified access to Claude, GPT-4o, DeepSeek, etc.",
+        ),
+        (
+            "gemini",
+            "Google Gemini",
+            "Gemini 2.0 Flash, Gemini 1.5 Pro",
+        ),
+        (
+            "anthropic",
+            "Anthropic",
+            "Claude 3.5 Sonnet, Claude 3.5 Haiku",
+        ),
         ("openai", "OpenAI", "GPT-4o, o3-mini"),
-        ("deepseek", "DeepSeek", "Official DeepSeek API (deepseek-chat, deepseek-reasoner)"),
-        ("groq", "Groq", "High-speed inference (Llama 3.3 70B, Mixtral)"),
+        (
+            "deepseek",
+            "DeepSeek",
+            "Official DeepSeek API (deepseek-chat, deepseek-reasoner)",
+        ),
+        (
+            "groq",
+            "Groq",
+            "High-speed inference (Llama 3.3 70B, Mixtral)",
+        ),
         ("ollama", "Ollama", "Local models (no API key required)"),
-        ("custom", "Custom Endpoint", "OpenAI-compatible server (vLLM, LM Studio, local)"),
+        (
+            "custom",
+            "Custom Endpoint",
+            "OpenAI-compatible server (vLLM, LM Studio, local)",
+        ),
     ];
 
     let mut items: Vec<String> = popular_providers
         .iter()
-        .map(|(id, name, desc)| format!("{:<14} - {:<16} ({})", id.cyan(), name.bold(), desc.dimmed()))
+        .map(|(id, name, desc)| {
+            format!(
+                "{:<14} - {:<16} ({})",
+                id.cyan(),
+                name.bold(),
+                desc.dimmed()
+            )
+        })
         .collect();
-    items.push(format!("{:<14} - {:<16} ({})", "other".cyan(), "Other Providers".bold(), "Pick from full catalog".dimmed()));
+    items.push(format!(
+        "{:<14} - {:<16} ({})",
+        "other".cyan(),
+        "Other Providers".bold(),
+        "Pick from full catalog".dimmed()
+    ));
     items.push(format!("{:<14} - Back to menu", "cancel".dimmed()));
 
     let selection = Select::new()
@@ -600,9 +719,19 @@ async fn interactive_remove(cred_manager: Arc<CredentialManager>) -> Result<(), 
 
     let removed = cred_manager.remove_credential(provider, &target).await?;
     if removed {
-        println!("{} Credential '{}' removed from '{}'.", "✔".green(), target, provider);
+        println!(
+            "{} Credential '{}' removed from '{}'.",
+            "✔".green(),
+            target,
+            provider
+        );
     } else {
-        println!("{} Credential '{}' not found for '{}'.", "✖".red(), target, provider);
+        println!(
+            "{} Credential '{}' not found for '{}'.",
+            "✖".red(),
+            target,
+            provider
+        );
     }
     Ok(())
 }
@@ -629,9 +758,18 @@ async fn interactive_reset(cred_manager: Arc<CredentialManager>) -> Result<(), H
 
     let count = cred_manager.reset_cooldowns(provider.as_deref()).await?;
     if let Some(ref p) = provider {
-        println!("{} Reset cooldowns for provider '{}' ({} credentials re-enabled)", "✔".green(), p, count);
+        println!(
+            "{} Reset cooldowns for provider '{}' ({} credentials re-enabled)",
+            "✔".green(),
+            p,
+            count
+        );
     } else {
-        println!("{} Reset cooldowns across all providers ({} credentials re-enabled)", "✔".green(), count);
+        println!(
+            "{} Reset cooldowns across all providers ({} credentials re-enabled)",
+            "✔".green(),
+            count
+        );
     }
     Ok(())
 }
@@ -651,13 +789,33 @@ async fn interactive_strategy(cred_manager: Arc<CredentialManager>) -> Result<()
     let provider_id = &catalog[selection].id;
 
     let current = cred_manager.get_rotation_strategy(provider_id).await;
-    println!("\nCurrent rotation strategy for {}: {:?}", provider_id.cyan().bold(), current);
+    println!(
+        "\nCurrent rotation strategy for {}: {:?}",
+        provider_id.cyan().bold(),
+        current
+    );
 
     let strategies = [
-        ("round_robin", "Cycle through keys evenly", RotationStrategy::RoundRobin),
-        ("fill_first", "Use first/priority key until exhausted, then next", RotationStrategy::FillFirst),
-        ("least_used", "Always pick the least-used key", RotationStrategy::LeastUsed),
-        ("random", "Random selection across active keys", RotationStrategy::Random),
+        (
+            "round_robin",
+            "Cycle through keys evenly",
+            RotationStrategy::RoundRobin,
+        ),
+        (
+            "fill_first",
+            "Use first/priority key until exhausted, then next",
+            RotationStrategy::FillFirst,
+        ),
+        (
+            "least_used",
+            "Always pick the least-used key",
+            RotationStrategy::LeastUsed,
+        ),
+        (
+            "random",
+            "Random selection across active keys",
+            RotationStrategy::Random,
+        ),
     ];
 
     let strat_items: Vec<String> = strategies
@@ -681,7 +839,9 @@ async fn interactive_strategy(cred_manager: Arc<CredentialManager>) -> Result<()
         .map_err(|e| HarnessError::Io(e.to_string()))?;
 
     let chosen_strategy = strategies[strat_idx].2;
-    cred_manager.set_rotation_strategy(provider_id, chosen_strategy).await?;
+    cred_manager
+        .set_rotation_strategy(provider_id, chosen_strategy)
+        .await?;
     println!(
         "{} Rotation strategy for '{}' set to {:?}",
         "✔".green().bold(),

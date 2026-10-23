@@ -67,7 +67,10 @@ pub fn disable_kitty_keyboard() {
 fn write_control(sequence: &str) -> bool {
     use std::io::Write;
     let mut stdout = io::stdout();
-    match stdout.write_all(sequence.as_bytes()).and_then(|_| stdout.flush()) {
+    match stdout
+        .write_all(sequence.as_bytes())
+        .and_then(|_| stdout.flush())
+    {
         Ok(()) => true,
         Err(_) => false,
     }
@@ -336,10 +339,7 @@ fn decode_utf8(buf: &[u8]) -> Option<(AppKey, usize)> {
         return None;
     }
     match std::str::from_utf8(&buf[..len]) {
-        Ok(text) => text
-            .chars()
-            .next()
-            .map(|c| (AppKey::Char(c), len)),
+        Ok(text) => text.chars().next().map(|c| (AppKey::Char(c), len)),
         Err(_) => Some((AppKey::Unknown, 1)),
     }
 }
@@ -381,13 +381,7 @@ fn read_byte(fd: RawFd, timeout: Option<Duration>) -> io::Result<Option<u8>> {
 
     let mut byte = [0u8; 1];
     loop {
-        let read = unsafe {
-            libc::read(
-                fd,
-                byte.as_mut_ptr() as *mut libc::c_void,
-                1,
-            )
-        };
+        let read = unsafe { libc::read(fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
         if read == 1 {
             return Ok(Some(byte[0]));
         }

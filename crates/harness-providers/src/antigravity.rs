@@ -1,10 +1,10 @@
-use std::path::PathBuf;
-use std::process::Command;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
+use std::process::Command;
 
 use harness_core::{
     CompletionOptions, HarnessError, Message, ReasoningEffort, Role, StreamEvent, TokenUsage,
@@ -75,7 +75,8 @@ pub struct AntigravityQuotaSummary {
 impl AntigravityQuotaSummary {
     pub fn format_quota_display(&self, model: &str) -> Option<String> {
         let lower = model.to_lowercase();
-        let is_gemini = lower.contains("gemini") || lower.contains("flash") || lower.contains("pro");
+        let is_gemini =
+            lower.contains("gemini") || lower.contains("flash") || lower.contains("pro");
         let is_claude_gpt = lower.contains("claude")
             || lower.contains("opus")
             || lower.contains("sonnet")
@@ -88,7 +89,9 @@ impl AntigravityQuotaSummary {
             if let Some(q_info) = self.models_quota.get(&resolved).or_else(|| {
                 self.models_quota
                     .iter()
-                    .find(|(k, _)| k.to_lowercase().contains("flash") || k.to_lowercase().contains("gemini"))
+                    .find(|(k, _)| {
+                        k.to_lowercase().contains("flash") || k.to_lowercase().contains("gemini")
+                    })
                     .map(|(_, v)| v)
             }) {
                 let weekly_part = q_info.remaining_fraction.map(|frac| {
@@ -109,7 +112,13 @@ impl AntigravityQuotaSummary {
                 let hourly_part = self
                     .groups
                     .iter()
-                    .find(|g| g.display_name.as_deref().unwrap_or("").to_lowercase().contains("gemini"))
+                    .find(|g| {
+                        g.display_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains("gemini")
+                    })
                     .and_then(|g| {
                         g.buckets.iter().find(|b| {
                             let w = b.window.as_deref().unwrap_or("").to_lowercase();
@@ -123,7 +132,11 @@ impl AntigravityQuotaSummary {
                         } else {
                             "100%".to_string()
                         };
-                        let time_str = b.reset_time.as_ref().map(|t| format_reset_time_remaining(t)).unwrap_or_default();
+                        let time_str = b
+                            .reset_time
+                            .as_ref()
+                            .map(|t| format_reset_time_remaining(t))
+                            .unwrap_or_default();
                         if time_str.is_empty() {
                             format!("5h {}", pct_str)
                         } else {
@@ -249,8 +262,14 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
                     let tok = val.get("token").unwrap_or(&val);
                     if let Some(access) = tok.get("access_token").and_then(|a| a.as_str()) {
-                        let refresh = tok.get("refresh_token").and_then(|r| r.as_str()).map(|s| s.to_string());
-                        let expiry = tok.get("expiry").and_then(|e| e.as_str()).map(|s| s.to_string());
+                        let refresh = tok
+                            .get("refresh_token")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string());
+                        let expiry = tok
+                            .get("expiry")
+                            .and_then(|e| e.as_str())
+                            .map(|s| s.to_string());
                         let email = extract_email_from_jwt(&val);
                         return Ok(AntigravityCredentials {
                             access_token: access.to_string(),
@@ -266,9 +285,7 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
 
     // 2. Try ~/.shiina/auth.json or profile auth.json
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut candidate_paths = vec![
-        PathBuf::from(&home).join(".shiina").join("auth.json"),
-    ];
+    let mut candidate_paths = vec![PathBuf::from(&home).join(".shiina").join("auth.json")];
 
     let profiles_dir = PathBuf::from(&home).join(".shiina").join("profiles");
     if profiles_dir.is_dir() {
@@ -283,13 +300,16 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
         if path.is_file() {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(agy) = data
-                        .get("providers")
-                        .and_then(|p| p.get("antigravity"))
-                    {
+                    if let Some(agy) = data.get("providers").and_then(|p| p.get("antigravity")) {
                         if let Some(access) = agy.get("access_token").and_then(|a| a.as_str()) {
-                            let refresh = agy.get("refresh_token").and_then(|r| r.as_str()).map(|s| s.to_string());
-                            let email = agy.get("email").and_then(|e| e.as_str()).map(|s| s.to_string());
+                            let refresh = agy
+                                .get("refresh_token")
+                                .and_then(|r| r.as_str())
+                                .map(|s| s.to_string());
+                            let email = agy
+                                .get("email")
+                                .and_then(|e| e.as_str())
+                                .map(|s| s.to_string());
                             return Ok(AntigravityCredentials {
                                 access_token: access.to_string(),
                                 refresh_token: refresh,
@@ -304,7 +324,11 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
     }
 
     // 3. Try environment variables
-    for var in &["ANTIGRAVITY_ACCESS_TOKEN", "AGY_ACCESS_TOKEN", "GEMINI_ACCESS_TOKEN"] {
+    for var in &[
+        "ANTIGRAVITY_ACCESS_TOKEN",
+        "AGY_ACCESS_TOKEN",
+        "GEMINI_ACCESS_TOKEN",
+    ] {
         if let Ok(token) = std::env::var(var) {
             if !token.trim().is_empty() {
                 return Ok(AntigravityCredentials {
@@ -344,11 +368,14 @@ fn extract_email_from_jwt(val: &serde_json::Value) -> Option<String> {
 }
 
 fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
-    let clean: String = s.chars().map(|c| match c {
-        '-' => '+',
-        '_' => '/',
-        other => other,
-    }).collect();
+    let clean: String = s
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
     let mut bytes = Vec::new();
     let mut buf = 0u32;
     let mut bits = 0;
@@ -402,10 +429,13 @@ pub async fn refresh_antigravity_token(
         });
     }
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| HarnessError::AuthenticationFailed {
-        provider: "antigravity".to_string(),
-        message: format!("Invalid JSON response from Google OAuth: {}", e),
-    })?;
+    let data: serde_json::Value =
+        resp.json()
+            .await
+            .map_err(|e| HarnessError::AuthenticationFailed {
+                provider: "antigravity".to_string(),
+                message: format!("Invalid JSON response from Google OAuth: {}", e),
+            })?;
 
     let access = data
         .get("access_token")
@@ -423,8 +453,14 @@ pub fn extract_bearer_token(secret: &str) -> (String, Option<String>) {
     let trimmed = secret.trim();
     if trimmed.starts_with('{') {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let access = val.get("access_token").and_then(|a| a.as_str()).unwrap_or(trimmed);
-            let refresh = val.get("refresh_token").and_then(|r| r.as_str()).map(|s| s.to_string());
+            let access = val
+                .get("access_token")
+                .and_then(|a| a.as_str())
+                .unwrap_or(trimmed);
+            let refresh = val
+                .get("refresh_token")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
             return (access.to_string(), refresh);
         }
     }
@@ -483,8 +519,14 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     if let Some(meta) = resp_data.get("usageMetadata") {
-        let prompt_tokens = meta.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let completion_tokens = meta.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let prompt_tokens = meta
+            .get("promptTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let completion_tokens = meta
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         events.push(StreamEvent::Completed {
             finish_reason: None,
             usage: Some(TokenUsage {
@@ -516,7 +558,10 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
         for part in parts {
             // Code Assist marks a reasoning part with a boolean `thought`, but some responses
             // carry the reasoning text under a string `thought` instead.
-            let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+            let is_thought = part
+                .get("thought")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false);
             if is_thought {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                     events.push(StreamEvent::ReasoningDelta(text.to_string()));
@@ -530,10 +575,19 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
             if let Some(call) = part.get("functionCall") {
                 events.push(StreamEvent::ToolCallDelta {
                     index: 0,
-                    id: call.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()),
-                    name: call.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()),
+                    id: call
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string()),
+                    name: call
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string()),
                     arguments_delta: Some(
-                        call.get("args").cloned().unwrap_or_else(|| json!({})).to_string(),
+                        call.get("args")
+                            .cloned()
+                            .unwrap_or_else(|| json!({}))
+                            .to_string(),
                     ),
                     // The model's own signature for this call: replayed verbatim on the next
                     // request, which is what Code Assist's validator actually checks.
@@ -630,7 +684,11 @@ fn build_antigravity_payload(
                     .map(|r| r.call_id.as_str())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("call_0");
-                let result_content = msg.tool_result.as_ref().map(|r| r.content.as_str()).unwrap_or("");
+                let result_content = msg
+                    .tool_result
+                    .as_ref()
+                    .map(|r| r.content.as_str())
+                    .unwrap_or("");
                 let tool_name = messages
                     .iter()
                     .filter_map(|m| {
@@ -657,8 +715,12 @@ fn build_antigravity_payload(
                 // Merge into previous user turn if it already contains functionResponse
                 if let Some(last_entry) = gemini_contents.last_mut() {
                     if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
-                        if let Some(parts_arr) = last_entry.get_mut("parts").and_then(|p| p.as_array_mut()) {
-                            let has_func_resp = parts_arr.iter().any(|p| p.get("functionResponse").is_some());
+                        if let Some(parts_arr) =
+                            last_entry.get_mut("parts").and_then(|p| p.as_array_mut())
+                        {
+                            let has_func_resp = parts_arr
+                                .iter()
+                                .any(|p| p.get("functionResponse").is_some());
                             if has_func_resp {
                                 parts_arr.push(resp_part);
                                 continue;
@@ -692,14 +754,15 @@ fn build_antigravity_payload(
     // Merge adjacent same-role turns to enforce strict Gemini user/model alternation
     let mut merged_contents: Vec<serde_json::Value> = Vec::new();
     for content in gemini_contents {
-        let same_role = merged_contents
-            .last()
-            .and_then(|prev| prev.get("role"))
-            == content.get("role");
+        let same_role =
+            merged_contents.last().and_then(|prev| prev.get("role")) == content.get("role");
 
         if same_role {
             if let (Some(prev_parts), Some(curr_parts)) = (
-                merged_contents.last_mut().and_then(|p| p.get_mut("parts")).and_then(|p| p.as_array_mut()),
+                merged_contents
+                    .last_mut()
+                    .and_then(|p| p.get_mut("parts"))
+                    .and_then(|p| p.as_array_mut()),
                 content.get("parts").and_then(|p| p.as_array()),
             ) {
                 prev_parts.extend(curr_parts.iter().cloned());
@@ -741,16 +804,28 @@ fn build_antigravity_payload(
     }
     if let Some(effort) = options.reasoning_effort {
         match effort {
-            ReasoningEffort::Minimal => gen_config["thinkingConfig"] = json!({ "thinkingBudget": 1024 }),
-            ReasoningEffort::Low => gen_config["thinkingConfig"] = json!({ "thinkingBudget": 2048 }),
-            ReasoningEffort::Medium => gen_config["thinkingConfig"] = json!({ "thinkingBudget": 8192 }),
-            ReasoningEffort::High => gen_config["thinkingConfig"] = json!({ "thinkingBudget": 16384 }),
+            ReasoningEffort::Minimal => {
+                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 1024 })
+            }
+            ReasoningEffort::Low => {
+                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 2048 })
+            }
+            ReasoningEffort::Medium => {
+                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 8192 })
+            }
+            ReasoningEffort::High => {
+                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 16384 })
+            }
             ReasoningEffort::Xhigh | ReasoningEffort::Max => {
                 gen_config["thinkingConfig"] = json!({ "thinkingBudget": 32768 })
             }
         }
     }
-    if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+    if gen_config
+        .as_object()
+        .map(|o| !o.is_empty())
+        .unwrap_or(false)
+    {
         req_obj["generationConfig"] = gen_config;
     }
 
@@ -783,10 +858,8 @@ async fn post_antigravity_with_transport_retry(
             match res {
                 Ok(resp) => return Ok(resp),
                 Err(err) => {
-                    let is_transport_error = err.is_connect()
-                        || err.is_request()
-                        || err.is_timeout()
-                        || err.is_body();
+                    let is_transport_error =
+                        err.is_connect() || err.is_request() || err.is_timeout() || err.is_body();
                     last_err = Some(err);
                     if !is_transport_error {
                         return Err(last_err.unwrap());
@@ -835,7 +908,9 @@ pub async fn retrieve_antigravity_quota(
             Ok(r) => {
                 if r.status().as_u16() == 401 {
                     if let Some(ref refresh_tok) = refresh_tok_opt {
-                        if let Ok(new_token) = refresh_antigravity_token(http_client, refresh_tok).await {
+                        if let Ok(new_token) =
+                            refresh_antigravity_token(http_client, refresh_tok).await
+                        {
                             bearer_token = new_token.clone();
                             if let Some(cm) = cred_manager {
                                 let updated_secret = json!({
@@ -843,7 +918,11 @@ pub async fn retrieve_antigravity_quota(
                                     "refresh_token": refresh_tok,
                                 });
                                 let _ = cm
-                                    .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
+                                    .update_credential_key(
+                                        "antigravity",
+                                        raw_secret,
+                                        &updated_secret.to_string(),
+                                    )
                                     .await;
                             }
                             if let Ok(r2) = send(ep, bearer_token.clone()).await {
@@ -864,7 +943,9 @@ pub async fn retrieve_antigravity_quota(
     }
 
     let mut summary = if let Some(resp) = resp_opt {
-        resp.json::<AntigravityQuotaSummary>().await.unwrap_or_default()
+        resp.json::<AntigravityQuotaSummary>()
+            .await
+            .unwrap_or_default()
     } else {
         AntigravityQuotaSummary::default()
     };
@@ -879,7 +960,10 @@ pub async fn retrieve_antigravity_quota(
                         for (model_name, m_val) in models_map {
                             if let Some(q_val) = m_val.get("quotaInfo") {
                                 let frac = q_val.get("remainingFraction").and_then(|f| f.as_f64());
-                                let r_time = q_val.get("resetTime").and_then(|t| t.as_str()).map(|s| s.to_string());
+                                let r_time = q_val
+                                    .get("resetTime")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string());
                                 summary.models_quota.insert(
                                     model_name.clone(),
                                     AntigravityModelQuotaInfo {
@@ -914,8 +998,16 @@ pub async fn resolve_antigravity_email_strict(
         // 2. Query Google tokeninfo with access_token
         let tok = val.get("token").unwrap_or(&val);
         if let Some(access) = tok.get("access_token").and_then(|a| a.as_str()) {
-            let url = format!("https://oauth2.googleapis.com/tokeninfo?access_token={}", access);
-            if let Ok(resp) = http_client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+            let url = format!(
+                "https://oauth2.googleapis.com/tokeninfo?access_token={}",
+                access
+            );
+            if let Ok(resp) = http_client
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+            {
                 if resp.status().is_success() {
                     if let Ok(info) = resp.json::<serde_json::Value>().await {
                         if let Some(email) = info.get("email").and_then(|e| e.as_str()) {
@@ -960,7 +1052,11 @@ async fn post_antigravity_turn(
                         "refresh_token": refresh_tok,
                     });
                     let _ = cm
-                        .update_credential_key("antigravity", raw_secret, &updated_secret.to_string())
+                        .update_credential_key(
+                            "antigravity",
+                            raw_secret,
+                            &updated_secret.to_string(),
+                        )
                         .await;
                 }
                 resp = post_antigravity_with_transport_retry(http_client, &bearer_token, payload)
@@ -1015,7 +1111,8 @@ pub async fn stream_antigravity_completion(
     messages: &[Message],
     tools: &[ToolDefinition],
     options: &CompletionOptions,
-) -> Result<futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+) -> Result<futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError>
+{
     let payload = build_antigravity_payload(messages, tools, options, model);
     let resp = post_antigravity_turn(http_client, raw_secret, cred_manager, &payload).await?;
 
@@ -1028,12 +1125,15 @@ pub async fn stream_antigravity_completion(
                     match serde_json::from_str::<serde_json::Value>(&event.data) {
                         Ok(parsed) => {
                             if let Some(err_val) = parsed.get("error") {
-                                let msg = if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+                                let msg = if let Some(m) =
+                                    err_val.get("message").and_then(|m| m.as_str())
+                                {
                                     m.to_string()
                                 } else {
                                     err_val.to_string()
                                 };
-                                let code = err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                                let code =
+                                    err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
                                 if code == 429
                                     || msg.to_lowercase().contains("exhausted")
                                     || msg.to_lowercase().contains("quota")
@@ -1055,7 +1155,10 @@ pub async fn stream_antigravity_completion(
                                     })]
                                 }
                             } else {
-                                parse_antigravity_chunk(&parsed).into_iter().map(Ok).collect()
+                                parse_antigravity_chunk(&parsed)
+                                    .into_iter()
+                                    .map(Ok)
+                                    .collect()
                             }
                         }
                         Err(e) => vec![Err(HarnessError::SerializationError(format!(
@@ -1087,9 +1190,16 @@ pub async fn execute_antigravity_completion(
 ) -> Result<Message, HarnessError> {
     // Draining the streaming path keeps one parser for both: the buffered call and the live one
     // classify thought chunks, text and function calls identically.
-    let mut stream =
-        stream_antigravity_completion(http_client, raw_secret, cred_manager, model, messages, tools, options)
-            .await?;
+    let mut stream = stream_antigravity_completion(
+        http_client,
+        raw_secret,
+        cred_manager,
+        model,
+        messages,
+        tools,
+        options,
+    )
+    .await?;
 
     let mut full_text = String::new();
     let mut thought_buf = String::new();
@@ -1100,7 +1210,13 @@ pub async fn execute_antigravity_completion(
         match event? {
             StreamEvent::ContentDelta(text) => full_text.push_str(&text),
             StreamEvent::ReasoningDelta(text) => thought_buf.push_str(&text),
-            StreamEvent::ToolCallDelta { id, name, arguments_delta, signature, .. } => {
+            StreamEvent::ToolCallDelta {
+                id,
+                name,
+                arguments_delta,
+                signature,
+                ..
+            } => {
                 if let Some(name) = name {
                     let arguments = arguments_delta
                         .as_deref()
@@ -1114,7 +1230,9 @@ pub async fn execute_antigravity_completion(
                     });
                 }
             }
-            StreamEvent::Completed { usage: event_usage, .. } => {
+            StreamEvent::Completed {
+                usage: event_usage, ..
+            } => {
                 if event_usage.is_some() {
                     usage = event_usage;
                 }
@@ -1128,7 +1246,13 @@ pub async fn execute_antigravity_completion(
             if let Some(start) = full_text.find(open_tag) {
                 if let Some(end) = full_text.find(close_tag) {
                     let think_text = full_text[start + open_tag.len()..end].trim().to_string();
-                    let rest = format!("{}{}", &full_text[..start], &full_text[end + close_tag.len()..]).trim().to_string();
+                    let rest = format!(
+                        "{}{}",
+                        &full_text[..start],
+                        &full_text[end + close_tag.len()..]
+                    )
+                    .trim()
+                    .to_string();
                     if !think_text.is_empty() {
                         thought_buf = think_text;
                     }
@@ -1158,7 +1282,9 @@ pub async fn execute_antigravity_completion(
         }
         return Err(HarnessError::ProviderError {
             provider: "antigravity".to_string(),
-            message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+            message:
+                "Model returned an empty response. The model may be overloaded or unavailable."
+                    .to_string(),
         });
     }
 
@@ -1237,7 +1363,9 @@ mod tests {
             "gemini-3.8-flash",
         );
 
-        let contents = payload["request"]["contents"].as_array().expect("contents array");
+        let contents = payload["request"]["contents"]
+            .as_array()
+            .expect("contents array");
         // Must be exactly 3 turns: user, model, user (with both function responses merged)
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[0]["role"], "user");
@@ -1249,10 +1377,7 @@ mod tests {
         // provider) carries no signature field at all.
         let model_parts = contents[1]["parts"].as_array().expect("model parts");
         assert_eq!(model_parts.len(), 2);
-        assert_eq!(
-            model_parts[0]["thoughtSignature"],
-            json!("sig-for-read")
-        );
+        assert_eq!(model_parts[0]["thoughtSignature"], json!("sig-for-read"));
         assert_eq!(
             model_parts[1]["thoughtSignature"],
             json!("sig-for-terminal")
@@ -1335,7 +1460,10 @@ mod tests {
         let model_parts = contents[1]["parts"].as_array().expect("model parts");
         assert_eq!(model_parts.len(), 2);
         assert_eq!(model_parts[0]["thought"], json!(true));
-        assert_eq!(model_parts[0]["text"], json!("I should list the files first."));
+        assert_eq!(
+            model_parts[0]["text"],
+            json!("I should list the files first.")
+        );
         assert_eq!(model_parts[1]["thoughtSignature"], json!("sig-1"));
     }
 
@@ -1351,37 +1479,38 @@ mod tests {
         );
 
         let summary = AntigravityQuotaSummary {
-            groups: vec![
-                AntigravityQuotaGroup {
-                    display_name: Some("Claude and GPT models".to_string()),
-                    buckets: vec![
-                        AntigravityQuotaBucket {
-                            bucket_id: Some("3p-5h".to_string()),
-                            display_name: Some("Five Hour Limit Remaining".to_string()),
-                            window: Some("5h".to_string()),
-                            reset_time: None,
-                            remaining_fraction: Some(1.0),
-                        },
-                        AntigravityQuotaBucket {
-                            bucket_id: Some("3p-weekly".to_string()),
-                            display_name: Some("Weekly Limit Remaining".to_string()),
-                            window: Some("weekly".to_string()),
-                            reset_time: None,
-                            remaining_fraction: Some(0.46),
-                        },
-                    ],
-                },
-            ],
+            groups: vec![AntigravityQuotaGroup {
+                display_name: Some("Claude and GPT models".to_string()),
+                buckets: vec![
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-5h".to_string()),
+                        display_name: Some("Five Hour Limit Remaining".to_string()),
+                        window: Some("5h".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(1.0),
+                    },
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-weekly".to_string()),
+                        display_name: Some("Weekly Limit Remaining".to_string()),
+                        window: Some("weekly".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(0.46),
+                    },
+                ],
+            }],
             models_quota,
         };
 
         // When active model is gemini, it must select the 6% quotaInfo from models_quota
-        let gemini_fmt = summary.format_quota_display("gemini-3.8-flash").expect("gemini quota");
+        let gemini_fmt = summary
+            .format_quota_display("gemini-3.8-flash")
+            .expect("gemini quota");
         assert_eq!(gemini_fmt, "5h 100% · w 6%");
 
         // When active model is claude, it must select the Claude and GPT models group (46%)
-        let claude_fmt = summary.format_quota_display("claude-sonnet-4-6").expect("claude quota");
+        let claude_fmt = summary
+            .format_quota_display("claude-sonnet-4-6")
+            .expect("claude quota");
         assert_eq!(claude_fmt, "5h 100% · w 46%");
     }
 }
-

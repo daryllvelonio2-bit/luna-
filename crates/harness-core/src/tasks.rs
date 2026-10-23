@@ -76,7 +76,11 @@ impl BackgroundTaskQueue {
 
         let _ = std::fs::create_dir_all(&self.jobs_dir);
         let log_file = File::create(&log_path).map_err(|e| {
-            HarnessError::Io(format!("Failed to create background log file '{}': {}", log_path.display(), e))
+            HarnessError::Io(format!(
+                "Failed to create background log file '{}': {}",
+                log_path.display(),
+                e
+            ))
         })?;
 
         let (kill_tx, kill_rx) = oneshot::channel();
@@ -93,7 +97,11 @@ impl BackgroundTaskQueue {
             cmd.arg("-c")
                 .arg(&cmd_str)
                 .current_dir(&workdir_buf)
-                .stdout(std_file.try_clone().unwrap_or_else(|_| File::create("/dev/null").unwrap()))
+                .stdout(
+                    std_file
+                        .try_clone()
+                        .unwrap_or_else(|_| File::create("/dev/null").unwrap()),
+                )
                 .stderr(std_file);
 
             if let Err(error) = crate::tools::netguard::apply(&mut cmd, network) {

@@ -80,7 +80,8 @@ pub async fn run_app_tui(mut app: AppState) -> io::Result<()> {
                 .border_type(app.theme.border_type)
                 .border_style(app.theme.border);
             if app.theme.card_bg != ratatui::style::Color::Reset {
-                head_block = head_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
+                head_block =
+                    head_block.style(ratatui::style::Style::default().bg(app.theme.card_bg));
             }
             let head_inner = head_block.inner(head_area);
             f.render_widget(head_block, head_area);
@@ -298,12 +299,15 @@ fn handle_event(app: &mut AppState, event: Event, width: u16) {
                         return;
                     }
                     KeyCode::Char('n') => {
-                        app.sessions.insert(0, app::SessionSummaryItem {
-                            id: format!("session_{}", app.sessions.len() + 1),
-                            name: format!("New Chat {}", app.sessions.len() + 1),
-                            active: true,
-                            time: "just now".to_string(),
-                        });
+                        app.sessions.insert(
+                            0,
+                            app::SessionSummaryItem {
+                                id: format!("session_{}", app.sessions.len() + 1),
+                                name: format!("New Chat {}", app.sessions.len() + 1),
+                                active: true,
+                                time: "just now".to_string(),
+                            },
+                        );
                         for s in app.sessions.iter_mut().skip(1) {
                             s.active = false;
                         }

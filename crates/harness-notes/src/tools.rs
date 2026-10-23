@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{HarnessError, NotesEngine, Tool, ToolPreview, ToolResult};
@@ -50,7 +50,10 @@ impl Tool for SaveNoteTool {
     /// The title of the note the call would create.
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         Some(ToolPreview {
-            target: args.get("title").and_then(|t| t.as_str()).map(str::to_string),
+            target: args
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(str::to_string),
             diff: None,
         })
     }
@@ -61,12 +64,22 @@ impl Tool for SaveNoteTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let title = args.get("title").and_then(|t| t.as_str()).unwrap_or_default();
-        let content = args.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+        let title = args
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        let content = args
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default();
         let tags: Vec<String> = args
             .get("tags")
             .and_then(|t| t.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let note = self.engine.save_note(title, content, &tags).await?;
@@ -112,7 +125,10 @@ impl Tool for SearchNotesTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or_default();
+        let query = args
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or_default();
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(5) as usize;
 
         let results = self.engine.search_notes(query, limit).await?;
@@ -129,7 +145,10 @@ impl Tool for SearchNotesTool {
             })
             .collect();
 
-        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&summaries).unwrap_or_default()))
+        Ok(ToolResult::success(
+            call_id,
+            serde_json::to_string_pretty(&summaries).unwrap_or_default(),
+        ))
     }
 }
 
@@ -187,7 +206,10 @@ impl Tool for ListNotesTool {
             })
             .collect();
 
-        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&summaries).unwrap_or_default()))
+        Ok(ToolResult::success(
+            call_id,
+            serde_json::to_string_pretty(&summaries).unwrap_or_default(),
+        ))
     }
 }
 
@@ -229,7 +251,10 @@ impl Tool for ReadNoteTool {
     ) -> Result<ToolResult, HarnessError> {
         let id = args.get("id").and_then(|i| i.as_str()).unwrap_or_default();
         let note = self.engine.read_note(id).await?;
-        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&note).unwrap_or_default()))
+        Ok(ToolResult::success(
+            call_id,
+            serde_json::to_string_pretty(&note).unwrap_or_default(),
+        ))
     }
 }
 
@@ -289,7 +314,10 @@ impl Tool for UpdateNoteTool {
         let content = args.get("content").and_then(|c| c.as_str());
 
         let note = self.engine.update_note(id, title, content, None).await?;
-        Ok(ToolResult::success(call_id, serde_json::to_string_pretty(&note).unwrap_or_default()))
+        Ok(ToolResult::success(
+            call_id,
+            serde_json::to_string_pretty(&note).unwrap_or_default(),
+        ))
     }
 }
 

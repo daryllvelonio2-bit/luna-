@@ -1,5 +1,5 @@
-use harness_notes::*;
 use harness_core::*;
+use harness_notes::*;
 
 #[tokio::test]
 async fn test_notes_fts_and_pointer_distillation() {
@@ -8,12 +8,18 @@ async fn test_notes_fts_and_pointer_distillation() {
     let title = "Stripe Payment Gateway Integration Specification 2026";
     let content = "This document describes the webhook callbacks, charge dispute handling, and idempotency key conventions for Stripe.";
 
-    let note = engine.save_note(title, content, &["finance".to_string()]).await.unwrap();
+    let note = engine
+        .save_note(title, content, &["finance".to_string()])
+        .await
+        .unwrap();
 
     // Summary pointer must strictly not exceed 5 words
     let word_count = note.summary_pointer.split_whitespace().count();
     assert!(word_count >= 1 && word_count <= 5);
-    assert_eq!(note.summary_pointer, "Stripe Payment Gateway Integration Specification");
+    assert_eq!(
+        note.summary_pointer,
+        "Stripe Payment Gateway Integration Specification"
+    );
 
     // Search via FTS
     let search_results = engine.search_notes("idempotency", 5).await.unwrap();
@@ -35,7 +41,14 @@ async fn test_delete_note_removes_row_and_fts_entry() {
         .unwrap();
 
     // The note is findable before deletion.
-    assert_eq!(engine.search_notes("Rolling restart", 5).await.unwrap().len(), 1);
+    assert_eq!(
+        engine
+            .search_notes("Rolling restart", 5)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Deletion reports that a row was removed.
     assert!(engine.delete_note(&note.id).await.unwrap());
@@ -44,7 +57,11 @@ async fn test_delete_note_removes_row_and_fts_entry() {
     assert!(engine.read_note(&note.id).await.is_err());
 
     // ...and the FTS index no longer surfaces it (the `notes_ad` trigger fired).
-    assert!(engine.search_notes("Rolling restart", 5).await.unwrap().is_empty());
+    assert!(engine
+        .search_notes("Rolling restart", 5)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

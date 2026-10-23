@@ -65,7 +65,10 @@ fn absolute_paths_outside_the_workspace_are_refused() {
 
     for escape in ["/etc/passwd", "/tmp/luna-escape.txt", "/"] {
         let error = sandbox.resolve(escape).expect_err("must be refused");
-        assert!(error.contains("escapes workspace root"), "{escape}: {error}");
+        assert!(
+            error.contains("escapes workspace root"),
+            "{escape}: {error}"
+        );
     }
 }
 
@@ -89,7 +92,9 @@ fn a_symlinked_parent_directory_cannot_smuggle_a_path_out() {
 
     // The link *name* is inside the workspace, but resolving it lands outside, so it is refused
     // too: a path is where it points, not where it is spelled.
-    let link_error = sandbox.resolve("link").expect_err("the link points outside");
+    let link_error = sandbox
+        .resolve("link")
+        .expect_err("the link points outside");
     assert!(link_error.contains("/etc"), "{link_error}");
     assert!(!sandbox.allows(&PathBuf::from("/etc")));
 }
@@ -101,7 +106,9 @@ fn a_symlinked_parent_that_stays_inside_is_allowed() {
     std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("internal symlink");
 
     let sandbox = Sandbox::workspace(root.clone());
-    let resolved = sandbox.resolve("alias/file.txt").expect("inside stays inside");
+    let resolved = sandbox
+        .resolve("alias/file.txt")
+        .expect("inside stays inside");
     assert_eq!(resolved, root.join("real/file.txt"));
 }
 
@@ -148,7 +155,10 @@ fn extra_roots_are_honoured_and_nothing_else_widens() {
         sandbox.resolve(inside_scratch.to_str().unwrap()).unwrap(),
         inside_scratch
     );
-    assert_eq!(sandbox.resolve("local.txt").unwrap(), root.join("local.txt"));
+    assert_eq!(
+        sandbox.resolve("local.txt").unwrap(),
+        root.join("local.txt")
+    );
     assert!(
         sandbox.resolve("/etc/passwd").is_err(),
         "an extra root does not open the rest of the filesystem"

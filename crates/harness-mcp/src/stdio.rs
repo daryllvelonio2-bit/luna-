@@ -1,14 +1,14 @@
+use serde_json::json;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use harness_core::HarnessError;
 use crate::types::{JsonRpcRequest, JsonRpcResponse, McpToolInfo};
+use harness_core::HarnessError;
 
 pub struct McpStdioClient {
     #[allow(dead_code)]
@@ -20,7 +20,10 @@ pub struct McpStdioClient {
 
 impl McpStdioClient {
     pub async fn spawn(command: &str, args: &[&str]) -> Result<Arc<Self>, HarnessError> {
-        info!("Spawning MCP stdio server: '{}' with args {:?}", command, args);
+        info!(
+            "Spawning MCP stdio server: '{}' with args {:?}",
+            command, args
+        );
 
         let mut child = Command::new(command)
             .args(args)
@@ -28,7 +31,9 @@ impl McpStdioClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e)))?;
+            .map_err(|e| {
+                HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e))
+            })?;
 
         let stdin = child
             .stdin
@@ -73,7 +78,10 @@ impl McpStdioClient {
                 .write_all(line.as_bytes())
                 .await
                 .map_err(|e| HarnessError::Io(e.to_string()))?;
-            stdin.flush().await.map_err(|e| HarnessError::Io(e.to_string()))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
         }
 
         let mut response_line = String::new();
@@ -85,8 +93,12 @@ impl McpStdioClient {
                 .map_err(|e| HarnessError::Io(e.to_string()))?;
         }
 
-        let resp: JsonRpcResponse = serde_json::from_str(&response_line)
-            .map_err(|e| HarnessError::SerializationError(format!("Failed to parse response '{}': {}", response_line, e)))?;
+        let resp: JsonRpcResponse = serde_json::from_str(&response_line).map_err(|e| {
+            HarnessError::SerializationError(format!(
+                "Failed to parse response '{}': {}",
+                response_line, e
+            ))
+        })?;
 
         if let Some(err) = resp.error {
             return Err(HarnessError::ToolExecutionFailed {

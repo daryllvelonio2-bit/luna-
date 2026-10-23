@@ -122,7 +122,11 @@ async fn keep_turns_prunes_the_oldest_snapshots() {
         .iter()
         .map(|checkpoint| checkpoint.seq)
         .collect();
-    assert_eq!(kept, vec![3, 4], "only the newest keep_turns snapshots survive");
+    assert_eq!(
+        kept,
+        vec![3, 4],
+        "only the newest keep_turns snapshots survive"
+    );
     assert!(
         f.store.restore("s1", 1).is_err(),
         "a pruned checkpoint cannot be restored"
@@ -408,10 +412,7 @@ async fn a_whole_turn_is_undoable_through_the_production_wiring() {
         .await
         .unwrap();
     registry
-        .register(Arc::new(WriteFileTool::new(
-            workspace.clone(),
-            read_cache,
-        )))
+        .register(Arc::new(WriteFileTool::new(workspace.clone(), read_cache)))
         .await
         .unwrap();
     registry
@@ -435,14 +436,21 @@ async fn a_whole_turn_is_undoable_through_the_production_wiring() {
         .run_turn("rewrite the goal", CancellationToken::new())
         .await
         .expect("turn completes");
-    assert!(!outcome.tool_calls[1].is_error, "the write must succeed: {}", outcome.tool_calls[1].output);
+    assert!(
+        !outcome.tool_calls[1].is_error,
+        "the write must succeed: {}",
+        outcome.tool_calls[1].output
+    );
     assert_eq!(
         std::fs::read_to_string(workspace.join("goal.md")).unwrap(),
         "rewritten by the model"
     );
 
     // The agent closed the snapshot at the end of the turn; `/rewind 1` is what the user runs.
-    assert!(controller.current().is_none(), "the turn must close its snapshot");
+    assert!(
+        controller.current().is_none(),
+        "the turn must close its snapshot"
+    );
     let checkpoints = controller.store().list("unbound").unwrap();
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].prompt.as_deref(), Some("rewrite the goal"));
@@ -473,7 +481,11 @@ async fn diff_classifies_created_modified_and_unchanged_files() {
     snapshot.capture("same.txt").unwrap();
     snapshot.capture("created.txt").unwrap();
 
-    write(&fixture.workspace, "modified.txt", "one\nTWO\nthree\nfour\n");
+    write(
+        &fixture.workspace,
+        "modified.txt",
+        "one\nTWO\nthree\nfour\n",
+    );
     write(&fixture.workspace, "same.txt", "identical\n");
     write(&fixture.workspace, "created.txt", "brand new\n");
 
@@ -483,7 +495,10 @@ async fn diff_classifies_created_modified_and_unchanged_files() {
     assert_eq!(summary.modified, 1, "modified.txt changed");
     assert_eq!(summary.unchanged, 1, "same.txt is byte-identical");
     assert_eq!(summary.deletions, 1, "one line removed");
-    assert_eq!(summary.additions, 3, "TWO + four, plus the created file's one line");
+    assert_eq!(
+        summary.additions, 3,
+        "TWO + four, plus the created file's one line"
+    );
     assert_eq!(summary.stat_line(), "+1 ~1 -0 ·1");
 
     let modified = turn
@@ -602,7 +617,15 @@ async fn diff_after_restore_shows_the_turn_s_work_is_undone() {
     snapshot.capture("notes.txt").unwrap();
     write(&fixture.workspace, "notes.txt", "after\n");
 
-    assert_eq!(fixture.store.diff("s-rewound", 1).unwrap().summary().modified, 1);
+    assert_eq!(
+        fixture
+            .store
+            .diff("s-rewound", 1)
+            .unwrap()
+            .summary()
+            .modified,
+        1
+    );
     fixture.store.restore("s-rewound", 1).unwrap();
 
     let turn = fixture.store.diff("s-rewound", 1).unwrap();
@@ -689,7 +712,11 @@ async fn the_scan_ignores_build_output_and_version_control() {
     let snapshot = fixture.store.begin("s-ignore", None).unwrap();
     write(&fixture.workspace, "target/debug/artifact", "rebuilt\n");
     write(&fixture.workspace, ".git/HEAD", "ref: other\n");
-    write(&fixture.workspace, "src/main.rs", "fn main() { println!(); }\n");
+    write(
+        &fixture.workspace,
+        "src/main.rs",
+        "fn main() { println!(); }\n",
+    );
     snapshot.finish();
 
     let turn = fixture.store.diff("s-ignore", 1).unwrap();

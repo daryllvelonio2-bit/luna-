@@ -5,8 +5,8 @@
 //! and what text lands in the transcript the model reads next.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -87,7 +87,10 @@ impl Tool for RecordingTool {
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
         self.calls.lock().await.push(arguments.clone());
-        Ok(ToolResult::success(call_id, "SECRET=hunter2 file=notes.txt"))
+        Ok(ToolResult::success(
+            call_id,
+            "SECRET=hunter2 file=notes.txt",
+        ))
     }
 }
 
@@ -234,8 +237,6 @@ async fn run_turn_with_hooks(
     .with_approval(approver.clone(), ApprovalSettings::default())
     .with_hooks(hooks);
 
-
-
     let outcome = agent
         .run_turn("go", CancellationToken::new())
         .await
@@ -258,11 +259,13 @@ async fn a_pre_tool_use_rewrite_is_what_the_tool_and_the_gate_see() {
         ]
       }
     }"#;
-    let (_outcome, calls, _messages, asked) = run_turn_with_hooks(hooks, json!({"path": "/etc/passwd"})).await;
+    let (_outcome, calls, _messages, asked) =
+        run_turn_with_hooks(hooks, json!({"path": "/etc/passwd"})).await;
 
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0], json!({"path": "/tmp/safe.txt"}),
+        calls[0],
+        json!({"path": "/tmp/safe.txt"}),
         "the tool runs with the rewritten arguments, not the model's"
     );
     assert_eq!(asked, 1, "the gate still runs after a rewrite");
@@ -277,7 +280,8 @@ async fn a_pre_tool_use_denial_means_the_gate_is_never_asked() {
         ]
       }
     }"#;
-    let (outcome, calls, _messages, asked) = run_turn_with_hooks(hooks, json!({"path": "/etc/passwd"})).await;
+    let (outcome, calls, _messages, asked) =
+        run_turn_with_hooks(hooks, json!({"path": "/etc/passwd"})).await;
 
     assert!(calls.is_empty(), "the tool never ran");
     assert_eq!(asked, 0, "the gate is not consulted on a hook denial");
@@ -374,5 +378,8 @@ async fn a_gating_event_can_refuse_the_turn_and_an_observation_event_cannot() {
     let observed = agent
         .emit_hook_event(harness_core::HookEvent::Notification, Some("hi"))
         .await;
-    assert!(observed.is_ok(), "an observation event never blocks the turn");
+    assert!(
+        observed.is_ok(),
+        "an observation event never blocks the turn"
+    );
 }

@@ -311,7 +311,11 @@ fn yes_approves_mutations_without_a_rule() {
     let (base_url, _served) = start_mock(write_turn());
     let config = write_config(&dir, &base_url, false);
 
-    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "write the report"]);
+    let output = run_exec(
+        &dir,
+        &config,
+        &["exec", "--json", "--yes", "write the report"],
+    );
     assert!(
         output.status.success(),
         "stderr:\n{}",
@@ -497,9 +501,14 @@ fn exec_runs_the_same_hooks_the_repl_does() {
         "the hook rewrote the path\nstdout:\n{}\nstderr:\n{}\nws: {:?}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
-        fs::read_dir(&ws).map(|entries| entries.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>()),
+        fs::read_dir(&ws).map(|entries| entries
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect::<Vec<_>>()),
     );
-    assert!(!ws.join("report.md").exists(), "the original path was never written");
+    assert!(
+        !ws.join("report.md").exists(),
+        "the original path was never written"
+    );
 
     let log = fs::read_to_string(&markers).expect("session hooks wrote markers");
     let lines: Vec<&str> = log.lines().collect();
@@ -536,7 +545,9 @@ fn hooks_command_reports_what_is_actually_loaded() {
     let report: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("json report");
     let hooks = report["hooks"].as_array().expect("a hook array");
     assert_eq!(hooks.len(), 2);
-    assert!(hooks.iter().any(|hook| hook["event"] == "pre_tool_use" && hook["matcher"] == "write_*"));
+    assert!(hooks
+        .iter()
+        .any(|hook| hook["event"] == "pre_tool_use" && hook["matcher"] == "write_*"));
     assert!(hooks.iter().any(|hook| hook["event"] == "stop"));
     assert_eq!(report["enabled"], true);
 }
@@ -567,13 +578,20 @@ fn the_workspace_is_a_boundary_even_when_the_gate_says_yes() {
 
     // `--yes` approves every mutation. It must not widen what a tool can reach: the sandbox is a
     // property of the path, not a human decision.
-    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "read /etc/passwd"]);
+    let output = run_exec(
+        &dir,
+        &config,
+        &["exec", "--json", "--yes", "read /etc/passwd"],
+    );
     let escape_events = events(&output.stdout);
     let tool_result = escape_events
         .iter()
         .find(|event| event["type"] == "tool_result")
         .expect("the call ran and reported");
-    assert_eq!(tool_result["ok"], false, "escaping the workspace is an error");
+    assert_eq!(
+        tool_result["ok"], false,
+        "escaping the workspace is an error"
+    );
     assert!(
         tool_result["output"]
             .as_str()
@@ -593,7 +611,10 @@ fn the_workspace_is_a_boundary_even_when_the_gate_says_yes() {
         .iter()
         .find(|event| event["type"] == "tool_result")
         .expect("the call ran and reported");
-    assert_eq!(tool_result["ok"], false, "a symlinked parent must not escape");
+    assert_eq!(
+        tool_result["ok"], false,
+        "a symlinked parent must not escape"
+    );
     assert!(
         tool_result["output"]
             .as_str()
@@ -621,7 +642,10 @@ fn paths_extra_roots_widens_the_sandbox_deliberately() {
         .iter()
         .find(|event| event["type"] == "tool_result")
         .expect("reported");
-    assert_eq!(result["ok"], false, "outside the workspace and not opted in");
+    assert_eq!(
+        result["ok"], false,
+        "outside the workspace and not opted in"
+    );
     assert!(result["output"]
         .as_str()
         .unwrap_or_default()
@@ -639,7 +663,10 @@ fn paths_extra_roots_widens_the_sandbox_deliberately() {
             shared.display()
         ),
     );
-    assert_ne!(with_root, text, "the config rewrite must have found the paths block");
+    assert_ne!(
+        with_root, text,
+        "the config rewrite must have found the paths block"
+    );
     fs::write(&config, with_root).expect("config with extra roots");
 
     let allowed = run_exec(&dir, &config, &["exec", "--json", "read the shared file"]);
@@ -708,7 +735,11 @@ fn luna_diff_shows_what_a_turn_changed_on_disk() {
     let config = write_config(&dir, &base_url, true);
 
     let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write notes"]);
-    assert!(ran.status.success(), "exec failed: {}", String::from_utf8_lossy(&ran.stderr));
+    assert!(
+        ran.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
 
     // Default: the newest turn of the newest session.
     let output = run_luna(&dir, &config, &["diff", "--json"]);
@@ -750,7 +781,10 @@ fn luna_diff_shows_what_a_turn_changed_on_disk() {
     let stat = run_luna(&dir, &config, &["diff", "--stat"]);
     let stat_out = String::from_utf8_lossy(&stat.stdout).to_string();
     assert!(stat_out.contains("created"), "got: {stat_out}");
-    assert!(!stat_out.contains("+alpha"), "no hunks with --stat: {stat_out}");
+    assert!(
+        !stat_out.contains("+alpha"),
+        "no hunks with --stat: {stat_out}"
+    );
 
     // After a rewind the same turn reads as unchanged — the review follows the bytes.
     let rewound = run_luna(&dir, &config, &["exec", "--json", "--yes", "noop"]);
@@ -839,10 +873,17 @@ fn run_terminal_under(config_lines: &str, command: &str, name: &str) -> serde_js
     let config = write_config(&dir, &base_url, true);
     let text = fs::read_to_string(&config).expect("config");
     let patched = text.replace("tools:\n", &format!("tools:\n{config_lines}"));
-    assert_ne!(patched, text, "the config rewrite must find the tools block");
+    assert_ne!(
+        patched, text,
+        "the config rewrite must find the tools block"
+    );
     fs::write(&config, patched).expect("patched config");
 
-    let output = run_exec(&dir, &config, &["exec", "--json", "--yes", "reach the network"]);
+    let output = run_exec(
+        &dir,
+        &config,
+        &["exec", "--json", "--yes", "reach the network"],
+    );
     let events = events(&output.stdout);
     events
         .into_iter()
@@ -900,7 +941,11 @@ fn luna_diff_names_files_a_shell_command_changed() {
     // Seed a file that the command rewrites, so the change is a *modification* as well as a create.
     fs::write(dir.join("ws").join("keep.txt"), "original\n").expect("seed");
 
-    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write via the shell"]);
+    let ran = run_exec(
+        &dir,
+        &config,
+        &["exec", "--json", "--yes", "write via the shell"],
+    );
     assert!(
         ran.status.success(),
         "exec failed: {}",
@@ -908,7 +953,11 @@ fn luna_diff_names_files_a_shell_command_changed() {
     );
 
     let output = run_luna(&dir, &config, &["diff", "--json"]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
     let turn = &payload["turns"][0];
 
@@ -935,7 +984,10 @@ fn luna_diff_names_files_a_shell_command_changed() {
     // Human output says plainly that a rewind cannot undo them.
     let text = run_luna(&dir, &config, &["diff"]);
     let stdout = String::from_utf8_lossy(&text.stdout).to_string();
-    assert!(stdout.contains("changed by a shell command"), "got: {stdout}");
+    assert!(
+        stdout.contains("changed by a shell command"),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("shell.txt"), "got: {stdout}");
     assert!(stdout.contains("keep.txt"), "got: {stdout}");
 }
@@ -954,7 +1006,11 @@ fn luna_diff_is_quiet_about_shell_changes_when_tracking_is_off() {
     };
     fs::write(&config, checkpoints).expect("config with tracking off");
 
-    let ran = run_exec(&dir, &config, &["exec", "--json", "--yes", "write via the shell"]);
+    let ran = run_exec(
+        &dir,
+        &config,
+        &["exec", "--json", "--yes", "write via the shell"],
+    );
     assert!(ran.status.success());
 
     let output = run_luna(&dir, &config, &["diff", "--json"]);
@@ -962,7 +1018,10 @@ fn luna_diff_is_quiet_about_shell_changes_when_tracking_is_off() {
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
     let turn = &payload["turns"][0];
     assert!(
-        turn["unrecorded"].as_array().map(|list| list.is_empty()).unwrap_or(true),
+        turn["unrecorded"]
+            .as_array()
+            .map(|list| list.is_empty())
+            .unwrap_or(true),
         "tracking off must not claim anything: {}",
         turn["unrecorded"]
     );

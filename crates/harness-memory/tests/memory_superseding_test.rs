@@ -1,5 +1,5 @@
-use harness_memory::*;
 use harness_core::*;
+use harness_memory::*;
 
 #[tokio::test]
 async fn test_memory_superseding_and_active_state() {
@@ -52,8 +52,14 @@ async fn test_memory_superseding_and_active_state() {
 async fn test_multiple_note_pointers_remain_active() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
-    engine.add_note_pointer("note_1", "Stripe Payment Gateway Spec 2026").await.unwrap();
-    engine.add_note_pointer("note_2", "Rust Harness Architecture").await.unwrap();
+    engine
+        .add_note_pointer("note_1", "Stripe Payment Gateway Spec 2026")
+        .await
+        .unwrap();
+    engine
+        .add_note_pointer("note_2", "Rust Harness Architecture")
+        .await
+        .unwrap();
 
     let res = engine.retrieve("Note", 10).await.unwrap();
     assert_eq!(res.len(), 2, "Both note pointers must remain active");
@@ -104,14 +110,20 @@ async fn test_update_with_identical_derived_id_revises_in_place() {
     assert_eq!(res[0].id, "project.x.profile");
     assert_eq!(res[0].object, "v2");
     assert!(res[0].is_active, "an in-place revision must stay active");
-    assert_eq!(res[0].superseded_by, None, "a record must never supersede itself");
+    assert_eq!(
+        res[0].superseded_by, None,
+        "a record must never supersede itself"
+    );
 }
 
 #[tokio::test]
 async fn test_update_with_changed_id_supersedes_old_record() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
-    engine.save(&record("user.old", "user", "old", "stale")).await.unwrap();
+    engine
+        .save(&record("user.old", "user", "old", "stale"))
+        .await
+        .unwrap();
     engine
         .update("user.old", &record("user.new", "user", "new", "fresh"))
         .await
@@ -135,14 +147,24 @@ async fn test_update_accepts_rendered_display_name() {
 
     // The system prompt renders `subject.predicate`, while the stored id is the sanitized form.
     engine
-        .save(&record("project_x_profile.profile", "project.x.profile", "profile", "v1"))
+        .save(&record(
+            "project_x_profile.profile",
+            "project.x.profile",
+            "profile",
+            "v1",
+        ))
         .await
         .unwrap();
 
     engine
         .update(
             "project.x.profile.profile",
-            &record("project_x_profile.profile", "project.x.profile", "profile", "v2"),
+            &record(
+                "project_x_profile.profile",
+                "project.x.profile",
+                "profile",
+                "v2",
+            ),
         )
         .await
         .expect("display-name ids must resolve to the stored record");
@@ -158,7 +180,10 @@ async fn test_update_accepts_rendered_display_name() {
 async fn test_update_missing_record_is_an_error() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
     let err = engine
-        .update("does.not.exist", &record("does.not.exist", "does", "not", "x"))
+        .update(
+            "does.not.exist",
+            &record("does.not.exist", "does", "not", "x"),
+        )
         .await
         .expect_err("updating an unknown id must fail loudly");
     assert!(format!("{}", err).contains("no such record"));
@@ -170,8 +195,14 @@ async fn test_update_missing_record_is_an_error() {
 async fn test_resaving_same_id_keeps_record_active() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
-    engine.save(&record("user.profile", "user", "profile", "v1")).await.unwrap();
-    engine.save(&record("user.profile", "user", "profile", "v2")).await.unwrap();
+    engine
+        .save(&record("user.profile", "user", "profile", "v1"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("user.profile", "user", "profile", "v2"))
+        .await
+        .unwrap();
 
     let res = engine.retrieve("user", 10).await.unwrap();
     assert_eq!(res.len(), 1);
@@ -183,8 +214,14 @@ async fn test_resaving_same_id_keeps_record_active() {
 async fn test_note_pointer_reshadowing_same_note_stays_active() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
-    engine.add_note_pointer("note_9", "Old Pointer Title").await.unwrap();
-    engine.add_note_pointer("note_9", "New Pointer Title").await.unwrap();
+    engine
+        .add_note_pointer("note_9", "Old Pointer Title")
+        .await
+        .unwrap();
+    engine
+        .add_note_pointer("note_9", "New Pointer Title")
+        .await
+        .unwrap();
 
     let res = engine.retrieve("Pointer", 10).await.unwrap();
     assert_eq!(res.len(), 1);

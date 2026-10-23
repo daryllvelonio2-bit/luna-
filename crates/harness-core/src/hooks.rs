@@ -330,7 +330,9 @@ impl HookRunner {
             }
             match self.run_one(spec, event, context).await {
                 Ok(Some(verdict)) => {
-                    outcome.notes.push(format!("{}: {}", spec.command, describe(&verdict)));
+                    outcome
+                        .notes
+                        .push(format!("{}: {}", spec.command, describe(&verdict)));
                     match verdict {
                         HookVerdict::Deny(reason) => {
                             outcome.verdict = HookVerdict::Deny(reason);
@@ -384,10 +386,7 @@ impl HookRunner {
             .current_dir(&self.workspace)
             .env("LUNA_HOOK_EVENT", event.as_str())
             .env("LUNA_PROJECT_DIR", &self.workspace)
-            .env(
-                "LUNA_HOOK_TOOL",
-                context.tool.unwrap_or_default(),
-            )
+            .env("LUNA_HOOK_TOOL", context.tool.unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -410,7 +409,11 @@ impl HookRunner {
                 HarnessError::Io(format!("hook '{}' failed: {error}", spec.command))
             })?,
             Err(_elapsed) => {
-                let reason = format!("hook '{}' timed out after {}s", spec.command, timeout.as_secs());
+                let reason = format!(
+                    "hook '{}' timed out after {}s",
+                    spec.command,
+                    timeout.as_secs()
+                );
                 // `kill_on_drop` already reaped the process when the future was dropped.
                 return if event.is_gating() {
                     Ok(Some(HookVerdict::Deny(reason)))
@@ -493,10 +496,14 @@ impl HookRunner {
         if !path.is_file() {
             return Ok(());
         }
-        let raw = std::fs::read_to_string(path)
-            .map_err(|error| HarnessError::Io(format!("cannot read {}: {error}", path.display())))?;
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            HarnessError::Io(format!("cannot read {}: {error}", path.display()))
+        })?;
         let file: HookFile = serde_json::from_str(&raw).map_err(|error| {
-            HarnessError::ConfigurationError(format!("{} is not valid hook config: {error}", path.display()))
+            HarnessError::ConfigurationError(format!(
+                "{} is not valid hook config: {error}",
+                path.display()
+            ))
         })?;
         for (name, specs) in file.into_events()? {
             self.specs.entry(name).or_default().extend(specs);
@@ -592,9 +599,7 @@ impl HookStdout {
                 reason.unwrap_or_else(|| "blocked by hook".to_string()),
             )),
             _ => updated_input
-                .or_else(|| {
-                    content.map(|content| serde_json::json!({ "content": content }))
-                })
+                .or_else(|| content.map(|content| serde_json::json!({ "content": content })))
                 .map(HookVerdict::ProceedWith),
         }
     }

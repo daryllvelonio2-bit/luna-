@@ -281,7 +281,10 @@ async fn test_terminal_exit_code_and_timeout() {
         )
         .await
         .unwrap();
-    assert!(!grep_res.is_error, "grep exit 1 should not be marked as is_error");
+    assert!(
+        !grep_res.is_error,
+        "grep exit 1 should not be marked as is_error"
+    );
     assert!(grep_res.content.contains("no matches found"));
 
     // Timeout test

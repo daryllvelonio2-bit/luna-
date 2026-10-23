@@ -113,7 +113,6 @@ impl RestoreReport {
     }
 }
 
-
 /// What happened to one file between the start of a turn and now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -224,10 +223,7 @@ pub struct DiffSummary {
 impl DiffSummary {
     /// `+2 ~1 -0 ·3` — the stat line, with the unchanged count omitted when there is none.
     pub fn stat_line(&self) -> String {
-        let mut line = format!(
-            "+{} ~{} -{}",
-            self.created, self.modified, self.deleted
-        );
+        let mut line = format!("+{} ~{} -{}", self.created, self.modified, self.deleted);
         if self.unchanged > 0 {
             line.push_str(&format!(" ·{}", self.unchanged));
         }
@@ -275,7 +271,10 @@ impl TurnSnapshot {
 
         let entry = if absolute.is_file() {
             let bytes = std::fs::read(&absolute).map_err(|error| {
-                HarnessError::Io(format!("checkpoint: cannot read {}: {error}", absolute.display()))
+                HarnessError::Io(format!(
+                    "checkpoint: cannot read {}: {error}",
+                    absolute.display()
+                ))
             })?;
             let mut next = self.next_blob.lock().unwrap();
             *next += 1;
@@ -339,7 +338,10 @@ impl TurnSnapshot {
             )
         });
         if let Err(error) = self.persist() {
-            warn!(seq = self.seq, "cannot write the finished checkpoint: {error}");
+            warn!(
+                seq = self.seq,
+                "cannot write the finished checkpoint: {error}"
+            );
         }
     }
 
@@ -393,7 +395,11 @@ impl CheckpointController {
     }
 
     /// Open a snapshot for this turn. Returns `None` when checkpoints are disabled.
-    pub fn begin(&self, session_id: &str, prompt: Option<&str>) -> Option<std::sync::Arc<TurnSnapshot>> {
+    pub fn begin(
+        &self,
+        session_id: &str,
+        prompt: Option<&str>,
+    ) -> Option<std::sync::Arc<TurnSnapshot>> {
         if !self.enabled {
             return None;
         }
@@ -489,7 +495,10 @@ impl CheckpointStore {
             workspace,
             keep_turns: DEFAULT_KEEP_TURNS,
             track_external: false,
-            ignore: DEFAULT_IGNORED_DIRS.iter().map(|dir| dir.to_string()).collect(),
+            ignore: DEFAULT_IGNORED_DIRS
+                .iter()
+                .map(|dir| dir.to_string())
+                .collect(),
         }
     }
 
@@ -520,11 +529,19 @@ impl CheckpointStore {
     }
 
     /// Open the next turn's snapshot for `session_id`.
-    pub fn begin(&self, session_id: &str, prompt: Option<&str>) -> Result<TurnSnapshot, HarnessError> {
+    pub fn begin(
+        &self,
+        session_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<TurnSnapshot, HarnessError> {
         let dir = self.session_dir(session_id);
         std::fs::create_dir_all(&dir)?;
 
-        let seq = self.list(session_id)?.last().map(|checkpoint| checkpoint.seq + 1).unwrap_or(1);
+        let seq = self
+            .list(session_id)?
+            .last()
+            .map(|checkpoint| checkpoint.seq + 1)
+            .unwrap_or(1);
         let turn_dir = dir.join(turn_dir_name(seq));
         std::fs::create_dir_all(turn_dir.join("blobs"))?;
 
@@ -616,7 +633,9 @@ impl CheckpointStore {
 
             if file.existed {
                 let Some(blob) = file.blob.as_ref() else {
-                    report.skipped.push(format!("{} (no blob recorded)", file.path));
+                    report
+                        .skipped
+                        .push(format!("{} (no blob recorded)", file.path));
                     continue;
                 };
                 let blob_path = turn_dir.join("blobs").join(blob);
@@ -955,7 +974,13 @@ fn turn_dir_name(seq: u32) -> String {
 fn sanitise(session_id: &str) -> String {
     let cleaned: String = session_id
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
         "session".to_string()

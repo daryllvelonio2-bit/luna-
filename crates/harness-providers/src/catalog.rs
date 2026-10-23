@@ -244,10 +244,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("grok-2-latest", 131_072),
-                ("grok-beta", 131_072),
-            ]),
+            context_windows: ctx_windows(&[("grok-2-latest", 131_072), ("grok-beta", 131_072)]),
         },
         ProviderDescriptor {
             id: "zai".to_string(),
@@ -513,7 +510,9 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
 pub fn canonicalize_provider_id(id: &str) -> &str {
     match id.to_lowercase().as_str() {
         "agy" => "antigravity",
-        "opencode-zen" | "opencode-local" | "opencode-agent" | "opencode-bin" | "opencode-cli" => "opencode",
+        "opencode-zen" | "opencode-local" | "opencode-agent" | "opencode-bin" | "opencode-cli" => {
+            "opencode"
+        }
         "kiro-ai" => "kiro",
         "openai-codex" => "openai",
         _ => id,
@@ -713,8 +712,14 @@ mod tests {
 
     #[test]
     fn test_context_window_1m_models() {
-        assert_eq!(get_context_window("nvidia", "z-ai/glm-5.3-flash"), Some(1_000_000));
-        assert_eq!(get_context_window("nvidia", "stepfun-ai/step-5-preview"), Some(1_000_000));
+        assert_eq!(
+            get_context_window("nvidia", "z-ai/glm-5.3-flash"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_context_window("nvidia", "stepfun-ai/step-5-preview"),
+            Some(1_000_000)
+        );
         assert_eq!(get_context_window("zai", "glm-4-plus"), Some(1_000_000));
         assert_eq!(get_context_window("other", "glm-4-long"), Some(1_000_000));
         assert_eq!(get_context_window("other", "step-2"), Some(1_000_000));

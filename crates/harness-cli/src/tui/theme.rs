@@ -79,10 +79,14 @@ impl Theme {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
             border_type: BorderType::Rounded,
-            title: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             text: Style::default().fg(Color::Reset),
             text_muted: Style::default().fg(Color::DarkGray),
-            text_bold: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            text_bold: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             accent: Style::default().fg(Color::Cyan),
             accent_cyan: Style::default().fg(Color::Cyan),
             accent_purple: Style::default().fg(Color::Magenta),
@@ -109,10 +113,14 @@ impl Theme {
                 .fg(Color::Rgb(130, 130, 240))
                 .add_modifier(Modifier::BOLD),
             border_type: BorderType::Rounded,
-            title: Style::default().fg(Color::Rgb(230, 230, 240)).add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::Rgb(230, 230, 240))
+                .add_modifier(Modifier::BOLD),
             text: Style::default().fg(Color::Rgb(220, 220, 225)),
             text_muted: Style::default().fg(Color::Rgb(120, 120, 130)),
-            text_bold: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            text_bold: Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             accent: Style::default().fg(Color::Rgb(130, 130, 240)),
             accent_cyan: Style::default().fg(Color::Cyan),
             accent_purple: Style::default().fg(Color::Rgb(180, 130, 240)),
@@ -140,10 +148,14 @@ impl Theme {
                 .fg(Color::Rgb(80, 80, 200))
                 .add_modifier(Modifier::BOLD),
             border_type: BorderType::Rounded,
-            title: Style::default().fg(Color::Rgb(25, 25, 35)).add_modifier(Modifier::BOLD),
+            title: Style::default()
+                .fg(Color::Rgb(25, 25, 35))
+                .add_modifier(Modifier::BOLD),
             text: Style::default().fg(Color::Rgb(35, 35, 45)),
             text_muted: Style::default().fg(Color::Rgb(115, 115, 125)),
-            text_bold: Style::default().fg(Color::Black).add_modifier(Modifier::BOLD),
+            text_bold: Style::default()
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
             accent: Style::default().fg(Color::Rgb(80, 80, 200)),
             accent_cyan: Style::default().fg(Color::Rgb(0, 130, 160)),
             accent_purple: Style::default().fg(Color::Rgb(130, 60, 200)),

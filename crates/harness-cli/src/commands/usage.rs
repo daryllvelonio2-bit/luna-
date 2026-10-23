@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
+use colored::Colorize;
 use harness_core::usage::{
     GroupBy, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals,
     SOURCE_CHAT,
 };
-use colored::Colorize;
 use harness_providers::{CredentialManager, ModelDiscovery};
 
 /// What a finished turn contributes, resolved once from the config.
@@ -71,7 +71,8 @@ impl UsageRecorder {
         session_id: Option<&str>,
         outcome: &harness_core::TurnOutcome,
     ) {
-        self.record(provider, model, session_id, outcome, SOURCE_CHAT).await;
+        self.record(provider, model, session_id, outcome, SOURCE_CHAT)
+            .await;
     }
 }
 
@@ -103,7 +104,10 @@ pub async fn run_usage(
         let records = ledger.recent(&filter, options.limit).await?;
         if options.json {
             for record in &records {
-                println!("{}", serde_json::to_string(record).expect("record serializes"));
+                println!(
+                    "{}",
+                    serde_json::to_string(record).expect("record serializes")
+                );
             }
         } else {
             print_recent(&records);
@@ -164,9 +168,7 @@ fn print_totals(totals: &UsageTotals) {
     println!("  turns            {}", totals.turns);
     println!(
         "  tokens           {} ({} in, {} out)",
-        totals.total_tokens,
-        totals.prompt_tokens,
-        totals.completion_tokens
+        totals.total_tokens, totals.prompt_tokens, totals.completion_tokens
     );
     println!("  cost             {}", cost_text(totals));
     println!("  time in turns    {}", format_duration(totals.duration_ms));

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::error::HarnessError;
 
@@ -122,7 +122,10 @@ impl SurfaceSpec {
                 ));
             }
             let trigger = skill.trigger.trim();
-            if !trigger.is_empty() && !always_on.contains(trigger) && !always_on.contains(&skill.name) {
+            if !trigger.is_empty()
+                && !always_on.contains(trigger)
+                && !always_on.contains(&skill.name)
+            {
                 return Err(HarnessError::SurfaceValidationError(format!(
                     "skill '{}' trigger '{}' not found in always-on system prompt",
                     skill.name, trigger

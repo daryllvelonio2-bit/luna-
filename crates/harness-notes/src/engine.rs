@@ -1,13 +1,13 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use harness_core::{HarnessError, Note, NotesEngine};
 use crate::distiller::PointerDistiller;
+use harness_core::{HarnessError, Note, NotesEngine};
 
 pub struct SqliteNotesEngine {
     #[allow(dead_code)]
@@ -32,7 +32,8 @@ impl SqliteNotesEngine {
             })?;
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| HarnessError::NotesError(e.to_string()))?;
+        let conn =
+            Connection::open(&db_path).map_err(|e| HarnessError::NotesError(e.to_string()))?;
         // Schema is applied to the owned connection before it is shared behind the mutex: the
         // constructors are reachable from async callers (`chat.rs`, `voice.rs`), and taking a
         // tokio lock there would panic inside the runtime.
@@ -45,7 +46,8 @@ impl SqliteNotesEngine {
     }
 
     pub fn in_memory() -> Result<Self, HarnessError> {
-        let conn = Connection::open_in_memory().map_err(|e| HarnessError::NotesError(e.to_string()))?;
+        let conn =
+            Connection::open_in_memory().map_err(|e| HarnessError::NotesError(e.to_string()))?;
         Self::init_schema(&conn)?;
         Ok(Self {
             db_path: PathBuf::from(":memory:"),

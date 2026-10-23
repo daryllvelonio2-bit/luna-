@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 use harness_core::config::Config;
 use harness_core::traits::NotesEngine;
 use harness_core::{
-    DefaultToolRegistry, HarnessError, LocalAgentSubstrate, MockSubstrate,
-    SubstrateOutcome, SurfaceSpec,
+    DefaultToolRegistry, HarnessError, LocalAgentSubstrate, MockSubstrate, SubstrateOutcome,
+    SurfaceSpec,
 };
 use harness_evolver::{RecursionMode, TaskHarnessRefiner};
 use harness_memory::SqliteMemoryEngine;
@@ -48,7 +48,11 @@ pub async fn handle_evolve_command(
         budget_k,
         refiner.ledger.max_rollouts,
         refiner.ledger.max_stages,
-        if offline { "offline-mock" } else { "live-substrate" }
+        if offline {
+            "offline-mock"
+        } else {
+            "live-substrate"
+        }
     );
 
     let refined_surface = if offline || config.model.provider.is_empty() {
@@ -73,7 +77,9 @@ pub async fn handle_evolve_command(
             config.providers.get(&config.model.provider),
         ) {
             Ok(client) => {
-                let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+                let memory = Arc::new(SqliteMemoryEngine::new(Some(
+                    config.paths.memory_db.clone(),
+                ))?);
                 let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
                 let evolver = Arc::new(harness_evolver::CodebaseEvolver::new(
                     config.paths.workspace_root.clone(),
@@ -96,7 +102,10 @@ pub async fn handle_evolve_command(
                     .await?
             }
             Err(_) => {
-                println!("(No active credentials for '{}'; falling back to offline simulation)", config.model.provider);
+                println!(
+                    "(No active credentials for '{}'; falling back to offline simulation)",
+                    config.model.provider
+                );
                 let substrate = MockSubstrate::new(
                     "task_eval_runner",
                     SubstrateOutcome {
@@ -114,18 +123,37 @@ pub async fn handle_evolve_command(
     };
 
     println!("\nRefinement completed successfully:");
-    println!("  Rollouts executed:     {}", refiner.ledger.completed_rollouts.len());
-    println!("  Stages executed:       {}", refiner.ledger.stages_executed);
+    println!(
+        "  Rollouts executed:     {}",
+        refiner.ledger.completed_rollouts.len()
+    );
+    println!(
+        "  Stages executed:       {}",
+        refiner.ledger.stages_executed
+    );
     println!("  Total tokens:          {}", refiner.ledger.total_tokens());
-    println!("  Tool guidance entries: {}", refined_surface.c5_tool_guidance.len());
-    println!("  Active skills:         {}", refined_surface.c4_skills.len());
-    println!("  Max failure threshold: {}", refined_surface.c2_guardrails.max_consecutive_failures);
+    println!(
+        "  Tool guidance entries: {}",
+        refined_surface.c5_tool_guidance.len()
+    );
+    println!(
+        "  Active skills:         {}",
+        refined_surface.c4_skills.len()
+    );
+    println!(
+        "  Max failure threshold: {}",
+        refined_surface.c2_guardrails.max_consecutive_failures
+    );
 
     let pretty_json = serde_json::to_string_pretty(&refined_surface)
         .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
 
     // Level-2 Harnessing-level recursion: auto-accumulate adopted harness in persistent library
-    let luna_dir = config.paths.sessions_db.parent().unwrap_or(std::path::Path::new("."));
+    let luna_dir = config
+        .paths
+        .sessions_db
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
     let library_dir = luna_dir.join("harnesses");
     let _ = fs::create_dir_all(&library_dir);
     let task_slug: String = task
@@ -134,10 +162,17 @@ pub async fn handle_evolve_command(
         .map(|c| c.to_ascii_lowercase())
         .take(32)
         .collect();
-    let slug = if task_slug.is_empty() { "default".to_string() } else { task_slug };
+    let slug = if task_slug.is_empty() {
+        "default".to_string()
+    } else {
+        task_slug
+    };
     let library_path = library_dir.join(format!("{}.json", slug));
     let _ = fs::write(&library_path, &pretty_json);
-    println!("\nAdopted harness persisted to library: {}", library_path.display());
+    println!(
+        "\nAdopted harness persisted to library: {}",
+        library_path.display()
+    );
 
     // Record an adopted knowledge note in notes.db
     if let Ok(notes_engine) = SqliteNotesEngine::new(Some(config.paths.notes_db.clone())) {
@@ -146,7 +181,13 @@ pub async fn handle_evolve_command(
             "Adopted SurfaceSpec for task '{}'\nMode: {:?}\nStages: {}\nRollouts: {}\nTool guidance: {:?}",
             task, mode, refiner.ledger.stages_executed, refiner.ledger.completed_rollouts.len(), refined_surface.c5_tool_guidance
         );
-        let _ = notes_engine.save_note(&note_title, &note_body, &["harness2".into(), "recursion".into()]).await;
+        let _ = notes_engine
+            .save_note(
+                &note_title,
+                &note_body,
+                &["harness2".into(), "recursion".into()],
+            )
+            .await;
     }
 
     if let Some(out) = output_path {

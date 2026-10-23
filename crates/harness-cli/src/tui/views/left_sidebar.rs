@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
 
 use crate::tui::app::{AppState, PanelFocus};

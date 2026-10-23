@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -157,9 +157,10 @@ impl CredentialManager {
             }
             let local = to_write.providers.get_mut(&p_id).expect("checked above");
             for disk_cred in disk_state.credentials {
-                let already = local.credentials.iter().any(|c| {
-                    c.id == disk_cred.id || c.api_key == disk_cred.api_key
-                });
+                let already = local
+                    .credentials
+                    .iter()
+                    .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key);
                 if !already {
                     local.credentials.push(disk_cred);
                 }
@@ -197,8 +198,8 @@ impl CredentialManager {
                 // `usage_count` alone would keep the oldest row, which is exactly backwards.
                 let newer = cred.last_used.is_some()
                     && (kept.last_used.is_none() || cred.last_used > kept.last_used);
-                let more_used =
-                    cred.last_used.is_none() == kept.last_used.is_none() && cred.usage_count > kept.usage_count;
+                let more_used = cred.last_used.is_none() == kept.last_used.is_none()
+                    && cred.usage_count > kept.usage_count;
                 if newer || more_used {
                     *kept = cred;
                 }
@@ -324,11 +325,7 @@ impl CredentialManager {
             for cred in &mut provider_state.credentials {
                 cred.is_priority = false;
             }
-            if let Some(cred) = provider_state
-                .credentials
-                .iter_mut()
-                .find(|c| c.id == id)
-            {
+            if let Some(cred) = provider_state.credentials.iter_mut().find(|c| c.id == id) {
                 cred.is_priority = true;
             }
         }
@@ -338,11 +335,17 @@ impl CredentialManager {
         Ok(id)
     }
 
-    pub async fn remove_credential(&self, provider: &str, label_or_id: &str) -> Result<bool, HarnessError> {
+    pub async fn remove_credential(
+        &self,
+        provider: &str,
+        label_or_id: &str,
+    ) -> Result<bool, HarnessError> {
         let mut state = self.state.write().await;
         if let Some(provider_state) = state.providers.get_mut(&provider.to_lowercase()) {
             let initial_len = provider_state.credentials.len();
-            provider_state.credentials.retain(|c| c.id != label_or_id && c.label != label_or_id);
+            provider_state
+                .credentials
+                .retain(|c| c.id != label_or_id && c.label != label_or_id);
             let removed = provider_state.credentials.len() < initial_len;
             drop(state);
             if removed {
@@ -470,13 +473,12 @@ impl CredentialManager {
                 state.providers.entry(p_id).or_insert(p_state);
             }
         }
-        let provider_state = state
-            .providers
-            .get_mut(&p_lower)
-            .ok_or_else(|| HarnessError::AuthenticationFailed {
+        let provider_state = state.providers.get_mut(&p_lower).ok_or_else(|| {
+            HarnessError::AuthenticationFailed {
                 provider: provider.to_string(),
                 message: "No credentials registered for provider in Luna Auth".to_string(),
-            })?;
+            }
+        })?;
 
         let active_credentials: Vec<usize> = provider_state
             .credentials
@@ -741,22 +743,22 @@ mod tests {
                 strategy: RotationStrategy::default(),
                 credentials: vec![
                     CredentialEntry {
-                        last_used: Some(
-                            "2026-10-18T16:07:35Z".parse().expect("timestamp"),
-                        ),
+                        last_used: Some("2026-10-18T16:07:35Z".parse().expect("timestamp")),
                         ..cred("daryllvelonio9@gmail.com", "token-old", 88)
                     },
                     CredentialEntry {
-                        last_used: Some(
-                            "2026-10-18T17:45:41Z".parse().expect("timestamp"),
-                        ),
+                        last_used: Some("2026-10-18T17:45:41Z".parse().expect("timestamp")),
                         ..cred("daryllvelonio9@gmail.com", "token-fresh", 87)
                     },
                 ],
                 current_round_robin_index: 0,
             },
         );
-        std::fs::write(&path, serde_json::to_string_pretty(&stacked).expect("serialize")).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&stacked).expect("serialize"),
+        )
+        .unwrap();
 
         let mgr = CredentialManager::new(Some(path)).expect("manager");
         let rows = mgr.get_credentials("antigravity").await;
@@ -808,13 +810,16 @@ mod tests {
         // Create a completely new manager reading the disk file to ensure it wasn't resurrected
         let fresh_mgr = CredentialManager::new(Some(path)).expect("fresh manager");
         let remaining = fresh_mgr.get_credentials("antigravity").await;
-        assert_eq!(remaining.len(), 1, "only 1 credential should survive on disk");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only 1 credential should survive on disk"
+        );
         assert_eq!(remaining[0].label, "keep@gmail.com");
     }
 
     fn temp_store_path() -> std::path::PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("luna-test-{}.json", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("luna-test-{}.json", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&path);
         path
     }

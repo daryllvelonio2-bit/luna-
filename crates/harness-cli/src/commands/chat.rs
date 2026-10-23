@@ -1919,7 +1919,10 @@ fn launch_turn(
         crate::commands::clear_screen();
         redraw_transcript(turns, process_expanded);
         println!();
-        println!("{}", right_aligned_user_message(query, get_terminal_width()));
+        println!(
+            "{}",
+            right_aligned_user_message(query, get_terminal_width())
+        );
         ui.draw_initial_box();
     } else {
         ui.begin_block(OutputBlockKind::User);
@@ -2309,7 +2312,10 @@ mod tests {
     /// because the history it would be built on is being rewritten underneath it.
     #[test]
     fn a_free_agent_takes_the_message_and_a_busy_one_replaces_the_turn() {
-        assert_eq!(submission("run the tests", false, false), super::Submission::Turn);
+        assert_eq!(
+            submission("run the tests", false, false),
+            super::Submission::Turn
+        );
         assert_eq!(
             submission("run the tests", true, false),
             super::Submission::Interrupt

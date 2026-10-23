@@ -1,5 +1,5 @@
-use ratatui::layout::Rect;
 use super::theme::{Theme, ThemeMode};
+use ratatui::layout::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
@@ -264,7 +264,9 @@ impl AppState {
                 if dx >= 3 {
                     if start_x <= self.rect_left.x + self.rect_left.width + 2 {
                         self.active_drag = Some(DragTarget::LeftDivider);
-                    } else if start_x >= self.rect_right.x.saturating_sub(2) && self.rect_right.width > 0 {
+                    } else if start_x >= self.rect_right.x.saturating_sub(2)
+                        && self.rect_right.width > 0
+                    {
                         self.active_drag = Some(DragTarget::RightDivider);
                     }
                 }

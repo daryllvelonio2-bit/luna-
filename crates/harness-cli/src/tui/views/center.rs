@@ -15,9 +15,10 @@ pub fn render_center(f: &mut Frame, app: &mut AppState, area: Rect) {
     }
 
     if !app.composer_input.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(&app.composer_input, app.theme.text_bold),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            &app.composer_input,
+            app.theme.text_bold,
+        )]));
     }
 
     let transcript_para = Paragraph::new(lines)

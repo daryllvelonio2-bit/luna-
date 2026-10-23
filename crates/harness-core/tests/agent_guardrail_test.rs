@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::*;
@@ -48,7 +48,6 @@ impl ModelProvider for MockProvider {
         }
     }
 
-
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         Ok(vec![])
     }
@@ -83,7 +82,11 @@ impl Tool for FailingTool {
 struct MockMemory;
 #[async_trait]
 impl MemoryEngine for MockMemory {
-    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
         Ok(vec![])
     }
     async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -106,7 +109,12 @@ impl MemoryEngine for MockMemory {
 struct MockNotes;
 #[async_trait]
 impl NotesEngine for MockNotes {
-    async fn save_note(&self, _title: &str, _content: &str, _tags: &[String]) -> Result<Note, HarnessError> {
+    async fn save_note(
+        &self,
+        _title: &str,
+        _content: &str,
+        _tags: &[String],
+    ) -> Result<Note, HarnessError> {
         unimplemented!()
     }
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
@@ -118,7 +126,13 @@ impl NotesEngine for MockNotes {
     async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
         unimplemented!()
     }
-    async fn update_note(&self, _id: &str, _t: Option<&str>, _c: Option<&str>, _tags: Option<&[String]>) -> Result<Note, HarnessError> {
+    async fn update_note(
+        &self,
+        _id: &str,
+        _t: Option<&str>,
+        _c: Option<&str>,
+        _tags: Option<&[String]>,
+    ) -> Result<Note, HarnessError> {
         unimplemented!()
     }
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
@@ -170,7 +184,10 @@ async fn test_5_consecutive_failures_halts_agent() {
     let result = agent.run_task("Test task", cancel).await;
 
     match result {
-        Err(HarnessError::ConsecutiveFailuresExceeded { failures, last_tool }) => {
+        Err(HarnessError::ConsecutiveFailuresExceeded {
+            failures,
+            last_tool,
+        }) => {
             assert_eq!(failures, 5);
             assert_eq!(last_tool, "failing_tool");
         }
@@ -323,7 +340,11 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
 
     let cancel = CancellationToken::new();
     let result = agent.run_task("Hello", cancel).await;
-    assert!(result.is_err(), "Expected error on empty response, got: {:?}", result);
+    assert!(
+        result.is_err(),
+        "Expected error on empty response, got: {:?}",
+        result
+    );
     let err = result.unwrap_err();
     assert!(err.to_string().contains("empty response") || err.to_string().contains("overloaded"));
 }
@@ -351,7 +372,9 @@ impl ModelProvider for SteeringMockProvider {
         // Check if any message contains the steering marker
         for msg in messages {
             if let Some(ref content) = msg.content {
-                if content.contains("OUT-OF-BAND USER MESSAGE") && content.contains("Switch to alternate plan") {
+                if content.contains("OUT-OF-BAND USER MESSAGE")
+                    && content.contains("Switch to alternate plan")
+                {
                     self.steer_observed.store(true, Ordering::SeqCst);
                     return Ok(Message::assistant("Acknowledged steering instruction"));
                 }
@@ -402,6 +425,9 @@ async fn test_mid_turn_steering_delivers_user_message() {
     let cancel = CancellationToken::new();
     let outcome = agent.run_turn("Initial query", cancel).await.unwrap();
 
-    assert!(steer_observed.load(Ordering::SeqCst), "Model must receive mid-turn steering message");
+    assert!(
+        steer_observed.load(Ordering::SeqCst),
+        "Model must receive mid-turn steering message"
+    );
     assert_eq!(outcome.reply, "Acknowledged steering instruction");
 }

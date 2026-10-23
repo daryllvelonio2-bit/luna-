@@ -25,9 +25,15 @@ async fn least_used_spreads_load_across_processes() {
 
     {
         let mgr = manager(&path);
-        mgr.add_credential("openai", "first", "sk-11111", false).await.unwrap();
-        mgr.add_credential("openai", "second", "sk-22222", false).await.unwrap();
-        mgr.set_rotation_strategy("openai", RotationStrategy::LeastUsed).await.unwrap();
+        mgr.add_credential("openai", "first", "sk-11111", false)
+            .await
+            .unwrap();
+        mgr.add_credential("openai", "second", "sk-22222", false)
+            .await
+            .unwrap();
+        mgr.set_rotation_strategy("openai", RotationStrategy::LeastUsed)
+            .await
+            .unwrap();
 
         for expected in ["sk-11111", "sk-22222", "sk-11111"] {
             let key = mgr.acquire_credential("openai").await.unwrap();
@@ -51,8 +57,12 @@ async fn usage_counts_survive_a_reload() {
 
     {
         let mgr = manager(&path);
-        mgr.add_credential("openai", "first", "sk-11111", false).await.unwrap();
-        mgr.add_credential("openai", "second", "sk-22222", false).await.unwrap();
+        mgr.add_credential("openai", "first", "sk-11111", false)
+            .await
+            .unwrap();
+        mgr.add_credential("openai", "second", "sk-22222", false)
+            .await
+            .unwrap();
         // Default strategy is round_robin: three picks hit first, second, first.
         for _ in 0..3 {
             mgr.acquire_credential("openai").await.unwrap();
@@ -80,8 +90,12 @@ async fn round_robin_position_survives_a_reload() {
 
     {
         let mgr = manager(&path);
-        mgr.add_credential("openai", "first", "sk-11111", false).await.unwrap();
-        mgr.add_credential("openai", "second", "sk-22222", false).await.unwrap();
+        mgr.add_credential("openai", "first", "sk-11111", false)
+            .await
+            .unwrap();
+        mgr.add_credential("openai", "second", "sk-22222", false)
+            .await
+            .unwrap();
         let key = mgr.acquire_credential("openai").await.unwrap();
         assert_eq!(key.expose_secret(), "sk-11111");
     }
@@ -100,9 +114,15 @@ async fn failover_flags_stay_out_of_the_persisted_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("credentials.json");
     let mgr = manager(&path);
-    mgr.add_credential("openai", "first", "sk-11111", false).await.unwrap();
-    mgr.add_credential("openai", "second", "sk-22222", false).await.unwrap();
-    mgr.set_rotation_strategy("openai", RotationStrategy::FillFirst).await.unwrap();
+    mgr.add_credential("openai", "first", "sk-11111", false)
+        .await
+        .unwrap();
+    mgr.add_credential("openai", "second", "sk-22222", false)
+        .await
+        .unwrap();
+    mgr.set_rotation_strategy("openai", RotationStrategy::FillFirst)
+        .await
+        .unwrap();
 
     assert!(mgr.mark_credential_failed("openai", "sk-11111").await);
     // This acquire persists the store — with the disabled flag set in memory.

@@ -1,9 +1,9 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
 
@@ -75,7 +75,11 @@ impl SkillLoader {
         let instructions = parts[2].trim().to_string();
 
         let meta: SkillMetadata = serde_yaml::from_str(frontmatter_str).map_err(|e| {
-            HarnessError::PluginError(format!("Failed to parse YAML frontmatter in {}: {}", path.display(), e))
+            HarnessError::PluginError(format!(
+                "Failed to parse YAML frontmatter in {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         Ok(Skill {
@@ -147,7 +151,12 @@ impl Tool for SkillToolAdapter {
             cmd.arg("-c")
                 .arg(&cmd_str)
                 .kill_on_drop(true)
-                .current_dir(self.skill.file_path.parent().unwrap_or_else(|| Path::new(".")))
+                .current_dir(
+                    self.skill
+                        .file_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(".")),
+                )
                 .env("SKILL_DIR", skill_dir.as_ref())
                 .env("SKILL_NAME", &self.skill.name)
                 .env("SKILL_ARGS", &args_json)
@@ -201,7 +210,10 @@ impl Tool for SkillToolAdapter {
                 Ok(ToolResult::error(call_id, err_msg))
             }
         } else {
-            let input = args.get("input").and_then(|i| i.as_str()).unwrap_or_default();
+            let input = args
+                .get("input")
+                .and_then(|i| i.as_str())
+                .unwrap_or_default();
             let rendered = format!(
                 "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
                 self.skill.name, self.skill.instructions, input
@@ -250,8 +262,16 @@ impl Tool for SkillViewTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let name = args.get("name").and_then(|n| n.as_str()).unwrap_or_default().trim();
-        if let Some(skill) = self.skills.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .trim();
+        if let Some(skill) = self
+            .skills
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+        {
             let mut output = format!(
                 "# Skill: {}\n{}\n\n## Instructions\n{}",
                 skill.name, skill.description, skill.instructions
@@ -323,7 +343,10 @@ impl Tool for SkillsListTool {
 
         Ok(ToolResult::success(
             call_id,
-            format!("Available skills (load with skill_view):\n{}", lines.join("\n")),
+            format!(
+                "Available skills (load with skill_view):\n{}",
+                lines.join("\n")
+            ),
         ))
     }
 }
@@ -348,7 +371,10 @@ Test instructions
         let skill = SkillLoader::parse_skill_file(&skill_file).unwrap();
         assert_eq!(skill.name, "echo-test");
         assert_eq!(skill.description, "Echo test skill");
-        assert_eq!(skill.command, Some("echo 'hello from skill:' $SKILL_NAME".to_string()));
+        assert_eq!(
+            skill.command,
+            Some("echo 'hello from skill:' $SKILL_NAME".to_string())
+        );
 
         let adapter = SkillToolAdapter::new(skill);
         let cancel = CancellationToken::new();
@@ -398,9 +424,16 @@ Test instructions
 
         let list_tool = SkillsListTool::new(skills.clone());
         let cancel = CancellationToken::new();
-        let list_res = list_tool.execute("c1", &serde_json::json!({}), &cancel).await.unwrap();
-        assert!(list_res.content.contains("ponytail: Lazy senior developer guidance"));
-        assert!(list_res.content.contains("security: Security review checklist"));
+        let list_res = list_tool
+            .execute("c1", &serde_json::json!({}), &cancel)
+            .await
+            .unwrap();
+        assert!(list_res
+            .content
+            .contains("ponytail: Lazy senior developer guidance"));
+        assert!(list_res
+            .content
+            .contains("security: Security review checklist"));
 
         let view_tool = SkillViewTool::new(skills);
         let view_res = view_tool

@@ -37,7 +37,12 @@ impl OneCallProvider {
             .lock()
             .expect("no other thread panicked while holding the lock")
             .iter()
-            .filter_map(|message| message.tool_result.as_ref().map(|result| result.content.clone()))
+            .filter_map(|message| {
+                message
+                    .tool_result
+                    .as_ref()
+                    .map(|result| result.content.clone())
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -75,7 +80,6 @@ impl ModelProvider for OneCallProvider {
             Ok(Message::assistant("Done"))
         }
     }
-
 
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         Ok(vec![])
@@ -161,7 +165,11 @@ struct MockMemory;
 
 #[async_trait]
 impl MemoryEngine for MockMemory {
-    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
         Ok(vec![])
     }
     async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -302,7 +310,10 @@ async fn a_denied_call_never_runs_and_says_so() {
     )
     .await;
 
-    assert_eq!(observed.tool_runs, 0, "a denied call must not reach the tool");
+    assert_eq!(
+        observed.tool_runs, 0,
+        "a denied call must not reach the tool"
+    );
     assert_eq!(prompts.load(Ordering::SeqCst), 1, "exactly one prompt");
     assert!(
         observed.tool_results.contains("approval denied"),
@@ -329,7 +340,11 @@ async fn an_allowed_call_runs_exactly_once() {
 
     assert_eq!(observed.tool_runs, 1);
     assert_eq!(prompts.load(Ordering::SeqCst), 1);
-    assert!(observed.tool_results.contains("ran"), "{}", observed.tool_results);
+    assert!(
+        observed.tool_results.contains("ran"),
+        "{}",
+        observed.tool_results
+    );
 }
 
 #[tokio::test]

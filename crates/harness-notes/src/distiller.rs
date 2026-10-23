@@ -50,7 +50,10 @@ mod tests {
         let p1 = PointerDistiller::distill("Stripe Payment Gateway Spec 2026", "details...");
         assert_eq!(p1, "Stripe Payment Gateway Spec 2026");
 
-        let p2 = PointerDistiller::distill("A Very Long Title That Definitely Exceeds Five Individual Words In Length", "details...");
+        let p2 = PointerDistiller::distill(
+            "A Very Long Title That Definitely Exceeds Five Individual Words In Length",
+            "details...",
+        );
         let count = p2.split_whitespace().count();
         assert!(count <= 5);
         assert_eq!(p2, "A Very Long Title That");

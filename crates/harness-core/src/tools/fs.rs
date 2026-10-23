@@ -189,13 +189,20 @@ impl Tool for ReadFileTool {
         };
 
         if !resolved.exists() {
-            let crates_alt = self.workspace_root.join("crates").join(path_str.trim_start_matches("./"));
+            let crates_alt = self
+                .workspace_root
+                .join("crates")
+                .join(path_str.trim_start_matches("./"));
             if crates_alt.exists() && crates_alt.is_file() {
                 resolved = crates_alt;
             } else {
                 return Ok(ToolResult::error(
                     call_id,
-                    format!("File not found: '{}' (relative to workspace root '{}')", path_str, self.workspace_root.display()),
+                    format!(
+                        "File not found: '{}' (relative to workspace root '{}')",
+                        path_str,
+                        self.workspace_root.display()
+                    ),
                 ));
             }
         }
@@ -454,7 +461,10 @@ impl Tool for PatchTool {
 
         let mut resolved = self.sandbox().resolve(path).ok()?;
         if !resolved.exists() {
-            let crates_alt = self.workspace_root.join("crates").join(path.trim_start_matches("./"));
+            let crates_alt = self
+                .workspace_root
+                .join("crates")
+                .join(path.trim_start_matches("./"));
             if crates_alt.exists() && crates_alt.is_file() {
                 resolved = crates_alt;
             }
@@ -518,13 +528,20 @@ impl Tool for PatchTool {
         };
 
         if !resolved.exists() {
-            let crates_alt = self.workspace_root.join("crates").join(path_str.trim_start_matches("./"));
+            let crates_alt = self
+                .workspace_root
+                .join("crates")
+                .join(path_str.trim_start_matches("./"));
             if crates_alt.exists() && crates_alt.is_file() {
                 resolved = crates_alt;
             } else {
                 return Ok(ToolResult::error(
                     call_id,
-                    format!("File not found: '{}' (relative to workspace root '{}')", path_str, self.workspace_root.display()),
+                    format!(
+                        "File not found: '{}' (relative to workspace root '{}')",
+                        path_str,
+                        self.workspace_root.display()
+                    ),
                 ));
             }
         }
@@ -729,7 +746,10 @@ impl Tool for SearchFilesTool {
         };
 
         if !resolved.exists() {
-            let crates_alt = self.workspace_root.join("crates").join(search_path_str.trim_start_matches("./"));
+            let crates_alt = self
+                .workspace_root
+                .join("crates")
+                .join(search_path_str.trim_start_matches("./"));
             if crates_alt.exists() {
                 resolved = crates_alt;
             } else {

@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::error::HarnessError;
 
@@ -35,7 +35,12 @@ pub struct RolloutRecord {
 
 impl RolloutRecord {
     pub fn identity(&self) -> String {
-        format!("{}:{}:{}", self.stage.as_str(), self.candidate_id, self.rollout_idx)
+        format!(
+            "{}:{}:{}",
+            self.stage.as_str(),
+            self.candidate_id,
+            self.rollout_idx
+        )
     }
 }
 
@@ -88,7 +93,8 @@ impl RolloutLedger {
         if !self.can_allocate_rollout() {
             return Err(HarnessError::LedgerError(format!(
                 "rollout budget exhausted: {}/{} rollouts recorded",
-                self.completed_rollouts.len(), self.max_rollouts
+                self.completed_rollouts.len(),
+                self.max_rollouts
             )));
         }
 

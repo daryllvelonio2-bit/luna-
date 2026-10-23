@@ -1,6 +1,6 @@
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -127,7 +127,10 @@ impl ToolRegistry for DefaultToolRegistry {
         }
 
         let mut result = match tool {
-            Some(t) => t.execute(&active_call.id, &active_call.arguments, cancel_token).await?,
+            Some(t) => {
+                t.execute(&active_call.id, &active_call.arguments, cancel_token)
+                    .await?
+            }
             None => return Err(HarnessError::ToolNotFound(call.name.clone())),
         };
 

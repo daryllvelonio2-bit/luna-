@@ -67,7 +67,10 @@ pub async fn resolve_session(
             } else if let Some(resolved) = find_by_name(store, &source).await? {
                 resolved
             } else {
-                return Err(HarnessError::SessionError(format!("source session '{}' not found", source)));
+                return Err(HarnessError::SessionError(format!(
+                    "source session '{}' not found",
+                    source
+                )));
             };
             store.fork_session(&id, None).await
         }
@@ -82,7 +85,10 @@ pub async fn resolve_session(
 
 /// The id of the most recently updated session carrying this name. `list()` is ordered
 /// newest-first, so the first match is the one the user last used.
-pub(crate) async fn find_by_name(store: &SqliteSessionStore, name: &str) -> Result<Option<String>, HarnessError> {
+pub(crate) async fn find_by_name(
+    store: &SqliteSessionStore,
+    name: &str,
+) -> Result<Option<String>, HarnessError> {
     if name.trim().is_empty() {
         return Ok(None);
     }
@@ -152,7 +158,10 @@ pub async fn handle_sessions_command(
             } else if let Some(resolved) = find_by_name(&store, &session).await? {
                 resolved
             } else {
-                return Err(HarnessError::SessionError(format!("session '{}' not found", session)));
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    session
+                )));
             };
 
             let forked_id = store.fork_session(&id, title.as_deref()).await?;
@@ -171,14 +180,21 @@ pub async fn handle_sessions_command(
             } else if let Some(resolved) = find_by_name(&store, &session).await? {
                 resolved
             } else {
-                return Err(HarnessError::SessionError(format!("session '{}' not found", session)));
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    session
+                )));
             };
 
             let deleted = store.delete_session(&id).await?;
             if deleted {
                 println!("{} Deleted session {}", "✔".green().bold(), id.cyan());
             } else {
-                println!("{} Session {} not found or already deleted", "ℹ".dimmed(), id);
+                println!(
+                    "{} Session {} not found or already deleted",
+                    "ℹ".dimmed(),
+                    id
+                );
             }
             Ok(())
         }
@@ -191,7 +207,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sessions_command_delete() {
-        let db_path = std::env::temp_dir().join(format!("luna_test_sessions_{}.db", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("luna_test_sessions_{}.db", uuid::Uuid::new_v4()));
         let store = SqliteSessionStore::new(Some(db_path.clone())).unwrap();
 
         // Create two sessions
@@ -211,7 +228,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(store.get(&s1).await.is_err(), "deleted session must be gone");
+        assert!(
+            store.get(&s1).await.is_err(),
+            "deleted session must be gone"
+        );
 
         // Delete non-existent session returns error
         let err = handle_sessions_command(

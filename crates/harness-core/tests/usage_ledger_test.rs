@@ -2,8 +2,8 @@
 //! once and a model without a price is reported as unknown rather than free.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -34,7 +34,13 @@ fn at(offset: Duration) -> chrono::DateTime<Utc> {
     Utc::now() - offset
 }
 
-fn record(provider: &str, model: &str, tokens: u32, cost: Option<f64>, source: &str) -> UsageRecord {
+fn record(
+    provider: &str,
+    model: &str,
+    tokens: u32,
+    cost: Option<f64>,
+    source: &str,
+) -> UsageRecord {
     UsageRecord {
         ts: Utc::now(),
         session_id: Some("s1".to_string()),
@@ -79,7 +85,9 @@ fn an_override_beats_the_builtin_price() {
     let mut overrides = BTreeMap::new();
     overrides.insert("openai/gpt-4o".to_string(), price(1.0, 2.0));
     let table = PriceTable::with_overrides(&overrides);
-    let cost = table.cost("openai", "gpt-4o", &usage(1_000_000, 1_000_000)).unwrap();
+    let cost = table
+        .cost("openai", "gpt-4o", &usage(1_000_000, 1_000_000))
+        .unwrap();
     assert!((cost - 3.0).abs() < 1e-9, "got {cost}");
 }
 
@@ -90,13 +98,23 @@ fn wildcards_cover_a_whole_provider_or_a_model_everywhere() {
     overrides.insert("*/gpt-4o-mini".to_string(), price(0.5, 1.5));
     let table = PriceTable::with_overrides(&overrides);
 
-    assert_eq!(table.cost("local", "anything", &usage(1_000_000, 0)), Some(0.0));
+    assert_eq!(
+        table.cost("local", "anything", &usage(1_000_000, 0)),
+        Some(0.0)
+    );
     let cost = table
         .cost("azure", "gpt-4o-mini", &usage(1_000_000, 0))
         .expect("the model wildcard applies");
     assert!((cost - 0.5).abs() < 1e-9, "got {cost}");
     // The exact provider key still wins over the model wildcard.
-    assert!((table.cost("openai", "gpt-4o-mini", &usage(1_000_000, 0)).unwrap() - 0.15).abs() < 1e-9);
+    assert!(
+        (table
+            .cost("openai", "gpt-4o-mini", &usage(1_000_000, 0))
+            .unwrap()
+            - 0.15)
+            .abs()
+            < 1e-9
+    );
 }
 
 #[test]
@@ -116,8 +134,14 @@ fn a_record_prices_the_turn_at_construction() {
 #[tokio::test]
 async fn totals_add_up_and_unpriced_rows_are_counted_separately() {
     let ledger = UsageLedger::open(None).expect("in-memory ledger");
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT)).await.unwrap();
-    ledger.record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_EXEC)).await.unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT))
+        .await
+        .unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_EXEC))
+        .await
+        .unwrap();
     ledger
         .record(&record("local", "llama-3", 300, None, SOURCE_CHAT))
         .await
@@ -127,14 +151,23 @@ async fn totals_add_up_and_unpriced_rows_are_counted_separately() {
     assert_eq!(totals.turns, 3);
     assert_eq!(totals.total_tokens, 600);
     assert!((totals.cost_usd - 2.0).abs() < 1e-9, "priced rows only");
-    assert_eq!(totals.unpriced_turns, 1, "the unpriced row is not counted as free");
+    assert_eq!(
+        totals.unpriced_turns, 1,
+        "the unpriced row is not counted as free"
+    );
 }
 
 #[tokio::test]
 async fn filters_narrow_by_source_and_session() {
     let ledger = UsageLedger::open(None).expect("in-memory ledger");
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT)).await.unwrap();
-    ledger.record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_EXEC)).await.unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT))
+        .await
+        .unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_EXEC))
+        .await
+        .unwrap();
 
     let exec_only = ledger
         .totals(&UsageFilter {
@@ -162,7 +195,10 @@ async fn a_since_filter_excludes_older_turns() {
     let mut old = record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT);
     old.ts = at(Duration::days(30));
     ledger.record(&old).await.unwrap();
-    ledger.record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_CHAT)).await.unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 200, Some(1.5), SOURCE_CHAT))
+        .await
+        .unwrap();
 
     let recent = ledger
         .totals(&UsageFilter {
@@ -178,14 +214,29 @@ async fn a_since_filter_excludes_older_turns() {
 #[tokio::test]
 async fn the_summary_groups_largest_spend_first() {
     let ledger = UsageLedger::open(None).expect("in-memory ledger");
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.1), SOURCE_CHAT)).await.unwrap();
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.1), SOURCE_CHAT)).await.unwrap();
     ledger
-        .record(&record("anthropic", "claude-opus-4", 900, Some(9.0), SOURCE_CHAT))
+        .record(&record("openai", "gpt-4o", 100, Some(0.1), SOURCE_CHAT))
+        .await
+        .unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 100, Some(0.1), SOURCE_CHAT))
+        .await
+        .unwrap();
+    ledger
+        .record(&record(
+            "anthropic",
+            "claude-opus-4",
+            900,
+            Some(9.0),
+            SOURCE_CHAT,
+        ))
         .await
         .unwrap();
 
-    let buckets = ledger.summarize(GroupBy::Model, &UsageFilter::default()).await.unwrap();
+    let buckets = ledger
+        .summarize(GroupBy::Model, &UsageFilter::default())
+        .await
+        .unwrap();
     assert_eq!(buckets.len(), 2);
     assert_eq!(buckets[0].key, "anthropic/claude-opus-4");
     assert_eq!(buckets[1].key, "openai/gpt-4o");
@@ -196,13 +247,25 @@ async fn the_summary_groups_largest_spend_first() {
 #[tokio::test]
 async fn grouping_by_day_and_source_works() {
     let ledger = UsageLedger::open(None).expect("in-memory ledger");
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT)).await.unwrap();
-    ledger.record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_EXEC)).await.unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT))
+        .await
+        .unwrap();
+    ledger
+        .record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_EXEC))
+        .await
+        .unwrap();
 
-    let by_source = ledger.summarize(GroupBy::Source, &UsageFilter::default()).await.unwrap();
+    let by_source = ledger
+        .summarize(GroupBy::Source, &UsageFilter::default())
+        .await
+        .unwrap();
     assert_eq!(by_source.len(), 2);
 
-    let by_day = ledger.summarize(GroupBy::Day, &UsageFilter::default()).await.unwrap();
+    let by_day = ledger
+        .summarize(GroupBy::Day, &UsageFilter::default())
+        .await
+        .unwrap();
     assert_eq!(by_day.len(), 1, "both rows are today");
     assert_eq!(by_day[0].key.len(), 10, "a day key is YYYY-MM-DD");
 }
@@ -227,7 +290,10 @@ async fn a_ledger_reopens_with_its_rows() {
     let path = dir.path().join("usage.db");
     {
         let ledger = UsageLedger::open(Some(path.clone())).unwrap();
-        ledger.record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT)).await.unwrap();
+        ledger
+            .record(&record("openai", "gpt-4o", 100, Some(0.5), SOURCE_CHAT))
+            .await
+            .unwrap();
     }
     let ledger = UsageLedger::open(Some(path)).unwrap();
     let totals = ledger.totals(&UsageFilter::default()).await.unwrap();
@@ -239,7 +305,10 @@ fn since_accepts_durations_and_timestamps() {
     let filter = UsageFilter::since_text("7d").expect("7d parses");
     let since = filter.since.expect("a timestamp");
     let age = Utc::now() - since;
-    assert!(age >= Duration::days(7) - Duration::minutes(1) && age <= Duration::days(7) + Duration::minutes(1));
+    assert!(
+        age >= Duration::days(7) - Duration::minutes(1)
+            && age <= Duration::days(7) + Duration::minutes(1)
+    );
 
     let instant = UsageFilter::parse_since("2024-01-01T00:00:00Z").expect("RFC 3339 parses");
     assert_eq!(instant.to_rfc3339(), "2024-01-01T00:00:00+00:00");
@@ -428,7 +497,14 @@ async fn a_turns_usage_sums_every_model_call_and_lands_in_the_ledger() {
     let ledger = UsageLedger::open(None).unwrap();
     let prices = PriceTable::builtin();
     ledger
-        .record_turn("openai", "gpt-4o", Some("s1"), &outcome, SOURCE_EXEC, &prices)
+        .record_turn(
+            "openai",
+            "gpt-4o",
+            Some("s1"),
+            &outcome,
+            SOURCE_EXEC,
+            &prices,
+        )
         .await
         .unwrap();
 
@@ -458,8 +534,18 @@ async fn a_turn_the_provider_did_not_measure_writes_no_row() {
         duration_ms: 5,
     };
     ledger
-        .record_turn("openai", "gpt-4o", None, &outcome, SOURCE_CHAT, &PriceTable::builtin())
+        .record_turn(
+            "openai",
+            "gpt-4o",
+            None,
+            &outcome,
+            SOURCE_CHAT,
+            &PriceTable::builtin(),
+        )
         .await
         .unwrap();
-    assert_eq!(ledger.totals(&UsageFilter::default()).await.unwrap().turns, 0);
+    assert_eq!(
+        ledger.totals(&UsageFilter::default()).await.unwrap().turns,
+        0
+    );
 }

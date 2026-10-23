@@ -162,20 +162,65 @@ pub fn install_no_network() -> io::Result<()> {
 
     let filter = [
         // A = seccomp_data.arch
-        libc::sock_filter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: 4 },
+        libc::sock_filter {
+            code: BPF_LD_W_ABS,
+            jt: 0,
+            jf: 0,
+            k: 4,
+        },
         // Not our architecture: kill rather than let an unknown syscall table through.
-        libc::sock_filter { code: BPF_JMP_JEQ_K, jt: 0, jf: 6, k: AUDIT_ARCH },
+        libc::sock_filter {
+            code: BPF_JMP_JEQ_K,
+            jt: 0,
+            jf: 6,
+            k: AUDIT_ARCH,
+        },
         // A = seccomp_data.nr
-        libc::sock_filter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: 0 },
+        libc::sock_filter {
+            code: BPF_LD_W_ABS,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        },
         // Not socket(2): allow (index 3 + 1 + 2 = 6).
-        libc::sock_filter { code: BPF_JMP_JEQ_K, jt: 0, jf: 2, k: NR_SOCKET },
+        libc::sock_filter {
+            code: BPF_JMP_JEQ_K,
+            jt: 0,
+            jf: 2,
+            k: NR_SOCKET,
+        },
         // A = seccomp_data.args[0] (the address family)
-        libc::sock_filter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: 16 },
+        libc::sock_filter {
+            code: BPF_LD_W_ABS,
+            jt: 0,
+            jf: 0,
+            k: 16,
+        },
         // AF_UNIX: allow (5 + 1 + 0 = 6); anything else: EPERM (5 + 1 + 1 = 7).
-        libc::sock_filter { code: BPF_JMP_JEQ_K, jt: 0, jf: 1, k: AF_UNIX },
-        libc::sock_filter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
-        libc::sock_filter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | libc::EPERM as u32 },
-        libc::sock_filter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS },
+        libc::sock_filter {
+            code: BPF_JMP_JEQ_K,
+            jt: 0,
+            jf: 1,
+            k: AF_UNIX,
+        },
+        libc::sock_filter {
+            code: BPF_RET_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+        libc::sock_filter {
+            code: BPF_RET_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        },
+        libc::sock_filter {
+            code: BPF_RET_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_KILL_PROCESS,
+        },
     ];
 
     let program = libc::sock_fprog {
@@ -250,8 +295,7 @@ mod tests {
         std::os::unix::net::UnixDatagram::unbound().expect("AF_UNIX must still be allowed");
 
         // TCP is refused at socket(2), before any packet or DNS lookup happens.
-        let error = std::net::TcpStream::connect(("127.0.0.1", 9))
-            .expect_err("TCP must be denied");
+        let error = std::net::TcpStream::connect(("127.0.0.1", 9)).expect_err("TCP must be denied");
         assert_eq!(
             error.raw_os_error(),
             Some(libc::EPERM),

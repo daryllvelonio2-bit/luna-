@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::ToolPreview;
@@ -217,7 +217,11 @@ pub trait ToolMiddleware: Send + Sync {
     }
 
     /// Hook executed after a tool completes. Can inspect/modify `result` or abort with an error.
-    async fn on_post_execute(&self, _call: &ToolCall, _result: &mut ToolResult) -> Result<(), HarnessError> {
+    async fn on_post_execute(
+        &self,
+        _call: &ToolCall,
+        _result: &mut ToolResult,
+    ) -> Result<(), HarnessError> {
         Ok(())
     }
 }

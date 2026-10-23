@@ -1,17 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::PathBuf;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-use harness_core::config::ProviderOverride;
-use harness_core::HarnessError;
 use crate::auth::CredentialManager;
 use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
 use crate::client::build_http_client;
+use harness_core::config::ProviderOverride;
+use harness_core::HarnessError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCacheEntry {
@@ -83,7 +83,10 @@ impl ModelDiscovery {
             }
         }
 
-        info!("Fetching dynamic model list from provider '{}' endpoint", provider_id);
+        info!(
+            "Fetching dynamic model list from provider '{}' endpoint",
+            provider_id
+        );
         let models = self.fetch_live_models(provider_id, cred_manager).await?;
 
         cache.providers.insert(
@@ -110,7 +113,14 @@ impl ModelDiscovery {
                 providers.push(p.clone());
             }
         }
-        for p in ["opencode", "opencode-zen", "antigravity", "kiro", "kiro-cli", "supercode"] {
+        for p in [
+            "opencode",
+            "opencode-zen",
+            "antigravity",
+            "kiro",
+            "kiro-cli",
+            "supercode",
+        ] {
             let s = p.to_string();
             if !providers.contains(&s) {
                 providers.push(s);
@@ -153,7 +163,13 @@ impl ModelDiscovery {
             let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
             let is_auto = matches!(
                 provider.as_str(),
-                "opencode" | "opencode-zen" | "antigravity" | "agy" | "kiro" | "kiro-cli" | "supercode"
+                "opencode"
+                    | "opencode-zen"
+                    | "antigravity"
+                    | "agy"
+                    | "kiro"
+                    | "kiro-cli"
+                    | "supercode"
             );
 
             if !has_creds && !is_auto {
@@ -199,7 +215,10 @@ impl ModelDiscovery {
             return crate::opencode::fetch_opencode_models().await;
         }
 
-        let mut url = format!("{}{}", descriptor.default_base_url, descriptor.models_endpoint);
+        let mut url = format!(
+            "{}{}",
+            descriptor.default_base_url, descriptor.models_endpoint
+        );
         let mut headers = HeaderMap::new();
 
         match descriptor.auth_header_format {
@@ -243,7 +262,10 @@ impl ModelDiscovery {
                     .mark_credential_failed(provider_id, secret.expose_secret())
                     .await;
                 if retired {
-                    warn!("Model discovery rejected the selected credential for '{}'; retired", provider_id);
+                    warn!(
+                        "Model discovery rejected the selected credential for '{}'; retired",
+                        provider_id
+                    );
                 }
             }
             let body = resp.text().await.unwrap_or_default();
@@ -253,10 +275,11 @@ impl ModelDiscovery {
             });
         }
 
-        let body_json: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
-            provider: provider_id.to_string(),
-            message: format!("Failed to parse JSON response: {}", e),
-        })?;
+        let body_json: serde_json::Value =
+            resp.json().await.map_err(|e| HarnessError::ProviderError {
+                provider: provider_id.to_string(),
+                message: format!("Failed to parse JSON response: {}", e),
+            })?;
 
         let mut model_names = Vec::new();
 

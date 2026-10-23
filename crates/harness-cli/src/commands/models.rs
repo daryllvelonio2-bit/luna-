@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use clap::Subcommand;
 use colored::Colorize;
+use std::sync::Arc;
 
 use harness_core::HarnessError;
 use harness_providers::{CredentialManager, ModelDiscovery};
@@ -36,9 +36,16 @@ pub async fn handle_models_command(
         ModelsCommand::List { provider, refresh } => {
             let provider = provider.unwrap_or_else(|| default_provider.to_string());
             println!("Querying models for provider '{}'...", provider.cyan());
-            match discovery.get_models(&provider, &cred_manager, refresh).await {
+            match discovery
+                .get_models(&provider, &cred_manager, refresh)
+                .await
+            {
                 Ok(models) => {
-                    println!("\n{} Available Models for {}:", "✔".green(), provider.bold());
+                    println!(
+                        "\n{} Available Models for {}:",
+                        "✔".green(),
+                        provider.bold()
+                    );
                     for m in models {
                         println!("  • {}", m);
                     }
@@ -51,16 +58,29 @@ pub async fn handle_models_command(
         ModelsCommand::Refresh { provider, all } => {
             if let Some(provider) = provider {
                 if !all {
-                    println!("Force-refreshing model catalog for '{}'...", provider.cyan().bold());
+                    println!(
+                        "Force-refreshing model catalog for '{}'...",
+                        provider.cyan().bold()
+                    );
                     match discovery.get_models(&provider, &cred_manager, true).await {
                         Ok(models) => {
-                            println!("\n{} Cache refreshed for {}! Found {} models.", "✔".green().bold(), provider.bold(), models.len());
+                            println!(
+                                "\n{} Cache refreshed for {}! Found {} models.",
+                                "✔".green().bold(),
+                                provider.bold(),
+                                models.len()
+                            );
                             for m in &models {
                                 println!("  • {}", m);
                             }
                         }
                         Err(e) => {
-                            eprintln!("{} Failed to refresh models for {}: {}", "✖".red().bold(), provider.bold(), e);
+                            eprintln!(
+                                "{} Failed to refresh models for {}: {}",
+                                "✖".red().bold(),
+                                provider.bold(),
+                                e
+                            );
                         }
                     }
                     return Ok(());
@@ -75,7 +95,12 @@ pub async fn handle_models_command(
             for (p, res) in results {
                 match res {
                     Ok(models) => {
-                        println!("  {} {:<16} {} models discovered", "✔".green(), p.bold(), models.len().to_string().cyan().bold());
+                        println!(
+                            "  {} {:<16} {} models discovered",
+                            "✔".green(),
+                            p.bold(),
+                            models.len().to_string().cyan().bold()
+                        );
                         total_models += models.len();
                         success_count += 1;
                     }

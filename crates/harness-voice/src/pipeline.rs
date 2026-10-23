@@ -1,12 +1,14 @@
+use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use harness_core::{Agent, EvolverEngine, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry};
 use crate::traits::{SpeechToText, TextToSpeech, WakeWordDetector};
+use harness_core::{
+    Agent, EvolverEngine, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry,
+};
 
 pub struct VoicePipelineConfig {
     pub wake_word: String,
@@ -75,7 +77,10 @@ where
         E: EvolverEngine + 'static,
         R: ToolRegistry + 'static,
     {
-        info!("Starting hands-free voice loop. Listening for wake word '{}'...", self.config.wake_word);
+        info!(
+            "Starting hands-free voice loop. Listening for wake word '{}'...",
+            self.config.wake_word
+        );
 
         while !cancel.is_cancelled() {
             // 1. Wait for wake word "Luna" in background
@@ -94,7 +99,10 @@ where
             // If user utters wake word while audio is playing, interrupt immediately
             self.interrupt_playback().await;
 
-            info!("Wake word '{}' detected! Ingesting user speech via VAD...", self.config.wake_word);
+            info!(
+                "Wake word '{}' detected! Ingesting user speech via VAD...",
+                self.config.wake_word
+            );
 
             // 2. Transcribe speech bytes from input device
             // Mock or live captured WAV bytes

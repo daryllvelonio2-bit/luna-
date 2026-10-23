@@ -628,9 +628,7 @@ mod tests {
             .collect();
         let notes: Vec<String> = (0..5)
             .map(|index| {
-                format!(
-                    r#"{{"title":"Note {index}","content":"body {index}","tags":[]}}"#
-                )
+                format!(r#"{{"title":"Note {index}","content":"body {index}","tags":[]}}"#)
             })
             .collect();
         let provider = CannedProvider::new(&format!(

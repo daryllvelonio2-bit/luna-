@@ -208,7 +208,13 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, HarnessError::ApprovalRejected(_)), "{error:?}");
-        assert!(error.to_string().contains("stdin is not a terminal"), "{error}");
+        assert!(
+            matches!(error, HarnessError::ApprovalRejected(_)),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("stdin is not a terminal"),
+            "{error}"
+        );
     }
 }

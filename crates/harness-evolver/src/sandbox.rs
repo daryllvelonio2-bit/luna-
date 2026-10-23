@@ -16,7 +16,11 @@ impl BuildSandbox {
     }
 
     /// Verifies a patch by creating an isolated sandbox, applying the patch, and running `cargo test`
-    pub async fn verify_patch(&self, relative_path: &str, patched_content: &str) -> Result<String, HarnessError> {
+    pub async fn verify_patch(
+        &self,
+        relative_path: &str,
+        patched_content: &str,
+    ) -> Result<String, HarnessError> {
         let temp_dir = tempfile::tempdir().map_err(|e| HarnessError::Io(e.to_string()))?;
         let sandbox_path = temp_dir.path();
 
@@ -60,7 +64,10 @@ impl BuildSandbox {
             }
             Err(e) => {
                 // If cargo is not available in environment, perform syntax check
-                debug!("Cargo not directly invocable in sandbox ({}). Fallback to syntax inspection.", e);
+                debug!(
+                    "Cargo not directly invocable in sandbox ({}). Fallback to syntax inspection.",
+                    e
+                );
                 Ok("Syntax inspection verified (cargo not present in sandbox host).".to_string())
             }
         }

@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -24,8 +24,10 @@ impl TokenTracker {
     }
 
     pub fn record_usage(&self, prompt: u32, completion: u32) {
-        self.prompt_tokens.fetch_add(prompt as u64, Ordering::Relaxed);
-        self.completion_tokens.fetch_add(completion as u64, Ordering::Relaxed);
+        self.prompt_tokens
+            .fetch_add(prompt as u64, Ordering::Relaxed);
+        self.completion_tokens
+            .fetch_add(completion as u64, Ordering::Relaxed);
     }
 
     pub fn metrics(&self) -> CostMetrics {
@@ -56,8 +58,7 @@ impl TokenTracker {
 /// to the file instead of stdout/stderr so that log lines never interleave with or corrupt
 /// the terminal UI.
 pub fn init_telemetry(json_format: bool, env_filter: &str, log_file: Option<&Path>) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(env_filter));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(env_filter));
 
     if let Some(path) = log_file {
         if let Some(parent) = path.parent() {

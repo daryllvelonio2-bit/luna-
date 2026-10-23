@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::sync::LazyLock;
-use std::time::Instant;
 use colored::Colorize;
 use harness_core::{CompletionOptions, Config, HarnessError, Message, ModelProvider, ToolRegistry};
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Instant;
 
 use super::chat::render::TurnRecord;
 use super::chat::ui::ChatUi;
@@ -92,7 +92,11 @@ pub async fn handle_chat_heartbeat(
         Ok(ag) => {
             let tools = ag.registry().list_tools().await.unwrap_or_default();
             let tool_names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
-            let tools_desc = format!("{} registered ({})", tool_names.len(), tool_names.join(", "));
+            let tools_desc = format!(
+                "{} registered ({})",
+                tool_names.len(),
+                tool_names.join(", ")
+            );
 
             let evolver_desc = {
                 let jobs = ag.evolver().list_jobs().await.unwrap_or_default();
@@ -114,7 +118,8 @@ pub async fn handle_chat_heartbeat(
             };
 
             let ctx = ag.estimate_session_tokens().await.unwrap_or(0);
-            let max_ctx = harness_providers::get_context_window(current_provider, current_model).unwrap_or(128_000);
+            let max_ctx = harness_providers::get_context_window(current_provider, current_model)
+                .unwrap_or(128_000);
             let pct = if max_ctx > 0 {
                 (ctx as f64 / max_ctx as f64) * 100.0
             } else {
