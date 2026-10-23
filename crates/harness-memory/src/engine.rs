@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -57,6 +57,70 @@ impl SqliteMemoryEngine {
         conn.execute_batch(schema_sql)
             .map_err(|e| HarnessError::MemoryError(format!("Schema initialization failed: {}", e)))?;
         Ok(())
+    }
+
+    /// Inserts `record`, or rewrites the row that already owns its primary key.
+    ///
+    /// Memory ids are derived from `subject` + `predicate`, so a revision of the same entity
+    /// lands on the *same* id as its predecessor. A plain INSERT therefore dies with
+    /// `UNIQUE constraint failed: memories.id` (that was the `update_memory` bug); the conflict
+    /// target rewrites the row in place instead. `created_at` is deliberately left untouched so
+    /// the age of the fact survives edits, and `superseded_by` is cleared because the row is
+    /// active again.
+    fn upsert_row(tx: &rusqlite::Transaction<'_>, record: &MemoryRecord) -> Result<(), HarnessError> {
+        tx.execute(
+            "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                subject = excluded.subject,
+                predicate = excluded.predicate,
+                object = excluded.object,
+                raw_content = excluded.raw_content,
+                category = excluded.category,
+                confidence = excluded.confidence,
+                updated_at = excluded.updated_at,
+                is_active = excluded.is_active,
+                superseded_by = NULL",
+            params![
+                record.id,
+                record.subject,
+                record.predicate,
+                record.object,
+                record.raw_content,
+                record.category.to_string(),
+                record.confidence,
+                record.created_at.to_rfc3339(),
+                record.updated_at.to_rfc3339(),
+                if record.is_active { 1 } else { 0 },
+                record.superseded_by,
+            ],
+        )
+        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Resolves the id a caller meant. The system prompt renders records as `subject.predicate`,
+    /// which is not always the stored primary key (ids are derived from a sanitized subject), so
+    /// an exact miss falls back to the rendered display name.
+    fn resolve_id(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Option<String>, HarnessError> {
+        let exact: Option<String> = tx
+            .query_row("SELECT id FROM memories WHERE id = ?1", params![id], |row| row.get(0))
+            .optional()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+
+        tx.query_row(
+            "SELECT id FROM memories
+             WHERE is_active = 1 AND subject || '.' || predicate = ?1
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| HarnessError::MemoryError(e.to_string()))
     }
 }
 
@@ -146,6 +210,12 @@ impl MemoryEngine for SqliteMemoryEngine {
                         "harness_improvement" => MemoryCategory::HarnessImprovement,
                         _ => MemoryCategory::Fact,
                     };
+                    let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    let updated_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
                     Ok(MemoryRecord {
                         id: row.get(0)?,
                         subject: row.get(1)?,
@@ -154,8 +224,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                         raw_content: row.get(4)?,
                         category,
                         confidence: row.get(6)?,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
+                        created_at,
+                        updated_at,
                         is_active: row.get::<_, i64>(9)? != 0,
                         superseded_by: row.get(10)?,
                     })
@@ -182,9 +252,9 @@ impl MemoryEngine for SqliteMemoryEngine {
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         // Auto-supersede conflicting active memories with matching subject & predicate.
-        // The conflict set is collected before the insert so the new row is never its own
-        // predecessor; the insert then has to land first because `superseded_by` is a foreign
-        // key onto `memories(id)` (bundled SQLite enables foreign keys by default).
+        // The conflict set is collected before the write so a row can never supersede itself,
+        // and `record.id` is skipped explicitly: ids are derived from subject + predicate, so a
+        // re-save of the same entity reuses the id and would otherwise deactivate itself.
         let old_ids: Vec<String> = {
             let mut check_stmt = tx
                 .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
@@ -196,30 +266,15 @@ impl MemoryEngine for SqliteMemoryEngine {
             let mut ids = Vec::new();
             for r in rows {
                 if let Ok(id) = r {
-                    ids.push(id);
+                    if id != record.id {
+                        ids.push(id);
+                    }
                 }
             }
             ids
         };
 
-        tx.execute(
-            "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                record.id,
-                record.subject,
-                record.predicate,
-                record.object,
-                record.raw_content,
-                record.category.to_string(),
-                record.confidence,
-                record.created_at.to_rfc3339(),
-                record.updated_at.to_rfc3339(),
-                if record.is_active { 1 } else { 0 },
-                record.superseded_by,
-            ],
-        )
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        Self::upsert_row(&tx, record)?;
 
         for old_id in old_ids {
             debug!("Superseding prior memory '{}' with new memory '{}'", old_id, record.id);
@@ -244,32 +299,45 @@ impl MemoryEngine for SqliteMemoryEngine {
             .transaction()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        // Same foreign-key ordering as `save`: the replacement row must exist before the row it
-        // supersedes can point at it.
-        tx.execute(
-            "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                updated.id,
-                updated.subject,
-                updated.predicate,
-                updated.object,
-                updated.raw_content,
-                updated.category.to_string(),
-                updated.confidence,
-                updated.created_at.to_rfc3339(),
-                updated.updated_at.to_rfc3339(),
-                if updated.is_active { 1 } else { 0 },
-                updated.superseded_by,
-            ],
-        )
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let Some(target_id) = Self::resolve_id(&tx, id)? else {
+            return Err(HarnessError::MemoryError(format!(
+                "Cannot update memory '{}': no such record (pass the record id shown in CURRENT ACTIVE MEMORIES)",
+                id
+            )));
+        };
+        let id = target_id.as_str();
 
-        tx.execute(
-            "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
-            params![updated.id, Utc::now().to_rfc3339(), id],
-        )
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        if updated.id == id {
+            // Same entity, same derived id: revise the row in place. Chaining a row to itself
+            // would flip it to is_active = 0 and hide the update from every future prompt.
+            tx.execute(
+                "UPDATE memories
+                 SET subject = ?1, predicate = ?2, object = ?3, raw_content = ?4,
+                     category = ?5, confidence = ?6, updated_at = ?7, is_active = 1,
+                     superseded_by = NULL
+                 WHERE id = ?8",
+                params![
+                    updated.subject,
+                    updated.predicate,
+                    updated.object,
+                    updated.raw_content,
+                    updated.category.to_string(),
+                    updated.confidence,
+                    Utc::now().to_rfc3339(),
+                    id,
+                ],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        } else {
+            // Decoupled id (subject/predicate changed): write the replacement first — the old row
+            // now points at it and `superseded_by` is a foreign key onto `memories(id)`.
+            Self::upsert_row(&tx, updated)?;
+            tx.execute(
+                "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
+                params![updated.id, Utc::now().to_rfc3339(), id],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        }
 
         tx.commit()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
