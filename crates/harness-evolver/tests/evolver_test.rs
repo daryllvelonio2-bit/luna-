@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::tempdir;
 
-use harness_evolver::engine::{CodebaseEvolver, JobRecord, JobStatus, PendingUpdate};
+use harness_evolver::engine::{CodebaseEvolver, JobRecord, JobStatus};
 use harness_evolver::pty::run_in_pty;
 
 #[test]
@@ -42,7 +42,10 @@ async fn test_job_lifecycle_and_pending_update() {
     let repo_temp = tempdir().expect("repo tempdir");
     let jobs_temp = tempdir().expect("jobs tempdir");
 
-    let evolver = CodebaseEvolver::new(repo_temp.path().to_path_buf(), jobs_temp.path().to_path_buf());
+    let evolver = CodebaseEvolver::new(
+        repo_temp.path().to_path_buf(),
+        jobs_temp.path().to_path_buf(),
+    );
 
     // Initially no pending update
     assert!(evolver.get_pending_update().is_none());
@@ -68,6 +71,7 @@ async fn test_job_lifecycle_and_pending_update() {
         modified_files: Vec::new(),
         summary: None,
         base_commit: None,
+        owner_pid: None,
     };
 
     let job_file = jobs_temp.path().join(format!("{}.json", job_id));
@@ -78,7 +82,9 @@ async fn test_job_lifecycle_and_pending_update() {
     assert_eq!(checked.task, "Fix mock issue");
 
     // Stage update with verify_and_stage
-    let stage_res = evolver.verify_and_stage(job_id, None, Some("FORBIDDEN_ERROR")).await;
+    let stage_res = evolver
+        .verify_and_stage(job_id, None, Some("FORBIDDEN_ERROR"))
+        .await;
     assert!(stage_res.is_ok());
 
     let pending = evolver.get_pending_update().expect("pending update exists");
@@ -95,7 +101,10 @@ async fn test_check_improvement_tool_native_progress_reading() {
 
     let repo_temp = tempfile::tempdir().unwrap();
     let jobs_temp = tempfile::tempdir().unwrap();
-    let evolver = Arc::new(CodebaseEvolver::new(repo_temp.path().to_path_buf(), jobs_temp.path().to_path_buf()));
+    let evolver = Arc::new(CodebaseEvolver::new(
+        repo_temp.path().to_path_buf(),
+        jobs_temp.path().to_path_buf(),
+    ));
 
     // Create a job with active progress, modified files, and logs
     let job_id = "job_progress_test";
@@ -117,6 +126,7 @@ async fn test_check_improvement_tool_native_progress_reading() {
         modified_files: vec!["crates/harness-core/src/parser.rs".to_string()],
         summary: None,
         base_commit: None,
+        owner_pid: Some(std::process::id()),
     };
 
     let job_file = jobs_temp.path().join(format!("{}.json", job_id));
@@ -127,22 +137,37 @@ async fn test_check_improvement_tool_native_progress_reading() {
     let cancel = CancellationToken::new();
 
     // 1. Calling check_improvement_job with job_id returns rich native readable progress
-    let res = check_tool.execute("call_1", &serde_json::json!({ "job_id": job_id }), &cancel).await.unwrap();
+    let res = check_tool
+        .execute("call_1", &serde_json::json!({ "job_id": job_id }), &cancel)
+        .await
+        .unwrap();
     assert!(!res.is_error);
     assert!(res.content.contains("Job ID: job_progress_test"));
     assert!(res.content.contains("running"));
-    assert!(res.content.contains("Current Activity: cargo check --workspace"));
-    assert!(res.content.contains("Modified Files: crates/harness-core/src/parser.rs"));
+    assert!(res
+        .content
+        .contains("Current Activity: cargo check --workspace"));
+    assert!(res
+        .content
+        .contains("Modified Files: crates/harness-core/src/parser.rs"));
     assert!(res.content.contains("Progress Timeline:"));
 
     // 2. Calling check_improvement_job without args defaults to latest job seamlessly
-    let res_latest = check_tool.execute("call_2", &serde_json::json!({}), &cancel).await.unwrap();
+    let res_latest = check_tool
+        .execute("call_2", &serde_json::json!({}), &cancel)
+        .await
+        .unwrap();
     assert!(!res_latest.is_error);
     assert!(res_latest.content.contains("Job ID: job_progress_test"));
 
     // 3. Calling list_improvement_jobs shows the job with its current activity
-    let res_list = list_tool.execute("call_3", &serde_json::json!({}), &cancel).await.unwrap();
+    let res_list = list_tool
+        .execute("call_3", &serde_json::json!({}), &cancel)
+        .await
+        .unwrap();
     assert!(!res_list.is_error);
     assert!(res_list.content.contains("job_progress_test"));
-    assert!(res_list.content.contains("Current activity: cargo check --workspace"));
+    assert!(res_list
+        .content
+        .contains("Current activity: cargo check --workspace"));
 }

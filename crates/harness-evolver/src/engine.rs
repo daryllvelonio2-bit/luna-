@@ -1,23 +1,22 @@
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use harness_core::{
-    prompts, Agent, AgentConfig, DefaultToolRegistry, EvolverEngine, HarnessError,
-    MemoryEngine, MemoryRecord, ModelProvider, Note, NotesEngine, ToolPreview, ToolRegistry,
-};
 use harness_core::tools::{
     ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, TerminalTool, TodoListTool,
-    TodoScope,
-    WriteFileTool,
+    TodoScope, WriteFileTool,
+};
+use harness_core::{
+    prompts, Agent, AgentConfig, DefaultToolRegistry, EvolverEngine, HarnessError, MemoryEngine,
+    MemoryRecord, ModelProvider, Note, NotesEngine, ToolPreview, ToolRegistry,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +71,15 @@ pub struct JobRecord {
     /// actually produced commits before its gates are treated as meaningful.
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// PID of the process that created this job.
+    ///
+    /// Ownership exists so that reconciliation can tell "the process that owned this job died" from
+    /// "another Luna process is running this job right now". Without it, any second process that
+    /// started an evolver — the always-on fleet supervisor, a heartbeat, another chat session —
+    /// reaped every in-flight job and deleted its worktree, after which the owning process died at
+    /// the commit step with `git add -A failed ... No such file or directory`.
+    #[serde(default)]
+    pub owner_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +149,12 @@ fn find_git_toplevel(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let output = Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "rev-parse", "--show-toplevel"])
+        .args([
+            "-C",
+            &path.to_string_lossy(),
+            "rev-parse",
+            "--show-toplevel",
+        ])
         .output()
         .ok()?;
     if output.status.success() {
@@ -151,6 +164,50 @@ fn find_git_toplevel(path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// How long a job may go without an update before its owner counts as hung rather than busy.
+pub const ORPHAN_GRACE: chrono::Duration = chrono::Duration::hours(6);
+
+/// Whether a job's owner is gone, making the record safe to reclaim.
+///
+/// A job owned by *this* process is never orphaned: it is the job this process is running, and a
+/// second evolver constructed in the same process must not reap it. A job owned by another live
+/// process is orphaned only once it has been silent for [`ORPHAN_GRACE`], so a hung owner cannot pin
+/// a worktree forever. Records written before ownership was tracked carry no pid and keep the
+/// original behaviour: they are treated as leftovers from an exited process.
+fn job_is_orphaned(record: &JobRecord, now: DateTime<Utc>) -> bool {
+    match record.owner_pid {
+        Some(pid) if pid == std::process::id() => false,
+        Some(pid) if process_is_alive(pid) => {
+            now.signed_duration_since(record.updated_at) > ORPHAN_GRACE
+        }
+        Some(_) => true,
+        None => true,
+    }
+}
+
+/// Whether a process with this pid is currently running. Signal 0 delivers nothing; it only performs
+/// the permission and existence checks.
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` with signal 0 delivers no signal to anyone; it is the standard liveness probe.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM means the process exists but belongs to another user: alive, just not signalable.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Without a liveness probe, assume the owner is alive: never reclaim a job that might still be in
+/// flight. Orphans on such a platform are reclaimed by the [`ORPHAN_GRACE`] path instead.
+#[cfg(not(unix))]
+fn process_is_alive(pid: u32) -> bool {
+    pid > 0
 }
 
 /// Cleans up a git worktree, its branch, and any leftover directory on disk.
@@ -298,23 +355,47 @@ impl CodebaseEvolver {
     }
 
     /// Reconcile stale jobs on disk from previous process runs that were left in Running or Queued state.
+    ///
+    /// Ownership-aware: a job is reclaimed only when the process that created it is gone, or when a
+    /// live owner has not touched the record within [`ORPHAN_GRACE`] (a hung process must not pin a
+    /// job forever). Without that check, every second Luna process — the always-on fleet supervisor,
+    /// a heartbeat, another chat session — reaped in-flight jobs and deleted their worktrees while
+    /// the owning process was still working in them.
     pub fn reconcile_orphaned_jobs(&self) {
+        let now = Utc::now();
         if let Ok(entries) = fs::read_dir(&self.jobs_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("json")
-                    && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with("job_"))
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |n| n.starts_with("job_"))
                 {
                     if let Ok(data) = fs::read_to_string(&path) {
                         if let Ok(mut record) = serde_json::from_str::<JobRecord>(&data) {
-                            if matches!(record.status, JobStatus::Running | JobStatus::Queued) {
+                            if matches!(record.status, JobStatus::Running | JobStatus::Queued)
+                                && job_is_orphaned(&record, now)
+                            {
                                 record.status = JobStatus::FailedTest {
-                                    error: "Interrupted: harness process exited while job was running".to_string(),
+                                    error:
+                                        "Interrupted: harness process exited while job was running"
+                                            .to_string(),
                                 };
                                 record.updated_at = Utc::now();
-                                record.logs.push("Job interrupted: process exited before job completed.".to_string());
-                                let _ = fs::write(&path, serde_json::to_string_pretty(&record).unwrap_or_default());
-                                cleanup_worktree(&self.repo_root, Path::new(&record.worktree_dir), Some(&record.branch));
+                                record.logs.push(
+                                    "Job interrupted: process exited before job completed."
+                                        .to_string(),
+                                );
+                                let _ = fs::write(
+                                    &path,
+                                    serde_json::to_string_pretty(&record).unwrap_or_default(),
+                                );
+                                cleanup_worktree(
+                                    &self.repo_root,
+                                    Path::new(&record.worktree_dir),
+                                    Some(&record.branch),
+                                );
                             }
                         }
                     }
@@ -379,7 +460,10 @@ impl CodebaseEvolver {
         let uuid = uuid::Uuid::new_v4().simple().to_string();
         let job_id = format!("job_{}", &uuid[..8]);
         let branch = format!("eng/{}", job_id);
-        let worktree_dir = self.repo_root.join(".worktrees").join(format!("eng_{}", job_id));
+        let worktree_dir = self
+            .repo_root
+            .join(".worktrees")
+            .join(format!("eng_{}", job_id));
 
         let record = JobRecord {
             id: job_id.clone(),
@@ -395,6 +479,7 @@ impl CodebaseEvolver {
             modified_files: Vec::new(),
             summary: None,
             base_commit: None,
+            owner_pid: Some(std::process::id()),
         };
 
         self.save_job(&record).await?;
@@ -456,11 +541,15 @@ impl CodebaseEvolver {
         if path.exists() {
             let data = fs::read_to_string(&path)
                 .map_err(|e| HarnessError::Io(format!("Failed to read job file: {}", e)))?;
-            let record: JobRecord = serde_json::from_str(&data)
-                .map_err(|e| HarnessError::EvolverError(format!("Failed to parse job JSON: {}", e)))?;
+            let record: JobRecord = serde_json::from_str(&data).map_err(|e| {
+                HarnessError::EvolverError(format!("Failed to parse job JSON: {}", e))
+            })?;
             Ok(record)
         } else {
-            Err(HarnessError::EvolverError(format!("Job '{}' not found", target_id)))
+            Err(HarnessError::EvolverError(format!(
+                "Job '{}' not found",
+                target_id
+            )))
         }
     }
 
@@ -554,7 +643,11 @@ impl CodebaseEvolver {
             job.logs.push(format!("Verification failed: {}", reason));
             let _ = self.save_job(&job).await;
             // Clean up worktree on failure
-            cleanup_worktree(&self.repo_root, Path::new(&job.worktree_dir), Some(&job.branch));
+            cleanup_worktree(
+                &self.repo_root,
+                Path::new(&job.worktree_dir),
+                Some(&job.branch),
+            );
             return Err(HarnessError::EvolverError(reason));
         }
 
@@ -570,7 +663,11 @@ impl CodebaseEvolver {
                 job.updated_at = Utc::now();
                 job.logs.push(format!("Verification failed: {}", reason));
                 let _ = self.save_job(&job).await;
-                cleanup_worktree(&self.repo_root, Path::new(&job.worktree_dir), Some(&job.branch));
+                cleanup_worktree(
+                    &self.repo_root,
+                    Path::new(&job.worktree_dir),
+                    Some(&job.branch),
+                );
                 return Err(HarnessError::EvolverError(reason));
             }
         }
@@ -580,7 +677,8 @@ impl CodebaseEvolver {
             binary_path: binary_path.to_string_lossy().to_string(),
         };
         job.updated_at = Utc::now();
-        job.logs.push("PTY scenario verification passed. Staged pending update.".to_string());
+        job.logs
+            .push("PTY scenario verification passed. Staged pending update.".to_string());
         self.save_job(&job).await?;
 
         let pending = PendingUpdate {
@@ -645,9 +743,19 @@ async fn run_engineer_job(
 
     record.status = JobStatus::Running;
     record.updated_at = Utc::now();
-    record.logs.push(format!("Creating git worktree at {} on branch {}", worktree_dir.display(), branch));
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    record.logs.push(format!(
+        "Creating git worktree at {} on branch {}",
+        worktree_dir.display(),
+        branch
+    ));
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     let _ = event_tx.send(EvolverEvent::JobProgress {
         job_id: job_id.clone(),
@@ -674,19 +782,37 @@ async fn run_engineer_job(
 
     match add_res {
         Ok(out) if out.status.success() => {
-            record.logs.push("Git worktree created successfully.".to_string());
+            record
+                .logs
+                .push("Git worktree created successfully.".to_string());
             let _ = Command::new("git")
-                .args(["-C", &worktree_dir.to_string_lossy(), "config", "user.name", "Daryll"])
+                .args([
+                    "-C",
+                    &worktree_dir.to_string_lossy(),
+                    "config",
+                    "user.name",
+                    "Daryll",
+                ])
                 .output();
             let _ = Command::new("git")
-                .args(["-C", &worktree_dir.to_string_lossy(), "config", "user.email", "daryllvelonio2@gmail.com"])
+                .args([
+                    "-C",
+                    &worktree_dir.to_string_lossy(),
+                    "config",
+                    "user.email",
+                    "daryllvelonio2@gmail.com",
+                ])
                 .output();
             match head_commit(&worktree_dir) {
                 Ok(sha) => {
                     record.base_commit = Some(sha.clone());
-                    record.logs.push(format!("Worktree based on commit {}.", sha));
+                    record
+                        .logs
+                        .push(format!("Worktree based on commit {}.", sha));
                 }
-                Err(e) => record.logs.push(format!("Warning: could not record base commit: {}", e)),
+                Err(e) => record
+                    .logs
+                    .push(format!("Warning: could not record base commit: {}", e)),
             }
         }
         Ok(out) => {
@@ -696,8 +822,14 @@ async fn run_engineer_job(
                 error: format!("git worktree add failed: {}", err),
             };
             record.updated_at = Utc::now();
-            let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-            jobs_map.write().await.insert(job_id.clone(), record.clone());
+            let _ = fs::write(
+                &job_file,
+                serde_json::to_string_pretty(&record).unwrap_or_default(),
+            );
+            jobs_map
+                .write()
+                .await
+                .insert(job_id.clone(), record.clone());
             let _ = event_tx.send(EvolverEvent::JobCompleted {
                 job_id: job_id.clone(),
                 task: task.clone(),
@@ -712,8 +844,14 @@ async fn run_engineer_job(
                 error: format!("Failed to run git: {}", e),
             };
             record.updated_at = Utc::now();
-            let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-            jobs_map.write().await.insert(job_id.clone(), record.clone());
+            let _ = fs::write(
+                &job_file,
+                serde_json::to_string_pretty(&record).unwrap_or_default(),
+            );
+            jobs_map
+                .write()
+                .await
+                .insert(job_id.clone(), record.clone());
             let _ = event_tx.send(EvolverEvent::JobCompleted {
                 job_id: job_id.clone(),
                 task: task.clone(),
@@ -763,11 +901,8 @@ async fn run_engineer_job(
     // Engineer builds are confined to the worktree's own target dir so their
     // artifacts can never be mistaken for the main repo's by a later cargo run.
     let target_dir = worktree_target_dir(&worktree_dir);
-    let mut terminal = TerminalTool::new(
-        worktree_dir.clone(),
-        300,
-        100_000,
-    ).with_env("CARGO_TARGET_DIR", target_dir.to_string_lossy());
+    let mut terminal = TerminalTool::new(worktree_dir.clone(), 300, 100_000)
+        .with_env("CARGO_TARGET_DIR", target_dir.to_string_lossy());
 
     if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
         terminal = terminal.with_env("CARGO_HOME", cargo_home);
@@ -801,79 +936,94 @@ async fn run_engineer_job(
     let job_file_obs = job_file.clone();
     let jobs_map_obs = jobs_map.clone();
 
-    let engineer_agent = engineer_agent.with_observer(Arc::new(move |event| {
-        match event {
-            harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-                let (tool_desc, touched_file) = match name.as_str() {
-                    "read_file" => {
-                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        (format!("read {}", path), None)
-                    }
-                    "write_file" => {
-                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        (format!("write {}", path), Some(path.to_string()))
-                    }
-                    "patch" => {
-                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                        (format!("patch {}", path), Some(path.to_string()))
-                    }
-                    "search_files" => {
-                        let pat = arguments.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
-                        (format!("search {}", pat), None)
-                    }
-                    "list_files" => {
-                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-                        (format!("list {}", path), None)
-                    }
-                    "terminal" => {
-                        let cmd = arguments.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                        (format!("run {}", cmd), None)
-                    }
-                    other => (other.to_string(), None),
-                };
+    let engineer_agent = engineer_agent.with_observer(Arc::new(move |event| match event {
+        harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+            let (tool_desc, touched_file) = match name.as_str() {
+                "read_file" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    (format!("read {}", path), None)
+                }
+                "write_file" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    (format!("write {}", path), Some(path.to_string()))
+                }
+                "patch" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    (format!("patch {}", path), Some(path.to_string()))
+                }
+                "search_files" => {
+                    let pat = arguments
+                        .get("pattern")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("");
+                    (format!("search {}", pat), None)
+                }
+                "list_files" => {
+                    let path = arguments
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or(".");
+                    (format!("list {}", path), None)
+                }
+                "terminal" => {
+                    let cmd = arguments
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    (format!("run {}", cmd), None)
+                }
+                other => (other.to_string(), None),
+            };
 
-                let _ = event_tx_obs.send(EvolverEvent::JobProgress {
-                    job_id: j_id_obs.clone(),
-                    task: task_obs.clone(),
-                    current_tool: tool_desc.clone(),
-                });
+            let _ = event_tx_obs.send(EvolverEvent::JobProgress {
+                job_id: j_id_obs.clone(),
+                task: task_obs.clone(),
+                current_tool: tool_desc.clone(),
+            });
 
-                let log_entry = format!("• Tool: {}", tool_desc);
-                if let Ok(mut jmap) = jobs_map_obs.try_write() {
-                    if let Some(rec) = jmap.get_mut(&j_id_obs) {
-                        rec.current_tool = Some(tool_desc);
-                        rec.updated_at = Utc::now();
-                        rec.logs.push(log_entry);
-                        if let Some(f) = touched_file {
-                            if !rec.modified_files.contains(&f) {
-                                rec.modified_files.push(f);
-                            }
+            let log_entry = format!("• Tool: {}", tool_desc);
+            if let Ok(mut jmap) = jobs_map_obs.try_write() {
+                if let Some(rec) = jmap.get_mut(&j_id_obs) {
+                    rec.current_tool = Some(tool_desc);
+                    rec.updated_at = Utc::now();
+                    rec.logs.push(log_entry);
+                    if let Some(f) = touched_file {
+                        if !rec.modified_files.contains(&f) {
+                            rec.modified_files.push(f);
                         }
-                        let _ = fs::write(&job_file_obs, serde_json::to_string_pretty(&rec).unwrap_or_default());
                     }
+                    let _ = fs::write(
+                        &job_file_obs,
+                        serde_json::to_string_pretty(&rec).unwrap_or_default(),
+                    );
                 }
             }
-            harness_core::AgentEvent::ToolExecuted { is_error, output, .. } => {
-                let out_brief = if output.chars().count() > 160 {
-                    format!("{}…", output.chars().take(159).collect::<String>())
-                } else {
-                    output.clone()
-                };
-                let log_entry = if is_error {
-                    format!("  ✖ Error: {}", out_brief)
-                } else {
-                    format!("  ✔ Output: {}", out_brief)
-                };
-                if let Ok(mut jmap) = jobs_map_obs.try_write() {
-                    if let Some(rec) = jmap.get_mut(&j_id_obs) {
-                        rec.updated_at = Utc::now();
-                        rec.logs.push(log_entry);
-                        let _ = fs::write(&job_file_obs, serde_json::to_string_pretty(&rec).unwrap_or_default());
-                    }
-                }
-            }
-            _ => {}
         }
+        harness_core::AgentEvent::ToolExecuted {
+            is_error, output, ..
+        } => {
+            let out_brief = if output.chars().count() > 160 {
+                format!("{}…", output.chars().take(159).collect::<String>())
+            } else {
+                output.clone()
+            };
+            let log_entry = if is_error {
+                format!("  ✖ Error: {}", out_brief)
+            } else {
+                format!("  ✔ Output: {}", out_brief)
+            };
+            if let Ok(mut jmap) = jobs_map_obs.try_write() {
+                if let Some(rec) = jmap.get_mut(&j_id_obs) {
+                    rec.updated_at = Utc::now();
+                    rec.logs.push(log_entry);
+                    let _ = fs::write(
+                        &job_file_obs,
+                        serde_json::to_string_pretty(&rec).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        _ => {}
     }));
 
     let _ = event_tx.send(EvolverEvent::JobProgress {
@@ -899,24 +1049,40 @@ async fn run_engineer_job(
     match turn_res {
         Ok(outcome) => {
             record.summary = Some(outcome.reply.clone());
-            record.logs.push(format!("Engineer finished turn: {}", outcome.reply));
+            record
+                .logs
+                .push(format!("Engineer finished turn: {}", outcome.reply));
         }
         Err(e) => {
             record.logs.push(format!("Engineer turn error: {}", e));
         }
     }
     record.updated_at = Utc::now();
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     // 2b. Prove the job actually produced work before running any gate.
     // Gates executed against an unchanged tree are measuring `main`, not the fix —
     // that is exactly how three jobs reported "dual-gate passed" with zero commits.
     record.current_tool = Some("committing worktree changes".to_string());
-    record.logs.push("Committing worktree changes...".to_string());
+    record
+        .logs
+        .push("Committing worktree changes...".to_string());
     record.updated_at = Utc::now();
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     let commit_msg = format!(
         "eng({}): {}",
@@ -946,7 +1112,11 @@ async fn run_engineer_job(
         (Ok(committed), Ok(n)) => {
             record.logs.push(format!(
                 "Worktree committed: {} ({} commit(s) ahead of base).",
-                if committed { "yes" } else { "already committed" },
+                if committed {
+                    "yes"
+                } else {
+                    "already committed"
+                },
                 n
             ));
             None
@@ -954,12 +1124,20 @@ async fn run_engineer_job(
     };
 
     if let Some(reason) = fail_reason {
-        record.status = JobStatus::FailedTest { error: reason.clone() };
+        record.status = JobStatus::FailedTest {
+            error: reason.clone(),
+        };
         record.current_tool = None;
         record.updated_at = Utc::now();
         record.logs.push(format!("Job rejected: {}", reason));
-        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = fs::write(
+            &job_file,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
+        jobs_map
+            .write()
+            .await
+            .insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -977,10 +1155,18 @@ async fn run_engineer_job(
         current_tool: "cargo test --workspace (Gate 1)".to_string(),
     });
     record.current_tool = Some("cargo test --workspace (Gate 1)".to_string());
-    record.logs.push("Running `cargo test --workspace` verification gate...".to_string());
+    record
+        .logs
+        .push("Running `cargo test --workspace` verification gate...".to_string());
     record.updated_at = Utc::now();
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     let test_res = Command::new("cargo")
         .args(["test", "--workspace"])
@@ -1008,8 +1194,14 @@ async fn run_engineer_job(
 
     if !tests_passed {
         record.updated_at = Utc::now();
-        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = fs::write(
+            &job_file,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
+        jobs_map
+            .write()
+            .await
+            .insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -1021,7 +1213,9 @@ async fn run_engineer_job(
         return Ok(());
     }
 
-    record.logs.push("Gate 1 passed: `cargo test --workspace` clean.".to_string());
+    record
+        .logs
+        .push("Gate 1 passed: `cargo test --workspace` clean.".to_string());
 
     // Build release binary
     let _ = event_tx.send(EvolverEvent::JobProgress {
@@ -1030,10 +1224,18 @@ async fn run_engineer_job(
         current_tool: "cargo build --release in worktree".to_string(),
     });
     record.current_tool = Some("cargo build --release in worktree".to_string());
-    record.logs.push("Compiling release binary in worktree...".to_string());
+    record
+        .logs
+        .push("Compiling release binary in worktree...".to_string());
     record.updated_at = Utc::now();
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     let build_res = Command::new("cargo")
         .args(["build", "--release"])
@@ -1060,8 +1262,14 @@ async fn run_engineer_job(
 
     if !build_ok {
         record.updated_at = Utc::now();
-        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = fs::write(
+            &job_file,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
+        jobs_map
+            .write()
+            .await
+            .insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -1079,12 +1287,20 @@ async fn run_engineer_job(
              Refusing to stage an update whose artifact does not exist.",
             binary_path.display()
         );
-        record.status = JobStatus::FailedTest { error: reason.clone() };
+        record.status = JobStatus::FailedTest {
+            error: reason.clone(),
+        };
         record.current_tool = None;
         record.updated_at = Utc::now();
         record.logs.push(reason.clone());
-        let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-        jobs_map.write().await.insert(job_id.clone(), record.clone());
+        let _ = fs::write(
+            &job_file,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
+        jobs_map
+            .write()
+            .await
+            .insert(job_id.clone(), record.clone());
         let _ = event_tx.send(EvolverEvent::JobCompleted {
             job_id: job_id.clone(),
             task: task.clone(),
@@ -1116,21 +1332,32 @@ async fn run_engineer_job(
         binary_path.display()
     ));
 
-    let _ = fs::write(&job_file, serde_json::to_string_pretty(&record).unwrap_or_default());
-    jobs_map.write().await.insert(job_id.clone(), record.clone());
+    let _ = fs::write(
+        &job_file,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    jobs_map
+        .write()
+        .await
+        .insert(job_id.clone(), record.clone());
 
     let _ = event_tx.send(EvolverEvent::JobCompleted {
         job_id: job_id.clone(),
         task: task.clone(),
         status: record.status.clone(),
-        summary: "Dual-gate passed (`cargo test` clean, release binary built). Pending update staged.".to_string(),
+        summary:
+            "Dual-gate passed (`cargo test` clean, release binary built). Pending update staged."
+                .to_string(),
     });
 
     Ok(())
 }
 
 /// Applies a pending update: merges git branch, swaps binary, cleans worktree and branch.
-pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Option<String>, HarnessError> {
+pub fn apply_update_at_startup(
+    repo_root: &Path,
+    jobs_dir: &Path,
+) -> Result<Option<String>, HarnessError> {
     let repo_root_buf = discover_harness_repo_root(repo_root.to_path_buf());
     let repo_root = repo_root_buf.as_path();
     let pending_file = jobs_dir.join("pending_update.json");
@@ -1140,8 +1367,9 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
 
     let data = fs::read_to_string(&pending_file)
         .map_err(|e| HarnessError::Io(format!("Failed to read pending update file: {}", e)))?;
-    let pending: PendingUpdate = serde_json::from_str(&data)
-        .map_err(|e| HarnessError::EvolverError(format!("Failed to parse pending update: {}", e)))?;
+    let pending: PendingUpdate = serde_json::from_str(&data).map_err(|e| {
+        HarnessError::EvolverError(format!("Failed to parse pending update: {}", e))
+    })?;
 
     info!("Applying pending update for job {}", pending.job_id);
 
@@ -1175,7 +1403,11 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
         return Err(HarnessError::EvolverError(format!(
             "Failed to merge branch {} into main{}: {}",
             pending.branch,
-            if already { " (branch carries no commits)" } else { "" },
+            if already {
+                " (branch carries no commits)"
+            } else {
+                ""
+            },
             err
         )));
     }
@@ -1191,7 +1423,11 @@ pub fn apply_update_at_startup(repo_root: &Path, jobs_dir: &Path) -> Result<Opti
     })?;
 
     // 4. Clean up worktree and branch
-    cleanup_worktree(repo_root, Path::new(&pending.worktree_dir), Some(&pending.branch));
+    cleanup_worktree(
+        repo_root,
+        Path::new(&pending.worktree_dir),
+        Some(&pending.branch),
+    );
 
     // 5. Delete pending update marker
     let _ = fs::remove_file(&pending_file);
@@ -1232,15 +1468,21 @@ impl EvolverEngine for CodebaseEvolver {
     }
 
     async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
-        Err(HarnessError::EvolverError("propose_patch is deprecated; use delegate_improvement".to_string()))
+        Err(HarnessError::EvolverError(
+            "propose_patch is deprecated; use delegate_improvement".to_string(),
+        ))
     }
 
     async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, HarnessError> {
-        Err(HarnessError::EvolverError("test_patch_sandbox is deprecated; use delegate_improvement".to_string()))
+        Err(HarnessError::EvolverError(
+            "test_patch_sandbox is deprecated; use delegate_improvement".to_string(),
+        ))
     }
 
     async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::EvolverError("apply_patch is deprecated; use delegate_improvement".to_string()))
+        Err(HarnessError::EvolverError(
+            "apply_patch is deprecated; use delegate_improvement".to_string(),
+        ))
     }
 
     async fn preview_patch(&self, _patch_id: &str) -> Option<ToolPreview> {
@@ -1254,7 +1496,11 @@ struct NoopMemory;
 
 #[async_trait]
 impl MemoryEngine for NoopMemory {
-    async fn retrieve(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
         Ok(vec![])
     }
     async fn save(&self, _record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -1279,8 +1525,15 @@ struct NoopNotes;
 
 #[async_trait]
 impl NotesEngine for NoopNotes {
-    async fn save_note(&self, _title: &str, _content: &str, _tags: &[String]) -> Result<Note, HarnessError> {
-        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+    async fn save_note(
+        &self,
+        _title: &str,
+        _content: &str,
+        _tags: &[String],
+    ) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError(
+            "Notes not enabled in engineer subagent".to_string(),
+        ))
     }
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
         Ok(vec![])
@@ -1289,10 +1542,20 @@ impl NotesEngine for NoopNotes {
         Ok(vec![])
     }
     async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
-        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+        Err(HarnessError::NotesError(
+            "Notes not enabled in engineer subagent".to_string(),
+        ))
     }
-    async fn update_note(&self, _id: &str, _t: Option<&str>, _c: Option<&str>, _tags: Option<&[String]>) -> Result<Note, HarnessError> {
-        Err(HarnessError::NotesError("Notes not enabled in engineer subagent".to_string()))
+    async fn update_note(
+        &self,
+        _id: &str,
+        _t: Option<&str>,
+        _c: Option<&str>,
+        _tags: Option<&[String]>,
+    ) -> Result<Note, HarnessError> {
+        Err(HarnessError::NotesError(
+            "Notes not enabled in engineer subagent".to_string(),
+        ))
     }
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
         Ok(false)
@@ -1305,16 +1568,24 @@ struct NoopEvolver;
 #[async_trait]
 impl EvolverEngine for NoopEvolver {
     async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+        Err(HarnessError::EvolverError(
+            "Recursion prohibited in engineer subagent".to_string(),
+        ))
     }
     async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
-        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+        Err(HarnessError::EvolverError(
+            "Recursion prohibited in engineer subagent".to_string(),
+        ))
     }
     async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, HarnessError> {
-        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+        Err(HarnessError::EvolverError(
+            "Recursion prohibited in engineer subagent".to_string(),
+        ))
     }
     async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::EvolverError("Recursion prohibited in engineer subagent".to_string()))
+        Err(HarnessError::EvolverError(
+            "Recursion prohibited in engineer subagent".to_string(),
+        ))
     }
 }
 
@@ -1441,5 +1712,146 @@ mod tests {
             "a dirty worktree must be committed"
         );
         assert_eq!(count_commits_ahead(&repo, &base).unwrap(), 1);
+    }
+
+    /// A job owned by this process must survive reconciliation: the fleet supervisor, a heartbeat or
+    /// another chat session starting an evolver must not reap work that is still in flight.
+    #[test]
+    fn a_job_owned_by_a_live_process_is_not_orphaned() {
+        let now = Utc::now();
+        let mine = record_with_owner(Some(std::process::id()), now);
+        assert!(!job_is_orphaned(&mine, now));
+
+        // Silence only matters once the owner is gone; a live owner is allowed to be quiet for a
+        // long build without losing its worktree.
+        let quiet = record_with_owner(Some(std::process::id()), now - chrono::Duration::hours(24));
+        assert!(!job_is_orphaned(&quiet, now));
+    }
+
+    /// The recovery path still works for jobs whose owner really did exit.
+    #[test]
+    fn a_job_owned_by_a_dead_process_is_orphaned() {
+        let now = Utc::now();
+        // A pid that cannot exist: the kernel reports ESRCH for it, which is exactly the state of a
+        // job left behind by a crashed process.
+        let dead = record_with_owner(Some(0x7FFF_FFFF), now);
+        assert!(job_is_orphaned(&dead, now));
+        assert!(!process_is_alive(0x7FFF_FFFF));
+
+        // Records written before ownership was tracked are still reclaimed.
+        let legacy = record_with_owner(None, now);
+        assert!(job_is_orphaned(&legacy, now));
+    }
+
+    /// A live but hung owner must not pin a job forever. `pid 1` stands in for "a live process that
+    /// is not us": it always exists, and signalling it is refused with EPERM for a normal user.
+    #[test]
+    fn a_silent_foreign_owner_is_orphaned_after_the_grace_period() {
+        let now = Utc::now();
+        let foreign = 1;
+        assert!(
+            process_is_alive(foreign),
+            "pid 1 must be alive on this host"
+        );
+        assert_ne!(foreign, std::process::id());
+
+        assert!(!job_is_orphaned(
+            &record_with_owner(Some(foreign), now - ORPHAN_GRACE),
+            now
+        ));
+        assert!(job_is_orphaned(
+            &record_with_owner(
+                Some(foreign),
+                now - ORPHAN_GRACE - chrono::Duration::seconds(1)
+            ),
+            now
+        ));
+    }
+
+    /// This process's own job is never reclaimed, however quiet it has been.
+    #[test]
+    fn a_job_owned_by_this_process_is_never_orphaned() {
+        let now = Utc::now();
+        let stale = record_with_owner(
+            Some(std::process::id()),
+            now - ORPHAN_GRACE - chrono::Duration::hours(1),
+        );
+        assert!(!job_is_orphaned(&stale, now));
+    }
+
+    /// Reconciliation must leave a live process's worktree on disk and its status untouched, while
+    /// still reclaiming a job whose owner is gone.
+    #[test]
+    fn reconciliation_leaves_a_live_owners_worktree_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let jobs = temp.path().join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        // A second process starts an evolver while this job is in flight.
+        let evolver = CodebaseEvolver::new(repo.clone(), jobs.clone());
+
+        let mut live = record_with_owner(Some(std::process::id()), Utc::now());
+        live.id = "job_live_owner".to_string();
+        live.worktree_dir = repo
+            .join(".worktrees/eng_job_live")
+            .to_string_lossy()
+            .to_string();
+        let mut dead = record_with_owner(Some(0x7FFF_FFFF), Utc::now());
+        dead.id = "job_dead_owner".to_string();
+        dead.worktree_dir = repo
+            .join(".worktrees/eng_job_dead")
+            .to_string_lossy()
+            .to_string();
+
+        for record in [&live, &dead] {
+            fs::create_dir_all(&record.worktree_dir).unwrap();
+            fs::write(
+                jobs.join(format!("{}.json", record.id)),
+                serde_json::to_string_pretty(record).unwrap(),
+            )
+            .unwrap();
+        }
+
+        evolver.reconcile_orphaned_jobs();
+
+        let after = |id: &str| -> JobRecord {
+            serde_json::from_str(&fs::read_to_string(jobs.join(format!("{}.json", id))).unwrap())
+                .unwrap()
+        };
+        assert!(
+            matches!(after(&live.id).status, JobStatus::Running),
+            "a live owner's job must stay running"
+        );
+        assert!(
+            Path::new(&live.worktree_dir).exists(),
+            "a live owner's worktree must never be deleted"
+        );
+        assert!(
+            matches!(after(&dead.id).status, JobStatus::FailedTest { .. }),
+            "a dead owner's job is reclaimed"
+        );
+        assert!(
+            !Path::new(&dead.worktree_dir).exists(),
+            "a dead owner's worktree is cleaned up"
+        );
+    }
+
+    fn record_with_owner(owner_pid: Option<u32>, updated_at: DateTime<Utc>) -> JobRecord {
+        JobRecord {
+            id: format!("job_{}", owner_pid.unwrap_or(0)),
+            task: "regression fixture".to_string(),
+            evidence: None,
+            branch: "eng/job_test".to_string(),
+            worktree_dir: "/tmp/does-not-matter".to_string(),
+            status: JobStatus::Running,
+            created_at: updated_at,
+            updated_at,
+            logs: Vec::new(),
+            current_tool: None,
+            modified_files: Vec::new(),
+            summary: None,
+            base_commit: None,
+            owner_pid,
+        }
     }
 }
