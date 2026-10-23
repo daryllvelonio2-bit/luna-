@@ -560,22 +560,34 @@ pub async fn run_interactive_chat(
                 } else {
                     Vec::new()
                 };
-                ui_obs.begin_block(OutputBlockKind::Tool);
-                // The call goes into the live region the instant it is invoked, so a slow tool is
-                // visible while it runs; `ToolExecuted` below finalizes the same line into the
-                // transcript with its verdict.
-                ui_obs.start_activity(&call_fmt, &name, &arguments);
-                in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
-                    call_formatted: call_fmt,
-                    result_formatted: String::new(),
-                    diff_lines,
-                });
+                if name != "todo_list" {
+                    ui_obs.begin_block(OutputBlockKind::Tool);
+                    // The call goes into the live region the instant it is invoked, so a slow tool is
+                    // visible while it runs; `ToolExecuted` below finalizes the same line into the
+                    // transcript with its verdict.
+                    ui_obs.start_activity(&call_fmt, &name, &arguments);
+                    in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                        call_formatted: call_fmt,
+                        result_formatted: String::new(),
+                        diff_lines,
+                    });
+                }
             }
             harness_core::AgentEvent::ToolExecuted {
                 name,
                 is_error,
                 output,
             } => {
+                if name == "todo_list" {
+                    ui_obs.stop_activity();
+                    // The list changed: refresh before drawing so the panel displays the new state immediately
+                    todo::refresh_panel(&ui_obs, &todo_scope_obs);
+                    if is_error {
+                        let line = format_tool_result(true, &output);
+                        ui_obs.emit_above(&line);
+                    }
+                    return;
+                }
                 ui_obs.stop_activity();
                 let status = if is_error {
                     " (failed)".red().to_string()
@@ -597,10 +609,6 @@ pub async fn run_interactive_chat(
                         (format_tool_result(is_error, &output), Vec::new())
                     }
                 };
-                // The list changed: refresh before drawing so the panel displays the new state immediately
-                if name == "todo_list" {
-                    todo::refresh_panel(&ui_obs, &todo_scope_obs);
-                }
                 ui_obs.emit_above(&line);
                 if !diff_to_show.is_empty() {
                     ui_obs.show_patch_diff(diff_to_show);
@@ -1244,13 +1252,15 @@ pub async fn run_interactive_chat(
                 } else {
                     harness_core::ApprovalDecision::Deny
                 };
-                let verdict_str = format_approval_verdict(is_run, &request);
-                ui.emit_above(&verdict_str);
-                in_flight_tools.lock().unwrap().push(TurnProcessItem {
-                    call_formatted: verdict_str,
-                    result_formatted: String::new(),
-                    diff_lines: Vec::new(),
-                });
+                if !is_run {
+                    let verdict_str = format_approval_verdict(false, &request);
+                    ui.emit_above(&verdict_str);
+                    in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                        call_formatted: verdict_str,
+                        result_formatted: String::new(),
+                        diff_lines: Vec::new(),
+                    });
+                }
                 if is_run {
                     let args = request.arguments.clone();
                     ui.start_activity(&format_tool_call(&request.tool, &args), &request.tool, &args);
