@@ -250,10 +250,19 @@ fn tail_window(text: &str, room: usize) -> String {
     out
 }
 
+/// Visible column count of `s`, colour codes excluded.
+fn visible_width(s: &str) -> usize {
+    dialoguer::console::strip_ansi_codes(s).chars().count()
+}
+
 /// Render `text` into the box as one or more padded rows, wrapped rather than truncated.
 ///
 /// `first_prefix` and `cont_prefix` are emitted before the first and subsequent wrapped lines, so
 /// a wrapped list item keeps its marker on the first line and stays aligned underneath it.
+///
+/// Prefixes may carry colour codes (the selection arrow does), so the wrap budget is measured on
+/// the *visible* prefix: measuring the styled length would shrink the room for the highlighted row
+/// and re-flow the same text differently as the selection moved.
 fn push_wrapped(
     lines: &mut Vec<String>,
     text: &str,
@@ -263,10 +272,7 @@ fn push_wrapped(
     style: &dyn Fn(&str) -> String,
     row: &dyn Fn(&str) -> String,
 ) {
-    let indent = first_prefix
-        .chars()
-        .count()
-        .max(cont_prefix.chars().count());
+    let indent = visible_width(first_prefix).max(visible_width(cont_prefix));
     let room = body.saturating_sub(indent).max(1);
     for (i, segment) in wrap_plain(text, room).into_iter().enumerate() {
         let prefix = if i == 0 { first_prefix } else { cont_prefix };
@@ -284,7 +290,7 @@ pub fn render_clarify_box(
 ) -> (String, usize) {
     let total = width.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
     let body = total.saturating_sub(4);
-    let visible_len = |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
+    let visible_len = visible_width;
 
     // Padding only: everything reaching a row has already been wrapped to fit.
     let row = |content: &str| -> String {
@@ -690,6 +696,82 @@ mod tests {
             assert_eq!(visible(line), total);
         }
         assert!(strip(&rendered).contains("narrow"));
+    }
+
+    #[test]
+    fn moving_the_selection_does_not_reflow_the_choices() {
+        // The arrow carries colour codes, so measuring the *styled* prefix shrank the wrap room for
+        // the highlighted row only — the same text re-flowed as the selection moved and the box
+        // twitched. Every row now wraps against the same visible budget.
+        let question = "Which writer owns memory?";
+        let choices = vec![
+            "Session mode — the agent calls its own save tools mid-turn, so records land right away"
+                .to_string(),
+            "Background saver — an independent distiller runs after every finished turn".to_string(),
+        ];
+        let normalize = |rendered: &str| -> Vec<String> {
+            rendered
+                .lines()
+                .map(|line| strip(line).replace('❯', " ").trim_end().to_string())
+                .collect()
+        };
+
+        let (highlighting_first, _) = render_clarify_box(question, &choices, 0, None, 60);
+        let (highlighting_second, _) = render_clarify_box(question, &choices, 1, None, 60);
+
+        assert_eq!(
+            normalize(&highlighting_first),
+            normalize(&highlighting_second),
+            "a row must occupy the same lines whether or not it is highlighted"
+        );
+    }
+
+    #[test]
+    fn the_wrap_budget_counts_visible_columns_not_colour_codes() {
+        // The selection arrow is styled, so its ANSI codes would otherwise be charged to the wrap
+        // budget: the highlighted row would wrap earlier than the identical unhighlighted row and
+        // the whole list would re-flow as the cursor moved. Colour is spelled out here rather than
+        // generated, because `colored` emits nothing outside a TTY and the bug would hide.
+        let long = "Session mode — the agent calls its own save tools mid-turn, nothing else does";
+        let body = 40usize;
+        let row = |content: &str| content.to_string();
+        let styled_arrow = "\u{1b}[36m\u{1b}[1m❯\u{1b}[0m ";
+        let plain_arrow = "❯ ";
+
+        assert_eq!(
+            visible_width(styled_arrow),
+            visible_width(plain_arrow),
+            "the two prefixes must be the same width on screen"
+        );
+
+        let mut styled = Vec::new();
+        let mut plain = Vec::new();
+        push_wrapped(
+            &mut styled,
+            long,
+            styled_arrow,
+            "  ",
+            body,
+            &|s| s.to_string(),
+            &row,
+        );
+        push_wrapped(
+            &mut plain,
+            long,
+            plain_arrow,
+            "  ",
+            body,
+            &|s| s.to_string(),
+            &row,
+        );
+
+        let on_screen =
+            |lines: &Vec<String>| -> Vec<String> { lines.iter().map(|line| strip(line)).collect() };
+        assert_eq!(
+            on_screen(&styled),
+            on_screen(&plain),
+            "colour codes must not shrink the room available to the text"
+        );
     }
 
     #[test]
