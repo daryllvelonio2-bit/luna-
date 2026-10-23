@@ -267,6 +267,23 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// shown, truncated, rather than the row collapsing to a bare spinner.
 pub const LIVE_CALL_MIN_CHARS: usize = 12;
 
+/// Floor for the compaction label. Lower than [`LIVE_CALL_MIN_CHARS`] because this row also carries
+/// a bar and a reason: on a narrow terminal the label gives way before they do, and the row still
+/// has to fit one physical line.
+pub const MIN_COMPACTION_LABEL_CELLS: usize = 4;
+
+/// Cells in the compaction sweep bar.
+pub const COMPACTION_BAR_CELLS: usize = 14;
+/// Cells of that bar lit at once. A wider head reads as a pulse; a narrower one disappears at a
+/// glance between frames.
+pub const COMPACTION_BAR_SWEEP: usize = 5;
+/// Narrowest the bar may shrink to before it is dropped altogether: fewer cells than the lit run
+/// and the bar says less than the words beside it.
+pub const COMPACTION_BAR_MIN_CELLS: usize = 6;
+/// Frames each step of the sweep holds. The bar moves one cell per two ticks, so the eye follows a
+/// travelling highlight instead of a flicker.
+pub const COMPACTION_BAR_HOLD: usize = 2;
+
 /// Share of the terminal the user's own message may occupy. Staying below 100% is what puts the
 /// message — including every wrapped row — visibly on the user's side of the transcript.
 pub const USER_BLOCK_PERCENT: usize = 70;
@@ -459,6 +476,73 @@ pub fn activity_line(
     format!("  {} {} {}", glyph, label.dimmed(), tail.dimmed())
 }
 
+/// One frame of the compaction sweep bar: a track of `cells` with [`COMPACTION_BAR_SWEEP`] cells
+/// lit, travelling left to right and wrapping around the right edge.
+///
+/// Returned as plain text — the lit cells are `█` and the rest `░` — so the caller styles it and a
+/// test can assert on the shape without stripping colour. The head walks one cell every
+/// [`COMPACTION_BAR_HOLD`] frames and starts off the left edge, so the first frames show the bar
+/// filling in rather than a highlight already mid-track.
+pub fn compaction_bar(frame: usize, cells: usize) -> String {
+    if cells == 0 {
+        return String::new();
+    }
+    let sweep = COMPACTION_BAR_SWEEP.min(cells);
+    let head = (frame / COMPACTION_BAR_HOLD.max(1)) % cells;
+    (0..cells)
+        .map(|cell| {
+            // Distance ahead of the head, wrapping: the head leads and the sweep trails it.
+            let offset = (cell + cells - head) % cells;
+            if offset < sweep {
+                '█'
+            } else {
+                '░'
+            }
+        })
+        .collect()
+}
+
+/// One animation frame of the compaction line: a spinner, what is being folded and why, the sweep
+/// bar, and the elapsed time.
+///
+/// Compaction is the one operation that both rewrites the transcript under the user and takes
+/// seconds to do, so it gets its own row: the tool spinner is for work the user can see the shape
+/// of, and a fold has none. The row is budgeted in cells for the same reason as [`activity_line`] —
+/// wrapping inside the live region breaks the erase arithmetic.
+pub fn compaction_line(frame: usize, forced: bool, elapsed: Duration, width: usize) -> String {
+    // Slower than the tool spinner: a fold is a long wait, and a fast spinner on a long wait reads
+    // as a hang.
+    let glyph = SPINNER_FRAMES[(frame / COMPACTION_BAR_HOLD) % SPINNER_FRAMES.len()].cyan();
+    let why = if forced { "requested" } else { "automatic" };
+    let when = format!("{:.1}s", elapsed.as_secs_f32());
+
+    // The bar is the widest part of the row, so it is what gives way first on a narrow terminal: it
+    // shrinks to the room left after the words, and is dropped when there is no room for it at all.
+    // The words stay — a fold with no words is a mystery.
+    let words = format!("{why} {when}");
+    let bar_room = width.saturating_sub(6 + dialoguer::console::measure_text_width(&words));
+    let bar_cells = if bar_room >= COMPACTION_BAR_MIN_CELLS {
+        COMPACTION_BAR_CELLS.min(bar_room)
+    } else {
+        0
+    };
+    let tail = if bar_cells > 0 {
+        format!(
+            "{}  {}",
+            compaction_bar(frame, bar_cells).cyan(),
+            words
+        )
+    } else {
+        words
+    };
+    // "  ", the glyph cell, " <label> ", then the tail: measured in cells because this row lives in
+    // the live region, where a wrap breaks the erase arithmetic.
+    let fixed = 5 + dialoguer::console::measure_text_width(&tail);
+    let budget = width.saturating_sub(fixed).max(MIN_COMPACTION_LABEL_CELLS);
+    let label = truncate_to_cells("compacting context — folding the oldest turns", budget);
+    format!("  {} {} {}", glyph, label.dimmed(), tail.dimmed())
+}
+
 /// What the activity line can say about a call beyond "still running": the size of the edit a
 /// mutating tool is about to make, so a patch shows its shape while it is applied.
 pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option<String> {
@@ -497,15 +581,15 @@ pub fn format_patch_diff(old_string: &str, new_string: &str) -> Vec<String> {
         let val = change.value().trim_end_matches(&['\r', '\n'][..]);
         match change.tag() {
             similar::ChangeTag::Delete => {
-                let text = format!("  - {}", val);
-                lines.push(text.on_red().white().to_string());
+                // Pure red background with bold white text
+                lines.push(format!("\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m", val));
             }
             similar::ChangeTag::Insert => {
-                let text = format!("  + {}", val);
-                lines.push(text.on_green().black().to_string());
+                // Pure green background with bold white text
+                lines.push(format!("\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m", val));
             }
             similar::ChangeTag::Equal => {
-                lines.push(format!("    {}", val).dimmed().to_string());
+                lines.push(format!("\x1b[2m    {}\x1b[0m", val));
             }
         }
     }
@@ -1463,6 +1547,89 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_compaction_bar_keeps_its_length_and_its_lit_run() {
+        for cells in [1usize, 5, COMPACTION_BAR_CELLS, 40] {
+            for frame in 0..64 {
+                let bar = compaction_bar(frame, cells);
+                assert_eq!(
+                    bar.chars().count(),
+                    cells,
+                    "frame {frame} of {cells} cells: {bar}"
+                );
+                let lit = bar.chars().filter(|c| *c == '█').count();
+                assert_eq!(
+                    lit,
+                    COMPACTION_BAR_SWEEP.min(cells),
+                    "frame {frame} of {cells} cells: {bar}"
+                );
+            }
+        }
+        assert_eq!(compaction_bar(0, 0), "", "no cells, no bar");
+    }
+
+    /// The sweep is the animation: a bar that does not move is a static row, and a user watching a
+    /// fold would have no way to tell a slow summary from a hung process.
+    #[test]
+    fn the_compaction_bar_sweeps_and_wraps() {
+        let cells = COMPACTION_BAR_CELLS;
+        let first = compaction_bar(0, cells);
+        assert_ne!(first, compaction_bar(3, cells), "the head moved");
+        assert_eq!(
+            first,
+            compaction_bar(COMPACTION_BAR_HOLD * cells, cells),
+            "the sweep wraps back to where it started"
+        );
+        // Every position is visited: the head walks the whole track.
+        let positions: std::collections::HashSet<String> = (0..cells)
+            .map(|step| compaction_bar(step * COMPACTION_BAR_HOLD, cells))
+            .collect();
+        assert_eq!(positions.len(), cells, "one distinct frame per cell");
+    }
+
+    #[test]
+    fn the_compaction_line_animates_and_says_why_the_fold_is_happening() {
+        let automatic = compaction_line(0, false, Duration::from_millis(4200), 100);
+        assert!(automatic.contains("compacting context"), "got: {automatic}");
+        assert!(automatic.contains("automatic"), "got: {automatic}");
+        assert!(automatic.contains("4.2s"), "got: {automatic}");
+
+        let requested = compaction_line(0, true, Duration::from_millis(0), 100);
+        assert!(requested.contains("requested"), "got: {requested}");
+        assert_ne!(
+            compaction_line(0, true, Duration::from_millis(0), 100),
+            compaction_line(COMPACTION_BAR_HOLD, true, Duration::from_millis(0), 100),
+            "each frame must differ, or nothing animates"
+        );
+    }
+
+    #[test]
+    fn the_compaction_line_never_exceeds_the_terminal_width() {
+        for width in [24usize, 40, 80, 200] {
+            for forced in [false, true] {
+                for frame in [0usize, 5, 11] {
+                    let row = compaction_line(frame, forced, Duration::from_millis(900), width);
+                    let plain = dialoguer::console::strip_ansi_codes(&row).to_string();
+                    let visible = dialoguer::console::measure_text_width(&plain);
+                    assert!(
+                        visible <= width,
+                        "width {width} produced {visible} visible cells: {row}"
+                    );
+                }
+            }
+        }
+        // The bar is what gives way first, and the words survive the squeeze.
+        let narrow = dialoguer::console::strip_ansi_codes(&compaction_line(
+            0,
+            true,
+            Duration::from_millis(900),
+            24,
+        ))
+        .to_string();
+        assert!(!narrow.contains('█'), "no bar in 24 columns: {narrow}");
+        assert!(narrow.contains("requested"), "the reason survives: {narrow}");
+    }
+
     /// A row is measured in terminal cells, not chars: `💻` is one char but two cells, so a
     /// chars-based row printed wider than the terminal, soft-wrapped into a second physical row,
     /// and the live region's erase left one orphan frame behind per animation tick — the
@@ -1940,7 +2107,6 @@ mod tests {
 
     #[test]
     fn patch_diff_formatting_colors_additions_and_deletions() {
-        colored::control::set_override(true);
         let old = "fn hello() {\n    println!(\"old\");\n}\n";
         let new = "fn hello() {\n    println!(\"new\");\n}\n";
         let diff = format_patch_diff(old, new);
@@ -1948,30 +2114,38 @@ mod tests {
         assert_eq!(diff.len(), 4);
         // Equal line
         assert!(diff[0].contains("fn hello()"));
-        // Deleted line should have '-' and red background ANSI escape (41)
+        // Deleted line should have '-' and pure red background (200;0;0) with white text (255;255;255)
         assert!(diff[1].contains("-"));
         assert!(diff[1].contains("println!(\"old\")"));
         assert!(
-            diff[1].contains("[41"),
-            "expected red background in deletion: {:?}",
+            diff[1].contains("200;0;0"),
+            "expected pure red background in deletion: {:?}",
             diff[1]
         );
-        // Added line should have '+' and green background ANSI escape (42)
+        assert!(
+            diff[1].contains("255;255;255"),
+            "expected white text in deletion: {:?}",
+            diff[1]
+        );
+        // Added line should have '+' and pure green background (0;160;0) with white text (255;255;255)
         assert!(diff[2].contains("+"));
         assert!(diff[2].contains("println!(\"new\")"));
         assert!(
-            diff[2].contains("[42"),
-            "expected green background in addition: {:?}",
+            diff[2].contains("0;160;0"),
+            "expected pure green background in addition: {:?}",
+            diff[2]
+        );
+        assert!(
+            diff[2].contains("255;255;255"),
+            "expected white text in addition: {:?}",
             diff[2]
         );
         // Equal line
         assert!(diff[3].contains("}"));
-        colored::control::unset_override();
     }
 
     #[test]
     fn patch_diff_included_in_history_parsing() {
-        colored::control::set_override(true);
         let history = vec![
             StoredMessage {
                 id: 1,
@@ -2017,9 +2191,8 @@ mod tests {
         let tool = &turn.tool_items[0];
         assert_eq!(tool.diff_lines.len(), 2);
         assert!(tool.diff_lines[0].contains("-"));
-        assert!(tool.diff_lines[0].contains("[41"));
+        assert!(tool.diff_lines[0].contains("200;0;0"));
         assert!(tool.diff_lines[1].contains("+"));
-        assert!(tool.diff_lines[1].contains("[42"));
-        colored::control::unset_override();
+        assert!(tool.diff_lines[1].contains("0;160;0"));
     }
 }

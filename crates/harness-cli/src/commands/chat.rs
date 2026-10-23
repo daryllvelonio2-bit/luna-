@@ -561,6 +561,8 @@ pub async fn run_interactive_chat(
                 });
                 ui_obs.emit_above(&line);
             }
+            harness_core::AgentEvent::CompactionStarted { .. } => {}
+            harness_core::AgentEvent::CompactionFinished { .. } => {}
         }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
