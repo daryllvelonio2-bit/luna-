@@ -145,6 +145,13 @@ struct BoxDrawnMetrics {
     /// Rows of the todo panel drawn above the box. They are erased with the rest of
     /// the region, so the panel does not leave a trail behind it.
     panel_rows_lens: Vec<usize>,
+    /// The rows drawn between the transcript and the prompt, top to bottom.
+    ///
+    /// The repaint compares them with the next frame and rewrites only the rows whose text
+    /// changed, so an unchanged status line is never cleared and redrawn.
+    block_rows: Vec<String>,
+    /// The prompt row as it was drawn, so the repaint can leave it alone when it has not changed.
+    prompt_drawn: String,
 }
 
 pub fn visible_width(s: &str) -> usize {
@@ -879,11 +886,126 @@ impl ChatUi {
             live.rows = rows.clone();
             prev
         };
+        // The fast path: the block keeps its height, so it is rewritten where it stands and the
+        // screen never blanks. This is what stops the status line from flickering on every tick.
+        if let Some(sequence) = self.repaint_block_sequence(width, &buf) {
+            print!("{sequence}");
+            let _ = io::stdout().flush();
+            return;
+        }
         self.erase_live_and_box(previous);
         for row in &rows {
             println!("{}", row);
         }
         self.draw_box(width, &buf);
+    }
+
+    /// The escape sequence that repaints the region between the transcript and the prompt in place.
+    ///
+    /// The animation tick changes the spinner frame and the elapsed time twelve times a second.
+    /// Erasing that region *and* the composer to redraw it made the status line, the rules and the
+    /// prompt flash on every tick, which reads as a broken display rather than as activity.
+    ///
+    /// When the region keeps its height — the common case: the same rows, a new frame — only the
+    /// rows whose text actually changed are rewritten, where they stand. The status line, the
+    /// rules and the prompt are not touched at all unless they changed, so nothing blinks. A
+    /// height change (the live tail grew, a tool started, the queue line appeared) means the
+    /// composer has to move, and the caller falls back to the full erase-and-redraw.
+    fn repaint_block_sequence(&self, width: usize, buf: &str) -> Option<String> {
+        if !self.box_drawn.load(Ordering::SeqCst) {
+            return None;
+        }
+        let metrics = self.drawn_metrics.lock().unwrap().clone()?;
+        if metrics.width != width {
+            // A resize redraws everything anyway.
+            return None;
+        }
+
+        let live_rows = self.live.lock().unwrap().rows.clone();
+        let panel_rows = self.todo_panel_rows(width);
+        let bg_line = self.format_background_task_line(width);
+        let queued_line = self.format_queue_line(width);
+        let status_line = self.format_status_line(width);
+
+        // The block is everything between the transcript and the prompt, top to bottom.
+        let mut block: Vec<String> = Vec::with_capacity(live_rows.len() + panel_rows.len() + 4);
+        block.extend(live_rows.iter().cloned());
+        block.extend(panel_rows.iter().cloned());
+        if let Some(line) = &bg_line {
+            block.push(line.clone());
+        }
+        if let Some(line) = &queued_line {
+            block.push(line.clone());
+        }
+        if let Some(line) = &status_line {
+            block.push(line.clone());
+        }
+        block.push("─".repeat(width).dimmed().to_string());
+
+        // A row wider than the terminal would occupy two physical rows, and the cursor arithmetic
+        // below counts one row per block row.
+        let old_block = metrics.block_rows.as_slice();
+        if block
+            .iter()
+            .chain(old_block.iter())
+            .any(|row| visible_width(row) > width)
+        {
+            return None;
+        }
+        // A different height means the composer moves: that is the full redraw's job.
+        if block.len() != old_block.len() {
+            return None;
+        }
+        // Reaching above the top of the screen scrolls the terminal and desyncs every row below.
+        if old_block.len() + 2 > get_terminal_height() {
+            return None;
+        }
+
+        let prompt = self.prompt_row(buf);
+        let mut sequence = String::new();
+        // The offset of the last row that was rewritten, so the cursor can walk back down.
+        let mut last_offset: Option<usize> = None;
+        for (i, row) in block.iter().enumerate() {
+            if old_block.get(i).map(|old| old == row).unwrap_or(false) {
+                continue;
+            }
+            // Block row `i` sits this many rows above the prompt row.
+            let offset = old_block.len() - i;
+            sequence.push_str(&format!("\r\x1b[{offset}A\r\x1b[2K{row}"));
+            last_offset = Some(offset);
+        }
+        // The cursor belongs back on the prompt row: the caret lives there, and the next keypress
+        // is written there.
+        if let Some(offset) = last_offset {
+            sequence.push_str(&format!("\r\x1b[{offset}B"));
+        }
+        if prompt != metrics.prompt_drawn {
+            sequence.push_str("\r\x1b[2K");
+            sequence.push_str(&prompt);
+        } else {
+            // The prompt text is unchanged, so it is not rewritten: the caret only walks back to
+            // the end of it.
+            let caret = visible_width(&prompt);
+            if caret > 0 {
+                sequence.push_str(&format!("\r\x1b[{caret}C"));
+            }
+        }
+
+        // Keep the measurements honest: the rows changed, the height did not.
+        {
+            let mut guard = self.drawn_metrics.lock().unwrap();
+            if let Some(m) = guard.as_mut() {
+                m.live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
+                m.panel_rows_lens = panel_rows.iter().map(|r| visible_width(r)).collect();
+                m.bg_line_len = bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
+                m.queued_line_len = queued_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
+                m.status_line_len = status_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
+                m.prompt_len = visible_width(&prompt);
+                m.block_rows = block;
+                m.prompt_drawn = prompt;
+            }
+        }
+        Some(sequence)
     }
 
     pub fn animate_tick(&self) {
@@ -998,6 +1120,11 @@ impl ChatUi {
         let queue_line = self.format_queue_line(width);
         let status_str = self.format_status_line(width);
 
+        // The block is everything between the transcript and the prompt: the live region, then the
+        // composer's own rows, ending with the rule above the prompt.
+        let mut block_rows = live_rows.clone();
+        block_rows.extend(rows[..rows.len() - 2].iter().cloned());
+
         *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
             width,
             bg_line_len: bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
@@ -1007,6 +1134,8 @@ impl ChatUi {
             prompt_len: visible_width(&prompt_str),
             live_rows_lens,
             panel_rows_lens: panel.iter().map(|r| visible_width(r)).collect(),
+            block_rows,
+            prompt_drawn: prompt_str.clone(),
         });
 
         self.box_drawn.store(true, Ordering::SeqCst);
@@ -1166,6 +1295,10 @@ impl ChatUi {
 mod tests {
     use super::*;
 
+    /// Serialises the captures: every capture swaps the process's stdout, so two captures running
+    /// at the same time write into each other's file and each test reads the other's bytes.
+    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Capture what the UI writes to stdout while `f` runs.
     ///
     /// The composer draws with cursor moves rather than by rewriting the screen, so
@@ -1175,6 +1308,10 @@ mod tests {
     fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
+
+        let _guard = CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out");
@@ -1385,6 +1522,129 @@ mod tests {
         }));
         ui.emit_above("Luna: the panel is pinned above the composer");
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    /// Prints a composer and one in-place repaint, so the escape sequence can be replayed in a
+    /// terminal and read back. Ignored by default: it is a scenario to watch, not an assertion.
+    #[test]
+    #[ignore]
+    fn demo_the_in_place_repaint() {
+        let ui = ChatUi::new(true);
+        ui.set_status("minimaxai/minimax-m3.1-flash", 194_000, 246_000);
+        let width = get_terminal_width();
+        let status = ui.format_status_line(width).expect("status line");
+        let divider = "─".repeat(width).dimmed().to_string();
+        let prompt = ui.prompt_row("");
+
+        {
+            let mut metrics = ui.drawn_metrics.lock().unwrap();
+            *metrics = Some(BoxDrawnMetrics {
+                width,
+                bg_line_len: 0,
+                queued_line_len: 0,
+                status_line_len: visible_width(&status),
+                divider_len: width,
+                prompt_len: visible_width(&prompt),
+                live_rows_lens: vec![visible_width("⠋ reading")],
+                panel_rows_lens: Vec::new(),
+                block_rows: vec!["⠋ reading".to_string(), status.clone(), divider.clone()],
+                prompt_drawn: prompt.clone(),
+            });
+        }
+        ui.box_drawn.store(true, Ordering::SeqCst);
+        {
+            let mut live = ui.live.lock().unwrap();
+            live.rows = vec!["⠋ reading".to_string()];
+        }
+
+        println!("\x01DEMO_START");
+        // The screen as it stands: transcript, live row, composer, prompt.
+        println!("a transcript line above");
+        println!("{}", "⠋ reading");
+        println!("{}", status);
+        println!("{}", divider);
+        println!();
+        println!("{}", divider);
+        print!("\x1b[2A\r{}", prompt);
+
+        {
+            let mut live = ui.live.lock().unwrap();
+            live.rows = vec!["⠙ reading".to_string()];
+        }
+        let sequence = ui
+            .repaint_block_sequence(width, "")
+            .expect("the same height repaints in place");
+        print!("{sequence}");
+        println!("\x01DEMO_END");
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_live_region_refreshes_in_place_instead_of_blanking_the_screen() {
+        let ui = ChatUi::new(true);
+        ui.set_status("test-model", 68_000, 272_000);
+        let width = get_terminal_width();
+        let status = ui.format_status_line(width).expect("status line");
+        let divider = "─".repeat(width).dimmed().to_string();
+
+        // Stand in for a drawn composer: the repaint reads the measurements, not the screen.
+        {
+            let mut metrics = ui.drawn_metrics.lock().unwrap();
+            *metrics = Some(BoxDrawnMetrics {
+                width,
+                bg_line_len: 0,
+                queued_line_len: 0,
+                status_line_len: visible_width(&status),
+                divider_len: width,
+                prompt_len: visible_width(&ui.prompt_row("")),
+                live_rows_lens: Vec::new(),
+                panel_rows_lens: Vec::new(),
+                block_rows: vec![status.clone(), divider.clone()],
+                prompt_drawn: ui.prompt_row(""),
+            });
+        }
+        ui.box_drawn.store(true, Ordering::SeqCst);
+
+        // A live row makes the block taller: the composer has to move, so there is no in-place
+        // repaint and the caller falls back to the full redraw.
+        {
+            let mut live = ui.live.lock().unwrap();
+            live.rows = vec!["⠋ reading".to_string()];
+        }
+        assert!(
+            ui.repaint_block_sequence(width, "").is_none(),
+            "a height change cannot be repainted in place"
+        );
+
+        // Same height, new frame: only the row that changed is rewritten.
+        {
+            let mut metrics = ui.drawn_metrics.lock().unwrap();
+            if let Some(m) = metrics.as_mut() {
+                m.block_rows = vec!["⠋ reading".to_string(), status.clone(), divider.clone()];
+                m.live_rows_lens = vec![visible_width("⠋ reading")];
+            }
+        }
+        {
+            let mut live = ui.live.lock().unwrap();
+            live.rows = vec!["⠙ reading".to_string()];
+        }
+        let sequence = ui
+            .repaint_block_sequence(width, "")
+            .expect("the same height repaints in place");
+        assert!(
+            !sequence.contains("\x1b[J"),
+            "a same-height refresh must not blank the screen:\n{sequence}"
+        );
+        assert!(sequence.contains("⠙ reading"), "the new frame is written");
+        assert!(
+            !sequence.contains("test-model"),
+            "the unchanged status line is left alone, not cleared and redrawn:\n{sequence}"
+        );
+        assert!(
+            sequence.contains("\x1b[2K"),
+            "the changed row is cleared before it is rewritten"
+        );
     }
 
     #[test]
