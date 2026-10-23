@@ -37,43 +37,59 @@ use harness_core::{
 
 use crate::tools::SaveMemoryTool;
 
-/// Most memory records one pass may add. A saver that dumps twenty rows per turn is worse than the
-/// session writer it replaced, so the cap is a guardrail, not a target.
-pub const MAX_MEMORIES_PER_PASS: usize = 8;
-/// Most notes one pass may add: notes are for documents, and a turn rarely produces two.
-pub const MAX_NOTES_PER_PASS: usize = 2;
-/// A note must say more than a memory could, or it should have been a memory.
-pub const MIN_NOTE_CHARS: usize = 200;
-/// Longest note body accepted from one pass.
-pub const MAX_NOTE_CHARS: usize = 20_000;
+/// Uncapped: process all durable memories extracted by the saver.
+pub const MAX_MEMORIES_PER_PASS: usize = usize::MAX;
+/// Uncapped: process all reference notes extracted by the saver.
+pub const MAX_NOTES_PER_PASS: usize = usize::MAX;
+/// Non-empty note content.
+pub const MIN_NOTE_CHARS: usize = 1;
+/// Maximum note length.
+pub const MAX_NOTE_CHARS: usize = usize::MAX;
 /// Per-message character cap while rendering the transcript.
-pub const MESSAGE_CHAR_CAP: usize = 2_000;
+pub const MESSAGE_CHAR_CAP: usize = 100_000;
 /// Total character budget for the rendered transcript.
-pub const TRANSCRIPT_CHAR_BUDGET: usize = 12_000;
+pub const TRANSCRIPT_CHAR_BUDGET: usize = 500_000;
 /// How many existing records are shown as the "already known" index.
-pub const INDEX_LIMIT: usize = 60;
+pub const INDEX_LIMIT: usize = 500;
 
 /// The instructions handed to the distillation model.
 ///
 /// Kept as one constant so the contract (what counts as durable, what a category means, what shape
 /// the answer must take) has exactly one home and can be asserted on in tests.
-pub const SAVER_SYSTEM_PROMPT: &str = r#"You are Luna's background memory saver. You read a finished conversation and decide what is worth remembering permanently. You never talk to the user: you emit JSON and nothing else.
+pub const SAVER_SYSTEM_PROMPT: &str = r#"You are Luna's background memory saver. You analyze finished conversations and persist durable facts, rules, preferences, and reference notes. You never talk to the user: you emit JSON and nothing else.
 
-Write a memory record only for a durable fact, rule, preference or decision that will still matter in a later, unrelated session: hardware and OS defaults, coding conventions, architectural choices, project layouts, user preferences, hard-won lessons.
+MEMORY PROTOCOL:
+Save durable facts that will still matter in a future, unrelated session.
 
-Consolidate by entity. Keep all facts about one person in a single 'user.profile' record and all facts about one project in a single 'project.<name>' record. Never fragment one entity across several records. Update an entity by writing the record that should now be true for it; contradictions are resolved in favour of the newer record.
+Consolidation & Entity Scope:
+- Consolidate by entity: Store related facts together in a single consolidated memory record rather than fragmenting attributes into multiple micro-records.
+  * Personal profile: Maintain a single consolidated 'user.profile' record containing the user's identity, preferences, aesthetic standards, and habits. Never create separate micro-memories like 'user.name', 'user.favorite_language', or 'user.favorite_number'.
+  * Project profiles: Maintain a single consolidated memory record per project (e.g. 'project.astra', 'project.luna') containing its purpose, repository path, build commands, and architectural conventions. Never create multiple fragmented memories for the same project.
+  * Environment: Maintain a single 'env.system' record for host OS, toolchain paths, and hardware defaults.
+- Update Over Append: When learning new facts or refinements about an existing entity, update that entity's consolidated record rather than creating duplicate entries. Contradictions are resolved in favor of the newer record.
 
-Never write: transient task state, plans, TODO scratchpads, raw command output, log lines, file contents, one-off invocations, or anything you cannot point to in the transcript. Never invent a fact. If the conversation only did work and decided nothing durable, return empty arrays.
+Evaluation Criteria:
+Persist only durable, generalizable information that remains relevant across future, unrelated sessions:
+- Hardware, operating system, and primary environment defaults.
+- Coding conventions, architectural preferences, and UI/CLI aesthetic habits.
+- Permanent project definitions, repository layouts, build instructions, and naming conventions.
+- Explicit facts, project locations, or preferences stated by the user or established during work.
+
+Constraints:
+- Do not save transient task states, one-off commands, temporary bugs, or session scratchpad plans.
+- Do not save raw logs, full code files, or unparsed data outputs.
+- Never fragment a single entity or project across multiple memory records.
 
 Categories: user_profile, code_pattern, workflow_rule, fact, harness_improvement.
 
-A note is for long-form reference that must survive verbatim: a specification, a research summary, a transcript, a log worth keeping. Notes must be at least 200 characters. If it fits in a memory record, it is a memory, not a note.
+NOTE PROTOCOL:
+Use notes to offload reference artifacts that exceed atomic memory limits: architecture specs, documentation, multi-step research, and structured logs.
 
 Answer with JSON only, in exactly this shape:
 
-{"memories":[{"subject":"user","predicate":"preferred_language","object":"Rust","category":"user_profile","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
+{"memories":[{"subject":"project.astra","predicate":"profile","object":"Autonomous Rust agent harness located at /path/to/astra, built with cargo build --release.","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
 
-Use empty arrays for anything you are not writing."#;
+Use empty arrays only if the conversation contained genuinely no durable facts, project details, user preferences, or reference notes."#;
 
 /// How a saver is configured: which model, and which budgets it honours.
 #[derive(Debug, Clone, PartialEq)]
@@ -227,7 +243,7 @@ impl MemorySaver {
             .unwrap_or_default();
 
         let mut seen: Vec<(String, String, String)> = Vec::new();
-        for item in distilled.memories.into_iter().take(MAX_MEMORIES_PER_PASS) {
+        for item in distilled.memories {
             let subject = item.subject.trim();
             let predicate = item.predicate.trim();
             let object = item.object.trim();
@@ -277,15 +293,14 @@ impl MemorySaver {
             return Ok(report);
         }
 
-        for note in distilled.notes.into_iter().take(MAX_NOTES_PER_PASS) {
+        for note in distilled.notes {
             let title = note.title.trim();
             let content = note.content.trim();
-            if title.is_empty() || content.chars().count() < MIN_NOTE_CHARS {
+            if title.is_empty() || content.is_empty() {
                 report.skipped += 1;
                 continue;
             }
-            let trimmed: String = content.chars().take(MAX_NOTE_CHARS).collect();
-            match self.notes.save_note(title, &trimmed, &note.tags).await {
+            match self.notes.save_note(title, content, &note.tags).await {
                 Ok(saved) => {
                     // The same pointer bridge the agent runs after `save_note`, so a note written
                     // by the saver is as findable as one written by the session.
@@ -603,7 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_pass_never_exceeds_its_caps() {
+    async fn one_pass_saves_all_without_artificial_caps() {
         let memories: Vec<String> = (0..20)
             .map(|index| {
                 format!(
@@ -614,8 +629,7 @@ mod tests {
         let notes: Vec<String> = (0..5)
             .map(|index| {
                 format!(
-                    r#"{{"title":"Note {index}","content":"{}","tags":[]}}"#,
-                    "x".repeat(MIN_NOTE_CHARS)
+                    r#"{{"title":"Note {index}","content":"body {index}","tags":[]}}"#
                 )
             })
             .collect();
@@ -628,21 +642,21 @@ mod tests {
 
         let report = saver.distil(&conversation()).await.expect("distils");
 
-        assert_eq!(report.memories, MAX_MEMORIES_PER_PASS);
-        assert_eq!(report.notes, MAX_NOTES_PER_PASS);
+        assert_eq!(report.memories, 20);
+        assert_eq!(report.notes, 5);
         assert_eq!(
             memory.retrieve("", 50).await.expect("retrieves").len(),
-            MAX_MEMORIES_PER_PASS + MAX_NOTES_PER_PASS,
+            25,
             "each note also registers a pointer record"
         );
         assert_eq!(
             notes_engine.list_notes(10, 0).await.expect("lists").len(),
-            MAX_NOTES_PER_PASS
+            5
         );
     }
 
     #[tokio::test]
-    async fn empty_short_or_malformed_items_are_skipped_and_counted() {
+    async fn empty_or_malformed_items_are_skipped_and_counted() {
         let provider = CannedProvider::new(
             r#"{"memories":[
                  {"subject":"","predicate":"p","object":"v"},
@@ -650,7 +664,7 @@ mod tests {
                  {"subject":"user","predicate":"p","object":"   "},
                  {"subject":"user","predicate":"p","object":"v"}
                ],
-               "notes":[{"title":"Tiny","content":"too short"}]}"#,
+               "notes":[{"title":"Empty","content":""}]}"#,
         );
         let (saver, memory, notes) = saver(provider);
 
