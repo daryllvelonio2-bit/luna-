@@ -11,6 +11,8 @@ use harness_core::{
     ToolCall, ToolDefinition,
 };
 
+use crate::thought_signature;
+
 pub const DEFAULT_PROJECT: &str = "aicode-consumers";
 pub const CODE_ASSIST_ENDPOINT: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
@@ -659,12 +661,15 @@ fn build_antigravity_payload(
                             "args": c.arguments
                         }
                     });
-                    // The signature the model issued with this call, replayed verbatim: Code
-                    // Assist validates each functionCall's signature against the model that
-                    // produced it. A call without one (another provider wrote this row, or an
-                    // older build) is sent WITHOUT the field — a fabricated value is what
-                    // corrupts the validation and 400s the whole request.
-                    if let Some(signature) = &c.signature {
+                    // The signature the model issued with this call is replayed verbatim: Code
+                    // Assist validates each functionCall's signature against the model that produced
+                    // it. A call we hold none for — another provider wrote the row, or the session
+                    // predates the field — carries Google's documented dummy instead, which makes the
+                    // validator skip the check. Omitting the field is what 400s the whole request.
+                    if let Some(signature) = thought_signature::signature_for_replay(
+                        c.signature.as_deref(),
+                        thought_signature::model_enforces_thought_signature(model),
+                    ) {
                         call_part["thoughtSignature"] = json!(signature);
                     }
                     parts.push(call_part);
@@ -1373,8 +1378,7 @@ mod tests {
         assert_eq!(contents[2]["role"], "user");
 
         // Model turn must carry the model's own signature on each functionCall — the value the
-        // provider issued, replayed verbatim. A call with no signature (history from another
-        // provider) carries no signature field at all.
+        // provider issued, replayed verbatim.
         let model_parts = contents[1]["parts"].as_array().expect("model parts");
         assert_eq!(model_parts.len(), 2);
         assert_eq!(model_parts[0]["thoughtSignature"], json!("sig-for-read"));
@@ -1390,12 +1394,71 @@ mod tests {
         assert_eq!(user_parts[1]["functionResponse"]["name"], "terminal");
     }
 
-    /// Calls recorded without a signature (another provider wrote the rows, or an older build)
-    /// must be sent without the `thoughtSignature` field — fabricating one corrupts the
-    /// validator and 400s the request that carries it.
+    /// A call recorded without a signature (another provider wrote the rows, or the session
+    /// predates the field) is replayed with Google's documented dummy on a model that validates
+    /// signatures: omitting the field is what 400s the request, and the dummy makes the validator
+    /// skip the check instead.
     #[test]
-    fn a_signatureless_call_is_sent_without_the_field() {
-        let messages = vec![
+    fn a_signatureless_call_carries_the_documented_dummy_on_a_strict_model() {
+        let messages = signatureless_call_conversation();
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+        let contents = payload["request"]["contents"].as_array().expect("contents");
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert_eq!(
+            model_parts[0]["thoughtSignature"],
+            json!("skip_thought_signature_validator"),
+            "a strict model rejects a function call replayed without a signature"
+        );
+    }
+
+    /// A model that does not validate signatures is sent no `thoughtSignature` at all: the dummy
+    /// is a documented last resort for strict validation, and Google notes it degrades model
+    /// performance, so it must not be volunteered to a model that never asks for one.
+    #[test]
+    fn a_signatureless_call_sends_no_field_to_a_non_validating_model() {
+        let messages = signatureless_call_conversation();
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-2.5-flash",
+        );
+        let contents = payload["request"]["contents"].as_array().expect("contents");
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert!(
+            model_parts[0].get("thoughtSignature").is_none(),
+            "no signature concept for this model: {:?}",
+            model_parts[0]
+        );
+    }
+
+    /// The other side of the same rule: a non-Gemini model on Code Assist (Claude, GPT) has no
+    /// signature concept either, even though the endpoint is Google's.
+    #[test]
+    fn a_signatureless_call_sends_no_field_to_a_non_gemini_model() {
+        let messages = signatureless_call_conversation();
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "claude-sonnet-4-6",
+        );
+        let contents = payload["request"]["contents"].as_array().expect("contents");
+        let model_parts = contents[1]["parts"].as_array().expect("model parts");
+        assert!(model_parts[0].get("thoughtSignature").is_none());
+    }
+
+    /// One user turn, one model turn that called a tool without a signature, and the result.
+    fn signatureless_call_conversation() -> Vec<Message> {
+        vec![
             Message::user("run one tool"),
             Message {
                 role: Role::Assistant,
@@ -1411,21 +1474,7 @@ mod tests {
                 usage: None,
             },
             Message::tool(harness_core::ToolResult::success("c1", "ok")),
-        ];
-
-        let payload = build_antigravity_payload(
-            &messages,
-            &[],
-            &CompletionOptions::default(),
-            "gemini-3.8-flash",
-        );
-        let contents = payload["request"]["contents"].as_array().expect("contents");
-        let model_parts = contents[1]["parts"].as_array().expect("model parts");
-        assert!(
-            model_parts[0].get("thoughtSignature").is_none(),
-            "a fabricated signature is a bypass, not a fix: {:?}",
-            model_parts[0]
-        );
+        ]
     }
 
     /// A reasoning-bearing assistant turn replays its thinking as a thought part before the

@@ -456,6 +456,42 @@ async fn append_assigns_sequence_and_replay_returns_it_in_order() {
     assert_eq!(replay.history[0].message.role, Role::User);
 }
 
+/// A tool call's provider signature is part of the record, not scratch state: Gemini validates it
+/// against the call when the history is replayed on the next request, so a store that dropped it
+/// would break the conversation it just persisted.
+#[tokio::test]
+async fn a_tool_calls_signature_survives_the_round_trip_through_the_store() {
+    let (_dir, _path, store) = temp_store();
+    store
+        .ensure_session("s1")
+        .await
+        .expect("create the session");
+
+    let assistant = Message {
+        role: Role::Assistant,
+        content: None,
+        reasoning: None,
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "list_files".to_string(),
+            arguments: serde_json::json!({ "path": "." }),
+            signature: Some("sig-from-gemini".to_string()),
+        }],
+        tool_result: None,
+        usage: None,
+    };
+    store.append("s1", &assistant, false).await.unwrap();
+
+    let replay = store.replay("s1", 200).await.unwrap();
+    let replayed = &replay.history[0].message.tool_calls[0];
+    assert_eq!(replayed.name, "list_files");
+    assert_eq!(
+        replayed.signature.as_deref(),
+        Some("sig-from-gemini"),
+        "the signature must come back verbatim, or the next request 400s"
+    );
+}
+
 #[tokio::test]
 async fn replay_bound_keeps_the_newest_and_reports_the_total() {
     let (_dir, _path, store) = temp_store();

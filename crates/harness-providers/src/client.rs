@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 use crate::auth::CredentialManager;
 use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
 use crate::discovery::ModelDiscovery;
+use crate::thought_signature;
 use harness_core::{
     config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider,
     ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
@@ -98,8 +99,9 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
                             .and_then(|f| f.get("arguments"))
                             .and_then(|a| a.as_str())
                             .map(|s| s.to_string()),
-                        // The OpenAI-compatible wire has no per-call signature concept.
-                        signature: None,
+                        // Gemini's OpenAI-compatible route carries the call's thought signature in
+                        // an `extra_content` extension; every other provider simply has none.
+                        signature: thought_signature::signature_from_tool_call(call),
                     }));
                 }
             }
@@ -274,7 +276,14 @@ impl GenericProviderClient {
         retired
     }
 
-    fn serialize_messages(&self, messages: &[Message]) -> serde_json::Value {
+    /// Serialize the transcript for an OpenAI-compatible `/chat/completions` body.
+    ///
+    /// `model` decides whether a replayed function call must carry Google's thought signature: the
+    /// value the model issued is written back verbatim, and a call we hold none for carries the
+    /// documented dummy on the models that would otherwise reject the request outright. Every
+    /// non-Google provider is unaffected — it neither sends a signature nor is sent one.
+    fn serialize_messages(&self, messages: &[Message], model: &str) -> serde_json::Value {
+        let enforce_signatures = thought_signature::model_enforces_thought_signature(model);
         let mut list = Vec::new();
         for m in messages {
             let role_str = match m.role {
@@ -303,14 +312,22 @@ impl GenericProviderClient {
                     .tool_calls
                     .iter()
                     .map(|tc| {
-                        json!({
+                        let mut call = json!({
                             "id": tc.id,
                             "type": "function",
                             "function": {
                                 "name": tc.name,
                                 "arguments": tc.arguments.to_string(),
                             }
-                        })
+                        });
+                        if let Some(signature) = thought_signature::signature_for_replay(
+                            tc.signature.as_deref(),
+                            enforce_signatures,
+                        ) {
+                            call["extra_content"] =
+                                json!({ "google": { "thought_signature": signature } });
+                        }
+                        call
                     })
                     .collect();
                 msg_obj["tool_calls"] = json!(tc_json);
@@ -451,7 +468,10 @@ impl ModelProvider for GenericProviderClient {
             let mut content = String::new();
             let mut reasoning = String::new();
             let mut usage = None;
-            let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
+            // Call fragments arrive one field at a time, so each call is accumulated into the shape
+            // it is finally returned in: text fields appended, `arguments` held as the raw JSON
+            // fragment string until the stream ends, and the signature kept verbatim.
+            let mut tool_builders: std::collections::BTreeMap<usize, ToolCall> =
                 std::collections::BTreeMap::new();
 
             while let Some(ev_res) = stream.next().await {
@@ -463,19 +483,30 @@ impl ModelProvider for GenericProviderClient {
                         id,
                         name,
                         arguments_delta,
-                        ..
+                        signature,
                     } => {
-                        let entry = tool_builders
-                            .entry(index)
-                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        let entry = tool_builders.entry(index).or_insert_with(|| ToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: serde_json::Value::String(String::new()),
+                            signature: None,
+                        });
                         if let Some(i) = id {
-                            entry.0.push_str(&i);
+                            entry.id.push_str(&i);
                         }
                         if let Some(n) = name {
-                            entry.1.push_str(&n);
+                            entry.name.push_str(&n);
                         }
-                        if let Some(a) = arguments_delta {
-                            entry.2.push_str(&a);
+                        if let Some(signature) = signature {
+                            entry.signature = Some(signature);
+                        }
+                        if let Some(fragment) = arguments_delta {
+                            let mut raw = match entry.arguments.take() {
+                                serde_json::Value::String(raw) => raw,
+                                _ => String::new(),
+                            };
+                            raw.push_str(&fragment);
+                            entry.arguments = serde_json::Value::String(raw);
                         }
                     }
                     StreamEvent::Completed { usage: u, .. } => {
@@ -484,19 +515,19 @@ impl ModelProvider for GenericProviderClient {
                 }
             }
 
-            let mut tool_calls = Vec::new();
-            for (_, (id, name, args_str)) in tool_builders {
-                if !name.is_empty() {
-                    let arguments: serde_json::Value =
-                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments,
-                        signature: None,
-                    });
-                }
-            }
+            let tool_calls: Vec<ToolCall> = tool_builders
+                .into_values()
+                .filter(|call| !call.name.is_empty())
+                .map(|mut call| {
+                    call.arguments = match call.arguments {
+                        serde_json::Value::String(raw) => {
+                            serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
+                        }
+                        other => other,
+                    };
+                    call
+                })
+                .collect();
 
             return Ok(Message {
                 role: Role::Assistant,
@@ -518,7 +549,7 @@ impl ModelProvider for GenericProviderClient {
 
         let mut body = json!({
             "model": model,
-            "messages": self.serialize_messages(messages),
+            "messages": self.serialize_messages(messages, model.as_str()),
         });
 
         if !tools.is_empty() {
@@ -682,7 +713,9 @@ impl ModelProvider for GenericProviderClient {
                     id,
                     name,
                     arguments: args,
-                    signature: None,
+                    // Gemini's OpenAI-compatible route hands the call's thought signature back in
+                    // an `extra_content` extension; without it a replayed call is rejected.
+                    signature: thought_signature::signature_from_tool_call(tc),
                 });
             }
         }
@@ -835,7 +868,7 @@ impl ModelProvider for GenericProviderClient {
 
         let mut body = json!({
             "model": model,
-            "messages": self.serialize_messages(messages),
+            "messages": self.serialize_messages(messages, model.as_str()),
             "stream": true,
             "stream_options": { "include_usage": true }
         });
@@ -1057,6 +1090,110 @@ fn normalize_reasoning_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn client_for(provider_id: &str, base_url: &str) -> GenericProviderClient {
+        let dir = std::env::temp_dir().join(format!(
+            "luna-thought-signature-{}-{}",
+            provider_id,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        GenericProviderClient {
+            provider_id: provider_id.to_string(),
+            base_url: base_url.to_string(),
+            auth_format: AuthHeaderFormat::Bearer,
+            cred_manager: CredentialManager::new(Some(dir.join("credentials.json")))
+                .expect("creds"),
+            discovery: Arc::new(ModelDiscovery::new(
+                Some(dir.join("models_cache.json")),
+                24,
+                Default::default(),
+            )),
+            http_client: build_http_client(600).expect("http client"),
+            default_model: "test-model".to_string(),
+        }
+    }
+
+    fn assistant_call(signature: Option<&str>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "list_files".to_string(),
+                arguments: json!({ "path": "." }),
+                signature: signature.map(|s| s.to_string()),
+            }],
+            tool_result: None,
+            usage: None,
+        }
+    }
+
+    fn first_tool_call(messages: &serde_json::Value) -> serde_json::Value {
+        messages
+            .as_array()
+            .expect("message list")
+            .iter()
+            .find_map(|m| m.get("tool_calls").and_then(|t| t.as_array()))
+            .and_then(|calls| calls.first().cloned())
+            .expect("a serialized tool call")
+    }
+
+    /// The whole point of the fix: the signature Gemini issued on the OpenAI-compatible route is
+    /// replayed beside the same call, in the extension that route documents.
+    #[test]
+    fn a_gemini_signature_is_replayed_on_the_openai_compatible_route() {
+        let client = client_for(
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        );
+        let messages =
+            client.serialize_messages(&[assistant_call(Some("sig-abc"))], "gemini-3.5-flash-lite");
+
+        assert_eq!(
+            first_tool_call(&messages)["extra_content"]["google"]["thought_signature"],
+            json!("sig-abc")
+        );
+    }
+
+    /// A strict model whose call we hold no signature for would 400 the request; it carries the
+    /// documented dummy so the validator skips the check instead.
+    #[test]
+    fn a_strict_gemini_model_without_a_signature_gets_the_documented_dummy() {
+        let client = client_for(
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        );
+        let messages = client.serialize_messages(&[assistant_call(None)], "gemini-3.5-flash-lite");
+
+        assert_eq!(
+            first_tool_call(&messages)["extra_content"]["google"]["thought_signature"],
+            json!("skip_thought_signature_validator")
+        );
+    }
+
+    /// The fix must not touch a provider that has no signature concept: adding the extension to
+    /// every tool call would be junk on the wire for all of them.
+    #[test]
+    fn a_non_google_provider_is_sent_no_signature_extension() {
+        let client = client_for("deepseek", "https://api.deepseek.com/v1");
+        let messages = client.serialize_messages(&[assistant_call(None)], "deepseek-v4.1-flash");
+
+        assert!(first_tool_call(&messages).get("extra_content").is_none());
+    }
+
+    /// An earlier Gemini family tolerates an absent signature, so it is not sent the dummy.
+    #[test]
+    fn a_non_validating_gemini_version_is_not_sent_the_dummy() {
+        let client = client_for(
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        );
+        let messages = client.serialize_messages(&[assistant_call(None)], "gemini-2.5-flash");
+
+        assert!(first_tool_call(&messages).get("extra_content").is_none());
+    }
 
     #[test]
     fn test_nvidia_deepseek_reasoning_effort_normalization() {
