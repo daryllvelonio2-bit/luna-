@@ -21,6 +21,7 @@ harness-plugins = { workspace = true }
 harness-mcp = { workspace = true }
 harness-voice = { workspace = true }
 harness-telemetry = { workspace = true }
+harness-onboarding = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
@@ -39,6 +40,7 @@ libc = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 rusqlite = { workspace = true }
+similar = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

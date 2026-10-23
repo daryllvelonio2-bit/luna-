@@ -14,6 +14,7 @@ use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
 pub struct TurnProcessItem {
     pub call_formatted: String,
     pub result_formatted: String,
+    pub diff_lines: Vec<String>,
 }
 
 /// A completed turn in the chat session, holding its query, intermediate reasoning, tool calls, and final reply.
@@ -61,9 +62,25 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                     }
                 }
                 for call in &msg.tool_calls {
+                    let diff_lines = if call.name == "patch" {
+                        let old_str = call
+                            .arguments
+                            .get("old_string")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let new_str = call
+                            .arguments
+                            .get("new_string")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        format_patch_diff(old_str, new_str)
+                    } else {
+                        Vec::new()
+                    };
                     current_tools.push(TurnProcessItem {
                         call_formatted: format_tool_call(&call.name, &call.arguments),
                         result_formatted: String::new(),
+                        diff_lines,
                     });
                 }
                 if let Some(ref content) = msg.content {
@@ -188,6 +205,9 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                             call.push_str(&status);
                         }
                         println!("{}", call);
+                        for diff_line in &item.diff_lines {
+                            println!("{}", diff_line);
+                        }
                     }
                 }
             }
@@ -464,6 +484,34 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
     }
 }
 
+/// Formats the diff between `old_string` and `new_string` for a patch tool call.
+/// Deletions are styled with a red background; additions are styled with a green background.
+pub fn format_patch_diff(old_string: &str, new_string: &str) -> Vec<String> {
+    if old_string.is_empty() && new_string.is_empty() {
+        return Vec::new();
+    }
+    let diff = similar::TextDiff::from_lines(old_string, new_string);
+    let mut lines = Vec::new();
+
+    for change in diff.iter_all_changes() {
+        let val = change.value().trim_end_matches(&['\r', '\n'][..]);
+        match change.tag() {
+            similar::ChangeTag::Delete => {
+                let text = format!("  - {}", val);
+                lines.push(text.on_red().white().to_string());
+            }
+            similar::ChangeTag::Insert => {
+                let text = format!("  + {}", val);
+                lines.push(text.on_green().black().to_string());
+            }
+            similar::ChangeTag::Equal => {
+                lines.push(format!("    {}", val).dimmed().to_string());
+            }
+        }
+    }
+    lines
+}
+
 /// Shortens any file or directory path to at most 3 path components (e.g. `downloads/rust-agent-harness/agents.md`).
 pub fn shorten_path(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -509,15 +557,15 @@ pub fn shorten_paths_in_text(raw: &str) -> String {
 
 fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
     let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home).join(".luna").join("memory.db");
+    let db_path = std::path::PathBuf::from(home)
+        .join(".luna")
+        .join("memory.db");
     if !db_path.exists() {
         return None;
     }
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare("SELECT subject, predicate FROM memories WHERE id = ?1 LIMIT 1")
         .ok()?;
@@ -532,15 +580,15 @@ fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
 
 fn lookup_note_title_from_db(id: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home).join(".luna").join("notes.db");
+    let db_path = std::path::PathBuf::from(home)
+        .join(".luna")
+        .join("notes.db");
     if !db_path.exists() {
         return None;
     }
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare("SELECT title FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE LIMIT 1")
         .ok()?;
@@ -560,7 +608,10 @@ fn resolve_memory_name(arguments: &serde_json::Value) -> String {
             .filter(|s| !s.is_empty())
     };
 
-    if let Some(name) = text("name").or_else(|| text("key")).or_else(|| text("title")) {
+    if let Some(name) = text("name")
+        .or_else(|| text("key"))
+        .or_else(|| text("title"))
+    {
         return format!("\"{}\"", truncate_visible(name, MAX_TOOL_ARG_CHARS));
     }
 
@@ -793,7 +844,13 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 let detail = text("task_id")
                     .map(|id| format!(" [{}]", id.cyan()))
                     .unwrap_or_default();
-                return format!("{} {} ({}){}", glyph, verb_col(verb), action.dimmed(), detail);
+                return format!(
+                    "{} {} ({}){}",
+                    glyph,
+                    verb_col(verb),
+                    action.dimmed(),
+                    detail
+                );
             }
             let task_count = arguments
                 .get("tasks")
@@ -830,13 +887,20 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
-                let display_title = lookup_note_title_from_db(target).unwrap_or_else(|| target.to_string());
+                let display_title =
+                    lookup_note_title_from_db(target).unwrap_or_else(|| target.to_string());
                 let action = match name {
                     "update_note" => suffix("(update)".to_string()),
                     "delete_note" => suffix("(delete)".to_string()),
                     _ => String::new(),
                 };
-                return format!("{} {} {}{}", glyph, verb_col(verb), quoted(&display_title), action);
+                return format!(
+                    "{} {} {}{}",
+                    glyph,
+                    verb_col(verb),
+                    quoted(&display_title),
+                    action
+                );
             }
         }
         "inspect_harness_source" => {
@@ -1009,7 +1073,12 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 .or_else(|| text_arg("name"))
                 .or_else(|| text_arg("subject"))
                 .unwrap_or("memory");
-            format!("{} {} {}", "memory".bold(), action.bold(), target.cyan().bold())
+            format!(
+                "{} {} {}",
+                "memory".bold(),
+                action.bold(),
+                target.cyan().bold()
+            )
         }
         "apply_harness_update" => {
             let id = request
@@ -1406,8 +1475,9 @@ mod tests {
         for width in [40usize, 80, 120] {
             for frame in 0..SPINNER_FRAMES.len() {
                 let row = activity_line(frame, long, None, Duration::from_millis(3700), width);
-                let cells =
-                    dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(&row).to_string());
+                let cells = dialoguer::console::measure_text_width(
+                    &dialoguer::console::strip_ansi_codes(&row).to_string(),
+                );
                 assert!(
                     cells <= width,
                     "width {width} frame {frame} rendered {cells} cells (> width, would \
@@ -1436,7 +1506,11 @@ mod tests {
     #[test]
     fn truncation_to_cells_counts_the_ellipsis() {
         let out = truncate_to_cells("💻💻💻💻💻💻💻💻", 5);
-        assert_eq!(dialoguer::console::measure_text_width(&out), 5, "got: {out}");
+        assert_eq!(
+            dialoguer::console::measure_text_width(&out),
+            5,
+            "got: {out}"
+        );
         assert!(out.ends_with('…'), "got: {out}");
         // Untouched when it already fits.
         assert_eq!(truncate_to_cells("💻 hi", 10), "💻 hi");
@@ -1636,8 +1710,14 @@ mod tests {
 
     #[test]
     fn a_coloured_verdict_counts_as_a_verdict() {
-        assert!(has_verdict(&format!("read src/lib.rs {}", " (success)".green())));
-        assert!(has_verdict(&format!("read src/lib.rs {}", " (failed)".red())));
+        assert!(has_verdict(&format!(
+            "read src/lib.rs {}",
+            " (success)".green()
+        )));
+        assert!(has_verdict(&format!(
+            "read src/lib.rs {}",
+            " (failed)".red()
+        )));
         assert!(!has_verdict("read src/lib.rs"));
     }
 
@@ -1856,5 +1936,90 @@ mod tests {
         assert_eq!(rows.len(), 1, "short messages must not be wrapped");
         assert_eq!(plain(rows[0]).chars().count(), 79);
         assert!(plain(rows[0]).starts_with(' '), "still pushed to the right");
+    }
+
+    #[test]
+    fn patch_diff_formatting_colors_additions_and_deletions() {
+        colored::control::set_override(true);
+        let old = "fn hello() {\n    println!(\"old\");\n}\n";
+        let new = "fn hello() {\n    println!(\"new\");\n}\n";
+        let diff = format_patch_diff(old, new);
+
+        assert_eq!(diff.len(), 4);
+        // Equal line
+        assert!(diff[0].contains("fn hello()"));
+        // Deleted line should have '-' and red background ANSI escape (41)
+        assert!(diff[1].contains("-"));
+        assert!(diff[1].contains("println!(\"old\")"));
+        assert!(
+            diff[1].contains("[41"),
+            "expected red background in deletion: {:?}",
+            diff[1]
+        );
+        // Added line should have '+' and green background ANSI escape (42)
+        assert!(diff[2].contains("+"));
+        assert!(diff[2].contains("println!(\"new\")"));
+        assert!(
+            diff[2].contains("[42"),
+            "expected green background in addition: {:?}",
+            diff[2]
+        );
+        // Equal line
+        assert!(diff[3].contains("}"));
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn patch_diff_included_in_history_parsing() {
+        colored::control::set_override(true);
+        let history = vec![
+            StoredMessage {
+                id: 1,
+                seq: 1,
+                message: harness_core::Message {
+                    role: Role::User,
+                    content: Some("fix it".to_string()),
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage: None,
+                },
+                is_summary: false,
+            },
+            StoredMessage {
+                id: 2,
+                seq: 2,
+                message: harness_core::Message {
+                    role: Role::Assistant,
+                    content: None,
+                    reasoning: None,
+                    tool_calls: vec![harness_core::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "patch".to_string(),
+                        arguments: serde_json::json!({
+                            "path": "src/main.rs",
+                            "old_string": "let a = 1;",
+                            "new_string": "let a = 2;"
+                        }),
+                        signature: None,
+                    }],
+                    tool_result: None,
+                    usage: None,
+                },
+                is_summary: false,
+            },
+        ];
+
+        let turns = parse_turns_from_history(&history);
+        assert_eq!(turns.len(), 1);
+        let turn = &turns[0];
+        assert_eq!(turn.tool_items.len(), 1);
+        let tool = &turn.tool_items[0];
+        assert_eq!(tool.diff_lines.len(), 2);
+        assert!(tool.diff_lines[0].contains("-"));
+        assert!(tool.diff_lines[0].contains("[41"));
+        assert!(tool.diff_lines[1].contains("+"));
+        assert!(tool.diff_lines[1].contains("[42"));
+        colored::control::unset_override();
     }
 }

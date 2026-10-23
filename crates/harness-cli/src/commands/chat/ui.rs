@@ -1,13 +1,12 @@
-use std::io::{self, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use dialoguer::console::Term;
 use harness_core::tools::todo::TodoSnapshot;
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, needs_separator, reasoning_rows, tool_activity_detail,
-    OutputBlockKind, PROMPT,
+    activity_line, needs_separator, reasoning_rows, tool_activity_detail, OutputBlockKind, PROMPT,
 };
 
 /// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
@@ -90,6 +89,7 @@ struct Activity {
 struct LiveRegion {
     reasoning: String,
     activity: Option<Activity>,
+    patch_diff: Option<Vec<String>>,
     rows: Vec<String>,
 }
 
@@ -275,11 +275,7 @@ impl ChatUi {
     pub fn todo_panel_rows(&self, width: usize) -> Vec<String> {
         let snapshot = self.todo_snapshot.lock().unwrap();
         match snapshot.as_ref() {
-            Some(snapshot) => super::todo::render_panel(
-                snapshot,
-                self.todo_collapsed(),
-                width,
-            ),
+            Some(snapshot) => super::todo::render_panel(snapshot, self.todo_collapsed(), width),
             None => Vec::new(),
         }
     }
@@ -386,6 +382,25 @@ impl ChatUi {
         live.reasoning.clear();
         live.rows.clear();
         live.activity = None;
+        live.patch_diff = None;
+    }
+
+    pub fn show_patch_diff(&self, diff: Vec<String>) {
+        {
+            let mut live = self.live.lock().unwrap();
+            live.patch_diff = Some(diff);
+        }
+        self.animate_tick();
+    }
+
+    pub fn clear_patch_diff(&self) {
+        let had_diff = {
+            let mut live = self.live.lock().unwrap();
+            live.patch_diff.take().is_some()
+        };
+        if had_diff {
+            self.animate_tick();
+        }
     }
 
     pub fn clear_live_and_box(&self) {
@@ -502,7 +517,9 @@ impl ChatUi {
 
         let icon = "⚙".cyan().bold();
         let tag = "evolver-harness".cyan().bold();
-        let elapsed = format_elapsed(task.started_at.elapsed()).dimmed().to_string();
+        let elapsed = format_elapsed(task.started_at.elapsed())
+            .dimmed()
+            .to_string();
         let right_hint = "[Ctrl+B]".dimmed().bold().to_string();
         let right_visible = dialoguer::console::strip_ansi_codes(&right_hint).to_string();
         let right_len = right_visible.chars().count();
@@ -528,13 +545,19 @@ impl ChatUi {
             if available > 2 {
                 let truncated = format!(
                     "{}…",
-                    left_visible.chars().take(available.saturating_sub(1)).collect::<String>()
+                    left_visible
+                        .chars()
+                        .take(available.saturating_sub(1))
+                        .collect::<String>()
                 );
                 let spaces = width.saturating_sub(truncated.chars().count() + right_len);
                 Some(format!("{}{}{}", truncated, " ".repeat(spaces), right_hint))
             } else {
                 let cut = width.saturating_sub(1);
-                Some(format!("{}…", left_visible.chars().take(cut).collect::<String>()))
+                Some(format!(
+                    "{}…",
+                    left_visible.chars().take(cut).collect::<String>()
+                ))
             }
         }
     }
@@ -563,7 +586,12 @@ impl ChatUi {
         let mut right = if let Some(ref q) = s.quota_display {
             if !q.is_empty() {
                 if s.context_max > 0 {
-                    format!("{}/{} · {}", humanize_tokens(s.context_used), humanize_tokens(s.context_max), q)
+                    format!(
+                        "{}/{} · {}",
+                        humanize_tokens(s.context_used),
+                        humanize_tokens(s.context_max),
+                        q
+                    )
                 } else {
                     format!("{} · {}", s.context_used, q)
                 }
@@ -782,6 +810,23 @@ impl ChatUi {
                     width,
                 ));
             }
+
+            if let Some(diff) = &live.patch_diff {
+                const MAX_LIVE_DIFF: usize = 20;
+                if diff.len() <= MAX_LIVE_DIFF {
+                    rows.extend(diff.iter().cloned());
+                } else {
+                    rows.extend(diff[..MAX_LIVE_DIFF - 1].iter().cloned());
+                    rows.push(
+                        format!(
+                            "    ... ({} more changed lines)",
+                            diff.len() - (MAX_LIVE_DIFF - 1)
+                        )
+                        .dimmed()
+                        .to_string(),
+                    );
+                }
+            }
             rows
         };
 
@@ -968,7 +1013,10 @@ impl ChatUi {
     }
 
     pub fn redraw_background_task_line(&self) {
-        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) || !self.has_background_task() {
+        if !self.is_attended
+            || !self.box_drawn.load(Ordering::SeqCst)
+            || !self.has_background_task()
+        {
             return;
         }
         self.redraw_box();
@@ -1011,7 +1059,9 @@ mod tests {
         assert!(saved >= 0, "cannot save stdout");
         assert!(unsafe { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) } >= 0);
 
-        std::thread::spawn(f).join().expect("the captured work panicked");
+        std::thread::spawn(f)
+            .join()
+            .expect("the captured work panicked");
         let _ = io::stdout().flush();
 
         unsafe { libc::dup2(saved, libc::STDOUT_FILENO) };
@@ -1098,7 +1148,10 @@ mod tests {
     fn the_panel_folds_and_unfolds() {
         let ui = ChatUi::new(true);
         assert!(!ui.todo_collapsed(), "the panel starts open");
-        assert!(ui.toggle_todo_collapsed(), "folding says the panel is folded");
+        assert!(
+            ui.toggle_todo_collapsed(),
+            "folding says the panel is folded"
+        );
         assert!(ui.todo_collapsed());
         assert!(!ui.toggle_todo_collapsed(), "unfolding says it is open");
         assert!(!ui.todo_collapsed());
@@ -1185,8 +1238,14 @@ mod tests {
 
         let line = ui.format_status_line(120).expect("status line");
         let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
-        assert!(stripped.contains("gemini-3.8-flash · daryllvelonio9@gmail.com"), "{stripped}");
-        assert!(stripped.contains("0/1M · 5h 100% (4h 59m) · w 100% (6d 23h)"), "{stripped}");
+        assert!(
+            stripped.contains("gemini-3.8-flash · daryllvelonio9@gmail.com"),
+            "{stripped}"
+        );
+        assert!(
+            stripped.contains("0/1M · 5h 100% (4h 59m) · w 100% (6d 23h)"),
+            "{stripped}"
+        );
     }
 
     #[test]
@@ -1248,5 +1307,21 @@ mod tests {
                 stripped
             );
         }
+    }
+
+    #[test]
+    fn patch_diff_lifecycle_in_live_region() {
+        let ui = ChatUi::new(false);
+        assert!(ui.live.lock().unwrap().patch_diff.is_none());
+
+        let diff = vec!["- old".to_string(), "+ new".to_string()];
+        ui.show_patch_diff(diff.clone());
+        assert_eq!(
+            ui.live.lock().unwrap().patch_diff.as_deref(),
+            Some(diff.as_slice())
+        );
+
+        ui.clear_patch_diff();
+        assert!(ui.live.lock().unwrap().patch_diff.is_none());
     }
 }

@@ -1,30 +1,30 @@
+use colored::Colorize;
+use dialoguer::console::Term;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use colored::Colorize;
-use dialoguer::console::Term;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use harness_core::BackgroundSaver;
 use harness_core::{
-    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError,
-    ModelProvider, SessionBinding, SessionStore,
-    ToolRegistry, TurnOutcome,
+    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
+    SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_evolver::{
     apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
     ListImprovementJobsTool,
 };
 use harness_memory::{
-    ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool,
+    ForgetMemoryTool, MemorySaver, SaveMemoryTool, SaverPolicy, SqliteMemoryEngine,
+    UpdateMemoryTool,
 };
 use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
     UpdateNoteTool,
 };
 use harness_providers::{
-    get_context_window, CredentialManager, GenericProviderClient,
-    ModelDiscovery,
+    get_context_window, CredentialManager, GenericProviderClient, ModelDiscovery,
 };
 
 use super::approval::{
@@ -43,18 +43,15 @@ pub mod viewer;
 
 use commands::{
     execute_slash_command, handle_compact_command, handle_compact_model_switch,
-    handle_delete_command, handle_fork_command, handle_model_switch, handle_name_command,
-    handle_new_command,
-    handle_diff_command, handle_reasoning_switch, handle_rewind_command,
-    handle_summarize_and_new_command,
-    select_slash_command,
-    SLASH_COMMANDS,
+    handle_delete_command, handle_diff_command, handle_fork_command, handle_model_switch,
+    handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
+    handle_summarize_and_new_command, select_slash_command, SLASH_COMMANDS,
 };
 use keys::AppKey;
 use render::{
-    format_approval_verdict, format_tool_call, format_tool_result, parse_turns_from_history,
-    render_transcript, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
-    LUNA_LABEL, PROMPT,
+    format_approval_verdict, format_patch_diff, format_tool_call, format_tool_result,
+    parse_turns_from_history, render_transcript, right_aligned_user_message, OutputBlockKind,
+    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, BackgroundTaskState, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -90,7 +87,10 @@ pub(crate) fn clear_on_exit() {
     crate::commands::clear_screen();
 }
 
-fn load_prompt_history(path: Option<&std::path::Path>, initial_turns: &[TurnRecord]) -> Vec<String> {
+fn load_prompt_history(
+    path: Option<&std::path::Path>,
+    initial_turns: &[TurnRecord],
+) -> Vec<String> {
     let mut prompts = Vec::new();
     if let Some(p) = path {
         if let Ok(content) = std::fs::read_to_string(p) {
@@ -104,7 +104,8 @@ fn load_prompt_history(path: Option<&std::path::Path>, initial_turns: &[TurnReco
     }
     for turn in initial_turns {
         let q = turn.user_query.trim();
-        if !q.is_empty() && !q.starts_with('•') && prompts.last().map(|s| s != q).unwrap_or(true) {
+        if !q.is_empty() && !q.starts_with('•') && prompts.last().map(|s| s != q).unwrap_or(true)
+        {
             prompts.push(q.to_string());
         }
     }
@@ -117,10 +118,76 @@ fn append_prompt_history(path: Option<&std::path::Path>, prompt: &str) {
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
             let _ = writeln!(file, "{}", prompt);
         }
     }
+}
+
+/// Build the independent memory writer, or `None` when the config keeps the session as the writer.
+///
+/// The saver gets its own provider client so it can be pointed at a cheaper model
+/// (`memory.background_model`) than the session's, the same way compaction is configured. It bills
+/// to that client, never to the turn's.
+///
+/// One caveat worth knowing: the client is resolved at startup, so `/model` changes the session
+/// mid-conversation without moving the saver. Point `memory.background_model` at something cheap
+/// and stable and the two never need to agree.
+#[allow(clippy::too_many_arguments)]
+fn build_memory_saver(
+    config: &Config,
+    memory: &Arc<SqliteMemoryEngine>,
+    notes: &Arc<SqliteNotesEngine>,
+    session_provider: &str,
+    session_model: &str,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+) -> Option<Arc<MemorySaver>> {
+    if !config.memory.mode.is_background() {
+        return None;
+    }
+    let provider_id = config
+        .memory
+        .background_provider
+        .clone()
+        .unwrap_or_else(|| session_provider.to_string());
+    let model = config
+        .memory
+        .background_model
+        .clone()
+        .unwrap_or_else(|| session_model.to_string());
+    let client = match GenericProviderClient::new(
+        provider_id.clone(),
+        model.clone(),
+        cred_manager,
+        discovery,
+        config.providers.get(&provider_id),
+    ) {
+        Ok(client) => client,
+        // Unusable saver config is a warning, not a startup failure: the session runs either way,
+        // and the missing pass is visible in the log.
+        Err(error) => {
+            eprintln!(
+                "warning: the background memory saver is off (provider '{provider_id}', model '{model}'): {error}"
+            );
+            return None;
+        }
+    };
+
+    let mut policy = SaverPolicy::new(model);
+    policy.every_turns = config.memory.background_every_turns;
+    policy.tail_messages = config.memory.background_tail_messages;
+    policy.notes = config.memory.background_notes;
+    Some(Arc::new(MemorySaver::new(
+        Arc::new(client),
+        memory.clone(),
+        notes.clone(),
+        policy,
+    )))
 }
 
 pub async fn run_interactive_chat(
@@ -140,7 +207,8 @@ pub async fn run_interactive_chat(
     // The todo list belongs to the session, not to the workspace: a new session starts
     // with an empty list and never sees another session's tasks. The scope is a shared
     // handle, so the tools follow the session when it forks or starts over.
-    let todo_scope = harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
+    let todo_scope =
+        harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
 
     let mut current_provider = config.model.provider.clone();
     let mut current_model = config.model.default.clone();
@@ -216,8 +284,25 @@ pub async fn run_interactive_chat(
         }
     };
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(config.paths.memory_db.clone()))?);
+    let memory = Arc::new(SqliteMemoryEngine::new(Some(
+        config.paths.memory_db.clone(),
+    ))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+
+    // Who writes durable memory. `session` (the default) keeps the original behaviour: the agent
+    // decides mid-turn and calls `save_memory` / `save_note`. `background` hands the pen to an
+    // independent saver that reads each finished turn and writes the same records through the same
+    // tool, so the write tools are withheld from the session to keep exactly one writer.
+    let background_mode = config.memory.mode.is_background();
+    let memory_saver = build_memory_saver(
+        &config,
+        &memory,
+        &notes,
+        &current_provider,
+        &current_model,
+        cred_manager.clone(),
+        discovery.clone(),
+    );
     let evolver = Arc::new(
         CodebaseEvolver::new(
             config.paths.workspace_root.clone(),
@@ -228,28 +313,68 @@ pub async fn run_interactive_chat(
 
     let registry = Arc::new(DefaultToolRegistry::new());
 
-    // Register native memory tools
-    registry.register(Arc::new(SaveMemoryTool::new(memory.clone()))).await?;
-    registry.register(Arc::new(UpdateMemoryTool::new(memory.clone()))).await?;
-    registry.register(Arc::new(ForgetMemoryTool::new(memory.clone()))).await?;
+    // Register native memory tools. In background mode the *writing* tools are withheld: the saver
+    // owns `save_memory` / `save_note`, and leaving them here would give the same store two writers.
+    // Revising and forgetting stay with the session — those maintain existing records rather than
+    // create new ones, and the agent is the only party that knows a memory has gone stale mid-turn.
+    registry
+        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+        .await?;
+    if !background_mode {
+        registry
+            .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+            .await?;
+    }
 
-    // Register native note tools
-    registry.register(Arc::new(SaveNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(ListNotesTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(UpdateNoteTool::new(notes.clone()))).await?;
-    registry.register(Arc::new(DeleteNoteTool::new(notes.clone()))).await?;
+    // Register native note tools (`save_note` follows the same rule as `save_memory`).
+    registry
+        .register(Arc::new(SearchNotesTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ListNotesTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ReadNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+        .await?;
+    if !background_mode {
+        registry
+            .register(Arc::new(SaveNoteTool::new(notes.clone())))
+            .await?;
+    }
+
+    if let Some(saver) = memory_saver.as_ref() {
+        eprintln!(
+            "memory: background saver on ({}), after every {} turn(s) — memories land after each reply",
+            saver.model(),
+            config.memory.background_every_turns
+        );
+    }
 
     // Register self-improvement evolver tools (delegated background engineer)
-    registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await?;
-    registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await?;
+    registry
+        .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
+        .await?;
+    registry
+        .register(Arc::new(CheckImprovementTool::new(evolver.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ListImprovementJobsTool::new(evolver.clone())))
+        .await?;
 
     // Load skills from skills_dir and workspace .harness/skills
     let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
-    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir) {
+    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
+    {
         all_skills.extend(skills);
     }
     let workspace_skills = config.paths.workspace_root.join(".harness/skills");
@@ -272,7 +397,9 @@ pub async fn run_interactive_chat(
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
         registry
-            .register(Arc::new(harness_plugins::SkillViewTool::new(skills_arc.clone())))
+            .register(Arc::new(harness_plugins::SkillViewTool::new(
+                skills_arc.clone(),
+            )))
             .await?;
         registry
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
@@ -333,8 +460,10 @@ pub async fn run_interactive_chat(
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();
 
-    let (approval_tx, mut approval_rx) =
-        mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<harness_core::ApprovalDecision>)>();
+    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<(
+        ApprovalRequest,
+        oneshot::Sender<harness_core::ApprovalDecision>,
+    )>();
 
     let allow_all_session = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -350,9 +479,15 @@ pub async fn run_interactive_chat(
             build_approver(&config)
         };
 
-    let (clarify_tx, mut clarify_rx) =
-        mpsc::unbounded_channel::<(crate::commands::clarify::ClarifyRequest, oneshot::Sender<crate::commands::clarify::ClarifyResponse>)>();
-    registry.register(Arc::new(crate::commands::clarify::ClarifyTool::new(clarify_tx))).await?;
+    let (clarify_tx, mut clarify_rx) = mpsc::unbounded_channel::<(
+        crate::commands::clarify::ClarifyRequest,
+        oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
+    )>();
+    registry
+        .register(Arc::new(crate::commands::clarify::ClarifyTool::new(
+            clarify_tx,
+        )))
+        .await?;
 
     let mut agent_config = config.agent.clone();
     agent_config.skills_summary = skills_summary;
@@ -374,6 +509,10 @@ pub async fn run_interactive_chat(
         session_id: session_id.clone(),
         resume_max_messages: config.session.resume_max_messages,
     });
+    let mut agent = agent;
+    // Attach the independent writer when the config asked for it; `None` leaves the session the
+    // only writer, which is the original behaviour.
+    agent.set_background_saver(memory_saver.map(|saver| saver as Arc<dyn BackgroundSaver>));
 
     let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
     let in_flight_tools_obs = in_flight_tools.clone();
@@ -390,63 +529,95 @@ pub async fn run_interactive_chat(
         .with_hooks(hooks.clone())
         .with_checkpoints(checkpoints.clone())
         .with_observer(Arc::new(move |event| match event {
-        // Reasoning lands in the live region and is settled into the transcript by the animation
-        // tick, so it is visible while it is still being produced.
-        harness_core::AgentEvent::ReasoningDelta(text) => ui_obs.push_reasoning(&text),
-        harness_core::AgentEvent::ContextTokensUpdated { tokens_used } => {
-            ui_obs.update_context_used(tokens_used);
-        }
-        harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-            ui_obs.finish_reasoning();
-            // A todo call reads as the task it acts on, not as the arguments it was sent.
-            let call_fmt = if name == "todo_list" {
-                todo::format_call(&arguments, &todo_scope_obs)
-            } else {
-                format_tool_call(&name, &arguments)
-            };
-            ui_obs.begin_block(OutputBlockKind::Tool);
-            // The call goes into the live region the instant it is invoked, so a slow tool is
-            // visible while it runs; `ToolExecuted` below finalizes the same line into the
-            // transcript with its verdict.
-            ui_obs.start_activity(&call_fmt, &name, &arguments);
-            in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
-                call_formatted: call_fmt,
-                result_formatted: String::new(),
-            });
-        }
-        harness_core::AgentEvent::ToolExecuted { name, is_error, output } => {
-            ui_obs.stop_activity();
-            let status = if is_error {
-                " (failed)".red().to_string()
-            } else {
-                " (success)".green().to_string()
-            };
-            let line = {
-                let mut tools = in_flight_tools_obs.lock().unwrap();
-                if let Some(last) = tools.last_mut() {
-                    last.call_formatted.push_str(&status);
-                    last.result_formatted.clear();
-                    last.call_formatted.clone()
-                } else {
-                    format_tool_result(is_error, &output)
-                }
-            };
-            // The list changed: refresh before drawing so the panel displays the new state immediately
-            if name == "todo_list" {
-                todo::refresh_panel(&ui_obs, &todo_scope_obs);
+            // Reasoning lands in the live region and is settled into the transcript by the animation
+            // tick, so it is visible while it is still being produced.
+            harness_core::AgentEvent::ReasoningDelta(text) => {
+                ui_obs.clear_patch_diff();
+                ui_obs.push_reasoning(&text);
             }
-            ui_obs.emit_above(&line);
-        }
-        harness_core::AgentEvent::Steered { text } => {
-            ui_obs.finish_reasoning();
-            let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
-            in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
-                call_formatted: line.clone(),
-                result_formatted: String::new(),
-            });
-            ui_obs.emit_above(&line);
-        }
-    }));
+            harness_core::AgentEvent::ContextTokensUpdated { tokens_used } => {
+                ui_obs.update_context_used(tokens_used);
+            }
+            harness_core::AgentEvent::ToolExecuting { name, arguments } => {
+                ui_obs.clear_patch_diff();
+                ui_obs.finish_reasoning();
+                // A todo call reads as the task it acts on, not as the arguments it was sent.
+                let call_fmt = if name == "todo_list" {
+                    todo::format_call(&arguments, &todo_scope_obs)
+                } else {
+                    format_tool_call(&name, &arguments)
+                };
+                let diff_lines = if name == "patch" {
+                    let old_str = arguments
+                        .get("old_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let new_str = arguments
+                        .get("new_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format_patch_diff(old_str, new_str)
+                } else {
+                    Vec::new()
+                };
+                ui_obs.begin_block(OutputBlockKind::Tool);
+                // The call goes into the live region the instant it is invoked, so a slow tool is
+                // visible while it runs; `ToolExecuted` below finalizes the same line into the
+                // transcript with its verdict.
+                ui_obs.start_activity(&call_fmt, &name, &arguments);
+                in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                    call_formatted: call_fmt,
+                    result_formatted: String::new(),
+                    diff_lines,
+                });
+            }
+            harness_core::AgentEvent::ToolExecuted {
+                name,
+                is_error,
+                output,
+            } => {
+                ui_obs.stop_activity();
+                let status = if is_error {
+                    " (failed)".red().to_string()
+                } else {
+                    " (success)".green().to_string()
+                };
+                let (line, diff_to_show) = {
+                    let mut tools = in_flight_tools_obs.lock().unwrap();
+                    if let Some(last) = tools.last_mut() {
+                        last.call_formatted.push_str(&status);
+                        last.result_formatted.clear();
+                        let diff = if !is_error && name == "patch" {
+                            last.diff_lines.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        (last.call_formatted.clone(), diff)
+                    } else {
+                        (format_tool_result(is_error, &output), Vec::new())
+                    }
+                };
+                // The list changed: refresh before drawing so the panel displays the new state immediately
+                if name == "todo_list" {
+                    todo::refresh_panel(&ui_obs, &todo_scope_obs);
+                }
+                ui_obs.emit_above(&line);
+                if !diff_to_show.is_empty() {
+                    ui_obs.show_patch_diff(diff_to_show);
+                }
+            }
+            harness_core::AgentEvent::Steered { text } => {
+                ui_obs.clear_patch_diff();
+                ui_obs.finish_reasoning();
+                let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
+                in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                    call_formatted: line.clone(),
+                    result_formatted: String::new(),
+                    diff_lines: Vec::new(),
+                });
+                ui_obs.emit_above(&line);
+            }
+        }));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
     }
@@ -492,7 +663,10 @@ pub async fn run_interactive_chat(
 
     {
         let ag = agent.lock().await;
-        if let Err(error) = ag.emit_hook_event(harness_core::HookEvent::SessionStart, None).await {
+        if let Err(error) = ag
+            .emit_hook_event(harness_core::HookEvent::SessionStart, None)
+            .await
+        {
             tracing::warn!("session_start hook refused the run: {}", error);
         }
     }
@@ -504,10 +678,14 @@ pub async fn run_interactive_chat(
         let cancel_token = CancellationToken::new();
         loop {
             print!("{}", PROMPT.bold().yellow());
-            io::stdout().flush().map_err(|e| HarnessError::Io(e.to_string()))?;
+            io::stdout()
+                .flush()
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
 
             let mut input = String::new();
-            let read = io::stdin().read_line(&mut input).map_err(|e| HarnessError::Io(e.to_string()))?;
+            let read = io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
             if read == 0 {
                 break;
             }
@@ -580,7 +758,9 @@ pub async fn run_interactive_chat(
                     "{} Plan mode {}",
                     "•".cyan(),
                     if next {
-                        "ON (read-only planning, mutating tools gated)".cyan().bold()
+                        "ON (read-only planning, mutating tools gated)"
+                            .cyan()
+                            .bold()
                     } else {
                         "OFF".dimmed()
                     }
@@ -588,7 +768,10 @@ pub async fn run_interactive_chat(
                 continue;
             }
             if query == "/fork" || query.starts_with("/fork ") {
-                let title_opt = query.strip_prefix("/fork").map(str::trim).filter(|s| !s.is_empty());
+                let title_opt = query
+                    .strip_prefix("/fork")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 handle_fork_command(
                     &ui,
                     &store,
@@ -626,7 +809,11 @@ pub async fn run_interactive_chat(
                 } else {
                     query.strip_prefix("/hb").unwrap().trim()
                 };
-                let arg_opt = if stripped.is_empty() { None } else { Some(stripped) };
+                let arg_opt = if stripped.is_empty() {
+                    None
+                } else {
+                    Some(stripped)
+                };
                 crate::commands::heartbeat::handle_chat_heartbeat(
                     arg_opt,
                     &ui,
@@ -698,7 +885,11 @@ pub async fn run_interactive_chat(
                 } else {
                     (false, arg)
                 };
-                let arg_opt = if remaining_arg.is_empty() { None } else { Some(remaining_arg) };
+                let arg_opt = if remaining_arg.is_empty() {
+                    None
+                } else {
+                    Some(remaining_arg)
+                };
                 if is_summarize {
                     handle_summarize_and_new_command(
                         &ui,
@@ -754,7 +945,12 @@ pub async fn run_interactive_chat(
             match res {
                 Ok(outcome) => {
                     usage
-                        .record_chat(&current_provider, &current_model, Some(&session_id), &outcome)
+                        .record_chat(
+                            &current_provider,
+                            &current_model,
+                            Some(&session_id),
+                            &outcome,
+                        )
                         .await;
                     println!("\n{}\n{}\n", LUNA_LABEL.bold().green(), outcome.reply);
                 }
@@ -781,10 +977,7 @@ pub async fn run_interactive_chat(
                     || trimmed.eq_ignore_ascii_case("y")
                     || trimmed.eq_ignore_ascii_case("yes")
                 {
-                    match apply_update_at_startup(
-                        evolver.repo_root(),
-                        &config.paths.jobs_dir,
-                    ) {
+                    match apply_update_at_startup(evolver.repo_root(), &config.paths.jobs_dir) {
                         Ok(Some(msg)) => {
                             println!("{}", msg.green());
                             std::thread::sleep(std::time::Duration::from_millis(800));
@@ -835,15 +1028,26 @@ pub async fn run_interactive_chat(
     let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
     // Seed the bar from the real transcript, not 0: a resumed session already carries history, and
     // reporting "0 used" made the continuation look like a fresh start.
-    let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    let context_used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
     ui.set_status(&current_model, context_used, context_max);
-    refresh_antigravity_status_if_needed(&ui, &current_provider, &current_model, &cred_manager).await;
+    refresh_antigravity_status_if_needed(&ui, &current_provider, &current_model, &cred_manager)
+        .await;
     // A resumed named session shows its name centered in the status bar from the first frame.
-    let stored_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
+    let stored_name = store
+        .get(&session_id)
+        .await
+        .map(|s| s.name)
+        .unwrap_or_default();
     ui.set_session_name(&stored_name);
 
     // Images pasted via Ctrl+V, waiting to ride the next prompt as data URLs.
-    let pending_images: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pending_images: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut evolver_rx = evolver.subscribe();
     if let Some(active) = evolver.active_job().await {
@@ -936,7 +1140,11 @@ pub async fn run_interactive_chat(
     let mut current_query = String::new();
     let mut turn_start = std::time::Instant::now();
 
-    let history_path = config.paths.sessions_db.parent().map(|p| p.join("history.txt"));
+    let history_path = config
+        .paths
+        .sessions_db
+        .parent()
+        .map(|p| p.join("history.txt"));
     let mut prompt_history = load_prompt_history(history_path.as_deref(), &turns);
     let mut history_cursor: Option<usize> = None;
     let mut draft_input = String::new();
@@ -1041,6 +1249,7 @@ pub async fn run_interactive_chat(
                 in_flight_tools.lock().unwrap().push(TurnProcessItem {
                     call_formatted: verdict_str,
                     result_formatted: String::new(),
+                    diff_lines: Vec::new(),
                 });
                 if is_run {
                     let args = request.arguments.clone();
@@ -1354,6 +1563,7 @@ pub async fn run_interactive_chat(
                             in_flight_tools.lock().unwrap().push(TurnProcessItem {
                                 call_formatted: steer_display.clone(),
                                 result_formatted: String::new(),
+                                diff_lines: Vec::new(),
                             });
                             ui.emit_above(&steer_display);
                         } else {
@@ -1679,7 +1889,10 @@ pub async fn run_interactive_chat(
 
     {
         let ag = agent.lock().await;
-        if let Err(error) = ag.emit_hook_event(harness_core::HookEvent::SessionEnd, None).await {
+        if let Err(error) = ag
+            .emit_hook_event(harness_core::HookEvent::SessionEnd, None)
+            .await
+        {
             tracing::warn!("session_end hook failed: {}", error);
         }
     }
@@ -1688,11 +1901,18 @@ pub async fn run_interactive_chat(
     // The screen is wiped on exit, so leave behind just the line that gets the user back in.
     // Both id and name are shown: the name is what the user recognises, the id is the
     // unambiguous handle, and `--session` accepts either.
-    let session_name = store.get(&session_id).await.map(|s| s.name).unwrap_or_default();
+    let session_name = store
+        .get(&session_id)
+        .await
+        .map(|s| s.name)
+        .unwrap_or_default();
     if session_name.is_empty() {
         println!("Resume: luna --session {}", session_id);
     } else {
-        println!("Resume: luna --session {}    (name: {})", session_id, session_name);
+        println!(
+            "Resume: luna --session {}    (name: {})",
+            session_id, session_name
+        );
     }
     Ok(())
 }
@@ -1749,10 +1969,18 @@ async fn prompt_approval_choice(
                 None
             }
             AppKey::Char('y') | AppKey::Char('Y') | AppKey::Char('1') => Some(ApprovalChoice::Once),
-            AppKey::Char('a') | AppKey::Char('A') | AppKey::Char('2') => Some(ApprovalChoice::AllSession),
-            AppKey::Char('n') | AppKey::Char('N') | AppKey::Char('3') | AppKey::Char('c') | AppKey::Char('C') | AppKey::Char('d') | AppKey::Char('D') | AppKey::Escape | AppKey::CtrlC => {
-                Some(ApprovalChoice::Deny)
+            AppKey::Char('a') | AppKey::Char('A') | AppKey::Char('2') => {
+                Some(ApprovalChoice::AllSession)
             }
+            AppKey::Char('n')
+            | AppKey::Char('N')
+            | AppKey::Char('3')
+            | AppKey::Char('c')
+            | AppKey::Char('C')
+            | AppKey::Char('d')
+            | AppKey::Char('D')
+            | AppKey::Escape
+            | AppKey::CtrlC => Some(ApprovalChoice::Deny),
             AppKey::Enter => match selected {
                 0 => Some(ApprovalChoice::Once),
                 1 => Some(ApprovalChoice::AllSession),
@@ -1828,9 +2056,16 @@ async fn prompt_sudo_password_dialog(
     while key_rx.try_recv().is_ok() {}
 
     println!();
-    println!("  {} {}", "🔐".bold(), "Sudo password required for command:".bold());
+    println!(
+        "  {} {}",
+        "🔐".bold(),
+        "Sudo password required for command:".bold()
+    );
     println!("     {}", command.cyan());
-    println!("     {}", "(Enter password; press Enter to confirm, Esc to skip)".dimmed());
+    println!(
+        "     {}",
+        "(Enter password; press Enter to confirm, Esc to skip)".dimmed()
+    );
     print!("  Password: ");
     let _ = io::stdout().flush();
 
@@ -1848,7 +2083,10 @@ async fn prompt_sudo_password_dialog(
                     let _ = io::stdout().flush();
                     return None;
                 } else {
-                    println!("  {} Password received and cached for this session\n", "✔".green().bold());
+                    println!(
+                        "  {} Password received and cached for this session\n",
+                        "✔".green().bold()
+                    );
                     let _ = io::stdout().flush();
                     return Some(password);
                 }
@@ -1873,7 +2111,10 @@ async fn prompt_sudo_password_dialog(
                         let _ = io::stdout().flush();
                         return None;
                     } else {
-                        println!("  {} Password received and cached for this session\n", "✔".green().bold());
+                        println!(
+                            "  {} Password received and cached for this session\n",
+                            "✔".green().bold()
+                        );
                         let _ = io::stdout().flush();
                         return Some(password);
                     }
@@ -1895,7 +2136,9 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
     current_model: &str,
     cred_manager: &Arc<CredentialManager>,
 ) {
-    if current_provider.eq_ignore_ascii_case("antigravity") || current_provider.eq_ignore_ascii_case("agy") {
+    if current_provider.eq_ignore_ascii_case("antigravity")
+        || current_provider.eq_ignore_ascii_case("agy")
+    {
         let creds = cred_manager.get_credentials("antigravity").await;
         if let Some(primary) = creds
             .iter()
@@ -1907,7 +2150,9 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
                 Err(_) => return,
             };
 
-            let strict_email = harness_providers::resolve_antigravity_email_strict(&client, &primary.api_key).await;
+            let strict_email =
+                harness_providers::resolve_antigravity_email_strict(&client, &primary.api_key)
+                    .await;
             let account_name = strict_email.clone().unwrap_or_else(|| {
                 if !primary.label.is_empty() {
                     primary.label.clone()
@@ -1917,9 +2162,12 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
             });
             ui.set_account_name(Some(account_name));
 
-            if let Ok(summary) =
-                harness_providers::retrieve_antigravity_quota(&client, &primary.api_key, Some(cred_manager))
-                    .await
+            if let Ok(summary) = harness_providers::retrieve_antigravity_quota(
+                &client,
+                &primary.api_key,
+                Some(cred_manager),
+            )
+            .await
             {
                 if let Some(display) = summary.format_quota_display(current_model) {
                     ui.set_quota_display(Some(display));
@@ -1934,4 +2182,3 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
         ui.set_quota_display(None);
     }
 }
-
