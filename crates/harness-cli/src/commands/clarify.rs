@@ -6,11 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use harness_core::{
-    error::HarnessError,
-    traits::Tool,
-    types::ToolResult,
-};
+use harness_core::{error::HarnessError, traits::Tool, types::ToolResult};
 
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
@@ -55,7 +51,9 @@ pub struct ClarifyTool {
 }
 
 impl ClarifyTool {
-    pub fn new(tx: mpsc::UnboundedSender<(ClarifyRequest, oneshot::Sender<ClarifyResponse>)>) -> Self {
+    pub fn new(
+        tx: mpsc::UnboundedSender<(ClarifyRequest, oneshot::Sender<ClarifyResponse>)>,
+    ) -> Self {
         Self { tx }
     }
 }
@@ -161,7 +159,10 @@ impl Tool for ClarifyTool {
         let (response_tx, response_rx) = oneshot::channel();
 
         if self.tx.send((request, response_tx)).is_err() {
-            return Ok(ToolResult::error(call_id, "interactive UI channel unavailable"));
+            return Ok(ToolResult::error(
+                call_id,
+                "interactive UI channel unavailable",
+            ));
         }
 
         tokio::select! {
@@ -184,6 +185,95 @@ impl Tool for ClarifyTool {
     }
 }
 
+/// The narrowest a clarification box ever gets, and the widest.
+///
+/// The box follows the terminal between these bounds: narrower terminals get a narrower box
+/// (content wraps instead of being cut), very wide ones stop growing so the text keeps a
+/// readable measure.
+pub const MIN_BOX_WIDTH: usize = 36;
+pub const MAX_BOX_WIDTH: usize = 78;
+
+/// Appended to the first choice so it reads as the suggested one.
+const RECOMMENDED_SUFFIX: &str = " (Recommended)";
+
+/// Word-wrap `text` to at most `room` visible columns per line.
+///
+/// Nothing is ever dropped: words longer than the room are hard-split, so the caller can rely on
+/// every returned line fitting (and on the joined lines holding the whole input).
+fn wrap_plain(text: &str, room: usize) -> Vec<String> {
+    let room = room.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    for raw in text.split('\n') {
+        let mut current = String::new();
+        for word in raw.split_whitespace() {
+            let mut word: Vec<char> = word.chars().collect();
+            // A word that cannot fit on a line of its own is split across lines.
+            if word.len() > room {
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                while word.len() > room {
+                    lines.push(word.drain(..room).collect());
+                }
+            }
+            if word.is_empty() {
+                continue;
+            }
+            let needed = word.len() + usize::from(!current.is_empty());
+            if current.chars().count() + needed > room {
+                lines.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.extend(word);
+        }
+        // A blank source line stays a blank rendered line.
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// The tail of `text` that fits in `room` columns, marked with a leading ellipsis when it had to
+/// scroll. Used for live free-text entry, where the cursor must stay visible.
+fn tail_window(text: &str, room: usize) -> String {
+    let room = room.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= room {
+        return text.to_string();
+    }
+    let mut out = String::from("…");
+    out.extend(chars[chars.len() - room.saturating_sub(1)..].iter());
+    out
+}
+
+/// Render `text` into the box as one or more padded rows, wrapped rather than truncated.
+///
+/// `first_prefix` and `cont_prefix` are emitted before the first and subsequent wrapped lines, so
+/// a wrapped list item keeps its marker on the first line and stays aligned underneath it.
+fn push_wrapped(
+    lines: &mut Vec<String>,
+    text: &str,
+    first_prefix: &str,
+    cont_prefix: &str,
+    body: usize,
+    style: &dyn Fn(&str) -> String,
+    row: &dyn Fn(&str) -> String,
+) {
+    let indent = first_prefix
+        .chars()
+        .count()
+        .max(cont_prefix.chars().count());
+    let room = body.saturating_sub(indent).max(1);
+    for (i, segment) in wrap_plain(text, room).into_iter().enumerate() {
+        let prefix = if i == 0 { first_prefix } else { cont_prefix };
+        lines.push(row(&format!("{prefix}{}", style(&segment))));
+    }
+}
+
 /// Renders the clarification box for a question, choices, and optional free-text typing state.
 pub fn render_clarify_box(
     question: &str,
@@ -192,34 +282,15 @@ pub fn render_clarify_box(
     typing_buf: Option<&str>,
     width: usize,
 ) -> (String, usize) {
-    let total = width.clamp(36, 78);
+    let total = width.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
+    let body = total.saturating_sub(4);
     let visible_len = |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
 
-    let cut = |s: &str, room: usize| -> String {
-        if visible_len(s) > room {
-            format!(
-                "{}…",
-                dialoguer::console::strip_ansi_codes(s)
-                    .chars()
-                    .take(room.saturating_sub(1))
-                    .collect::<String>()
-            )
-        } else {
-            s.to_string()
-        }
-    };
-
+    // Padding only: everything reaching a row has already been wrapped to fit.
     let row = |content: &str| -> String {
-        let max_content = total.saturating_sub(4);
         let vlen = visible_len(content);
-        if vlen > max_content {
-            let truncated = cut(content, max_content);
-            let pad = max_content.saturating_sub(visible_len(&truncated));
-            format!("│ {}{} │", truncated, " ".repeat(pad))
-        } else {
-            let pad = max_content - vlen;
-            format!("│ {}{} │", content, " ".repeat(pad))
-        }
+        let pad = body.saturating_sub(vlen);
+        format!("│ {}{} │", content, " ".repeat(pad))
     };
 
     let blank = format!("│{}│", " ".repeat(total.saturating_sub(2)));
@@ -227,11 +298,23 @@ pub fn render_clarify_box(
     let mut lines = Vec::new();
     let title = "Clarification Needed";
     let dashes = total.saturating_sub(title.len() + 5);
-    lines.push(format!("╭─ {} {}╮", title.bold().cyan(), "─".repeat(dashes)));
+    lines.push(format!(
+        "╭─ {} {}╮",
+        title.bold().cyan(),
+        "─".repeat(dashes)
+    ));
     lines.push(blank.clone());
 
-    // Render Question
-    lines.push(row(&format!(" {}", question.bold())));
+    // Render Question, wrapped over as many rows as it needs.
+    push_wrapped(
+        &mut lines,
+        question,
+        " ",
+        " ",
+        body,
+        &|s| s.bold().to_string(),
+        &row,
+    );
     lines.push(blank.clone());
 
     if let Some(buf) = typing_buf {
@@ -240,42 +323,95 @@ pub fn render_clarify_box(
         let inner_width = total.saturating_sub(8);
         lines.push(row(&format!(" ┌{}┐", "─".repeat(inner_width))));
         let cursor_char = "█".cyan();
-        let display_text = cut(buf, inner_width.saturating_sub(4));
-        lines.push(row(&format!(" │ > {}{} │", display_text.bold(), cursor_char)));
+        let display_text = tail_window(buf, inner_width.saturating_sub(4));
+        lines.push(row(&format!(
+            " │ > {}{} │",
+            display_text.bold(),
+            cursor_char
+        )));
         lines.push(row(&format!(" └{}┘", "─".repeat(inner_width))));
         lines.push(blank.clone());
-        lines.push(row(&format!(
-            " {}",
-            "Type answer • Enter to confirm • Esc to cancel".dimmed()
-        )));
+        push_wrapped(
+            &mut lines,
+            "Type answer • Enter to confirm • Esc to cancel",
+            " ",
+            " ",
+            body,
+            &|s| s.dimmed().to_string(),
+            &row,
+        );
     } else {
         // Choices menu mode
         lines.push(row(&format!(" {}", "Select an option:".dimmed())));
 
-        let mut all_options = Vec::with_capacity(choices.len() + 1);
+        let mut all_options: Vec<String> = Vec::with_capacity(choices.len() + 1);
         for (i, c) in choices.iter().enumerate() {
+            let mut plain = format!("[{}] {}", i + 1, c);
             if i == 0 {
-                all_options.push(format!("[{}] {} {}", i + 1, c, "(Recommended)".dimmed()));
-            } else {
-                all_options.push(format!("[{}] {}", i + 1, c));
+                plain.push_str(RECOMMENDED_SUFFIX);
             }
+            all_options.push(plain);
         }
         let type_idx = choices.len() + 1;
         all_options.push(format!("[{}] Type your answer...", type_idx));
 
+        // Style the body of an option per wrapped line, keeping "(Recommended)" dimmed.
+        let style_choice = |segment: &str, selected: bool| -> String {
+            let head = if selected {
+                segment.bold().to_string()
+            } else {
+                segment.dimmed().to_string()
+            };
+            match segment.find(RECOMMENDED_SUFFIX) {
+                Some(pos) => {
+                    let (body, tail) = segment.split_at(pos);
+                    let body = if selected {
+                        body.bold().to_string()
+                    } else {
+                        body.dimmed().to_string()
+                    };
+                    format!("{body}{}", tail.dimmed())
+                }
+                None => head,
+            }
+        };
+
         for (idx, opt) in all_options.iter().enumerate() {
             if idx == selected {
-                lines.push(row(&format!(" {} {}", "❯".cyan().bold(), opt.bold())));
+                // The arrow keeps its colour; the body is what wraps.
+                let marker = format!(" {} ", "❯".cyan().bold());
+                push_wrapped(
+                    &mut lines,
+                    opt,
+                    &marker,
+                    "   ",
+                    body,
+                    &|s| style_choice(s, true),
+                    &row,
+                );
             } else {
-                lines.push(row(&format!(" {} {}", " ", opt.dimmed())));
+                push_wrapped(
+                    &mut lines,
+                    opt,
+                    "   ",
+                    "   ",
+                    body,
+                    &|s| style_choice(s, false),
+                    &row,
+                );
             }
         }
 
         lines.push(blank.clone());
-        lines.push(row(&format!(
-            " {}",
-            "Navigate with ↑/↓ • Enter or 1-9 to select • Esc to skip".dimmed()
-        )));
+        push_wrapped(
+            &mut lines,
+            "Navigate with ↑/↓ • Enter or 1-9 to select • Esc to skip",
+            " ",
+            " ",
+            body,
+            &|s| s.dimmed().to_string(),
+            &row,
+        );
     }
 
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
@@ -292,7 +428,11 @@ pub async fn prompt_clarify_choice(
     if !ui.is_attended {
         let mut answers = Vec::new();
         for q in &request.questions {
-            let def = q.choices.first().cloned().unwrap_or_else(|| "Yes".to_string());
+            let def = q
+                .choices
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Yes".to_string());
             answers.push(ClarifyAnswer {
                 question: q.question.clone(),
                 answer: def,
@@ -425,7 +565,12 @@ pub async fn prompt_clarify_choice(
             None => ("(skipped by user)".to_string(), None),
         };
 
-        let summary = format!("{} {}: {}", "✔".green().bold(), item.question.dimmed(), chosen_answer.cyan().bold());
+        let summary = format!(
+            "{} {}: {}",
+            "✔".green().bold(),
+            item.question.dimmed(),
+            chosen_answer.cyan().bold()
+        );
         ui.emit_above(&summary);
 
         answers.push(ClarifyAnswer {
@@ -448,6 +593,121 @@ pub async fn prompt_clarify_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip(line: &str) -> String {
+        dialoguer::console::strip_ansi_codes(line).to_string()
+    }
+
+    /// Visible column count of a rendered line, colour codes excluded.
+    fn visible(line: &str) -> usize {
+        strip(line).chars().count()
+    }
+
+    #[test]
+    fn wrap_plain_never_loses_text_and_never_exceeds_the_room() {
+        let text = "Debug pass: which memory writer should stay canonical after this test — session (agent writes) or background saver?";
+        for room in 1..80usize {
+            let wrapped = wrap_plain(text, room);
+            for line in &wrapped {
+                assert!(
+                    line.chars().count() <= room,
+                    "room {room} produced a {}-column line: {line}",
+                    line.chars().count()
+                );
+            }
+            let stripped = |s: &str| -> String {
+                s.chars().filter(|c| !c.is_whitespace()).collect::<String>()
+            };
+            assert_eq!(
+                stripped(&wrapped.join(" ")),
+                stripped(text),
+                "wrapping at {room} dropped or duplicated text"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_plain_hard_splits_a_word_longer_than_the_line() {
+        let wrapped = wrap_plain("supercalifragilisticexpialidocious", 10);
+        assert!(wrapped.len() > 1);
+        assert!(wrapped.iter().all(|l| l.chars().count() <= 10));
+        assert_eq!(wrapped.concat(), "supercalifragilisticexpialidocious");
+    }
+
+    #[test]
+    fn tail_window_keeps_the_end_of_a_long_buffer() {
+        assert_eq!(tail_window("DuckDB", 10), "DuckDB");
+        let shown = tail_window("0123456789abcdef", 6);
+        assert_eq!(shown.chars().count(), 6);
+        assert!(shown.ends_with("bcdef"));
+    }
+
+    #[test]
+    fn a_long_question_wraps_instead_of_being_cut() {
+        let question = "Debug pass: which memory writer should stay canonical after this test — session (agent writes) or background saver?";
+        let choices = vec![
+            "Session mode (agent writes memory mid-turn)".to_string(),
+            "Background saver (independent writer after each turn)".to_string(),
+        ];
+        let terminal = 120;
+        let (rendered, count) = render_clarify_box(question, &choices, 0, None, terminal);
+        let total = terminal.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
+
+        assert!(
+            !rendered.contains('…'),
+            "nothing may be truncated now that the box wraps:\n{rendered}"
+        );
+        assert!(
+            count > 5 + choices.len(),
+            "the question should occupy extra rows"
+        );
+
+        // The box stays a rectangle: every row fills the same width, terminal included.
+        for line in rendered.lines() {
+            assert_eq!(visible(line), total, "ragged row: {line:?}");
+        }
+
+        // Every word of the question and of each choice survives the wrap.
+        let plain = strip(&rendered);
+        for word in question
+            .split_whitespace()
+            .chain(choices.iter().flat_map(|c| c.split_whitespace()))
+        {
+            assert!(plain.contains(word), "wrapped box lost {word:?}");
+        }
+    }
+
+    #[test]
+    fn the_box_follows_a_narrow_terminal() {
+        let question =
+            "A question long enough that a narrow terminal has to wrap it over several rows.";
+        let choices = vec!["The only choice, also rather long for a narrow terminal".to_string()];
+        let (rendered, _) = render_clarify_box(question, &choices, 0, None, 24);
+        let total = 24usize.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
+
+        assert!(!rendered.contains('…'));
+        for line in rendered.lines() {
+            assert_eq!(visible(line), total);
+        }
+        assert!(strip(&rendered).contains("narrow"));
+    }
+
+    #[test]
+    fn a_long_typed_answer_scrolls_to_keep_the_cursor_visible() {
+        let question = "Which database do you prefer?";
+        let choices = vec!["PostgreSQL".to_string()];
+        let (rendered, _) = render_clarify_box(question, &choices, 0, Some(&"x".repeat(400)), 60);
+        let total = 60usize.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
+        assert_eq!(
+            rendered.matches('…').count(),
+            1,
+            "only the scrolled buffer marker may appear"
+        );
+        for line in rendered.lines() {
+            assert_eq!(visible(line), total, "ragged row: {line:?}");
+        }
+        assert!(rendered.contains('█'), "the cursor must stay in the box");
+    }
 
     #[test]
     fn test_render_clarify_box_menu() {
