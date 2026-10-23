@@ -11,7 +11,7 @@ use tracing::debug;
 
 use super::{default_sessions_db, ReplayOutcome, SessionRecord, SessionStore, StoredMessage};
 use crate::error::HarnessError;
-use crate::types::{Message, Role, ToolCall, ToolResult, TokenUsage};
+use crate::types::{Message, Role, TokenUsage, ToolCall, ToolResult};
 
 /// Longest title kept from the first user line.
 const TITLE_MAX_CHARS: usize = 80;
@@ -166,11 +166,8 @@ impl SqliteSessionStore {
             .map_err(|error| session_error("failed to inspect the messages schema", error))?;
         let has_reasoning = message_columns.iter().any(|column| column == "reasoning");
         if !has_reasoning {
-            conn.execute(
-                "ALTER TABLE messages ADD COLUMN reasoning TEXT",
-                [],
-            )
-            .map_err(|error| session_error("failed to add the reasoning column", error))?;
+            conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", [])
+                .map_err(|error| session_error("failed to add the reasoning column", error))?;
         }
         Ok(())
     }
@@ -233,13 +230,21 @@ fn raw_to_stored(raw: RawRow) -> Result<StoredMessage, HarnessError> {
         _ => None,
     };
 
+    // Rows written before the provider layer learned to drop DeepSeek's DSML scaffolding still
+    // carry it, so the filter runs on the way out too: a resumed session cannot replay noise the
+    // live turn never showed, and the model does not get it back as history either.
+    let content = raw
+        .content
+        .map(|text| crate::text::strip_dsml_artifacts(&text))
+        .filter(|text| !text.trim().is_empty());
+
     Ok(StoredMessage {
         id: raw.id,
         seq: raw.seq,
         is_summary: raw.is_summary,
         message: Message {
             role: text_to_role(&raw.role)?,
-            content: raw.content,
+            content,
             reasoning: raw.reasoning.filter(|r| !r.is_empty()),
             tool_calls,
             tool_result,
@@ -296,7 +301,11 @@ fn query_rows(
         .map_err(|error| session_error("failed to read session messages", error))?;
 
     // Read newest-first (that is where a LIMIT has to bite), hand back oldest-first.
-    let mut stored: Vec<StoredMessage> = rows.into_iter().rev().map(raw_to_stored).collect::<Result<Vec<_>, _>>()?;
+    let mut stored: Vec<StoredMessage> = rows
+        .into_iter()
+        .rev()
+        .map(raw_to_stored)
+        .collect::<Result<Vec<_>, _>>()?;
     if !summaries {
         // If a limit boundary cuts in the middle of a turn, drop leading messages until
         // the first User message so replayed history always starts on a clean user turn.
@@ -321,8 +330,8 @@ fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title, name, model): (String, String, String, String, String) = conn
-        .query_row(
+    let (created_at, updated_at, title, name, model): (String, String, String, String, String) =
+        conn.query_row(
             "SELECT created_at, updated_at, title, name, model FROM sessions WHERE id = ?1",
             params![id],
             |row| {
@@ -602,7 +611,10 @@ impl SessionStore for SqliteSessionStore {
         .map(Some)
         .or_else(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(session_error("failed to read the most recent session", other)),
+            other => Err(session_error(
+                "failed to read the most recent session",
+                other,
+            )),
         })
     }
 
@@ -638,7 +650,13 @@ impl SessionStore for SqliteSessionStore {
             .query_row(
                 "SELECT title, name, model FROM sessions WHERE id = ?1",
                 params![source_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .map_err(|e| session_error(&format!("source session '{source_id}' not found"), e))?;
 
@@ -672,4 +690,3 @@ impl SessionStore for SqliteSessionStore {
         Ok(new_id)
     }
 }
-

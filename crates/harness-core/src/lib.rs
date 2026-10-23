@@ -14,6 +14,7 @@ pub mod session;
 pub mod substrate;
 pub mod surface;
 pub mod tasks;
+pub mod text;
 pub mod tools;
 pub mod traits;
 pub mod types;

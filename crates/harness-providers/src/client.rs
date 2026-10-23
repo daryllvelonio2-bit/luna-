@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::stream::BoxStream;
@@ -6,15 +5,16 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
+use crate::auth::CredentialManager;
+use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
+use crate::discovery::ModelDiscovery;
 use harness_core::{
     config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider,
     ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
-use crate::auth::CredentialManager;
-use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
-use crate::discovery::ModelDiscovery;
 
 /// Extract the stream events carried by one OpenAI-compatible SSE chunk. A single chunk can
 /// hold reasoning, visible text and a tool-call fragment at the same time, so every field is
@@ -84,7 +84,10 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
                         .unwrap_or(position);
                     events.push(Ok(E::ToolCallDelta {
                         index,
-                        id: call.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()),
+                        id: call
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .map(|s| s.to_string()),
                         name: call
                             .get("function")
                             .and_then(|f| f.get("name"))
@@ -114,9 +117,18 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
         events.push(Ok(E::Completed {
             finish_reason: None,
             usage: Some(TokenUsage {
-                prompt_tokens: usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
-                completion_tokens: usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
-                total_tokens: usage.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+                prompt_tokens: usage
+                    .get("prompt_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32,
+                completion_tokens: usage
+                    .get("completion_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32,
+                total_tokens: usage
+                    .get("total_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32,
             }),
         }));
     }
@@ -176,8 +188,13 @@ impl GenericProviderClient {
 
     /// Builds the auth headers for one request and returns the secret that was used, so a failing
     /// request can tell the [`CredentialManager`] *which* credential to retire.
-    async fn build_auth_headers(&self) -> Result<(HeaderMap, Option<String>, SecretString), HarnessError> {
-        let secret = self.cred_manager.acquire_credential(&self.provider_id).await?;
+    async fn build_auth_headers(
+        &self,
+    ) -> Result<(HeaderMap, Option<String>, SecretString), HarnessError> {
+        let secret = self
+            .cred_manager
+            .acquire_credential(&self.provider_id)
+            .await?;
         let api_key = secret.expose_secret().to_string();
 
         let mut headers = HeaderMap::new();
@@ -219,7 +236,10 @@ impl GenericProviderClient {
 
         if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
             let session_id = crate::opencode::get_or_create_opencode_session_id();
-            headers.insert("User-Agent", HeaderValue::from_static("opencode/latest/2.0.29/cli"));
+            headers.insert(
+                "User-Agent",
+                HeaderValue::from_static("opencode/latest/2.0.29/cli"),
+            );
             headers.insert("x-opencode-client", HeaderValue::from_static("cli"));
             headers.insert("x-opencode-project", HeaderValue::from_static("global"));
             if let Ok(v) = HeaderValue::from_str(&session_id) {
@@ -355,7 +375,10 @@ impl ModelProvider for GenericProviderClient {
             url = format!("{}?{}", url, q);
         }
 
-        let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "supercode" {
             let res = crate::supercode::execute_supercode_completion(
@@ -369,7 +392,10 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
@@ -388,7 +414,10 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
@@ -407,96 +436,130 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
             return res;
         }
 
-            if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
-                let mut stream = self.stream(messages, tools, options).await?;
-                let mut content = String::new();
-                let mut reasoning = String::new();
-                let mut usage = None;
-                let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
-                    std::collections::BTreeMap::new();
+        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+            let mut stream = self.stream(messages, tools, options).await?;
+            let mut content = String::new();
+            let mut reasoning = String::new();
+            let mut usage = None;
+            let mut tool_builders: std::collections::BTreeMap<usize, (String, String, String)> =
+                std::collections::BTreeMap::new();
 
-                while let Some(ev_res) = stream.next().await {
-                    match ev_res? {
-                        StreamEvent::ContentDelta(d) => content.push_str(&d),
-                        StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
-                        StreamEvent::ToolCallDelta {
-                            index,
-                            id,
-                            name,
-                            arguments_delta,
-                            ..
-                        } => {
-                            let entry = tool_builders
-                                .entry(index)
-                                .or_insert_with(|| (String::new(), String::new(), String::new()));
-                            if let Some(i) = id {
-                                entry.0.push_str(&i);
-                            }
-                            if let Some(n) = name {
-                                entry.1.push_str(&n);
-                            }
-                            if let Some(a) = arguments_delta {
-                                entry.2.push_str(&a);
-                            }
+            while let Some(ev_res) = stream.next().await {
+                match ev_res? {
+                    StreamEvent::ContentDelta(d) => content.push_str(&d),
+                    StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
+                    StreamEvent::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        arguments_delta,
+                        ..
+                    } => {
+                        let entry = tool_builders
+                            .entry(index)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        if let Some(i) = id {
+                            entry.0.push_str(&i);
                         }
-                        StreamEvent::Completed { usage: u, .. } => {
-                            usage = u;
+                        if let Some(n) = name {
+                            entry.1.push_str(&n);
+                        }
+                        if let Some(a) = arguments_delta {
+                            entry.2.push_str(&a);
                         }
                     }
-                }
-
-                let mut tool_calls = Vec::new();
-                for (_, (id, name, args_str)) in tool_builders {
-                    if !name.is_empty() {
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
-                        tool_calls.push(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            signature: None,
-                        });
+                    StreamEvent::Completed { usage: u, .. } => {
+                        usage = u;
                     }
                 }
-
-                return Ok(Message {
-                    role: Role::Assistant,
-                    content: if content.is_empty() { None } else { Some(content) },
-                    reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
-                    tool_calls,
-                    tool_result: None,
-                    usage,
-                });
             }
 
-            let mut body = json!({
-                "model": model,
-                "messages": self.serialize_messages(messages),
+            let mut tool_calls = Vec::new();
+            for (_, (id, name, args_str)) in tool_builders {
+                if !name.is_empty() {
+                    let arguments: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        signature: None,
+                    });
+                }
+            }
+
+            return Ok(Message {
+                role: Role::Assistant,
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                reasoning: if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                },
+                tool_calls,
+                tool_result: None,
+                usage,
             });
+        }
 
-            if !tools.is_empty() {
-                body["tools"] = self.serialize_tools(tools);
-            }
-            if let Some(temp) = options.temperature {
-                body["temperature"] = json!(temp);
-            }
-            if let Some(max_tok) = options.max_tokens {
-                body["max_tokens"] = json!(max_tok);
-            }
-            if let Some(effort) = options.reasoning_effort {
-                if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
-                    body["reasoning_effort"] = json!(s);
-                }
-            }
+        let mut body = json!({
+            "model": model,
+            "messages": self.serialize_messages(messages),
+        });
 
-            let mut resp = match self
+        if !tools.is_empty() {
+            body["tools"] = self.serialize_tools(tools);
+        }
+        if let Some(temp) = options.temperature {
+            body["temperature"] = json!(temp);
+        }
+        if let Some(max_tok) = options.max_tokens {
+            body["max_tokens"] = json!(max_tok);
+        }
+        if let Some(effort) = options.reasoning_effort {
+            if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
+                body["reasoning_effort"] = json!(s);
+            }
+        }
+
+        let mut resp = match self
+            .http_client
+            .post(&url)
+            .headers(headers.clone())
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: format!("HTTP error: {}", e),
+                })
+            }
+        };
+
+        // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
+        // retry once without reasoning_effort for models that do not support it.
+        if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+            if let Some(map) = body.as_object_mut() {
+                map.remove("reasoning_effort");
+            }
+            if let Ok(retry_resp) = self
                 .http_client
                 .post(&url)
                 .headers(headers.clone())
@@ -504,32 +567,9 @@ impl ModelProvider for GenericProviderClient {
                 .send()
                 .await
             {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(HarnessError::ProviderError {
-                        provider: self.provider_id.clone(),
-                        message: format!("HTTP error: {}", e),
-                    })
-                }
-            };
-
-            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
-            // retry once without reasoning_effort for models that do not support it.
-            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("reasoning_effort");
-                }
-                if let Ok(retry_resp) = self
-                    .http_client
-                    .post(&url)
-                    .headers(headers.clone())
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    resp = retry_resp;
-                }
+                resp = retry_resp;
             }
+        }
 
         if resp.status().as_u16() == 429 {
             self.retire_failed_credential(&secret).await;
@@ -553,7 +593,8 @@ impl ModelProvider for GenericProviderClient {
             });
         }
 
-            let resp_json: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
+        let resp_json: serde_json::Value =
+            resp.json().await.map_err(|e| HarnessError::ProviderError {
                 provider: self.provider_id.clone(),
                 message: format!("Failed to parse response JSON: {}", e),
             })?;
@@ -566,10 +607,12 @@ impl ModelProvider for GenericProviderClient {
                 message: "No choices returned by LLM".to_string(),
             })?;
 
-        let msg_val = choice.get("message").ok_or_else(|| HarnessError::ProviderError {
-            provider: self.provider_id.clone(),
-            message: "Choice has no message".to_string(),
-        })?;
+        let msg_val = choice
+            .get("message")
+            .ok_or_else(|| HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: "Choice has no message".to_string(),
+            })?;
 
         let mut reasoning = msg_val
             .get("reasoning_content")
@@ -577,14 +620,19 @@ impl ModelProvider for GenericProviderClient {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
 
-        let mut content = msg_val.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
+        let mut content = msg_val
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
 
         if reasoning.is_none() {
             if let Some(c) = &content {
                 if let Some(start) = c.find("<think>") {
                     if let Some(end) = c.find("</think>") {
                         let think_text = c[start + 7..end].trim().to_string();
-                        let rest = format!("{}{}", &c[..start], &c[end + 8..]).trim().to_string();
+                        let rest = format!("{}{}", &c[..start], &c[end + 8..])
+                            .trim()
+                            .to_string();
                         if !think_text.is_empty() {
                             reasoning = Some(think_text);
                         }
@@ -594,13 +642,41 @@ impl ModelProvider for GenericProviderClient {
             }
         }
 
+        // DeepSeek's DSML scaffolding can also arrive whole (non-streaming, or a gateway that does
+        // not split it), and it is protocol noise rather than the model speaking — so it must never
+        // become the stored message text. `raw_text_present` remembers that the model did emit
+        // *something*, so an all-scaffolding reply is reported as a no-text turn, not an empty one.
+        let raw_text_present = content
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false);
+        if let Some(text) = content.as_deref() {
+            let scrubbed = harness_core::text::strip_dsml_artifacts(text);
+            content = if scrubbed.trim().is_empty() {
+                None
+            } else {
+                Some(scrubbed)
+            };
+        }
+
         let mut tool_calls = Vec::new();
         if let Some(tc_array) = msg_val.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tc_array {
-                let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let id = tc
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let func = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                let args_raw = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                let name = func
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_raw = func
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
                 let args: serde_json::Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
                 tool_calls.push(ToolCall {
                     id,
@@ -630,11 +706,14 @@ impl ModelProvider for GenericProviderClient {
         });
 
         if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
-            if let Some(r) = reasoning {
+            // A reply whose text was nothing but protocol scaffolding still *happened* — the model
+            // spoke, it just spoke in markup — so it is reported as a no-text turn instead of being
+            // treated as an empty (failed) response.
+            if reasoning.is_some() || raw_text_present {
                 return Ok(Message {
                     role: Role::Assistant,
                     content: Some(harness_core::types::NO_TEXT_RESPONSE.to_string()),
-                    reasoning: Some(r),
+                    reasoning,
                     tool_calls: Vec::new(),
                     tool_result: None,
                     usage,
@@ -642,7 +721,9 @@ impl ModelProvider for GenericProviderClient {
             }
             return Err(HarnessError::ProviderError {
                 provider: self.provider_id.clone(),
-                message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+                message:
+                    "Model returned an empty response. The model may be overloaded or unavailable."
+                        .to_string(),
             });
         }
 
@@ -670,7 +751,10 @@ impl ModelProvider for GenericProviderClient {
             let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
         }
 
-        let model = options.model.clone().unwrap_or_else(|| self.default_model.clone());
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "supercode" {
             let (_, _, secret) = self.build_auth_headers().await?;
@@ -685,7 +769,10 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
@@ -705,7 +792,10 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
@@ -727,7 +817,10 @@ impl ModelProvider for GenericProviderClient {
             )
             .await;
             if let Err(ref err) = res {
-                if matches!(err, HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }) {
+                if matches!(
+                    err,
+                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+                ) {
                     self.retire_failed_credential(&secret).await;
                 }
             }
@@ -803,7 +896,8 @@ impl ModelProvider for GenericProviderClient {
                 self.retire_failed_credential(&secret).await;
             }
             let body_text = resp.text().await.unwrap_or_default();
-            let is_overloaded = status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
+            let is_overloaded =
+                status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
             return Err(HarnessError::ProviderError {
                 provider: self.provider_id.clone(),
                 message: if is_overloaded {
@@ -872,16 +966,20 @@ impl ModelProvider for GenericProviderClient {
                 message: format!("HTTP error: {}", e),
             })?;
 
-        let json_val: serde_json::Value = resp.json().await.map_err(|e| HarnessError::ProviderError {
-            provider: self.provider_id.clone(),
-            message: format!("Failed to parse embeddings JSON: {}", e),
-        })?;
+        let json_val: serde_json::Value =
+            resp.json().await.map_err(|e| HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: format!("Failed to parse embeddings JSON: {}", e),
+            })?;
 
         let mut embeddings = Vec::new();
         if let Some(data) = json_val.get("data").and_then(|d| d.as_array()) {
             for item in data {
                 if let Some(emb_arr) = item.get("embedding").and_then(|e| e.as_array()) {
-                    let vec: Vec<f32> = emb_arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+                    let vec: Vec<f32> = emb_arr
+                        .iter()
+                        .filter_map(|v| v.as_f64().map(|f| f as f32))
+                        .collect();
                     embeddings.push(vec);
                 }
             }
@@ -965,19 +1063,35 @@ mod tests {
         // DeepSeek on NVIDIA NIM rejects "minimal" and "medium" with HTTP 400.
         // It must normalize to "low" and "high".
         assert_eq!(
-            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Minimal),
+            normalize_reasoning_effort(
+                "nvidia",
+                "deepseek-ai/deepseek-v4.1-flash",
+                ReasoningEffort::Minimal
+            ),
             Some("low")
         );
         assert_eq!(
-            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Low),
+            normalize_reasoning_effort(
+                "nvidia",
+                "deepseek-ai/deepseek-v4.1-flash",
+                ReasoningEffort::Low
+            ),
             Some("low")
         );
         assert_eq!(
-            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Medium),
+            normalize_reasoning_effort(
+                "nvidia",
+                "deepseek-ai/deepseek-v4.1-flash",
+                ReasoningEffort::Medium
+            ),
             Some("high")
         );
         assert_eq!(
-            normalize_reasoning_effort("nvidia", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::High),
+            normalize_reasoning_effort(
+                "nvidia",
+                "deepseek-ai/deepseek-v4.1-flash",
+                ReasoningEffort::High
+            ),
             Some("high")
         );
 
@@ -987,7 +1101,11 @@ mod tests {
             Some("medium")
         );
         assert_eq!(
-            normalize_reasoning_effort("openrouter", "deepseek-ai/deepseek-v4.1-flash", ReasoningEffort::Medium),
+            normalize_reasoning_effort(
+                "openrouter",
+                "deepseek-ai/deepseek-v4.1-flash",
+                ReasoningEffort::Medium
+            ),
             Some("medium")
         );
     }

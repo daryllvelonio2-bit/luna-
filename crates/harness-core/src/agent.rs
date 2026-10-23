@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -143,7 +143,9 @@ pub enum AgentEvent {
     ///
     /// A UI needs this to animate: the fold can take seconds, and without a start event the only
     /// evidence of it is the summary that appears afterwards.
-    CompactionStarted { forced: bool },
+    CompactionStarted {
+        forced: bool,
+    },
     /// The fold finished, whatever came of it: `folded` is the summary that replaced the oldest
     /// turns, `error` is why a fold the user asked for did not happen. Both `None` means there was
     /// nothing to fold (or an automatic fold failed and the turn continued on the full transcript).
@@ -1401,7 +1403,17 @@ where
             }
         }
 
+        // A gateway can echo DeepSeek's DSML scaffolding into the text channel *next to* a perfectly
+        // good tool call. That is protocol noise rather than the model speaking, so it must not be
+        // stored: otherwise a resumed session replays pages of `…DSML… calls>` that never showed
+        // up during the live turn.
+        content = crate::text::strip_dsml_artifacts(&content);
+
         let mut response = Message::assistant(content);
+        if response.content.as_deref().unwrap_or("").trim().is_empty() {
+            // Nothing but scaffolding (or nothing at all): the turn has no text, only calls.
+            response.content = None;
+        }
         response.reasoning = if reasoning.is_empty() {
             None
         } else {
