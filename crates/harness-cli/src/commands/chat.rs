@@ -427,6 +427,7 @@ pub async fn run_interactive_chat(
     let mut agent_config = config.agent.clone();
     agent_config.skills_summary = skills_summary;
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
+    agent_config.memory_mode = config.memory.mode;
 
     let agent = Agent::new(
         provider,

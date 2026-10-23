@@ -195,6 +195,7 @@ pub async fn run_voice_loop(
     let mut agent_cfg = config.agent.clone();
     agent_cfg.skills_summary = skills_summary;
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
+    agent_cfg.memory_mode = config.memory.mode;
 
     let agent = Arc::new(
         Agent::new(provider, memory, notes, evolver, registry, agent_cfg)

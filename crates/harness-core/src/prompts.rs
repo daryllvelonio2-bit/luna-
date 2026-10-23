@@ -13,6 +13,8 @@ const PROMPTS_FILE: &str = include_str!("../prompts.md");
 pub const SYSTEM_PROMPT: &str = "SYSTEM_PROMPT";
 pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
 pub const ENGINEER_SYSTEM_PROMPT: &str = "ENGINEER_SYSTEM_PROMPT";
+pub const MEMORY_SESSION_PROMPT: &str = "MEMORY_SESSION_PROMPT";
+pub const MEMORY_BACKGROUND_PROMPT: &str = "MEMORY_BACKGROUND_PROMPT";
 
 /// The body of the `name` section, with surrounding blank lines trimmed.
 ///
@@ -48,6 +50,8 @@ mod tests {
             SYSTEM_PROMPT,
             COMPACTION_INSTRUCTION,
             ENGINEER_SYSTEM_PROMPT,
+            MEMORY_SESSION_PROMPT,
+            MEMORY_BACKGROUND_PROMPT,
         ] {
             let body = section(name).expect("declared section is present");
             assert!(!body.is_empty(), "{name} loaded empty");
@@ -68,6 +72,10 @@ mod tests {
         assert!(
             body.contains("{{AVAILABLE_SKILLS}}"),
             "skills marker missing"
+        );
+        assert!(
+            body.contains("{{MEMORY_AND_NOTE_PROTOCOL}}"),
+            "memory and note protocol marker missing"
         );
     }
 

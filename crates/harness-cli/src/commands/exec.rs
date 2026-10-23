@@ -215,6 +215,7 @@ pub async fn run_exec(
     };
     agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
+    agent_cfg.memory_mode = config.memory.mode;
     if let Some(skills_summary) = skills_summary(&config) {
         agent_cfg.skills_summary = Some(skills_summary);
     }

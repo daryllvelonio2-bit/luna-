@@ -47,6 +47,9 @@ pub struct AgentConfig {
     /// Root directory of the workspace. Injected into system prompt so the model knows its working directory.
     #[serde(default)]
     pub workspace_root: Option<PathBuf>,
+    /// Mode for memory and note persistence: Session writer vs Background saver.
+    #[serde(default)]
+    pub memory_mode: crate::config::MemoryMode,
 }
 
 impl Default for AgentConfig {
@@ -64,6 +67,7 @@ impl Default for AgentConfig {
             engineer_provider: None,
             skills_summary: None,
             workspace_root: None,
+            memory_mode: crate::config::MemoryMode::Session,
         }
     }
 }
@@ -274,12 +278,27 @@ where
 
     /// Replace (or clear) the memory saver at runtime.
     pub fn set_background_saver(&mut self, saver: Option<Arc<dyn BackgroundSaver>>) {
+        if saver.is_some() {
+            self.config.memory_mode = crate::config::MemoryMode::Background;
+        } else {
+            self.config.memory_mode = crate::config::MemoryMode::Session;
+        }
         self.saver = saver.map(SaverHook::from_saver);
+    }
+
+    /// Update the memory mode at runtime.
+    pub fn set_memory_mode(&mut self, mode: crate::config::MemoryMode) {
+        self.config.memory_mode = mode;
     }
 
     /// The attached saver, if any (used by the CLI to report the mode).
     pub fn background_saver(&self) -> Option<&SaverHook> {
         self.saver.as_ref()
+    }
+
+    /// Build the full system prompt for a turn, with memories, skills, and memory mode instructions substituted.
+    pub async fn build_system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
+        self.system_prompt(user_input).await
     }
 
     /// Hand the finished turn to the saver when its interval is due.
@@ -1411,13 +1430,23 @@ where
             .as_deref()
             .unwrap_or("(no specialized skills installed)");
 
+        let memory_instruction = match self.config.memory_mode {
+            crate::config::MemoryMode::Session => {
+                crate::prompts::section(crate::prompts::MEMORY_SESSION_PROMPT)?
+            }
+            crate::config::MemoryMode::Background => {
+                crate::prompts::section(crate::prompts::MEMORY_BACKGROUND_PROMPT)?
+            }
+        };
+
         let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
             .replace(
                 "{{SYSTEM_PROMPT_PREFIX}}",
                 self.config.system_prompt_prefix.as_deref().unwrap_or(""),
             )
             .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
-            .replace("{{AVAILABLE_SKILLS}}", skills_prompt);
+            .replace("{{AVAILABLE_SKILLS}}", skills_prompt)
+            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction);
 
         let env_info = if let Some(ref root) = self.config.workspace_root {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());

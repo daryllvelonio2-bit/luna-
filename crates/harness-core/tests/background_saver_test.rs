@@ -307,3 +307,32 @@ async fn a_zero_interval_disables_the_saver_entirely() {
     assert_eq!(saver.calls.load(Ordering::SeqCst), 0);
     assert!(passes.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn memory_mode_switches_system_prompt_instructions_dynamically() {
+    let mut config = AgentConfig::default();
+    config.memory_mode = harness_core::MemoryMode::Session;
+
+    let agent = Agent::new(
+        Arc::new(MockProvider),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        config,
+    );
+
+    // 1. In Session writer mode: prompt instructs to call save_memory / save_note
+    let session_prompt = agent.build_system_prompt("hello").await.unwrap();
+    assert!(session_prompt.contains("SESSION WRITER MODE"));
+    assert!(session_prompt.contains("save_memory"));
+    assert!(!session_prompt.contains("BACKGROUND SAVER MODE"));
+
+    // 2. In Background saver mode: prompt changes to background saver instructions
+    let mut bg_agent = agent;
+    bg_agent.set_memory_mode(harness_core::MemoryMode::Background);
+    let bg_prompt = bg_agent.build_system_prompt("hello").await.unwrap();
+    assert!(bg_prompt.contains("BACKGROUND SAVER MODE"));
+    assert!(bg_prompt.contains("Do NOT attempt to call `save_memory` or `save_note` mid-turn"));
+    assert!(!bg_prompt.contains("SESSION WRITER MODE"));
+}
