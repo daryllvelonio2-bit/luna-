@@ -201,12 +201,19 @@ impl MemorySaver {
         let options = CompletionOptions {
             model: Some(self.policy.model.clone()),
             temperature: Some(0.0),
-            max_tokens: Some(1_200),
+            max_tokens: Some(4_096),
             ..CompletionOptions::default()
         };
         let response = self.provider.complete(&messages, &[], &options).await?;
         let text = response.content.as_deref().unwrap_or_default();
-        let distilled = parse_distilled(text)?;
+        let candidate = if (text.is_empty() || text == harness_core::types::NO_TEXT_RESPONSE)
+            && response.reasoning.is_some()
+        {
+            response.reasoning.as_deref().unwrap_or_default()
+        } else {
+            text
+        };
+        let distilled = parse_distilled(candidate)?;
         self.apply(distilled).await
     }
 

@@ -249,23 +249,32 @@ pub async fn run_interactive_chat(
 
     let registry = Arc::new(DefaultToolRegistry::new());
 
-    // Register native memory tools. In background mode the *writing* tools are withheld: the saver
-    // owns `save_memory` / `save_note`, and leaving them here would give the same store two writers.
-    // Revising and forgetting stay with the session — those maintain existing records rather than
-    // create new ones, and the agent is the only party that knows a memory has gone stale mid-turn.
-    registry
-        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
-        .await?;
+    // Register native memory tools.
+    // In background saver mode, all memory/note modification tools are withheld from the main agent
+    // because the background saver owns memory creation, updating, and persistence completely.
+    // In session writer mode, the main agent is the primary writer and receives the full toolset.
     if !background_mode {
         registry
             .register(Arc::new(SaveMemoryTool::new(memory.clone())))
             .await?;
+        registry
+            .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(SaveNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+            .await?;
     }
 
-    // Register native note tools (`save_note` follows the same rule as `save_memory`).
+    // Read-only note tools are always available so the agent can reference existing knowledge:
     registry
         .register(Arc::new(SearchNotesTool::new(notes.clone())))
         .await?;
@@ -275,17 +284,6 @@ pub async fn run_interactive_chat(
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
         .await?;
-    registry
-        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
-        .await?;
-    if !background_mode {
-        registry
-            .register(Arc::new(SaveNoteTool::new(notes.clone())))
-            .await?;
-    }
 
     // One line of notice, because a mode that changes *where* records come from is worth stating.
     if memory_saver.is_some() {

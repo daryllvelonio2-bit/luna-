@@ -1432,11 +1432,12 @@ where
 
         let memory_instruction = match self.config.memory_mode {
             crate::config::MemoryMode::Session => {
-                crate::prompts::section(crate::prompts::MEMORY_SESSION_PROMPT)?
+                format!(
+                    "{}\n\n",
+                    crate::prompts::section(crate::prompts::MEMORY_SESSION_PROMPT)?
+                )
             }
-            crate::config::MemoryMode::Background => {
-                crate::prompts::section(crate::prompts::MEMORY_BACKGROUND_PROMPT)?
-            }
+            crate::config::MemoryMode::Background => String::new(),
         };
 
         let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
@@ -1446,6 +1447,7 @@ where
             )
             .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
             .replace("{{AVAILABLE_SKILLS}}", skills_prompt)
+            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", &memory_instruction)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction);
 
         let env_info = if let Some(ref root) = self.config.workspace_root {

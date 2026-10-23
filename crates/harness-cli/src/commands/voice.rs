@@ -107,18 +107,27 @@ pub async fn run_voice_loop(
     );
     let registry = Arc::new(DefaultToolRegistry::new());
 
-    registry
-        .register(Arc::new(SaveMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(SaveNoteTool::new(notes.clone())))
-        .await?;
+    let background_mode = config.memory.mode.is_background();
+    if !background_mode {
+        registry
+            .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(SaveNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+            .await?;
+    }
     registry
         .register(Arc::new(SearchNotesTool::new(notes.clone())))
         .await?;
@@ -127,12 +136,6 @@ pub async fn run_voice_loop(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
         .await?;
     registry
         .register(Arc::new(InspectSourceTool::new(evolver.clone())))

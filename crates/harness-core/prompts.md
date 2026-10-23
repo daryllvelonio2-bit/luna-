@@ -149,13 +149,12 @@ Operations & Boundaries
 - Keep active memories lightweight; delegate all long-form context to notes.
 
 ===== MEMORY_BACKGROUND_PROMPT =====
-MEMORY & NOTE PROTOCOL (BACKGROUND SAVER MODE):
-Durable memories and reference notes are managed automatically by an autonomous background saver that processes each finished turn.
-- Do NOT attempt to call `save_memory` or `save_note` mid-turn: those writing tools are withheld from your session to prevent duplicate writers and race conditions.
-- Focus completely on fulfilling the user's task directly without spending turn latency on persistence.
-- You still have access to retrieval and revision tools:
-  * `update_memory` and `forget_memory` if existing memories are contradicted or need correction mid-turn.
-  * `search_notes`, `list_notes`, `read_note`, `update_note`, `delete_note` to consult or update existing reference notes.
+MEMORY & PERSISTENCE (BACKGROUND SAVER MODE):
+Durable memories and long-term reference notes are handled completely automatically in the background by an autonomous saver that processes each turn after your reply.
+- You have NO memory-saving or memory-modifying tools: do NOT attempt to save, update, or delete memories or notes. All memory creation and maintenance is owned exclusively by the background saver.
+- Focus 100% on fulfilling the user's task directly without spending turn latency on persistence.
+- Relevant existing memories are automatically retrieved and displayed under CURRENT ACTIVE MEMORIES above.
+- You have read-only note reference tools: `search_notes`, `list_notes`, and `read_note` to consult existing documentation if needed.
 
 ===== COMPACTION_INSTRUCTION =====
 You compress conversation history for an AI agent. Rewrite the following transcript into a dense, 3-to-5 line factual state snapshot. Preserve:

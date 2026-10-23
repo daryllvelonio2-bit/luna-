@@ -112,19 +112,28 @@ pub async fn run_exec(
 
     // The tool surface matches the interactive chat: a headless run that could do less than the
     // chat could would be a different agent wearing the same name.
+    let background_mode = config.memory.mode.is_background();
     let registry = Arc::new(DefaultToolRegistry::new());
-    registry
-        .register(Arc::new(SaveMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
-        .await?;
-    registry
-        .register(Arc::new(SaveNoteTool::new(notes.clone())))
-        .await?;
+    if !background_mode {
+        registry
+            .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+            .await?;
+        registry
+            .register(Arc::new(SaveNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+            .await?;
+        registry
+            .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+            .await?;
+    }
     registry
         .register(Arc::new(SearchNotesTool::new(notes.clone())))
         .await?;
@@ -133,12 +142,6 @@ pub async fn run_exec(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
         .await?;
     registry
         .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
