@@ -407,6 +407,20 @@ impl Tool for TodoListTool {
                     return Ok(bad("'add' requires non-empty 'text' or 'tasks'".to_string()));
                 }
 
+                // Any tasks from previous work that were already marked Done must not linger
+                // or resurrect when new tasks are added. If all existing tasks were Done, start fresh.
+                if !file.items.is_empty()
+                    && file
+                        .items
+                        .iter()
+                        .all(|item| item.status == TodoStatus::Done)
+                {
+                    file.items.clear();
+                    file.next_id = 0;
+                } else {
+                    file.items.retain(|item| item.status != TodoStatus::Done);
+                }
+
                 let mut added_msgs = Vec::new();
                 for text in texts_to_add {
                     let id = file.next_id;
@@ -455,8 +469,17 @@ impl Tool for TodoListTool {
                 }
                 let rendered = format!("[{}] {} {}", item.id, item.status.as_str(), item.text);
                 self.store(&file)?;
-                let done = file.items.iter().filter(|i| i.status == TodoStatus::Done).count();
-                format!("{} ({}/{} tasks completed)", rendered, done, file.items.len())
+                let done = file
+                    .items
+                    .iter()
+                    .filter(|i| i.status == TodoStatus::Done)
+                    .count();
+                format!(
+                    "{} ({}/{} tasks completed)",
+                    rendered,
+                    done,
+                    file.items.len()
+                )
             }
             "remove" => {
                 let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {

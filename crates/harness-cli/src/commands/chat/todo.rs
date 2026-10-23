@@ -189,14 +189,18 @@ pub fn refresh_panel(ui: &ChatUi, scope: &TodoScope) {
 
     // Say why the panel went away, once. A checklist that vanishes silently reads as
     // a bug; a line saying the work is done reads as an ending.
-    if finished && was_visible && !snapshot.items.is_empty() {
-        let (done, total) = (snapshot.counts().0, snapshot.items.len());
-        ui.emit_above(&format!(
-            "{} todo list complete ({}/{} done) — panel cleared",
-            "✔".green().bold(),
-            done,
-            total
-        ));
+    if finished && !snapshot.items.is_empty() {
+        if was_visible {
+            let (done, total) = (snapshot.counts().0, snapshot.items.len());
+            ui.emit_above(&format!(
+                "{} todo list complete ({}/{} done) — panel cleared",
+                "✔".green().bold(),
+                done,
+                total
+            ));
+        }
+        // Purge the completed tasks file from disk so finished tasks do not stay on disk or resurrect!
+        let _ = std::fs::remove_file(scope.path());
     }
 }
 
