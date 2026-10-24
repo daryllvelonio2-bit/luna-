@@ -1191,10 +1191,8 @@ mod tests {
     /// The clipboard path appends the URL as its own line; that shape must keep working.
     #[test]
     fn a_line_starting_with_a_data_url_is_lifted() {
-        let content = serialize_content_with_images(
-            "user",
-            "describe it\n\ndata:image/jpeg;base64,QUJD",
-        );
+        let content =
+            serialize_content_with_images("user", "describe it\n\ndata:image/jpeg;base64,QUJD");
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["text", "image_url"]);

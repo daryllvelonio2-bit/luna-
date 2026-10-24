@@ -969,6 +969,64 @@ async fn the_summarising_call_carries_a_bounded_transcript() {
     );
 }
 
+/// The folded region is budgeted from its newest end.
+///
+/// The turns immediately before the kept tail are the working state the next turn continues
+/// from. A head-first cut — render the oldest messages and stop at the budget — replaces
+/// exactly those with a truncation marker, so the summary describes the opening of the session
+/// and says nothing about what was happening when the fold ran. That reads as the model
+/// forgetting its own next step right after a compaction.
+#[tokio::test]
+async fn the_summarising_call_keeps_the_newest_folded_turns() {
+    let mut transcript = history(40);
+    for stored in transcript.iter_mut() {
+        if let Some(content) = stored.message.content.as_mut() {
+            content.push_str(&"f".repeat(4_000));
+        }
+    }
+    // The compressed head of an earlier fold: a handful of lines, never the thing to cut.
+    let mut prior = stored(Role::System, "PRIOR SUMMARY LAYER".to_string());
+    prior.is_summary = true;
+    transcript.insert(0, prior);
+    // Turn 37 is the last folded turn (turns 38 and 39 are kept). Its user line is the state
+    // the summary must carry forward.
+    transcript[75].message.content =
+        Some(format!("THE MOST RECENT FOLDED TURN {}", "g".repeat(4_000)));
+
+    let provider = RecordingProvider::new("FOLDED");
+    compact(&provider, "canned-model", &transcript, 2)
+        .await
+        .unwrap()
+        .expect("foldable");
+
+    let request = provider.last_request();
+    let sent = request
+        .iter()
+        .map(|message| message.content.clone().unwrap_or_default())
+        .collect::<String>();
+    assert!(
+        sent.contains("THE MOST RECENT FOLDED TURN"),
+        "the newest folded turn is in the summariser's transcript"
+    );
+    assert!(
+        sent.contains("PRIOR SUMMARY LAYER"),
+        "a previous summary survives the cut: it is the only trace of the oldest layers"
+    );
+    assert!(
+        sent.contains("older messages cut"),
+        "the cut is marked, and it is the older messages that were cut"
+    );
+    assert!(
+        sent.len() < 100_000,
+        "the transcript that goes to the summariser is still bounded, got {} chars",
+        sent.len()
+    );
+    assert!(
+        !sent.contains("transcript truncated"),
+        "the tail of the folded region is never what gets thrown away"
+    );
+}
+
 /// A tool result may not stand alone: the assistant message that called it has to be in
 /// the kept tail as well, or the provider rejects the vector. So a boundary that lands
 /// on a tool result moves forward.

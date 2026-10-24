@@ -237,44 +237,88 @@ fn clip(text: &str, limit: usize) -> String {
     format!("{}\n… [{} more characters cut]", head, count - limit)
 }
 
+/// One stored message rendered as one transcript block, the way the summariser reads it.
+fn render_stored(stored: &StoredMessage) -> String {
+    let message = &stored.message;
+    let label = if stored.is_summary {
+        "summary".to_string()
+    } else {
+        match message.role {
+            Role::System => "system".to_string(),
+            Role::User => "user".to_string(),
+            Role::Assistant => "assistant".to_string(),
+            Role::Tool => "tool".to_string(),
+        }
+    };
+    let mut out = String::new();
+    let body = clip(
+        message.content.as_deref().unwrap_or_default(),
+        TRANSCRIPT_MESSAGE_CHARS,
+    );
+    out.push_str(&format!("{}: {}\n", label, body));
+    for call in &message.tool_calls {
+        out.push_str(&format!(
+            "  tool call {} {} {}\n",
+            call.name,
+            call.id,
+            clip(&call.arguments.to_string(), TRANSCRIPT_MESSAGE_CHARS)
+        ));
+    }
+    if let Some(result) = &message.tool_result {
+        out.push_str(&format!(
+            "  tool result: {}\n",
+            clip(&result.content, TRANSCRIPT_MESSAGE_CHARS)
+        ));
+    }
+    out
+}
+
+/// The folded messages as the summariser reads them, inside [`TRANSCRIPT_TOTAL_CHARS`].
+///
+/// Two rules decide what a bounded transcript has to contain, and both are about the *end* of
+/// the folded region rather than its start:
+///
+/// * a **previous summary** is always carried. It is the already-compressed head of the
+///   conversation, a handful of lines each, and it is the only trace of the layers it covers —
+///   cutting it would lose the oldest history outright, which is the one thing a fold must not do.
+/// * the budget is then spent **from the newest message backwards**. The turns immediately
+///   before the kept tail are the working state the next turn continues from; rendering the
+///   oldest messages first and stopping at the cap throws exactly those away, and the summary
+///   then describes how the session opened while saying nothing about what was happening when it
+///   was folded. The oldest folded turns are what a summary can afford to lose — they are the
+///   ones a prior summary already covers.
 fn render_transcript(messages: &[StoredMessage]) -> String {
     let mut out = String::new();
+    let mut body: Vec<&StoredMessage> = Vec::with_capacity(messages.len());
     for stored in messages {
-        if out.len() >= TRANSCRIPT_TOTAL_CHARS {
-            out.push_str("\n… transcript truncated …\n");
-            break;
-        }
-        let message = &stored.message;
-        let label = if stored.is_summary {
-            "summary".to_string()
+        if stored.is_summary {
+            out.push_str(&render_stored(stored));
         } else {
-            match message.role {
-                Role::System => "system".to_string(),
-                Role::User => "user".to_string(),
-                Role::Assistant => "assistant".to_string(),
-                Role::Tool => "tool".to_string(),
-            }
-        };
-        let body = clip(
-            message.content.as_deref().unwrap_or_default(),
-            TRANSCRIPT_MESSAGE_CHARS,
-        );
-        out.push_str(&format!("{}: {}\n", label, body));
-        for call in &message.tool_calls {
-            out.push_str(&format!(
-                "  tool call {} {} {}\n",
-                call.name,
-                call.id,
-                clip(&call.arguments.to_string(), TRANSCRIPT_MESSAGE_CHARS)
-            ));
-        }
-        if let Some(result) = &message.tool_result {
-            out.push_str(&format!(
-                "  tool result: {}\n",
-                clip(&result.content, TRANSCRIPT_MESSAGE_CHARS)
-            ));
+            body.push(stored);
         }
     }
+
+    let mut rendered: Vec<String> = Vec::with_capacity(body.len());
+    let mut used = out.len();
+    let mut cut = body.len();
+    for (index, stored) in body.iter().enumerate().rev() {
+        let text = render_stored(stored);
+        let is_newest = index + 1 == body.len();
+        // The newest message is always kept: a transcript that cannot spare the last thing said
+        // cannot be summarised at all.
+        if !is_newest && used + text.len() > TRANSCRIPT_TOTAL_CHARS {
+            break;
+        }
+        used += text.len();
+        rendered.push(text);
+        cut = index;
+    }
+    rendered.reverse();
+
+    if cut > 0 {
+        out.push_str(&format!("… [{} older messages cut] …\n", cut));
+    }
+    out.extend(rendered);
     out
 }
 

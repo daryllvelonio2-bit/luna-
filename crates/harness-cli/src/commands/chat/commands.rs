@@ -183,6 +183,9 @@ pub(crate) async fn execute_slash_command(
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
     todo_scope: &harness_core::tools::TodoScope,
+    // The rendered skill list (`None` when none are installed); `/skills` prints it or explains
+    // where skills would go, instead of falling through the match and saying nothing.
+    skills_summary: Option<&str>,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -442,6 +445,25 @@ pub(crate) async fn execute_slash_command(
                 ui.emit_above(&format!("{} Steered: {}", "⏩".cyan().bold(), guidance));
             } else {
                 ui.emit_above(&format!("{} Usage: /steer <guidance>", "•".dimmed()));
+            }
+            Ok(false)
+        }
+        "/skills" => {
+            // Every exit path answers something: a silent command reads as a dead key.
+            match skills_summary {
+                Some(summary) if !summary.is_empty() => {
+                    ui.emit_above(&format!("\n{}\n{}\n", "Available skills:".bold(), summary));
+                }
+                _ => {
+                    ui.emit_above(&format!(
+                        "{} No skills installed — drop SKILL.md directories into {} and restart",
+                        "•".cyan(),
+                        config.paths.skills_dir.display()
+                    ));
+                }
+            }
+            if ui.is_attended {
+                ui.draw_initial_box();
             }
             Ok(false)
         }

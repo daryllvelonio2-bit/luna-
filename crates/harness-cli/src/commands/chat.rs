@@ -423,7 +423,7 @@ pub async fn run_interactive_chat(
         .await?;
 
     let mut agent_config = config.agent.clone();
-    agent_config.skills_summary = skills_summary;
+    agent_config.skills_summary = skills_summary.clone();
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
     agent_config.memory_mode = config.memory.mode;
 
@@ -1428,6 +1428,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &todo_scope,
+                                skills_summary.as_deref(),
                             )
                             .await?
                             {
@@ -1518,6 +1519,7 @@ pub async fn run_interactive_chat(
                                     &mut turns,
                                     &mut process_expanded,
                                     &todo_scope,
+                                    skills_summary.as_deref(),
                                 )
                                 .await?
                                 {
@@ -1548,6 +1550,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &todo_scope,
+                                skills_summary.as_deref(),
                             )
                             .await?
                             {

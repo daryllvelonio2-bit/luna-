@@ -660,15 +660,20 @@ fn build_antigravity_payload(
     model: &str,
 ) -> serde_json::Value {
     let mut gemini_contents = Vec::new();
-    let mut system_instruction = None;
+    // Every system message is kept, joined in order. The vector carries two by design: the
+    // session's system prompt first, then the synthetic compaction summary. Assigning instead
+    // of accumulating makes the summary — the last one — *replace* the system prompt, which
+    // drops the persona, the rules and the tool guidance from the request and leaves the folded
+    // history masquerading as instructions.
+    let mut system_texts: Vec<String> = Vec::new();
 
     for msg in messages {
         match msg.role {
             Role::System => {
                 if let Some(ref text) = msg.content {
-                    system_instruction = Some(json!({
-                        "parts": [{ "text": text }]
-                    }));
+                    if !text.trim().is_empty() {
+                        system_texts.push(text.clone());
+                    }
                 }
             }
             Role::User => {
@@ -846,8 +851,10 @@ fn build_antigravity_payload(
 
     let mut req_obj = json!({ "contents": merged_contents });
 
-    if let Some(sys) = system_instruction {
-        req_obj["systemInstruction"] = sys;
+    if !system_texts.is_empty() {
+        req_obj["systemInstruction"] = json!({
+            "parts": [{ "text": system_texts.join("\n\n") }]
+        });
     }
 
     if !tools.is_empty() {
@@ -1521,6 +1528,44 @@ mod tests {
         let contents = payload["request"]["contents"].as_array().expect("contents");
         let model_parts = contents[1]["parts"].as_array().expect("model parts");
         assert!(model_parts[0].get("thoughtSignature").is_none());
+    }
+
+    /// Every system message reaches the request, in order.
+    ///
+    /// The vector carries two by design: the session's system prompt, then the synthetic
+    /// compaction summary. Keeping only the last one — the summary — drops the prompt from the
+    /// request, so the persona, the rules and the tool guidance vanish the moment a session
+    /// compacts, and the folded history is read as instructions.
+    #[test]
+    fn both_system_messages_reach_the_system_instruction() {
+        let messages = vec![
+            Message::system("You are Mahiru, and you never lie about a test"),
+            Message::system("Summary of the earlier conversation: the user asked for X"),
+            Message::user("continue"),
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-2.5-flash",
+        );
+        let instruction = &payload["request"]["systemInstruction"];
+        let text = instruction["parts"][0]["text"]
+            .as_str()
+            .expect("the system instruction carries text");
+        assert!(
+            text.contains("You are Mahiru"),
+            "the system prompt survives a compaction summary: {text}"
+        );
+        assert!(
+            text.contains("Summary of the earlier conversation"),
+            "the summary survives beside it: {text}"
+        );
+        assert!(
+            text.find("You are Mahiru") < text.find("Summary of the earlier"),
+            "the prompt comes first: {text}"
+        );
     }
 
     /// One user turn, one model turn that called a tool without a signature, and the result.
