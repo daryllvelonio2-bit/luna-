@@ -7,6 +7,32 @@ use harness_core::HarnessError;
 /// `providers.<id>.timeout_secs` in `~/.luna/config.yaml`.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
+/// Context window assumed for a model nothing else can describe: no window from the provider's own
+/// catalog, no entry in the declared tables, no family the heuristics recognise.
+///
+/// It is deliberately the small end. Guessing *high* makes the harness assemble a transcript the
+/// provider rejects — a hard failure mid-turn — while guessing low only folds the conversation
+/// earlier than it had to, which the status line shows and `/compact` tunes. A provider whose
+/// models are all larger sets `providers.<id>.context_window` once and stops relying on this.
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
+
+/// Input-token limit every current Gemini model reports (`1 << 20`), pro versions included.
+const GEMINI_INPUT_TOKENS: u32 = 1_048_576;
+
+/// The window for `provider`/`model`, from the first source that can speak to it.
+///
+/// `discovered` is what the provider itself reported for this model (see
+/// [`crate::discovery::ModelDiscovery::context_window`]); it is authoritative and wins over every
+/// guess below it. The rest is the static catalog, then the model-family heuristics, then
+/// [`DEFAULT_CONTEXT_WINDOW`]. The order is the whole point: a number the provider published beats
+/// a number this crate inferred.
+pub fn resolve_context_window(provider: &str, model: &str, discovered: Option<u32>) -> u32 {
+    discovered
+        .filter(|window| *window > 0)
+        .or_else(|| get_context_window(provider, model))
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderDescriptor {
     pub id: String,
@@ -83,12 +109,12 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             // The OpenAI-compatible Gemini endpoint authenticates with `Authorization: Bearer …`.
             auth_header_format: AuthHeaderFormat::Bearer,
+            // Only the models this harness offers by default are pinned here, both measured from
+            // the provider's own catalog; every other Gemini is covered by the family rule, so
+            // there is no dead table to rot when Google retires a model.
             context_windows: ctx_windows(&[
-                ("gemini-3.5-flash-lite", 1_000_000),
-                ("gemini-1.5-pro", 2_000_000),
-                ("gemini-1.5-flash", 1_000_000),
-                ("gemini-1.0-pro", 32_768),
-                ("gemini-2.0-flash-exp", 1_000_000),
+                ("gemini-3.5-flash-lite", GEMINI_INPUT_TOKENS),
+                ("gemini-3.8-flash", GEMINI_INPUT_TOKENS),
             ]),
         },
         ProviderDescriptor {
@@ -643,12 +669,16 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         return Some(128_000);
     }
 
-    // Gemini 1.5/2.x/3.x family
+    // Gemini family. Every current Gemini reports 1,048,576 input tokens, pro included — the old
+    // 2M figure belongs to gemini-1.5-pro and claiming it for a 2.5/3.x pro over-states the window
+    // by 2x, which is the direction that fails a turn instead of folding it early.
     if leaf.contains("gemini") {
-        if leaf.contains("pro") {
-            return Some(2_000_000);
-        }
-        return Some(1_000_000);
+        return Some(GEMINI_INPUT_TOKENS);
+    }
+
+    // Gemma, served by the same endpoint and measured at 262,144.
+    if leaf.contains("gemma") {
+        return Some(262_144);
     }
 
     // Claude family

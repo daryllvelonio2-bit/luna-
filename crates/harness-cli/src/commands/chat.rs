@@ -20,14 +20,13 @@ use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
     UpdateNoteTool,
 };
-use harness_providers::{
-    get_context_window, CredentialManager, GenericProviderClient, ModelDiscovery,
-};
+use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
 use super::approval::{
     approval_settings, build_approver, render_approval_box, ApprovalChoice, ChatApprover,
     APPROVAL_ACTIONS,
 };
+use super::context_window::context_window;
 use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
@@ -778,6 +777,7 @@ pub async fn run_interactive_chat(
                 crate::commands::heartbeat::handle_chat_heartbeat(
                     arg_opt,
                     &ui,
+                    &config,
                     &agent,
                     &session_id,
                     &current_provider,
@@ -832,7 +832,8 @@ pub async fn run_interactive_chat(
                 continue;
             }
             if query.starts_with("/compact") {
-                handle_compact_command(&ui, &agent, &current_provider, &current_model).await?;
+                handle_compact_command(&ui, &config, &agent, &current_provider, &current_model)
+                    .await?;
                 continue;
             }
             if query.starts_with("/new") {
@@ -986,7 +987,26 @@ pub async fn run_interactive_chat(
         println!();
     }
 
-    let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
+    // Warm the model catalog in the background before the first status line is drawn: the windows
+    // the provider publishes live in it, and the gauge reads them from there on every turn. It is
+    // detached on purpose — a slow or dead `/models` endpoint must never hold up a session, and
+    // each answer it does give replaces the catalog's own guess with the provider's measurement.
+    {
+        let discovery = discovery.clone();
+        let cred_manager = cred_manager.clone();
+        let provider = current_provider.clone();
+        tokio::spawn(async move {
+            if let Err(error) = discovery.get_models(&provider, &cred_manager, false).await {
+                tracing::debug!(
+                    "model catalog warm-up for '{}' did not run: {}",
+                    provider,
+                    error
+                );
+            }
+        });
+    }
+
+    let context_max = context_window(&config, &discovery, &current_provider, &current_model);
     // Seed the bar from the real transcript, not 0: a resumed session already carries history, and
     // reporting "0 used" made the continuation look like a fresh start.
     let context_used = agent
@@ -1130,6 +1150,12 @@ pub async fn run_interactive_chat(
                     std::future::pending::<()>().await
                 }
             } => {
+                // A resize changes how every soft-wrapped line lays out. The live region and
+                // input box are redrawn by handle_resize, but the transcript above them was
+                // printed at the old width and stays frozen there. Clear and re-render the
+                // whole screen so old messages reflow to the new width.
+                crate::commands::clear_screen();
+                redraw_transcript(&turns, process_expanded);
                 ui.handle_resize();
             }
 
@@ -1559,8 +1585,12 @@ pub async fn run_interactive_chat(
                                     &current_query,
                                     process_expanded,
                                     &agent,
-                                    &current_provider,
-                                    &current_model,
+                                    context_window(
+                                        &config,
+                                        &discovery,
+                                        &current_provider,
+                                        &current_model,
+                                    ),
                                 )
                                 .await;
                             }
@@ -1595,8 +1625,12 @@ pub async fn run_interactive_chat(
                             &current_query,
                             process_expanded,
                             &agent,
-                            &current_provider,
-                            &current_model,
+                            context_window(
+                                &config,
+                                &discovery,
+                                &current_provider,
+                                &current_model,
+                            ),
                         )
                         .await;
                         if !cancelled {
@@ -1616,8 +1650,12 @@ pub async fn run_interactive_chat(
                             &current_query,
                             process_expanded,
                             &agent,
-                            &current_provider,
-                            &current_model,
+                            context_window(
+                                &config,
+                                &discovery,
+                                &current_provider,
+                                &current_model,
+                            ),
                         )
                         .await;
                     }
@@ -1667,7 +1705,8 @@ pub async fn run_interactive_chat(
 
                         // Update status bar with current context usage
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
+                        let context_max =
+                            context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
@@ -1696,7 +1735,8 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
+                        let context_max =
+                            context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
                     }
                     Ok(Err(e)) => {
@@ -1746,7 +1786,8 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
+                        let context_max =
+                            context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
                     }
                     Err(join_err) => {
@@ -1796,7 +1837,8 @@ pub async fn run_interactive_chat(
                         }
 
                         let context_used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
-                        let context_max = get_context_window(&current_provider, &current_model).unwrap_or(128_000);
+                        let context_max =
+                            context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
                     }
                 }
@@ -1956,8 +1998,7 @@ async fn cancel_running_turn(
     current_query: &str,
     process_expanded: bool,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
-    current_provider: &str,
-    current_model: &str,
+    context_max: u32,
 ) -> bool {
     let Some(handle) = active_turn.take() else {
         return false;
@@ -1992,7 +2033,6 @@ async fn cancel_running_turn(
         .estimate_session_tokens()
         .await
         .unwrap_or(0);
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
     ui.update_status(context_used, context_max);
     true
 }

@@ -8,8 +8,8 @@ use harness_core::{
     SqliteSessionStore,
 };
 use harness_providers::{
-    get_context_window, get_default_model, get_provider_catalog, CredentialManager,
-    GenericProviderClient, ModelDiscovery,
+    get_default_model, get_provider_catalog, CredentialManager, GenericProviderClient,
+    ModelDiscovery,
 };
 
 use super::clear_on_exit;
@@ -18,6 +18,7 @@ use super::render::{render_transcript, TurnRecord, PROMPT};
 use super::todo;
 use super::ui::{get_terminal_width, ChatUi};
 use super::ChatAgent;
+use crate::commands::context_window::{context_window, context_window_for};
 use crate::commands::sessions::{resolve_session, SessionSelection};
 
 pub struct SlashCommand {
@@ -303,7 +304,8 @@ pub(crate) async fn execute_slash_command(
             Ok(false)
         }
         "/compact" => {
-            if let Err(e) = handle_compact_command(ui, agent, current_provider, current_model).await
+            if let Err(e) =
+                handle_compact_command(ui, config, agent, current_provider, current_model).await
             {
                 ui.emit_above(&format!(
                     "{} Failed to compact session: {}",
@@ -430,6 +432,7 @@ pub(crate) async fn execute_slash_command(
             crate::commands::heartbeat::handle_chat_heartbeat(
                 arg,
                 ui,
+                config,
                 agent,
                 session_id,
                 current_provider,
@@ -1298,7 +1301,7 @@ pub(crate) async fn handle_model_switch(
 
     // The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
     // that stale box so the status bar is drawn once, showing the model now in use.
-    let context_max = get_context_window(&chosen_provider, &chosen_model).unwrap_or(128_000);
+    let context_max = context_window(config, discovery, &chosen_provider, &chosen_model);
     // Switching models does not touch the transcript, so keep the real usage rather than resetting
     // the bar to 0.
     let context_used = agent
@@ -1717,7 +1720,7 @@ pub(crate) async fn handle_new_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
+    let context_max = context_window_for(config, current_provider, current_model);
     ui.set_status(current_model, 0, context_max);
     ui.set_session_name(name);
 
@@ -1793,7 +1796,7 @@ pub(crate) async fn handle_delete_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
+    let context_max = context_window_for(config, current_provider, current_model);
     ui.set_status(current_model, 0, context_max);
     ui.set_session_name("");
 
@@ -1908,7 +1911,7 @@ pub(crate) async fn handle_summarize_and_new_command(
         resume_max_messages: config.session.resume_max_messages,
     });
 
-    let context_max = get_context_window(current_provider, current_model).unwrap_or(128_000);
+    let context_max = context_window_for(config, current_provider, current_model);
     let summary_tokens = harness_core::heuristic_tokens(&[summary_msg]);
     ui.set_status(current_model, summary_tokens, context_max);
     ui.set_session_name(name);
@@ -1973,14 +1976,16 @@ pub(crate) async fn handle_summarize_and_new_command(
 /// of being silently parked behind the turn.
 pub(crate) async fn handle_compact_command(
     ui: &ChatUi,
+    config: &Config,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     current_provider: &str,
     current_model: &str,
 ) -> Result<(), HarnessError> {
     let ui = ui.clone();
     let agent = agent.clone();
-    let current_provider = current_provider.to_string();
-    let current_model = current_model.to_string();
+    // Resolved here, on the caller's thread: the fold runs in a task that has no config, and the
+    // answer is the same before and after it (the window belongs to the model, not the fold).
+    let context_max = context_window_for(config, current_provider, current_model);
     tokio::spawn(async move {
         let Ok(ag) = agent.try_lock() else {
             ui.emit_above(&format!(
@@ -1994,8 +1999,6 @@ pub(crate) async fn handle_compact_command(
         if ag.compact_current_session().await.is_ok() {
             // The summary replaced the folded turns, so the gauge drops for real.
             let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
-            let context_max =
-                get_context_window(&current_provider, &current_model).unwrap_or(128_000);
             ui.update_status(context_used, context_max);
         }
     });

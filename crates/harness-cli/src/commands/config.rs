@@ -46,6 +46,9 @@ pub fn catalog_defaults() -> Config {
                 base_url: Some(provider.default_base_url),
                 models_endpoint: Some(provider.models_endpoint),
                 timeout_secs: Some(provider.timeout_secs),
+                // Not a catalog value: the window for models the catalog cannot describe is the
+                // operator's to state (`providers.<id>.context_window`), never injected here.
+                context_window: None,
             },
         );
     }

@@ -4,6 +4,7 @@ pub mod chat;
 pub mod clarify;
 pub mod clipboard_image;
 pub mod config;
+pub mod context_window;
 pub mod diff;
 pub mod evolve;
 pub mod exec;

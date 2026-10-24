@@ -8,6 +8,7 @@ use std::time::Instant;
 use super::chat::render::TurnRecord;
 use super::chat::ui::ChatUi;
 use super::chat::ChatAgent;
+use super::context_window::context_window_for;
 
 static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -73,6 +74,7 @@ pub fn get_git_status(path: &std::path::Path) -> Option<String> {
 pub async fn handle_chat_heartbeat(
     arg: Option<&str>,
     ui: &ChatUi,
+    config: &Config,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     session_id: &str,
     current_provider: &str,
@@ -118,8 +120,7 @@ pub async fn handle_chat_heartbeat(
             };
 
             let ctx = ag.estimate_session_tokens().await.unwrap_or(0);
-            let max_ctx = harness_providers::get_context_window(current_provider, current_model)
-                .unwrap_or(128_000);
+            let max_ctx = context_window_for(config, current_provider, current_model);
             let pct = if max_ctx > 0 {
                 (ctx as f64 / max_ctx as f64) * 100.0
             } else {

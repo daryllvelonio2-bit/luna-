@@ -37,6 +37,7 @@ fn with_provider(defaults: &mut Config) {
             base_url: None,
             models_endpoint: None,
             timeout_secs: None,
+            context_window: None,
         },
     );
 }

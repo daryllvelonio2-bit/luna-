@@ -343,6 +343,14 @@ pub struct ProviderOverride {
     pub base_url: Option<String>,
     pub models_endpoint: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Context window to assume for this provider's models that no source can describe: the ones
+    /// its catalog publishes no window for and the model-family heuristics do not recognise.
+    ///
+    /// The escape hatch for a model released after this build. Providers that publish their own
+    /// windows (OpenRouter, Mistral) never reach this value, and neither does any model the
+    /// heuristics know — so setting it is a statement about the provider's *unknown* models only,
+    /// which is why it wants a window those models all share rather than the largest one.
+    pub context_window: Option<u32>,
 }
 
 /// Tool-run settings.
