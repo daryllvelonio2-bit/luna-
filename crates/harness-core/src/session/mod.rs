@@ -112,6 +112,10 @@ pub trait SessionStore: Send + Sync {
         summary: &str,
     ) -> Result<i64, HarnessError>;
 
+    /// Mark messages belonging to the oldest `n` user turns as compacted.
+    /// Returns the number of messages compacted.
+    async fn compact_oldest_n(&self, session_id: &str, n: usize) -> Result<usize, HarnessError>;
+
     /// Every session, most recently updated first.
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError>;
 

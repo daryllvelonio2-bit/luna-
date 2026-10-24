@@ -109,6 +109,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Fold oldest turns into a summary in this session",
     },
     SlashCommand {
+        name: "/auto-compact",
+        details: "Configure automatic context compaction (/auto-compact on|off|set threshold|set turns)",
+    },
+    SlashCommand {
         name: "/expand",
         details: "Expand intermediate tool and reasoning processes (or Ctrl+O)",
     },
@@ -185,7 +189,7 @@ pub(crate) async fn execute_slash_command(
     todo_scope: &harness_core::tools::TodoScope,
     // The rendered skill list (`None` when none are installed); `/skills` prints it or explains
     // where skills would go, instead of falling through the match and saying nothing.
-    skills_summary: Option<&str>,
+    skills_readout: Option<&str>,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -335,6 +339,16 @@ pub(crate) async fn execute_slash_command(
             }
             Ok(false)
         }
+        "/auto-compact" => {
+            if let Err(e) = handle_auto_compact_command(ui, agent, arg).await {
+                ui.emit_above(&format!(
+                    "{} Failed to update auto-compact: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
+            Ok(false)
+        }
         "/new" => {
             turns.clear();
             let (is_summarize, remaining_arg) = if let Some(a) = arg {
@@ -450,9 +464,9 @@ pub(crate) async fn execute_slash_command(
         }
         "/skills" => {
             // Every exit path answers something: a silent command reads as a dead key.
-            match skills_summary {
-                Some(summary) if !summary.is_empty() => {
-                    ui.emit_above(&format!("\n{}\n{}\n", "Available skills:".bold(), summary));
+            match skills_readout {
+                Some(readout) if !readout.is_empty() => {
+                    ui.emit_above(&format!("\n{}\n{}\n", "Available skills:".bold(), readout));
                 }
                 _ => {
                     ui.emit_above(&format!(
@@ -2042,6 +2056,137 @@ pub(crate) async fn handle_compact_command(
         }
     });
 
+    Ok(())
+}
+
+/// `/auto-compact`: view or modify automatic transcript compaction settings.
+pub(crate) async fn handle_auto_compact_command(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let arg = arg.unwrap_or("").trim();
+    if arg.is_empty() {
+        let (enabled, threshold, turns) = {
+            let ag = agent.lock().await;
+            ag.auto_compact_settings()
+        };
+        let status = if enabled {
+            "enabled".green().bold()
+        } else {
+            "disabled".dimmed()
+        };
+        ui.emit_above(&format!(
+            "Auto-compact is {} (threshold: {} tokens, turns: {})",
+            status, threshold, turns
+        ));
+        ui.emit_above(
+            "Usage: /auto-compact on | /auto-compact off | /auto-compact set threshold <value> | /auto-compact set turns <n>",
+        );
+        return Ok(());
+    }
+
+    let layers = harness_core::config::process_layers(Config::default())?;
+
+    if arg.eq_ignore_ascii_case("on") || arg.eq_ignore_ascii_case("enable") {
+        {
+            let mut ag = agent.lock().await;
+            ag.set_auto_compact_enabled(true);
+        }
+        let _ = harness_core::config::set_in_file(&layers, "auto_compact_enabled", "true")?;
+        let (threshold, turns) = {
+            let ag = agent.lock().await;
+            let (_, th, tr) = ag.auto_compact_settings();
+            (th, tr)
+        };
+        ui.emit_above(&format!(
+            "{} Auto-compact enabled (threshold: {} tokens, turns: {})",
+            "✓".green().bold(),
+            threshold,
+            turns
+        ));
+        return Ok(());
+    }
+
+    if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("disable") {
+        {
+            let mut ag = agent.lock().await;
+            ag.set_auto_compact_enabled(false);
+        }
+        let _ = harness_core::config::set_in_file(&layers, "auto_compact_enabled", "false")?;
+        ui.emit_above(&format!(
+            "{} Auto-compact disabled",
+            "✓".green().bold()
+        ));
+        return Ok(());
+    }
+
+    let lower = arg.to_ascii_lowercase();
+    if lower.starts_with("set threshold") || lower.starts_with("threshold") {
+        let val_part = if lower.starts_with("set threshold") {
+            arg["set threshold".len()..].trim()
+        } else {
+            arg["threshold".len()..].trim()
+        };
+        match harness_onboarding::compact_step::parse_threshold(val_part) {
+            Ok(th) => {
+                {
+                    let mut ag = agent.lock().await;
+                    ag.set_auto_compact_threshold(th);
+                }
+                let _ = harness_core::config::set_in_file(
+                    &layers,
+                    "auto_compact_threshold",
+                    &th.to_string(),
+                )?;
+                ui.emit_above(&format!(
+                    "{} Auto-compact threshold set to {} tokens",
+                    "✓".green().bold(),
+                    th
+                ));
+            }
+            Err(e) => {
+                ui.emit_above(&format!("{} {}", "✖".red().bold(), e));
+            }
+        }
+        return Ok(());
+    }
+
+    if lower.starts_with("set turns") || lower.starts_with("turns") {
+        let val_part = if lower.starts_with("set turns") {
+            arg["set turns".len()..].trim()
+        } else {
+            arg["turns".len()..].trim()
+        };
+        match harness_onboarding::compact_step::parse_turns(val_part) {
+            Ok(turns) => {
+                {
+                    let mut ag = agent.lock().await;
+                    ag.set_auto_compact_turns(turns);
+                }
+                let _ = harness_core::config::set_in_file(
+                    &layers,
+                    "auto_compact_turns",
+                    &turns.to_string(),
+                )?;
+                ui.emit_above(&format!(
+                    "{} Auto-compact turns set to {}",
+                    "✓".green().bold(),
+                    turns
+                ));
+            }
+            Err(e) => {
+                ui.emit_above(&format!("{} {}", "✖".red().bold(), e));
+            }
+        }
+        return Ok(());
+    }
+
+    ui.emit_above(&format!(
+        "{} Unknown auto-compact command: '{}'. Use `on`, `off`, `set threshold <100k-700k>`, or `set turns <n>`",
+        "✖".red().bold(),
+        arg
+    ));
     Ok(())
 }
 

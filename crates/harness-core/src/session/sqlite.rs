@@ -587,6 +587,54 @@ impl SessionStore for SqliteSessionStore {
         Ok(summary_id)
     }
 
+    async fn compact_oldest_n(&self, session_id: &str, n: usize) -> Result<usize, HarnessError> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().await;
+        let timestamp = now();
+
+        let cutoff_seq: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM messages
+                 WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL AND role = 'user'
+                 ORDER BY seq ASC
+                 LIMIT 1 OFFSET ?2",
+                params![session_id, n],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(session_error("failed to query compaction cutoff", other)),
+            })?;
+
+        let updated = match cutoff_seq {
+            Some(cutoff) => conn
+                .execute(
+                    "UPDATE messages
+                     SET compacted_at = ?1
+                     WHERE session_id = ?2 AND is_summary = 0 AND compacted_at IS NULL AND seq < ?3",
+                    params![timestamp, session_id, cutoff],
+                )
+                .map_err(|error| session_error("failed to compact oldest messages", error))?,
+            None => conn
+                .execute(
+                    "UPDATE messages
+                     SET compacted_at = ?1
+                     WHERE session_id = ?2 AND is_summary = 0 AND compacted_at IS NULL",
+                    params![timestamp, session_id],
+                )
+                .map_err(|error| session_error("failed to compact oldest messages", error))?,
+        };
+
+        debug!(
+            "compact_oldest_n for session '{}' (n={}) marked {} messages compacted",
+            session_id, n, updated
+        );
+        Ok(updated)
+    }
+
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError> {
         let conn = self.conn.lock().await;
         let mut stmt = conn

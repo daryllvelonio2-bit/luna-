@@ -852,7 +852,7 @@ async fn compact_folds_the_oldest_turns_and_bounds_the_vector() {
     let history = history(6);
     let provider = CannedProvider::new("four questions were answered");
 
-    let outcome = compact(&provider, "canned-model", &history, 2)
+    let outcome = compact(&provider, "canned-model", &history, Some(2))
         .await
         .unwrap()
         .expect("six turns with two kept is four folded");
@@ -883,7 +883,7 @@ async fn compact_folds_nothing_when_the_history_is_short_enough() {
 
     assert_eq!(fold_boundary(&history, 2), 0);
     assert_eq!(fold_boundary(&history, 8), 0);
-    let outcome = compact(&provider, "canned-model", &history, 2)
+    let outcome = compact(&provider, "canned-model", &history, Some(2))
         .await
         .unwrap();
     assert!(outcome.is_none());
@@ -899,7 +899,7 @@ async fn compact_returns_an_error_when_the_provider_fails() {
     let history = history(6);
     let provider = FailingProvider::new();
 
-    let result = compact(&provider, "unconfigured", &history, 2).await;
+    let result = compact(&provider, "unconfigured", &history, Some(2)).await;
     assert!(
         result.is_err(),
         "the caller decides what a failed summary means"
@@ -918,7 +918,7 @@ async fn a_big_transcript_with_few_turns_is_folded_at_a_message_boundary() {
     big[0].message.content = Some("x".repeat(500_000));
     let provider = RecordingProvider::new("FOLDED");
 
-    let outcome = compact(&provider, "canned-model", &big, 8)
+    let outcome = compact(&provider, "canned-model", &big, Some(8))
         .await
         .unwrap()
         .expect("a transcript over budget is foldable, whatever its turn count");
@@ -948,7 +948,7 @@ async fn the_summarising_call_carries_a_bounded_transcript() {
     big[0].message.content = Some("x".repeat(2_000_000));
     let provider = RecordingProvider::new("FOLDED");
 
-    compact(&provider, "canned-model", &big, 8)
+    compact(&provider, "canned-model", &big, Some(8))
         .await
         .unwrap()
         .expect("foldable");
@@ -994,7 +994,7 @@ async fn the_summarising_call_keeps_the_newest_folded_turns() {
         Some(format!("THE MOST RECENT FOLDED TURN {}", "g".repeat(4_000)));
 
     let provider = RecordingProvider::new("FOLDED");
-    compact(&provider, "canned-model", &transcript, 2)
+    compact(&provider, "canned-model", &transcript, Some(2))
         .await
         .unwrap()
         .expect("foldable");
@@ -1052,7 +1052,7 @@ async fn the_kept_tail_never_starts_with_a_tool_result() {
     transcript[0].message.content = Some("x".repeat(500_000));
 
     let provider = RecordingProvider::new("FOLDED");
-    let outcome = compact(&provider, "canned-model", &transcript, 8)
+    let outcome = compact(&provider, "canned-model", &transcript, Some(8))
         .await
         .unwrap()
         .expect("foldable");
@@ -1080,7 +1080,7 @@ async fn a_small_transcript_with_few_turns_is_left_alone() {
     let provider = CannedProvider::new("unused");
 
     assert_eq!(fold_boundary(&history, 8), 0);
-    let outcome = compact(&provider, "canned-model", &history, 8)
+    let outcome = compact(&provider, "canned-model", &history, Some(8))
         .await
         .unwrap();
     assert!(outcome.is_none());
@@ -1101,7 +1101,7 @@ async fn an_empty_summary_is_retried_with_a_bigger_budget() {
     big[0].message.content = Some("x".repeat(500_000));
     let provider = ReasoningProvider::new();
 
-    let outcome = compact(&provider, "reasoning-model", &big, 8)
+    let outcome = compact(&provider, "reasoning-model", &big, Some(8))
         .await
         .unwrap()
         .expect("foldable");
@@ -1128,7 +1128,7 @@ async fn a_summary_that_never_arrives_is_an_error() {
     big[0].message.content = Some("x".repeat(500_000));
     let provider = SilentProvider::new();
 
-    let result = compact(&provider, "silent-model", &big, 8).await;
+    let result = compact(&provider, "silent-model", &big, Some(8)).await;
 
     assert!(
         result.is_err(),
@@ -1453,4 +1453,278 @@ async fn fork_session_copies_all_messages_and_metadata() {
         assert_eq!(orig.message.content, forked.message.content);
         assert_eq!(orig.seq, forked.seq);
     }
+}
+
+// ---------------------------------------------------------------- the gauge across a fold
+
+/// A transcript whose newest reply carries the usage a real provider reported, as every reply in a
+/// live session does: it is the number the gauge shows, and the number a fold has to retire.
+async fn seeded_store_with_reported_usage(
+    turns: usize,
+    reported_prompt_tokens: u32,
+) -> (TempDir, std::path::PathBuf, Arc<SqliteSessionStore>) {
+    let (dir, path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+    for turn in 0..turns {
+        store
+            .append(
+                "s1",
+                &Message::user(format!("question {} {}", turn, "x".repeat(400))),
+                false,
+            )
+            .await
+            .unwrap();
+        let mut reply = Message::assistant(format!("answer {}", turn));
+        if turn + 1 == turns {
+            // Reported for the request that produced this reply, which covers the transcript as it
+            // stood before the fold.
+            reply.usage = Some(TokenUsage {
+                prompt_tokens: reported_prompt_tokens,
+                completion_tokens: 20,
+                total_tokens: reported_prompt_tokens + 20,
+            });
+        }
+        store.append("s1", &reply, false).await.unwrap();
+    }
+    (dir, path, Arc::new(store))
+}
+
+/// A fold has to announce the shrunken context itself: `/compact` runs between turns, so nothing
+/// recomputes the figure until the next request reports usage, and until then the readout keeps
+/// describing the history that was just folded away.
+#[tokio::test]
+async fn a_fold_announces_the_shrunken_context_without_waiting_for_a_model_call() {
+    let (_dir, _path, store) = seeded_store_with_reported_usage(6, 90_000).await;
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED"));
+
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = events.clone();
+
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    })
+    .with_observer(Arc::new(move |event| {
+        let mut log = recorder.lock().unwrap();
+        match event {
+            AgentEvent::CompactionStarted { .. } => log.push("started".to_string()),
+            AgentEvent::CompactionFinished { folded, error } => log.push(format!(
+                "finished folded={} error={}",
+                folded.is_some(),
+                error.is_some()
+            )),
+            AgentEvent::ContextTokensUpdated { tokens_used } => {
+                log.push(format!("ctx {tokens_used}"))
+            }
+            _ => {}
+        }
+    }));
+
+    agent.compact_current_session().await.unwrap();
+
+    let log = events.lock().unwrap().clone();
+    assert!(
+        log.iter()
+            .any(|line| line == "finished folded=true error=false"),
+        "the fold itself is reported: {log:?}"
+    );
+    let finished_at = log
+        .iter()
+        .position(|line| line.starts_with("finished"))
+        .expect("the fold is announced");
+    let announced = log[finished_at + 1..]
+        .iter()
+        .find_map(|line| line.strip_prefix("ctx "))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("the fold must refresh the gauge, log: {log:?}"));
+
+    // The bound is an order of magnitude, not a number: the bounded transcript is a summary plus two
+    // kept turns, and only the pre-fold report was 90k.
+    assert!(
+        announced < 30_000,
+        "the announced figure describes the bounded transcript, got {announced}"
+    );
+}
+
+/// `/compact` refreshes the gauge through `estimate_session_tokens` *after* the fold, and the kept
+/// tail still carries the usage the provider reported for the pre-fold prompt. Preferring that
+/// report blindly hands the gauge the size of the history the fold just removed, which is the
+/// readout the user is left staring at until the next request.
+#[tokio::test]
+async fn estimate_after_a_fold_ignores_the_usage_of_the_pre_fold_transcript() {
+    let (_dir, _path, store) = seeded_store_with_reported_usage(6, 90_000).await;
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED"));
+
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+
+    assert_eq!(
+        agent.estimate_session_tokens().await.unwrap(),
+        90_020,
+        "with no fold newer than it, the last reported usage is the size of the session"
+    );
+
+    agent.compact_current_session().await.unwrap();
+
+    let after = agent.estimate_session_tokens().await.unwrap();
+    assert!(
+        after < 30_000,
+        "the fold retires the pre-fold figure, got {after}"
+    );
+
+    // And it is the live transcript's own estimate, not a number borrowed from the folded rows.
+    let replayed = store.replay("s1", 200).await.unwrap();
+    let live: Vec<Message> = replayed
+        .history
+        .iter()
+        .map(|stored| stored.message.clone())
+        .collect();
+    assert_eq!(after, heuristic_tokens(&live));
+}
+
+#[tokio::test]
+async fn session_store_compact_oldest_n_marks_turns() {
+    let (_tmp, _path, store) = temp_store();
+    store.ensure_session("s_compact").await.unwrap();
+
+    // 4 user turns: 8 messages total
+    for i in 0..4 {
+        store
+            .append(
+                "s_compact",
+                &Message::user(format!("user turn {}", i)),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s_compact",
+                &Message::assistant(format!("assistant turn {}", i)),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    let initial = store.replay("s_compact", 100).await.unwrap();
+    assert_eq!(initial.total, 8);
+
+    // Compact oldest 2 turns: should compact turn 0 and turn 1 (4 messages)
+    let compacted = store.compact_oldest_n("s_compact", 2).await.unwrap();
+    assert_eq!(compacted, 4);
+
+    let after_2 = store.replay("s_compact", 100).await.unwrap();
+    assert_eq!(after_2.total, 4);
+    assert_eq!(
+        after_2.history[0].message.content.as_deref(),
+        Some("user turn 2")
+    );
+
+    // Compact remaining (ask for 5 turns when only 2 remain)
+    let compacted_remaining = store.compact_oldest_n("s_compact", 5).await.unwrap();
+    assert_eq!(compacted_remaining, 4);
+
+    let after_all = store.replay("s_compact", 100).await.unwrap();
+    assert_eq!(after_all.total, 0);
+
+    // Calling again on empty returns 0
+    let zero = store.compact_oldest_n("s_compact", 1).await.unwrap();
+    assert_eq!(zero, 0);
+}
+
+#[tokio::test]
+async fn compact_accepts_optional_keep_recent_turns_none() {
+    let mut big = history(2);
+    big[0].message.content = Some("x".repeat(500_000));
+    let provider = RecordingProvider::new("FOLDED WITH NONE");
+
+    let outcome = compact(&provider, "canned-model", &big, None)
+        .await
+        .unwrap()
+        .expect("none keep_recent_turns still folds budget-exceeding messages");
+
+    assert_eq!(outcome.summary, "FOLDED WITH NONE");
+}
+
+#[tokio::test]
+async fn agent_auto_compact_triggers_when_threshold_exceeded() {
+    let (_tmp, _path, store) = temp_store();
+    let store = Arc::new(store);
+    store.ensure_session("s_auto").await.unwrap();
+
+    // Seed 4 previous turns
+    for i in 0..4 {
+        store
+            .append("s_auto", &Message::user(format!("turn {}", i)), false)
+            .await
+            .unwrap();
+        store
+            .append("s_auto", &Message::assistant(format!("resp {}", i)), false)
+            .await
+            .unwrap();
+    }
+
+    let mut cfg = agent_config();
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 10; // Extremely low threshold to trigger auto-compact
+    cfg.auto_compact_turns = 2; // Compact oldest 2 turns
+
+    let main = Arc::new(RecordingProvider::new("answer"));
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s_auto".to_string(),
+        resume_max_messages: 200,
+    });
+
+    let outcome = agent
+        .run_turn("new prompt", CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "answer");
+
+    // The oldest 2 turns (4 messages) should have been marked compacted
+    let live = store.replay("s_auto", 100).await.unwrap();
+    // Originally 8 messages, 4 compacted = 4 remaining + 2 from this turn (user + assistant) = 6 total
+    assert_eq!(live.total, 6);
+    assert_eq!(live.history[0].message.content.as_deref(), Some("turn 2"));
 }

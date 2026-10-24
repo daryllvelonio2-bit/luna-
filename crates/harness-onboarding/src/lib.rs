@@ -19,6 +19,7 @@
 //! [`harness_core::prompts::section`], so the prompt file stays the only home for model-facing
 //! text and a persona's voice can be edited without touching a config file or a build.
 
+pub mod compact_step;
 pub mod flow;
 pub mod memory_step;
 pub mod menu;

@@ -40,10 +40,10 @@ pub mod ui;
 pub mod viewer;
 
 use commands::{
-    execute_slash_command, handle_compact_command, handle_compact_model_switch,
-    handle_delete_command, handle_diff_command, handle_fork_command, handle_model_switch,
-    handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
-    handle_summarize_and_new_command, select_slash_command, SLASH_COMMANDS,
+    execute_slash_command, handle_auto_compact_command, handle_compact_command,
+    handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
+    handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
+    handle_rewind_command, handle_summarize_and_new_command, select_slash_command, SLASH_COMMANDS,
 };
 use keys::AppKey;
 use render::{
@@ -326,6 +326,10 @@ pub async fn run_interactive_chat(
             .collect();
         Some(lines.join("\n"))
     };
+    // The model's index above keeps the full descriptions — choosing between skills is done from
+    // them. `/skills` prints this readout instead: a paragraph per skill is a wall of text on a
+    // terminal, and the procedure itself is `skill_view`'s job.
+    let skills_readout = crate::commands::skills::readout(&all_skills);
 
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
@@ -703,8 +707,8 @@ pub async fn run_interactive_chat(
                 continue;
             }
             if query == "/skills" || query.starts_with("/skills ") {
-                if let Some(ref summary) = agent_config.skills_summary {
-                    println!("\n{}\n{}\n", "Available skills:".bold(), summary);
+                if let Some(ref readout) = skills_readout {
+                    println!("\n{}\n{}\n", "Available skills:".bold(), readout);
                 } else {
                     println!("\n{}\n", "No specialized skills installed.".dimmed());
                 }
@@ -830,6 +834,12 @@ pub async fn run_interactive_chat(
                 let arg = query.strip_prefix("/rewind").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
                 handle_rewind_command(&ui, &agent, &session_id, arg_opt).await?;
+                continue;
+            }
+            if query.starts_with("/auto-compact") {
+                let arg = query.strip_prefix("/auto-compact").unwrap().trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_auto_compact_command(&ui, &agent, arg_opt).await?;
                 continue;
             }
             if query.starts_with("/compact") {
@@ -1344,12 +1354,7 @@ pub async fn run_interactive_chat(
                         match crate::commands::clipboard_image::read_clipboard_image() {
                             Ok(Some(img)) => {
                                 let data_url = img.data_url();
-                                let marker = format!(
-                                    "[image: {}x{} saved to {}]",
-                                    img.width,
-                                    img.height,
-                                    img.saved_path.display()
-                                );
+                                let marker = format!("[image: {}x{}]", img.width, img.height);
                                 {
                                     let mut b = ui.input_buf.lock().unwrap();
                                     if !b.is_empty() && !b.ends_with(' ') {
@@ -1428,7 +1433,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &todo_scope,
-                                skills_summary.as_deref(),
+                                skills_readout.as_deref(),
                             )
                             .await?
                             {
@@ -1519,7 +1524,7 @@ pub async fn run_interactive_chat(
                                     &mut turns,
                                     &mut process_expanded,
                                     &todo_scope,
-                                    skills_summary.as_deref(),
+                                    skills_readout.as_deref(),
                                 )
                                 .await?
                                 {
@@ -1550,7 +1555,7 @@ pub async fn run_interactive_chat(
                                 &mut turns,
                                 &mut process_expanded,
                                 &todo_scope,
-                                skills_summary.as_deref(),
+                                skills_readout.as_deref(),
                             )
                             .await?
                             {

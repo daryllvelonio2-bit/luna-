@@ -259,6 +259,20 @@ luna
 luna --provider openai --model gpt-4o
 ```
 
+**Context Auto-Compaction & Trimming:**
+Luna automatically bounds session context tokens before making model requests:
+- **Configuration** in `~/.luna/config.yaml`:
+  - `auto_compact_enabled: true` (default `true`)
+  - `auto_compact_threshold: 150000` (valid range `100_000` to `700_000`, default `150_000`)
+  - `auto_compact_turns: 20` (positive integer, default `20`)
+- **First-run Onboarding**: Prompted during setup to enable/disable auto-compaction, select token threshold between 100k and 700k, and specify the turn count to compact.
+- **Interactive Slash Command**:
+  - `/auto-compact` — show current auto-compaction configuration.
+  - `/auto-compact on` | `/auto-compact off` — enable or disable auto-compaction.
+  - `/auto-compact set threshold <value>` — set threshold (e.g. `200000` or `200k`, validated 100k-700k).
+  - `/auto-compact set turns <n>` — set amount of turns to compact (e.g. `15`).
+  Both the runtime in-memory state and the configuration file are updated immediately.
+
 **The todo list belongs to the session.** `todo_list` keeps one file per conversation in
 `paths.todos_dir` (`~/.luna/todos/<session>.json`), so a new session starts with an empty
 list and never shows another session's tasks. A `/fork` carries the list into the fork,

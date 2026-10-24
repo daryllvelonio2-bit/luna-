@@ -54,6 +54,8 @@ pub struct Outcome {
     pub persona: &'static Persona,
     /// Who writes durable memory from now on.
     pub memory: MemoryMode,
+    /// Automatic compaction settings.
+    pub auto_compact: store::AutoCompactSelection,
     /// The config file the choice was written to.
     pub config_path: PathBuf,
 }
@@ -91,14 +93,18 @@ where
     // Phase 2b: who writes memory. A separate screen, same box, same list language.
     let memory = select_memory(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, persona, memory)?;
+    // Phase 2c: auto-compact setup.
+    let auto_compact = crate::compact_step::select(&mut writer, reader)?;
+
+    let config_path = store::persist(layers, persona, memory, &auto_compact)?;
 
     let mut writer = Typewriter::new(out, pacer, size);
-    confirmation(&mut writer, persona, memory, &config_path)?;
+    confirmation(&mut writer, persona, memory, &auto_compact, &config_path)?;
 
     Ok(Outcome {
         persona,
         memory,
+        auto_compact,
         config_path,
     })
 }
@@ -209,11 +215,12 @@ fn confirmation<W: Write, P: Pacer>(
     writer: &mut Typewriter<'_, W, P>,
     persona: &Persona,
     memory: MemoryMode,
+    auto_compact: &store::AutoCompactSelection,
     config_path: &Path,
 ) -> Result<(), HarnessError> {
     writer.clear_screen()?;
     writer.show_cursor()?;
-    let lines = confirmation_lines(persona, memory, config_path, writer.size());
+    let lines = confirmation_lines(persona, memory, auto_compact, config_path, writer.size());
     writer.write_block(&lines)?;
     Ok(())
 }
@@ -222,6 +229,7 @@ fn confirmation<W: Write, P: Pacer>(
 pub fn confirmation_lines(
     persona: &Persona,
     memory: MemoryMode,
+    auto_compact: &store::AutoCompactSelection,
     config_path: &Path,
     size: Size,
 ) -> Vec<Line> {
@@ -254,6 +262,19 @@ pub fn confirmation_lines(
         }
     }
     lines.push(Line::blank());
+    let ac_label = "Auto-compact";
+    let ac_summary = crate::compact_step::summary(auto_compact);
+    if ac_label.len() + 2 + ac_summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{ac_label}  "))).with(Span::strong(ac_summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(ac_label)));
+        for wrapped in screen::wrap(&ac_summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
+    lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
         limit,
@@ -282,7 +303,8 @@ mod tests {
     fn the_confirmation_names_the_persona_and_the_file() {
         let persona = persona::by_id(3).expect("in the catalog");
         let path = PathBuf::from("/home/janelle/.luna/config.yaml");
-        let block = confirmation_lines(persona, MemoryMode::Background, &path, Size::new(90, 24))
+        let ac = store::AutoCompactSelection::default();
+        let block = confirmation_lines(persona, MemoryMode::Background, &ac, &path, Size::new(90, 24))
             .iter()
             .map(Line::text)
             .collect::<Vec<_>>()
@@ -301,9 +323,11 @@ mod tests {
     fn the_confirmation_fits_a_narrow_terminal() {
         let persona = persona::by_id(9).expect("in the catalog");
         for columns in [40u16, 80, 120] {
+            let ac = store::AutoCompactSelection::default();
             for line in confirmation_lines(
                 persona,
                 MemoryMode::Session,
+                &ac,
                 &PathBuf::from("~/.luna/config.yaml"),
                 Size::new(columns, 24),
             ) {

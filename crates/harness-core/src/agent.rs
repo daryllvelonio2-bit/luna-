@@ -14,7 +14,9 @@ use crate::error::HarnessError;
 use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::permission::{PermissionEngine, RuleVerdict};
 use crate::saver::{transcript_tail, BackgroundSaver, SaverHook};
-use crate::session::{compact, estimate_tokens, CompactionOutcome, SessionStore, StoredMessage};
+use crate::session::{
+    compact, estimate_tokens, heuristic_tokens, CompactionOutcome, SessionStore, StoredMessage,
+};
 use crate::traits::*;
 use crate::types::*;
 
@@ -50,6 +52,27 @@ pub struct AgentConfig {
     /// Mode for memory and note persistence: Session writer vs Background saver.
     #[serde(default)]
     pub memory_mode: crate::config::MemoryMode,
+    /// Whether automatic compaction is enabled when transcript crosses threshold.
+    #[serde(default = "default_auto_compact_enabled")]
+    pub auto_compact_enabled: bool,
+    /// Token threshold at which automatic compaction triggers (100k - 700k).
+    #[serde(default = "default_auto_compact_threshold")]
+    pub auto_compact_threshold: usize,
+    /// Number of oldest turns to compact when auto-compaction triggers.
+    #[serde(default = "default_auto_compact_turns")]
+    pub auto_compact_turns: usize,
+}
+
+fn default_auto_compact_enabled() -> bool {
+    true
+}
+
+fn default_auto_compact_threshold() -> usize {
+    150_000
+}
+
+fn default_auto_compact_turns() -> usize {
+    20
 }
 
 impl Default for AgentConfig {
@@ -68,6 +91,9 @@ impl Default for AgentConfig {
             skills_summary: None,
             workspace_root: None,
             memory_mode: crate::config::MemoryMode::Session,
+            auto_compact_enabled: true,
+            auto_compact_threshold: 150_000,
+            auto_compact_turns: 20,
         }
     }
 }
@@ -291,6 +317,30 @@ where
     /// Update the memory mode at runtime.
     pub fn set_memory_mode(&mut self, mode: crate::config::MemoryMode) {
         self.config.memory_mode = mode;
+    }
+
+    /// Update whether auto-compaction is enabled at runtime.
+    pub fn set_auto_compact_enabled(&mut self, enabled: bool) {
+        self.config.auto_compact_enabled = enabled;
+    }
+
+    /// Update the auto-compaction token threshold at runtime.
+    pub fn set_auto_compact_threshold(&mut self, threshold: usize) {
+        self.config.auto_compact_threshold = threshold;
+    }
+
+    /// Update the number of turns to compact at runtime.
+    pub fn set_auto_compact_turns(&mut self, turns: usize) {
+        self.config.auto_compact_turns = turns;
+    }
+
+    /// Current auto-compaction settings.
+    pub fn auto_compact_settings(&self) -> (bool, usize, usize) {
+        (
+            self.config.auto_compact_enabled,
+            self.config.auto_compact_threshold,
+            self.config.auto_compact_turns,
+        )
     }
 
     /// The attached saver, if any (used by the CLI to report the mode).
@@ -581,6 +631,11 @@ where
 
     /// Get the estimated token count for the current session's conversation history.
     /// This loads the history from the session store and runs the compaction estimator.
+    ///
+    /// Reported usage wins, *unless* the newest fold is newer than it: the kept tail of a folded
+    /// session still carries the usage of the call made against the transcript that was folded
+    /// away, and handing that number back draws the gauge with the size of history the fold just
+    /// removed — the readout only catches up when the next request reports fresh usage.
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
         let (history, _replay_notice) = self.load_history().await?;
 
@@ -588,24 +643,32 @@ where
             return Ok(0);
         }
 
+        // A summary row is written with the highest `seq` in the session, so any usage reported
+        // before it describes a prompt that no longer exists.
+        let fold_seq = last_fold_seq(&history);
+
         // 1. If any prior turn recorded actual usage from the provider, use the most recent report
-        if let Some(latest_usage) = history
-            .iter()
-            .rev()
-            .find_map(|stored| stored.message.usage.as_ref())
-        {
-            return Ok(latest_usage
-                .prompt_tokens
-                .saturating_add(latest_usage.completion_tokens));
+        if let Some((usage_seq, latest_usage)) = history.iter().rev().find_map(|stored| {
+            stored
+                .message
+                .usage
+                .as_ref()
+                .map(|usage| (stored.seq, usage))
+        }) {
+            if !fold_seq.is_some_and(|fold_seq| usage_seq < fold_seq) {
+                return Ok(latest_usage
+                    .prompt_tokens
+                    .saturating_add(latest_usage.completion_tokens));
+            }
+            debug!(
+                "The newest reported usage (seq {}) predates the fold at seq {:?}; estimating from the live transcript",
+                usage_seq, fold_seq
+            );
         }
 
-        // 2. Otherwise estimate accurately from session messages
-        let messages: Vec<Message> = history
-            .iter()
-            .map(|stored| stored.message.clone())
-            .collect();
-        let estimate = estimate_tokens(&messages);
-        Ok(estimate.tokens)
+        // 2. Otherwise estimate from the messages that would actually be sent, with the retired
+        //    reports dropped so the estimator measures the live transcript and not the folded one.
+        Ok(estimate_tokens(&sendable_messages(&history)).tokens)
     }
 
     /// Fold the oldest turns of the current session into a summary, ignoring
@@ -761,11 +824,39 @@ where
         let system_text = self.system_prompt(user_input).await?;
 
         // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
-        let (history, replay_notice) = self.load_history().await?;
+        //    Size reports a fold has retired are dropped here: they measure a prompt that is no
+        //    longer sent, and every estimate taken from this vector — the gauge, the compaction
+        //    threshold — would otherwise be the size of the folded transcript.
+        let (mut history, replay_notice) = self.load_history().await?;
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::system(system_text.clone()));
-        messages.extend(history.iter().map(|stored| stored.message.clone()));
+        messages.extend(sendable_messages(&history));
         messages.push(Message::user(user_input));
+
+        // Auto-compact check:
+        // In Agent.run_turn estimate token usage, and if enabled && tokens > threshold
+        // call compact_oldest_n with the configured turn count, then reload the trimmed history before the model request.
+        if self.config.auto_compact_enabled {
+            let tokens = estimate_tokens(&messages).tokens as usize;
+            if tokens > self.config.auto_compact_threshold {
+                if let Some(ref binding) = self.session {
+                    let compacted_count = binding
+                        .store
+                        .compact_oldest_n(&binding.session_id, self.config.auto_compact_turns)
+                        .await?;
+                    debug!(
+                        "Auto-compact triggered (tokens: {} > threshold: {}): compacted {} messages across oldest {} turns",
+                        tokens, self.config.auto_compact_threshold, compacted_count, self.config.auto_compact_turns
+                    );
+                    let (reloaded_history, _) = self.load_history().await?;
+                    history = reloaded_history;
+                    messages.clear();
+                    messages.push(Message::system(system_text.clone()));
+                    messages.extend(sendable_messages(&history));
+                    messages.push(Message::user(user_input));
+                }
+            }
+        }
 
         // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
         self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
@@ -1549,7 +1640,7 @@ where
             setup.provider.as_ref(),
             &setup.model,
             history,
-            self.config.keep_recent_turns,
+            Some(self.config.keep_recent_turns),
         )
         .await
         {
@@ -1618,6 +1709,19 @@ where
                 error: None,
             });
         }
+
+        // The sent vector just changed size, and the gauge has to hear about it *here*: a fold asked
+        // for with `/compact` happens between turns, so nothing else recomputes the figure until the
+        // next request reports usage — the readout keeps describing the transcript that was just
+        // folded away. The character heuristic, deliberately, not `estimate_tokens`: the kept rows
+        // still carry the usage the provider reported for the *pre-fold* prompt, and measuring with
+        // it would announce the size the fold just removed. No call has been made against the
+        // bounded prompt yet, so this is the honest figure until one has.
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::ContextTokensUpdated {
+                tokens_used: heuristic_tokens(messages),
+            });
+        }
         Ok(Some(notice))
     }
 
@@ -1634,6 +1738,42 @@ where
             .await
             .map(|_| ())
     }
+}
+
+/// The sequence of the newest fold in `history`, if the session has been folded.
+///
+/// A summary row is written with the highest `seq` in the session at the moment of the fold, so it
+/// is the watermark that separates usage reports made against a transcript that still exists from
+/// reports made against one a later fold has replaced.
+fn last_fold_seq(history: &[StoredMessage]) -> Option<i64> {
+    history
+        .iter()
+        .filter(|stored| stored.is_summary)
+        .map(|stored| stored.seq)
+        .max()
+}
+
+/// The replayed rows as the messages to send, with the size reports a later fold retired dropped.
+///
+/// [`Message::usage`] is not an annotation on a message: it is the size of the *request* the
+/// provider answered, which covers everything up to that reply. Once a fold has written a newer
+/// summary, that request's transcript is gone, so the number describes nothing that will be sent
+/// again — and both the context gauge and [`crate::AgentConfig::compact_at_tokens`] read it as the
+/// size of the session, which makes the readout show history the fold removed and makes the next
+/// turn fold against a transcript that is not there. Dropping it makes the estimate fall back to
+/// the character heuristic over what is actually sent.
+fn sendable_messages(history: &[StoredMessage]) -> Vec<Message> {
+    let fold_seq = last_fold_seq(history);
+    history
+        .iter()
+        .map(|stored| {
+            let mut message = stored.message.clone();
+            if fold_seq.is_some_and(|fold_seq| stored.seq < fold_seq) {
+                message.usage = None;
+            }
+            message
+        })
+        .collect()
 }
 
 /// The text a `post_tool_use` hook wants the model to see instead of the tool's own output.

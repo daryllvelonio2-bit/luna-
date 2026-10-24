@@ -331,3 +331,57 @@ fn the_terminal_is_prepared_and_handed_back_clean() {
         "the cursor must be restored before input and again at the end"
     );
 }
+
+#[test]
+fn onboarding_configures_custom_auto_compact() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // persona 1, memory 1, enable auto-compact, threshold 250k, turns 15
+    let (outcome, rendered) = drive(&file, "1\n1\n1\n250k\n15\n");
+
+    assert!(outcome.auto_compact.enabled);
+    assert_eq!(outcome.auto_compact.threshold, 250_000);
+    assert_eq!(outcome.auto_compact.turns, 15);
+
+    let config = read_config(&file);
+    assert_eq!(config["auto_compact_enabled"].as_bool(), Some(true));
+    assert_eq!(config["auto_compact_threshold"].as_u64(), Some(250_000));
+    assert_eq!(config["auto_compact_turns"].as_u64(), Some(15));
+    assert!(rendered.contains("Auto-compact"));
+}
+
+#[test]
+fn onboarding_disables_auto_compact() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // persona 2, memory 1, disable auto-compact (choice 2)
+    let (outcome, rendered) = drive(&file, "2\n1\n2\n");
+
+    assert!(!outcome.auto_compact.enabled);
+
+    let config = read_config(&file);
+    assert_eq!(config["auto_compact_enabled"].as_bool(), Some(false));
+    assert!(rendered.contains("Disabled"));
+}
+
+#[test]
+fn compact_step_parsers() {
+    use harness_onboarding::compact_step::{parse_selection, parse_threshold, parse_turns};
+
+    assert!(parse_selection("1").unwrap().enabled);
+    assert!(!parse_selection("2").unwrap().enabled);
+    assert!(parse_selection("").unwrap().enabled);
+
+    assert_eq!(parse_threshold("150000").unwrap(), 150_000);
+    assert_eq!(parse_threshold("200k").unwrap(), 200_000);
+    assert_eq!(parse_threshold("").unwrap(), 150_000);
+    assert!(parse_threshold("50k").is_err()); // below 100k
+    assert!(parse_threshold("800k").is_err()); // above 700k
+
+    assert_eq!(parse_turns("20").unwrap(), 20);
+    assert_eq!(parse_turns("5").unwrap(), 5);
+    assert_eq!(parse_turns("").unwrap(), 20);
+    assert!(parse_turns("0").is_err());
+}

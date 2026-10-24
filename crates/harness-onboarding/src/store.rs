@@ -30,18 +30,57 @@ pub const PERSONA_ID_KEY: &str = "persona.id";
 pub const PERSONA_NAME_KEY: &str = "persona.name";
 /// The config key holding who writes durable memory: `session` or `background`.
 pub const MEMORY_MODE_KEY: &str = "memory.mode";
+/// The config key holding whether auto-compaction is enabled.
+pub const AUTO_COMPACT_ENABLED_KEY: &str = "auto_compact_enabled";
+/// The config key holding auto-compaction threshold.
+pub const AUTO_COMPACT_THRESHOLD_KEY: &str = "auto_compact_threshold";
+/// The config key holding auto-compaction turns.
+pub const AUTO_COMPACT_TURNS_KEY: &str = "auto_compact_turns";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoCompactSelection {
+    pub enabled: bool,
+    pub threshold: usize,
+    pub turns: usize,
+}
+
+impl Default for AutoCompactSelection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: harness_core::config::AUTO_COMPACT_DEFAULT_THRESHOLD,
+            turns: harness_core::config::AUTO_COMPACT_DEFAULT_TURNS,
+        }
+    }
+}
 
 /// Write the selections, returning the path that was written.
 pub fn persist(
     layers: &Layers,
     persona: &Persona,
     memory: MemoryMode,
+    auto_compact: &AutoCompactSelection,
 ) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
     config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
     config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_ENABLED_KEY,
+        if auto_compact.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_THRESHOLD_KEY,
+        &auto_compact.threshold.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_TURNS_KEY,
+        &auto_compact.turns.to_string(),
+    )?;
     config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
     config_file(layers)
 }

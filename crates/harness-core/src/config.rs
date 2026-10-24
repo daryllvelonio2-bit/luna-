@@ -69,6 +69,32 @@ pub struct Config {
     /// onboarding — both take the tour. `LUNA_FIRST_RUN=false` skips it through the env layer
     /// without touching the file.
     pub first_run: bool,
+    /// Whether automatic compaction is enabled when transcript crosses threshold.
+    #[serde(default = "default_auto_compact_enabled")]
+    pub auto_compact_enabled: bool,
+    /// Token threshold at which automatic compaction triggers (100k - 700k).
+    #[serde(default = "default_auto_compact_threshold")]
+    pub auto_compact_threshold: usize,
+    /// Number of oldest turns to compact when auto-compaction triggers.
+    #[serde(default = "default_auto_compact_turns")]
+    pub auto_compact_turns: usize,
+}
+
+pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
+pub const AUTO_COMPACT_MAX_THRESHOLD: usize = 700_000;
+pub const AUTO_COMPACT_DEFAULT_THRESHOLD: usize = 150_000;
+pub const AUTO_COMPACT_DEFAULT_TURNS: usize = 20;
+
+fn default_auto_compact_enabled() -> bool {
+    true
+}
+
+fn default_auto_compact_threshold() -> usize {
+    AUTO_COMPACT_DEFAULT_THRESHOLD
+}
+
+fn default_auto_compact_turns() -> usize {
+    AUTO_COMPACT_DEFAULT_TURNS
 }
 
 /// Written by hand rather than derived so `first_run` starts at `true`. A derived `Default` would
@@ -89,7 +115,43 @@ impl Default for Config {
             memory: MemorySettings::default(),
             persona: PersonaSettings::default(),
             first_run: true,
+            auto_compact_enabled: true,
+            auto_compact_threshold: AUTO_COMPACT_DEFAULT_THRESHOLD,
+            auto_compact_turns: AUTO_COMPACT_DEFAULT_TURNS,
         }
+    }
+}
+
+impl Config {
+    /// Validate configuration invariants (e.g. thresholds, bounds).
+    pub fn validate(&self) -> Result<(), HarnessError> {
+        if self.auto_compact_threshold < AUTO_COMPACT_MIN_THRESHOLD
+            || self.auto_compact_threshold > AUTO_COMPACT_MAX_THRESHOLD
+        {
+            return Err(HarnessError::ConfigurationError(format!(
+                "auto_compact_threshold must be between {} and {}, got {}",
+                AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, self.auto_compact_threshold
+            )));
+        }
+        if self.auto_compact_turns == 0 {
+            return Err(HarnessError::ConfigurationError(
+                "auto_compact_turns must be positive, got 0".to_string(),
+            ));
+        }
+        if self.agent.auto_compact_threshold < AUTO_COMPACT_MIN_THRESHOLD
+            || self.agent.auto_compact_threshold > AUTO_COMPACT_MAX_THRESHOLD
+        {
+            return Err(HarnessError::ConfigurationError(format!(
+                "agent.auto_compact_threshold must be between {} and {}, got {}",
+                AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, self.agent.auto_compact_threshold
+            )));
+        }
+        if self.agent.auto_compact_turns == 0 {
+            return Err(HarnessError::ConfigurationError(
+                "agent.auto_compact_turns must be positive, got 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -594,13 +656,59 @@ pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
     let mut config: Config = from_value(&merged)?;
     expand_paths(&mut config.paths);
 
+    let from_file = flatten(&file);
+    let from_env = flatten(&env);
+    let from_flag = flatten(&flag);
+
+    // Sync auto-compact config between top-level and agent section
+    if from_flag.contains_key("auto_compact_enabled")
+        || from_env.contains_key("auto_compact_enabled")
+        || from_file.contains_key("auto_compact_enabled")
+    {
+        config.agent.auto_compact_enabled = config.auto_compact_enabled;
+    } else if from_flag.contains_key("agent.auto_compact_enabled")
+        || from_env.contains_key("agent.auto_compact_enabled")
+        || from_file.contains_key("agent.auto_compact_enabled")
+    {
+        config.auto_compact_enabled = config.agent.auto_compact_enabled;
+    } else {
+        config.agent.auto_compact_enabled = config.auto_compact_enabled;
+    }
+
+    if from_flag.contains_key("auto_compact_threshold")
+        || from_env.contains_key("auto_compact_threshold")
+        || from_file.contains_key("auto_compact_threshold")
+    {
+        config.agent.auto_compact_threshold = config.auto_compact_threshold;
+    } else if from_flag.contains_key("agent.auto_compact_threshold")
+        || from_env.contains_key("agent.auto_compact_threshold")
+        || from_file.contains_key("agent.auto_compact_threshold")
+    {
+        config.auto_compact_threshold = config.agent.auto_compact_threshold;
+    } else {
+        config.agent.auto_compact_threshold = config.auto_compact_threshold;
+    }
+
+    if from_flag.contains_key("auto_compact_turns")
+        || from_env.contains_key("auto_compact_turns")
+        || from_file.contains_key("auto_compact_turns")
+    {
+        config.agent.auto_compact_turns = config.auto_compact_turns;
+    } else if from_flag.contains_key("agent.auto_compact_turns")
+        || from_env.contains_key("agent.auto_compact_turns")
+        || from_file.contains_key("agent.auto_compact_turns")
+    {
+        config.auto_compact_turns = config.agent.auto_compact_turns;
+    } else {
+        config.agent.auto_compact_turns = config.auto_compact_turns;
+    }
+
+    config.validate()?;
+
     let values: BTreeMap<String, String> = flatten(&to_value(&config)?)
         .into_iter()
         .map(|(key, value)| (key, scalar_to_string(&value)))
         .collect();
-    let from_file = flatten(&file);
-    let from_env = flatten(&env);
-    let from_flag = flatten(&flag);
 
     let mut sources = BTreeMap::new();
     for key in values.keys() {
@@ -707,7 +815,8 @@ pub fn set_in_file(layers: &Layers, key: &str, raw: &str) -> Result<PathBuf, Har
     deep_merge(&mut check, root.clone());
     // Reject anything that would not load (a type the key does not accept, a corrupted sibling
     // key) while the original file is still untouched.
-    from_value::<Config>(&check)?;
+    let check_cfg: Config = from_value(&check)?;
+    check_cfg.validate()?;
 
     write_file_value(&path, &root)?;
     Ok(path)

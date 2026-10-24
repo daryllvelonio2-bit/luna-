@@ -130,16 +130,22 @@ pub fn estimate_tokens(messages: &[Message]) -> Estimate {
 /// to fold, which leaves the user with a context they cannot shrink. So when the turn rule comes
 /// up empty, the boundary moves to the most recent stretch of *messages* that fits
 /// [`FALLBACK_KEEP_TOKENS`], and the rest is folded.
-pub fn fold_boundary(history: &[StoredMessage], keep_recent_turns: usize) -> usize {
-    let user_indices: Vec<usize> = history
-        .iter()
-        .enumerate()
-        .filter(|(_, stored)| stored.message.role == Role::User)
-        .map(|(index, _)| index)
-        .collect();
+pub fn fold_boundary(
+    history: &[StoredMessage],
+    keep_recent_turns: impl Into<Option<usize>>,
+) -> usize {
+    let keep_recent_turns = keep_recent_turns.into();
+    if let Some(keep_recent_turns) = keep_recent_turns {
+        let user_indices: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .filter(|(_, stored)| stored.message.role == Role::User)
+            .map(|(index, _)| index)
+            .collect();
 
-    if user_indices.len() > keep_recent_turns {
-        return user_indices[user_indices.len() - keep_recent_turns];
+        if user_indices.len() > keep_recent_turns {
+            return user_indices[user_indices.len() - keep_recent_turns];
+        }
     }
 
     budget_boundary(history, FALLBACK_KEEP_TOKENS)
@@ -331,7 +337,7 @@ pub async fn compact(
     provider: &dyn ModelProvider,
     model: &str,
     history: &[StoredMessage],
-    keep_recent_turns: usize,
+    keep_recent_turns: Option<usize>,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
     let boundary = fold_boundary(history, keep_recent_turns);
     if boundary == 0 {
