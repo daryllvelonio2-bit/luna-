@@ -605,6 +605,52 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
     events
 }
 
+/// One piece of a user turn's content: prose, or an image that was embedded as a data URL.
+enum UserChunk {
+    Text(String),
+    /// The image's MIME type and base64 payload, in the shape `inlineData` wants.
+    Image(String, String),
+}
+
+/// Split user content into its prose and its embedded images.
+///
+/// The CLI appends pasted screenshots to the prompt as whole-line `data:image/...;base64,...`
+/// URLs (the OpenAI-compatible route lifts those into `image_url` parts the same way). Anything
+/// that is not a whole-line data URL is prose — a sentence *about* a data URL is text, not pixels.
+fn user_text_and_images(text: &str) -> Vec<UserChunk> {
+    let mut chunks = Vec::new();
+    let mut prose = String::new();
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some((mime, data)) = split_data_url(trimmed) {
+            let flushed = prose.trim_end().to_string();
+            if !flushed.is_empty() {
+                chunks.push(UserChunk::Text(flushed));
+                prose.clear();
+            }
+            chunks.push(UserChunk::Image(mime.to_string(), data.to_string()));
+        } else {
+            prose.push_str(line);
+        }
+    }
+
+    let tail = prose.trim_end().to_string();
+    if !tail.is_empty() {
+        chunks.push(UserChunk::Text(tail));
+    }
+    chunks
+}
+
+/// The `(mime, base64)` of a whole-string data URL, or `None` when `s` is not one.
+fn split_data_url(s: &str) -> Option<(&str, &str)> {
+    let rest = s.strip_prefix("data:")?;
+    let (mime, after) = rest.split_once(';')?;
+    let data = after.strip_prefix("base64,")?;
+    // An empty payload is a malformed embed rather than a zero-byte image.
+    (!mime.is_empty() && !data.is_empty()).then_some((mime, data))
+}
+
 /// Build the Code Assist payload for one turn: messages translated to `contents`, tools to
 /// function declarations, and the reasoning effort to a thinking budget.
 fn build_antigravity_payload(
@@ -627,9 +673,30 @@ fn build_antigravity_payload(
             }
             Role::User => {
                 let text = msg.content.as_deref().unwrap_or("");
+                let mut parts = Vec::new();
+                // A pasted or inlined image rides in the text as a data URL; on this route it
+                // must become an `inlineData` part, or the model gets megabytes of base64 as
+                // prose and no pixels at all.
+                for chunk in user_text_and_images(text) {
+                    match chunk {
+                        UserChunk::Text(text) => {
+                            if !text.trim().is_empty() {
+                                parts.push(json!({ "text": text }));
+                            }
+                        }
+                        UserChunk::Image(mime, data) => {
+                            parts.push(json!({
+                                "inlineData": { "mimeType": mime, "data": data }
+                            }));
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    parts.push(json!({ "text": "" }));
+                }
                 gemini_contents.push(json!({
                     "role": "user",
-                    "parts": [{ "text": text }]
+                    "parts": parts
                 }));
             }
             Role::Assistant => {

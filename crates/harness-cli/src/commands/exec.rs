@@ -305,7 +305,10 @@ pub async fn run_exec(
         .emit_hook_event(harness_core::HookEvent::SessionStart, None)
         .await?;
     let outcome = agent
-        .run_turn(&prompt, tokio_util::sync::CancellationToken::new())
+        .run_turn(
+            &crate::commands::prompt_images::inline_image_paths(&prompt),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await;
     // `session_end` fires even when the turn failed: a hook that tears down a container or
     // flushes a log must not be skipped because the model errored.

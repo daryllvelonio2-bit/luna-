@@ -11,6 +11,7 @@ pub mod exec;
 pub mod heartbeat;
 pub mod hooks;
 pub mod models;
+pub mod prompt_images;
 pub mod sessions;
 pub mod supervisor;
 pub mod usage;

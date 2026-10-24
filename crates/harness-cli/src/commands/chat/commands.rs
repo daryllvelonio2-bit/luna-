@@ -153,6 +153,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Alias for /heartbeat",
     },
     SlashCommand {
+        name: "/connect",
+        details: "Add providers and API keys",
+    },
+    SlashCommand {
         name: "/delete",
         details: "Delete current session and start a fresh one",
     },
@@ -248,6 +252,18 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
+            Ok(false)
+        }
+        "/connect" => {
+            ui.redraw_input_line();
+            if let Err(e) = super::connect::handle_connect_command(key_rx, ui, cred_manager).await {
+                ui.emit_above(&format!(
+                    "{} Failed to open provider setup: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
+            ui.draw_initial_box();
             Ok(false)
         }
         "/name" => {
@@ -724,7 +740,7 @@ pub(crate) async fn select_slash_command(
     result
 }
 
-async fn select_from_rx(
+pub(crate) async fn select_from_rx(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
     prompt: &str,
@@ -962,7 +978,7 @@ async fn select_from_rx(
     result
 }
 
-async fn input_from_rx(
+pub(crate) async fn input_from_rx(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     prompt: &str,
 ) -> Option<String> {

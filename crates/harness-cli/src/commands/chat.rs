@@ -31,6 +31,7 @@ use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
 pub mod commands;
+pub(crate) mod connect;
 pub(crate) mod keys;
 pub(crate) mod memory_writer;
 pub(crate) mod render;
@@ -1942,7 +1943,10 @@ fn launch_turn(
 ) {
     // Attached screenshots become OpenAI-style data-URL blocks appended to the prompt text; the
     // provider layer expands them into content parts. Each URL is one paste, oldest first.
+    // Image paths typed into the prompt are inlined the same way, so naming a file on disk sends
+    // its pixels rather than a path the model would have to OCR through a shell tool.
     let images = std::mem::take(&mut *pending_images.lock().unwrap());
+    let query = crate::commands::prompt_images::inline_image_paths(query);
     let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
         format!(
             "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
@@ -1965,12 +1969,12 @@ fn launch_turn(
         println!();
         println!(
             "{}",
-            right_aligned_user_message(query, get_terminal_width())
+            right_aligned_user_message(&query, get_terminal_width())
         );
         ui.draw_initial_box();
     } else {
         ui.begin_block(OutputBlockKind::User);
-        ui.emit_above(&right_aligned_user_message(query, get_terminal_width()));
+        ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
     }
 
     *current_cancel = CancellationToken::new();
