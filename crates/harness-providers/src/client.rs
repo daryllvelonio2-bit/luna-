@@ -1038,23 +1038,36 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
     let mut prose = String::new();
 
     for line in text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if trimmed.starts_with("data:image/") && trimmed.contains(";base64,") {
-            let flushed = prose.trim_end().to_string();
+        // A data URL is lifted wherever it sits in the line — as its own line (the clipboard
+        // paste appends one) or mid-sentence (an inlined file path replaces its own token).
+        // Everything around it stays prose, in order.
+        let mut rest = line;
+        while let Some(start) = find_data_url(rest) {
+            let (before, url_and_rest) = rest.split_at(start);
+            let url_len = url_and_rest
+                .find(char::is_whitespace)
+                .unwrap_or(url_and_rest.len());
+            let (url, after) = url_and_rest.split_at(url_len);
+
+            prose.push_str(before);
+            let flushed = prose.trim().to_string();
+            prose.clear();
             if !flushed.is_empty() {
                 parts.push(json!({ "type": "text", "text": flushed }));
-                prose.clear();
             }
             parts.push(json!({
                 "type": "image_url",
-                "image_url": { "url": trimmed }
+                "image_url": { "url": url }
             }));
-        } else {
-            prose.push_str(line);
+            // Whitespace between the prose and the URL (and after it) does not survive into the
+            // next prose chunk; a following sentence starts fresh.
+            prose.push_str(after.trim_start_matches(['\n']));
+            rest = "";
         }
+        prose.push_str(rest);
     }
 
-    let tail = prose.trim_end().to_string();
+    let tail = prose.trim().to_string();
     if !tail.is_empty() {
         parts.push(json!({ "type": "text", "text": tail }));
     }
@@ -1064,6 +1077,22 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
     }
 
     json!(parts)
+}
+
+/// The byte offset of a `data:image/...;base64,...` token's start in `s`, if one occurs there.
+fn find_data_url(s: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(offset) = s[from..].find("data:image/") {
+        let start = from + offset;
+        let rest = &s[start..];
+        // A data URL runs to the next whitespace; it must carry the base64 marker to be one.
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if rest[..end].contains(";base64,") {
+            return Some(start);
+        }
+        from = start + "data:image/".len();
+    }
+    None
 }
 
 /// Normalize reasoning effort strings for providers with strict accepted-variant sets.
@@ -1142,6 +1171,49 @@ mod tests {
 
     /// The whole point of the fix: the signature Gemini issued on the OpenAI-compatible route is
     /// replayed beside the same call, in the extension that route documents.
+    #[test]
+    fn a_mid_line_data_url_is_lifted_and_the_words_around_it_stay_prose() {
+        let content = serialize_content_with_images(
+            "user",
+            "what is in this image data:image/png;base64,iVBORw0KGgo exactly",
+        );
+        let parts = content.as_array().expect("multimodal array");
+        let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["text", "image_url", "text"]);
+        assert_eq!(parts[0]["text"], "what is in this image");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo"
+        );
+        assert_eq!(parts[2]["text"], "exactly");
+    }
+
+    /// The clipboard path appends the URL as its own line; that shape must keep working.
+    #[test]
+    fn a_line_starting_with_a_data_url_is_lifted() {
+        let content = serialize_content_with_images(
+            "user",
+            "describe it\n\ndata:image/jpeg;base64,QUJD",
+        );
+        let parts = content.as_array().expect("multimodal array");
+        let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["text", "image_url"]);
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    #[test]
+    fn a_data_url_mention_in_system_role_stays_plain_text() {
+        let content =
+            serialize_content_with_images("system", "sent data:image/png;base64,QUJD once");
+        assert!(content.is_string(), "system turns are never multimodal");
+    }
+
+    #[test]
+    fn prose_without_base64_marker_is_not_lifted() {
+        let content = serialize_content_with_images("user", "the spec data:image/png draft");
+        assert!(content.is_string());
+    }
+
     #[test]
     fn a_gemini_signature_is_replayed_on_the_openai_compatible_route() {
         let client = client_for(

@@ -256,6 +256,8 @@ pub(crate) async fn execute_slash_command(
         }
         "/connect" => {
             ui.redraw_input_line();
+            // handle_connect_command restores the composer on every exit path; drawing it again
+            // here would print a second box below the first.
             if let Err(e) = super::connect::handle_connect_command(key_rx, ui, cred_manager).await {
                 ui.emit_above(&format!(
                     "{} Failed to open provider setup: {}",
@@ -263,7 +265,6 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            ui.draw_initial_box();
             Ok(false)
         }
         "/name" => {
