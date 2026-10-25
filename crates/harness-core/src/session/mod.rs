@@ -5,11 +5,17 @@
 //! turn it runs; [`SqliteSessionStore::replay`] reads the recent transcript back so a restarted
 //! process can answer "what did I just ask you?".
 //!
-//! Bounded context is [`compaction`]: when the estimated transcript size crosses
-//! `agent.compact_at_tokens`, the oldest user turns are folded into a single `system`-role summary
-//! row, the last `agent.keep_recent_turns` turns stay verbatim, and the folded rows are kept in the
+//! Bounded context is [`compaction`]: when the estimated transcript size crosses the fold
+//! threshold — `agent.auto_compact_threshold` when auto-compaction is on, else
+//! `agent.compact_at_tokens` — the oldest user turns are folded into a single `system`-role summary
+//! row, the configured number of recent turns stay verbatim, and the folded rows are kept in the
 //! table with `compacted_at` set (nothing is destroyed — that is the raw material for a rewind
 //! spec). [`estimate_tokens`] is the one estimator both the threshold and the tests use.
+//!
+//! Folding always goes through [`compaction::compact`] and [`SessionStore::record_compaction`]
+//! together. Marking rows `compacted_at` *without* writing the summary they were folded into drops
+//! those turns out of every later replay with nothing standing in for them, which is
+//! indistinguishable — to the model — from the conversation never having happened.
 
 pub mod compaction;
 
@@ -111,10 +117,6 @@ pub trait SessionStore: Send + Sync {
         folded: &[i64],
         summary: &str,
     ) -> Result<i64, HarnessError>;
-
-    /// Mark messages belonging to the oldest `n` user turns as compacted.
-    /// Returns the number of messages compacted.
-    async fn compact_oldest_n(&self, session_id: &str, n: usize) -> Result<usize, HarnessError>;
 
     /// Every session, most recently updated first.
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError>;

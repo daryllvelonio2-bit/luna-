@@ -8,6 +8,7 @@ pub struct ClipboardImage {
     /// PNG-encoded bytes of the image.
     pub png_bytes: Vec<u8>,
     /// Where the PNG was persisted (a session-scoped temp file), for logging and replay.
+    #[allow(dead_code)]
     pub saved_path: PathBuf,
     /// Width and height in pixels.
     pub width: usize,

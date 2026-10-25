@@ -1073,6 +1073,68 @@ async fn the_kept_tail_never_starts_with_a_tool_result() {
     );
 }
 
+/// An assistant message issuing tool calls cannot open the kept tail: providers like Gemini
+/// require a user turn before any function call turn, and tool calls without the user prompt
+/// are orphaned. The boundary must advance forward past the tool loop.
+#[tokio::test]
+async fn the_kept_tail_never_starts_with_an_assistant_tool_call() {
+    let call1 = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({"path": "a.rs"}),
+        signature: None,
+    };
+    let call2 = ToolCall {
+        id: "call-2".to_string(),
+        name: "search_files".to_string(),
+        arguments: serde_json::json!({"pattern": "foo"}),
+        signature: None,
+    };
+    let mut transcript = vec![
+        stored(Role::User, "initial prompt".to_string()),
+        stored_with(Role::Assistant, String::new(), vec![call1], None),
+        stored_with(
+            Role::Tool,
+            String::new(),
+            vec![],
+            Some(ToolResult::success("call-1", "file content")),
+        ),
+        stored_with(Role::Assistant, String::new(), vec![call2], None),
+        stored_with(
+            Role::Tool,
+            String::new(),
+            vec![],
+            Some(ToolResult::success("call-2", "y".repeat(400_000))),
+        ),
+        stored(Role::User, "next user task".to_string()),
+        stored(Role::Assistant, "completed".to_string()),
+    ];
+    transcript[0].message.content = Some("x".repeat(500_000));
+
+    let provider = RecordingProvider::new("FOLDED");
+    let outcome = compact(&provider, "canned-model", &transcript, Some(8))
+        .await
+        .unwrap()
+        .expect("foldable");
+
+    let first = outcome.kept.first().expect("kept tail not empty");
+    assert!(
+        !(first.role == Role::Assistant && !first.tool_calls.is_empty()),
+        "first kept message cannot be an assistant issuing tool calls"
+    );
+    assert_ne!(
+        first.role,
+        Role::Tool,
+        "first kept message cannot be a tool result"
+    );
+    assert_eq!(
+        first.role,
+        Role::User,
+        "kept tail advances to the clean user turn"
+    );
+    assert_eq!(first.content.as_deref(), Some("next user task"));
+}
+
 /// A transcript that fits the budget has nothing to fold, and must not spend a call.
 #[tokio::test]
 async fn a_small_transcript_with_few_turns_is_left_alone() {
@@ -1143,10 +1205,14 @@ async fn a_summary_that_never_arrives_is_an_error() {
 
 // ---------------------------------------------------------------- the agent loop
 
+/// The explicit fold policy: `compact_at_tokens` and `keep_recent_turns`, which is what `/compact`
+/// and the default turn loop use. Auto-compact is off here because it moves both numbers, and the
+/// tests built on this helper assert *these* two.
 fn agent_config() -> AgentConfig {
     AgentConfig {
         compact_at_tokens: 1,
         keep_recent_turns: 2,
+        auto_compact_enabled: false,
         ..AgentConfig::default()
     }
 }
@@ -1167,13 +1233,28 @@ async fn seeded_store(turns: usize) -> (TempDir, std::path::PathBuf, Arc<SqliteS
     (dir, path, Arc::new(store))
 }
 
+/// An observer that fires when a fold reports itself finished, plus the notification to await.
+///
+/// A fold runs off the turn's path, so a test that wants to look at what it wrote waits for the
+/// announcement instead of for `run_turn` to return.
+fn fold_finished() -> (AgentObserver, Arc<tokio::sync::Notify>) {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let signal = notify.clone();
+    let observer: AgentObserver = Arc::new(move |event| {
+        if matches!(event, AgentEvent::CompactionFinished { .. }) {
+            signal.notify_one();
+        }
+    });
+    (observer, notify)
+}
+
 #[tokio::test]
-async fn run_turn_compacts_once_and_sends_the_summary_first() {
+async fn run_turn_does_not_wait_for_the_fold_and_the_next_turn_reaps_it() {
     let (_dir, path, store) = seeded_store(6).await;
     let main = Arc::new(RecordingProvider::new("done"));
     let summariser = Arc::new(CannedProvider::new("FOLDED"));
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
@@ -1190,20 +1271,28 @@ async fn run_turn_compacts_once_and_sends_the_summary_first() {
         provider: summariser.clone(),
         model: "canned-model".to_string(),
     });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
 
     let outcome = agent
         .run_turn("hello", CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(outcome.reply, "done");
+
+    // The request this turn sent is the transcript as it stood: the fold did not hold it back.
+    let sent = main.last_request();
     assert_eq!(
-        outcome.compaction,
-        Some(CompactionNotice {
-            session_id: "s1".to_string(),
-            turns: 4,
-            messages: 8,
-        })
+        sent.len(),
+        14,
+        "system + the full 12-message transcript + the new user line"
     );
+    assert_eq!(sent[0].role, Role::System);
+    assert_eq!(sent[1].content.as_deref(), Some("question 0"));
+    assert_eq!(sent[sent.len() - 1].content.as_deref(), Some("hello"));
+
+    // The fold ran off that path, and it announced itself when it was done.
+    folded.notified().await;
     assert_eq!(
         summariser.calls.load(Ordering::SeqCst),
         1,
@@ -1211,25 +1300,28 @@ async fn run_turn_compacts_once_and_sends_the_summary_first() {
     );
     assert_eq!(main.call_count(), 1);
 
+    // What it wrote is a bounded transcript: the kept turns plus the summary.
+    assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 8);
+    let replay = store.replay("s1", 200).await.unwrap();
+    assert!(replay.history.iter().any(|stored| stored.is_summary));
+
+    // The next turn is the one that sends the bounded transcript.
+    let second = agent
+        .run_turn("again", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second.reply, "done");
     let sent = main.last_request();
-    assert_eq!(sent[0].role, Role::System);
-    assert_eq!(sent[1].content.as_deref(), Some("FOLDED"));
-    assert_eq!(sent[sent.len() - 1].content.as_deref(), Some("hello"));
+    assert!(
+        sent.iter()
+            .any(|message| message.content.as_deref() == Some("FOLDED")),
+        "the next request carries the summary"
+    );
     assert_eq!(
         sent.len(),
-        7,
-        "system + summary + 4 kept turns + the new user line"
+        9,
+        "system + 4 kept messages + the summary + the first turn's own exchange + the new user line"
     );
-    assert!(
-        sent.len() < 1 + 12 + 1,
-        "the request is smaller than the full transcript it replaced"
-    );
-
-    // The summary is in the store, so the next process resumes the bounded transcript.
-    let replay = store.replay("s1", 200).await.unwrap();
-    assert!(replay.history[0].is_summary);
-    assert_eq!(replay.history[0].message.content.as_deref(), Some("FOLDED"));
-    assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 8);
 }
 
 #[tokio::test]
@@ -1238,7 +1330,7 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
     let main = Arc::new(RecordingProvider::new("done"));
     let summariser = Arc::new(FailingProvider::new());
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
@@ -1255,6 +1347,8 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
         provider: summariser.clone(),
         model: "unconfigured".to_string(),
     });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
 
     let outcome = agent
         .run_turn("hello", CancellationToken::new())
@@ -1264,11 +1358,13 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
         outcome.reply, "done",
         "the turn proceeds on the full history"
     );
-    assert!(outcome.compaction.is_none());
+
+    // The failure happens off the turn's path, where it cannot reach the reply.
+    folded.notified().await;
     assert_eq!(
         summariser.calls.load(Ordering::SeqCst),
         1,
-        "a failed compaction is not retried inside the same turn"
+        "a failed compaction is not retried"
     );
 
     let sent = main.last_request();
@@ -1612,55 +1708,38 @@ async fn estimate_after_a_fold_ignores_the_usage_of_the_pre_fold_transcript() {
     assert_eq!(after, heuristic_tokens(&live));
 }
 
+/// A fold boundary is never the end of the transcript.
+///
+/// The kept count is a *floor*: when the session holds fewer turns than that, the boundary moves
+/// to a token budget and the newest messages stay. Asking to keep more turns than exist is an
+/// ordinary request — it is what a freshly configured threshold does on a young session — and it
+/// must not fold the conversation away.
 #[tokio::test]
-async fn session_store_compact_oldest_n_marks_turns() {
-    let (_tmp, _path, store) = temp_store();
-    store.ensure_session("s_compact").await.unwrap();
+async fn a_keep_count_larger_than_the_transcript_still_keeps_the_newest_messages() {
+    let mut big = history(3);
+    big[0].message.content = Some("x".repeat(500_000));
 
-    // 4 user turns: 8 messages total
-    for i in 0..4 {
-        store
-            .append(
-                "s_compact",
-                &Message::user(format!("user turn {}", i)),
-                false,
-            )
-            .await
-            .unwrap();
-        store
-            .append(
-                "s_compact",
-                &Message::assistant(format!("assistant turn {}", i)),
-                false,
-            )
-            .await
-            .unwrap();
-    }
-
-    let initial = store.replay("s_compact", 100).await.unwrap();
-    assert_eq!(initial.total, 8);
-
-    // Compact oldest 2 turns: should compact turn 0 and turn 1 (4 messages)
-    let compacted = store.compact_oldest_n("s_compact", 2).await.unwrap();
-    assert_eq!(compacted, 4);
-
-    let after_2 = store.replay("s_compact", 100).await.unwrap();
-    assert_eq!(after_2.total, 4);
-    assert_eq!(
-        after_2.history[0].message.content.as_deref(),
-        Some("user turn 2")
+    let boundary = fold_boundary(&big, Some(20));
+    assert!(
+        boundary < big.len(),
+        "something is foldable in an oversized transcript"
+    );
+    assert!(
+        boundary > 0,
+        "but the newest messages are never the ones folded"
     );
 
-    // Compact remaining (ask for 5 turns when only 2 remain)
-    let compacted_remaining = store.compact_oldest_n("s_compact", 5).await.unwrap();
-    assert_eq!(compacted_remaining, 4);
+    let provider = RecordingProvider::new("FOLDED");
+    let outcome = compact(&provider, "canned-model", &big, Some(20))
+        .await
+        .unwrap()
+        .expect("an oversized transcript is foldable whatever the keep count");
 
-    let after_all = store.replay("s_compact", 100).await.unwrap();
-    assert_eq!(after_all.total, 0);
-
-    // Calling again on empty returns 0
-    let zero = store.compact_oldest_n("s_compact", 1).await.unwrap();
-    assert_eq!(zero, 0);
+    assert!(!outcome.kept.is_empty(), "the kept tail is never empty");
+    assert_eq!(
+        outcome.summary, "FOLDED",
+        "the folded turns are replaced by a summary, not by nothing"
+    );
 }
 
 #[tokio::test]
@@ -1677,31 +1756,297 @@ async fn compact_accepts_optional_keep_recent_turns_none() {
     assert_eq!(outcome.summary, "FOLDED WITH NONE");
 }
 
+/// Auto-compact is a lower bar on the one fold, not a second mechanism — and it does not hold the
+/// turn that trips it.
+///
+/// The fold is a bound on the *next* request. The turn that crosses the threshold is answered on
+/// the transcript it already has; the fold lands in the store while the answer is being read. What
+/// it must leave behind is a summary the next request carries: marking rows folded and writing
+/// nothing in their place is what reads as the agent losing the conversation.
 #[tokio::test]
-async fn agent_auto_compact_triggers_when_threshold_exceeded() {
-    let (_tmp, _path, store) = temp_store();
-    let store = Arc::new(store);
-    store.ensure_session("s_auto").await.unwrap();
-
-    // Seed 4 previous turns
-    for i in 0..4 {
-        store
-            .append("s_auto", &Message::user(format!("turn {}", i)), false)
-            .await
-            .unwrap();
-        store
-            .append("s_auto", &Message::assistant(format!("resp {}", i)), false)
-            .await
-            .unwrap();
-    }
+async fn auto_compact_folds_in_the_background_and_the_next_request_carries_the_summary() {
+    let (_dir, path, store) = seeded_store(6).await;
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED BY AUTO-COMPACT"));
 
     let mut cfg = agent_config();
     cfg.auto_compact_enabled = true;
-    cfg.auto_compact_threshold = 10; // Extremely low threshold to trigger auto-compact
-    cfg.auto_compact_turns = 2; // Compact oldest 2 turns
+    cfg.auto_compact_threshold = 10; // fires on the first turn
+    cfg.auto_compact_turns = 2;
 
-    let main = Arc::new(RecordingProvider::new("answer"));
-    let agent = Agent::new(
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
+
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply, "done");
+    assert_eq!(
+        main.last_request().len(),
+        14,
+        "the turn that tripped the threshold did not wait for the fold"
+    );
+
+    // The fold reports itself when it is done, off the turn's path.
+    folded.notified().await;
+    assert_eq!(summariser.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        count_rows(&path, "is_summary = 1"),
+        1,
+        "the folded turns left a summary behind"
+    );
+    assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 8);
+
+    // And the next turn is the one that sends the bounded transcript.
+    let second = agent
+        .run_turn("second", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second.reply, "done");
+    let sent = main.last_request();
+    assert!(
+        sent.iter()
+            .any(|message| message.content.as_deref() == Some("FOLDED BY AUTO-COMPACT")),
+        "the next request carries the summary"
+    );
+    assert!(
+        sent.len() < 14,
+        "and it is smaller than the transcript it replaced: {} messages",
+        sent.len()
+    );
+    assert_eq!(sent[sent.len() - 1].content.as_deref(), Some("second"));
+}
+
+/// Answers only after a delay, so a fold spawned at the start of a turn has certainly finished by
+/// the time that turn's own checks run again.
+struct SlowProvider {
+    delay: std::time::Duration,
+}
+
+impl SlowProvider {
+    fn new(delay_ms: u64) -> Self {
+        Self {
+            delay: std::time::Duration::from_millis(delay_ms),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for SlowProvider {
+    fn provider_id(&self) -> &str {
+        "slow"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["slow-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(Message::assistant("done"))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A turn that crosses the bar on its own reply folds by itself, with no second user message.
+///
+/// The check at the top of a turn only runs when a turn starts, so a transcript that grew past the
+/// threshold *during* a turn stayed unfolded until the user came back — which reads as an
+/// auto-compaction that only works when you prompt it. The turn's own reply is weight enough to trip
+/// the bar, so the turn that wrote it is the one that starts the fold.
+#[tokio::test]
+async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
+    let (_dir, path, store) = seeded_store(3).await;
+    let main = Arc::new(RecordingProvider::new(&"x".repeat(2_000_000)));
+    let summariser = Arc::new(CannedProvider::new("FOLDED WITHOUT BEING ASKED"));
+
+    let mut cfg = agent_config();
+    // The long-standing bar stays out of the way, and the auto-compact bar sits between what the
+    // session weighs before this turn and what it weighs after it.
+    cfg.compact_at_tokens = 500_000;
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 100_000;
+    cfg.auto_compact_turns = 1;
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
+
+    // One turn, and only one: nothing else is sent to the agent.
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply.chars().count(), 2_000_000);
+    assert_eq!(
+        main.call_count(),
+        1,
+        "the turn ran on the transcript it had; the fold is not part of it"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), folded.notified())
+        .await
+        .expect("the turn must start the fold itself, without another user message");
+
+    assert_eq!(
+        summariser.calls.load(Ordering::SeqCst),
+        1,
+        "one summarising call"
+    );
+    assert_eq!(
+        count_rows(&path, "is_summary = 1"),
+        1,
+        "the fold wrote its summary"
+    );
+    assert!(
+        count_rows(&path, "compacted_at IS NOT NULL") > 0,
+        "and it folded rows rather than only marking the session"
+    );
+}
+
+/// One fold per turn — even though the turn's own request still measures the *unfolded* transcript.
+///
+/// A fold that lands while a turn runs rewrites the stored history, but the running turn keeps its
+/// own copy and its remaining model calls go on reporting that copy's size. Those reports describe a
+/// transcript the fold has already replaced, so a check that trusts them folds a second time —
+/// spending another summarising call to summarise the summary it has just written.
+#[tokio::test]
+async fn a_turn_folds_once_even_when_its_reports_still_describe_the_unfolded_transcript() {
+    let (_dir, path, store) = seeded_store(6).await;
+    // Slow enough that the fold from the top of the turn has finished before the turn ends, which is
+    // the state the check has to get right: nothing in flight, and a transcript already rewritten.
+    let main = Arc::new(SlowProvider::new(300));
+    let summariser = Arc::new(CannedProvider::new("FOLDED"));
+
+    let mut cfg = agent_config();
+    cfg.compact_at_tokens = 1; // crossed before the turn's own work even starts
+    cfg.auto_compact_enabled = false;
+    cfg.keep_recent_turns = 2;
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(MockEvolver),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
+
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply, "done");
+
+    folded.notified().await;
+    // Room for a second fold to land, were one going to.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert_eq!(
+        summariser.calls.load(Ordering::SeqCst),
+        1,
+        "the crossing was folded once"
+    );
+    assert_eq!(
+        count_rows(&path, "is_summary = 1"),
+        1,
+        "one summary, not a summary of the summary"
+    );
+}
+
+/// The configured turn count is how many recent turns to *keep*, and it may exceed what the
+/// session holds — that is the ordinary state of a young session on a low threshold. This is the
+/// shape that used to take the whole transcript with it: no cutoff row was found, so every message
+/// was marked folded, and the next replay had nothing to hand the model.
+#[tokio::test]
+async fn auto_compact_never_empties_a_session_that_holds_fewer_turns_than_it_keeps() {
+    let (_dir, path, store) = temp_store();
+    store.ensure_session("s_auto").await.unwrap();
+    // Three turns, the first of them big enough that the transcript is over any budget.
+    store
+        .append(
+            "s_auto",
+            &Message::user(format!("opening question {}", "x".repeat(500_000))),
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .append("s_auto", &Message::assistant("first answer"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_auto", &Message::user("second question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_auto", &Message::assistant("second answer"), false)
+        .await
+        .unwrap();
+
+    let store = Arc::new(store);
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED"));
+
+    let mut cfg = agent_config();
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 10;
+    cfg.auto_compact_turns = 20; // more turns than this session has
+
+    let mut agent = Agent::new(
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
@@ -1713,18 +2058,41 @@ async fn agent_auto_compact_triggers_when_threshold_exceeded() {
         store: store.clone(),
         session_id: "s_auto".to_string(),
         resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
     });
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
 
-    let outcome = agent
+    agent
         .run_turn("new prompt", CancellationToken::new())
         .await
         .unwrap();
+    folded.notified().await;
 
-    assert_eq!(outcome.reply, "answer");
-
-    // The oldest 2 turns (4 messages) should have been marked compacted
     let live = store.replay("s_auto", 100).await.unwrap();
-    // Originally 8 messages, 4 compacted = 4 remaining + 2 from this turn (user + assistant) = 6 total
-    assert_eq!(live.total, 6);
-    assert_eq!(live.history[0].message.content.as_deref(), Some("turn 2"));
+    assert!(
+        live.total > 0,
+        "the session still holds the conversation: {} live messages",
+        live.total
+    );
+    assert!(
+        live.history.iter().any(|stored| stored.is_summary),
+        "what was folded is represented by a summary"
+    );
+    assert_eq!(
+        count_rows(&path, "is_summary = 1"),
+        1,
+        "exactly one fold happened, and it wrote its summary"
+    );
+
+    // The newest turns survived verbatim, and the model was sent them.
+    let sent = main.last_request();
+    assert!(
+        sent.iter()
+            .any(|message| message.content.as_deref() == Some("second question")),
+        "the most recent turns are still in the request"
+    );
 }

@@ -354,7 +354,6 @@ pub async fn run_exec(
                         "output": call.output,
                     })).collect::<Vec<_>>(),
                     "replayed": outcome.replayed.as_ref().map(|replay: &ReplayNotice| replay.replayed),
-                    "compacted": outcome.compaction.is_some(),
                     "usage": outcome.usage.as_ref().map(|usage| serde_json::json!({
                         "prompt_tokens": usage.prompt_tokens,
                         "completion_tokens": usage.completion_tokens,

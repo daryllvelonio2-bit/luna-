@@ -266,7 +266,8 @@ pub fn confirmation_lines(
     let ac_summary = crate::compact_step::summary(auto_compact);
     if ac_label.len() + 2 + ac_summary.len() <= limit {
         lines.push(
-            Line::of(Span::muted(format!("{ac_label}  "))).with(Span::strong(ac_summary, NAME_COLOR)),
+            Line::of(Span::muted(format!("{ac_label}  ")))
+                .with(Span::strong(ac_summary, NAME_COLOR)),
         );
     } else {
         lines.push(Line::of(Span::muted(ac_label)));
@@ -304,11 +305,17 @@ mod tests {
         let persona = persona::by_id(3).expect("in the catalog");
         let path = PathBuf::from("/home/janelle/.luna/config.yaml");
         let ac = store::AutoCompactSelection::default();
-        let block = confirmation_lines(persona, MemoryMode::Background, &ac, &path, Size::new(90, 24))
-            .iter()
-            .map(Line::text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let block = confirmation_lines(
+            persona,
+            MemoryMode::Background,
+            &ac,
+            &path,
+            Size::new(90, 24),
+        )
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert!(block.contains("Persona configured"));
         assert!(block.contains(&persona.labelled()));

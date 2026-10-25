@@ -1,5 +1,3 @@
-use std::io::{self, Write};
-
 use async_trait::async_trait;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -9,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use harness_core::{error::HarnessError, traits::Tool, types::ToolResult};
 
 use crate::commands::chat::keys::AppKey;
+use crate::commands::chat::modal::{paint_centred, ModalScreen};
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
 
 /// A single clarification question with its choices.
@@ -287,7 +286,7 @@ pub fn render_clarify_box(
     selected: usize,
     typing_buf: Option<&str>,
     width: usize,
-) -> (String, usize) {
+) -> String {
     let total = width.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
     let body = total.saturating_sub(4);
     let visible_len = visible_width;
@@ -421,11 +420,15 @@ pub fn render_clarify_box(
     }
 
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
-    let count = lines.len();
-    (lines.join("\n") + "\n", count)
+    // The frame's height is a property of the text itself (`lines().count()`), so nothing that
+    // draws it has to be handed it separately.
+    lines.join("\n") + "\n"
 }
 
-/// Prompt the user for clarify choice using the session's key receiver.
+/// Ask the user for a clarification, on a screen the question has to itself.
+///
+/// The box is drawn centred on the alternate screen, so nothing else is on screen beside it, and
+/// what was asked and answered is written into the transcript once the composer is back.
 pub async fn prompt_clarify_choice(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     request: &ClarifyRequest,
@@ -455,25 +458,25 @@ pub async fn prompt_clarify_choice(
     }
 
     let mut answers = Vec::new();
+    // The box takes the screen for as long as a question is up, and gives it back on the way out.
+    let screen = ModalScreen::enter();
 
     for item in &request.questions {
         while key_rx.try_recv().is_ok() {}
-        ui.clear_box_on_exit();
 
         let mut selected = 0;
         let num_options = item.choices.len() + 1; // Predefined choices + "Type your answer..."
         let mut typing: Option<String> = None;
         let mut width = get_terminal_width().saturating_sub(2);
 
-        let (initial_text, mut line_count) = render_clarify_box(
+        let rendered = render_clarify_box(
             &item.question,
             &item.choices,
             selected,
             typing.as_deref(),
             width,
         );
-        print!("{}", initial_text);
-        let _ = io::stdout().flush();
+        paint_centred(&rendered);
 
         let final_answer = loop {
             let key = match key_rx.recv().await {
@@ -538,52 +541,44 @@ pub async fn prompt_clarify_choice(
                 }
             }
 
-            // Erase previous box and re-render
-            print!("\r\x1b[{}A", line_count);
-            for _ in 0..line_count {
-                print!("\x1b[2K\x1b[1B");
-            }
-            print!("\r\x1b[{}A", line_count);
-
+            // Repaint the whole frame: the box changes height as the question wraps and as the
+            // typing row opens, and the screen it is drawn on holds nothing that must survive.
             width = get_terminal_width().saturating_sub(2);
-            let (new_text, new_count) = render_clarify_box(
+            let rendered = render_clarify_box(
                 &item.question,
                 &item.choices,
                 selected,
                 typing.as_deref(),
                 width,
             );
-            print!("{}", new_text);
-            line_count = new_count;
-            let _ = io::stdout().flush();
+            paint_centred(&rendered);
         };
-
-        // Erase box completely before continuing
-        print!("\r\x1b[{}A", line_count);
-        for _ in 0..line_count {
-            print!("\x1b[2K\x1b[1B");
-        }
-        print!("\r\x1b[{}A", line_count);
-        let _ = io::stdout().flush();
 
         let (chosen_answer, chosen_idx) = match final_answer {
             Some((ans, idx)) => (ans, idx),
             None => ("(skipped by user)".to_string(), None),
         };
 
-        let summary = format!(
-            "{} {}: {}",
-            "✔".green().bold(),
-            item.question.dimmed(),
-            chosen_answer.cyan().bold()
-        );
-        ui.emit_above(&summary);
-
         answers.push(ClarifyAnswer {
             question: item.question.clone(),
             answer: chosen_answer,
             choice_index: chosen_idx,
         });
+    }
+
+    // Back on the transcript. The box went with the screen it was drawn on, so what the
+    // conversation keeps is one line per question and answer. Written here rather than as each
+    // answer was given: a line emitted while the alternate screen was up would have been drawn
+    // onto that screen instead of the conversation.
+    drop(screen);
+    for answer in &answers {
+        let summary = format!(
+            "{} {}: {}",
+            "✔".green().bold(),
+            answer.question.dimmed(),
+            answer.answer.cyan().bold()
+        );
+        ui.emit_above(&summary);
     }
 
     let first_ans = answers.first().map(|a| a.answer.clone());
@@ -599,6 +594,7 @@ pub async fn prompt_clarify_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::chat::modal::centred_frame;
 
     fn strip(line: &str) -> String {
         dialoguer::console::strip_ansi_codes(line).to_string()
@@ -656,7 +652,7 @@ mod tests {
             "Background saver (independent writer after each turn)".to_string(),
         ];
         let terminal = 120;
-        let (rendered, count) = render_clarify_box(question, &choices, 0, None, terminal);
+        let rendered = render_clarify_box(question, &choices, 0, None, terminal);
         let total = terminal.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
 
         assert!(
@@ -664,7 +660,7 @@ mod tests {
             "nothing may be truncated now that the box wraps:\n{rendered}"
         );
         assert!(
-            count > 5 + choices.len(),
+            rendered.lines().count() > 5 + choices.len(),
             "the question should occupy extra rows"
         );
 
@@ -688,7 +684,7 @@ mod tests {
         let question =
             "A question long enough that a narrow terminal has to wrap it over several rows.";
         let choices = vec!["The only choice, also rather long for a narrow terminal".to_string()];
-        let (rendered, _) = render_clarify_box(question, &choices, 0, None, 24);
+        let rendered = render_clarify_box(question, &choices, 0, None, 24);
         let total = 24usize.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
 
         assert!(!rendered.contains('…'));
@@ -716,8 +712,8 @@ mod tests {
                 .collect()
         };
 
-        let (highlighting_first, _) = render_clarify_box(question, &choices, 0, None, 60);
-        let (highlighting_second, _) = render_clarify_box(question, &choices, 1, None, 60);
+        let highlighting_first = render_clarify_box(question, &choices, 0, None, 60);
+        let highlighting_second = render_clarify_box(question, &choices, 1, None, 60);
 
         assert_eq!(
             normalize(&highlighting_first),
@@ -778,7 +774,7 @@ mod tests {
     fn a_long_typed_answer_scrolls_to_keep_the_cursor_visible() {
         let question = "Which database do you prefer?";
         let choices = vec!["PostgreSQL".to_string()];
-        let (rendered, _) = render_clarify_box(question, &choices, 0, Some(&"x".repeat(400)), 60);
+        let rendered = render_clarify_box(question, &choices, 0, Some(&"x".repeat(400)), 60);
         let total = 60usize.clamp(MIN_BOX_WIDTH, MAX_BOX_WIDTH);
         assert_eq!(
             rendered.matches('…').count(),
@@ -791,12 +787,74 @@ mod tests {
         assert!(rendered.contains('█'), "the cursor must stay in the box");
     }
 
+    /// The box has the screen to itself, in the middle of it: asked mid-turn it used to be drawn
+    /// under the process header, the reasoning and the composer, competing with all of them.
+    #[test]
+    fn the_box_is_centred_on_a_screen_of_its_own() {
+        let question = "Which database do you prefer?";
+        let choices = vec!["PostgreSQL".to_string(), "SQLite".to_string()];
+        let rendered = render_clarify_box(question, &choices, 0, None, 80);
+        let rows = rendered.lines().count();
+        let (width, height) = (80usize, 24usize);
+
+        let frame = centred_frame(&rendered, width, height);
+        assert!(
+            frame.starts_with("\x1b[H\x1b[2J"),
+            "the screen is cleared before the box is drawn"
+        );
+        assert!(
+            !frame.ends_with('\n'),
+            "a trailing newline on the last row scrolls a full box off centre"
+        );
+
+        let lines: Vec<&str> = frame
+            .trim_start_matches("\x1b[H\x1b[2J")
+            .split('\n')
+            .collect();
+        let blank_rows = lines.iter().take_while(|line| line.is_empty()).count();
+        assert_eq!(
+            blank_rows,
+            (height - rows) / 2,
+            "the box is centred vertically"
+        );
+        assert_eq!(
+            lines.len(),
+            blank_rows + rows,
+            "the screen holds the box and nothing else"
+        );
+
+        let left = (width - visible(rendered.lines().next().unwrap())) / 2;
+        assert!(left > 0, "a centred box is indented, not flush left");
+        for line in &lines[blank_rows..] {
+            assert_eq!(
+                line.chars().take_while(|c| *c == ' ').count(),
+                left,
+                "every row is indented to the same column: {line:?}"
+            );
+        }
+        assert!(
+            frame.contains(question),
+            "the question is not cut to fit the screen"
+        );
+
+        // A screen too small for the box is not a panic and not a negative indent.
+        let tight = centred_frame(&rendered, 20, 4);
+        assert!(
+            tight.contains(question),
+            "the box is still drawn: {tight:?}"
+        );
+        assert!(
+            !tight.contains("  \n"),
+            "no padding is emitted where there is no room for it"
+        );
+    }
+
     #[test]
     fn test_render_clarify_box_menu() {
         let question = "Which database do you prefer?";
         let choices = vec!["PostgreSQL".to_string(), "SQLite".to_string()];
-        let (rendered, count) = render_clarify_box(question, &choices, 0, None, 60);
-        assert!(count > 5);
+        let rendered = render_clarify_box(question, &choices, 0, None, 60);
+        assert!(rendered.lines().count() > 5);
         assert!(rendered.contains("Clarification Needed"));
         assert!(rendered.contains("Which database do you prefer?"));
         assert!(rendered.contains("PostgreSQL"));
@@ -809,8 +867,8 @@ mod tests {
     fn test_render_clarify_box_typing() {
         let question = "Which database do you prefer?";
         let choices = vec!["PostgreSQL".to_string()];
-        let (rendered, count) = render_clarify_box(question, &choices, 1, Some("DuckDB"), 60);
-        assert!(count > 5);
+        let rendered = render_clarify_box(question, &choices, 1, Some("DuckDB"), 60);
+        assert!(rendered.lines().count() > 5);
         assert!(rendered.contains("Your answer:"));
         assert!(rendered.contains("DuckDB"));
         assert!(rendered.contains("Enter to confirm"));

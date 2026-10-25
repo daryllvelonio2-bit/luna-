@@ -13,11 +13,45 @@ use std::path::Path;
 
 use base64::Engine;
 
+/// Strip ` saved to <path>` inside `[image...]` markers: the image pixels are already attached to
+/// the turn as a data URL, so sending the local temp file path is redundant and invites the model
+/// to read or mention a path it does not need.
+pub fn strip_image_saved_paths(text: &str) -> String {
+    if !text.contains("[image") || !text.contains(" saved to ") {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(start) = rest.find("[image") {
+        out.push_str(&rest[..start]);
+        let marker_rest = &rest[start..];
+        if let Some(end) = marker_rest.find(']') {
+            let marker = &marker_rest[..=end];
+            if let Some(saved_idx) = marker.find(" saved to ") {
+                out.push_str(&marker[..saved_idx]);
+                out.push(']');
+            } else {
+                out.push_str(marker);
+            }
+            rest = &marker_rest[end + 1..];
+        } else {
+            out.push_str(&marker_rest[.."[image".len()]);
+            rest = &marker_rest["[image".len()..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Inline every image path in `prompt` as a data URL, on its own line.
 ///
 /// Each path is replaced in place; the resulting line is what the provider layer turns into an
 /// `image_url` (OpenAI route) or `inlineData` (Gemini route) content part.
 pub fn inline_image_paths(prompt: &str) -> String {
+    let cleaned = strip_image_saved_paths(prompt);
+    let prompt = cleaned.as_str();
     if !prompt.contains('.') {
         return prompt.to_string();
     }
@@ -215,5 +249,40 @@ mod tests {
         // panic and leaves non-existent tilde paths alone.
         let prompt = "check ~/definitely/not/here.png now";
         assert_eq!(inline_image_paths(prompt), prompt);
+    }
+
+    #[test]
+    fn strip_image_saved_paths_removes_file_paths_from_image_markers() {
+        let input = "[image: 1920x1080 saved to /tmp/screenshot_123.png] what is in this?";
+        assert_eq!(
+            strip_image_saved_paths(input),
+            "[image: 1920x1080] what is in this?"
+        );
+
+        let input_no_dims = "[image saved to /tmp/shot.png]";
+        assert_eq!(strip_image_saved_paths(input_no_dims), "[image]");
+
+        let multiple = "[image: 800x600 saved to /a.png] and [image: 1024x768 saved to /b.png]";
+        assert_eq!(
+            strip_image_saved_paths(multiple),
+            "[image: 800x600] and [image: 1024x768]"
+        );
+
+        let clean = "[image: 1920x1080] looks fine";
+        assert_eq!(strip_image_saved_paths(clean), clean);
+    }
+
+    #[test]
+    fn inline_image_paths_strips_saved_paths_instead_of_inlining_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n fake").unwrap();
+
+        let prompt = format!(
+            "[image: 1920x1080 saved to {}] describe this",
+            path.display()
+        );
+        let out = inline_image_paths(&prompt);
+        assert_eq!(out, "[image: 1920x1080] describe this");
     }
 }

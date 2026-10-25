@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod models;
 pub mod prompt_images;
 pub mod sessions;
+pub mod skills;
 pub mod supervisor;
 pub mod usage;
 pub mod voice;

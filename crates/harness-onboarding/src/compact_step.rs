@@ -1,7 +1,7 @@
 //! Phase 2c: automatic context compaction setup.
 //!
 //! Asks the user whether to enable auto-compaction, what token threshold to trigger at (100k-700k),
-//! and how many oldest turns to compact.
+//! and how many recent turns a fold keeps verbatim.
 
 use std::io::{BufRead, Write};
 
@@ -26,7 +26,7 @@ pub const PANEL: Panel = Panel {
 
 pub const PROMPT: &str = "Select 1-2 ▸ ";
 pub const THRESHOLD_PROMPT: &str = "Threshold (100k-700k, default 150k) ▸ ";
-pub const TURNS_PROMPT: &str = "Turns to compact (default 20) ▸ ";
+pub const TURNS_PROMPT: &str = "Recent turns to keep (default 20) ▸ ";
 
 pub const HINT: &str = "Enter 1 to enable auto-compact, 2 to disable — blank keeps enabled (1). Change it later with `/auto-compact`.";
 pub const MAX_ATTEMPTS: usize = 10;
@@ -43,7 +43,7 @@ pub const CHOICES: [Choice; 2] = [
     Choice {
         id: 1,
         name: "Enable auto-compaction",
-        detail: "Oldest conversation turns are trimmed when transcript tokens cross the threshold.",
+        detail: "When transcript tokens cross the threshold, the older turns are folded into a summary and the newest turns stay verbatim.",
         enabled: true,
     },
     Choice {
@@ -207,7 +207,10 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
             turns: AUTO_COMPACT_DEFAULT_TURNS,
         };
         writer.blank()?;
-        writer.write_centered(&format!("✓ Auto-compact: {}", summary(&selection)), Some(NAME_COLOR))?;
+        writer.write_centered(
+            &format!("✓ Auto-compact: {}", summary(&selection)),
+            Some(NAME_COLOR),
+        )?;
         return Ok(selection);
     }
 
@@ -265,6 +268,9 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
         turns: chosen_turns,
     };
     writer.blank()?;
-    writer.write_centered(&format!("✓ Auto-compact: {}", summary(&selection)), Some(NAME_COLOR))?;
+    writer.write_centered(
+        &format!("✓ Auto-compact: {}", summary(&selection)),
+        Some(NAME_COLOR),
+    )?;
     Ok(selection)
 }

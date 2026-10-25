@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -58,7 +58,12 @@ pub struct AgentConfig {
     /// Token threshold at which automatic compaction triggers (100k - 700k).
     #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold: usize,
-    /// Number of oldest turns to compact when auto-compaction triggers.
+    /// Turns kept verbatim when automatic compaction triggers.
+    ///
+    /// This is a *retained* count, like [`Self::keep_recent_turns`], not a count of turns to
+    /// throw away: after a fold the transcript is the summary plus this many recent turns. It is
+    /// a floor, not a guarantee about the fold's size — a transcript whose messages are large is
+    /// folded back to a token budget instead, because a turn is not a fixed size.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
 }
@@ -96,6 +101,21 @@ impl Default for AgentConfig {
             auto_compact_turns: 20,
         }
     }
+}
+
+/// When the transcript gets folded, and how much of it stays verbatim afterwards.
+///
+/// There is one fold in this harness, so there is one policy for it: the auto-compact settings
+/// when that feature is on, the long-standing `compact_at_tokens` / `keep_recent_turns` pair when
+/// it is not. Auto-compact moves the bar and the kept tail — nothing else. Everything a fold does
+/// (summarising, writing the summary back, bounding the sent vector, announcing the new size) comes
+/// from [`Agent::compact_once`] either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FoldPolicy {
+    /// Fold once the transcript estimate crosses this many tokens.
+    threshold: usize,
+    /// Turns kept verbatim at the end of the folded transcript.
+    keep_recent: usize,
 }
 
 /// The provider and model that write summaries. A separate provider is what makes a failing
@@ -194,8 +214,9 @@ pub struct TurnOutcome {
     pub tool_calls: Vec<TurnToolCall>,
     /// `Some` whenever the run is bound to a session.
     pub replayed: Option<ReplayNotice>,
-    /// `Some` only on a turn that actually compacted.
-    pub compaction: Option<CompactionNotice>,
+    // No `compaction` field: a turn no longer waits for a fold, so it has no fold result to report.
+    // A fold is announced by `AgentEvent::CompactionStarted` / `CompactionFinished`, which arrive
+    // while the turn runs and long after it returns.
     /// Provider-reported tokens summed over every model call in this turn, when the provider
     /// reported any. `None` is "unknown", never "zero".
     pub usage: Option<TokenUsage>,
@@ -231,11 +252,28 @@ where
     saver: Option<SaverHook>,
     /// Completed turns in this agent's lifetime; the saver's interval counts turns, not wall time.
     turns_completed: AtomicUsize,
+    /// `true` while an automatic fold is in flight.
+    ///
+    /// The fold runs off the turn's path, so a later turn can arrive while the summary call is
+    /// still going. This is what stops that turn from starting a second fold over the same
+    /// transcript: one fold at a time, and the next turn reaps the result.
+    fold_in_flight: Arc<AtomicBool>,
 }
 
 /// Closes the turn's checkpoint on every exit path, including `?` and panics.
 struct CheckpointGuard<'a> {
     controller: Option<&'a CheckpointController>,
+}
+
+/// Clears [`Agent::fold_in_flight`] however the fold ends — including a panic inside the spawned
+/// task. A flag left set by a fold that never finished would silently disable folding for the rest
+/// of the session, which is the one failure mode worse than a fold that ran twice.
+struct FoldInFlight(Arc<AtomicBool>);
+
+impl Drop for FoldInFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Drop for CheckpointGuard<'_> {
@@ -291,6 +329,7 @@ where
             steer_queue: Arc::new(Mutex::new(VecDeque::new())),
             saver: None,
             turns_completed: AtomicUsize::new(0),
+            fold_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -341,6 +380,37 @@ where
             self.config.auto_compact_threshold,
             self.config.auto_compact_turns,
         )
+    }
+
+    /// Which threshold and kept-tail the fold uses this turn.
+    ///
+    /// Auto-compact is not a second mechanism, only a lower bar: with it on, the fold fires at the
+    /// *smaller* of the two thresholds, so switching it on can fold earlier than the default but
+    /// can never let a conversation grow past what the harness already allowed.
+    fn fold_policy(&self) -> FoldPolicy {
+        if self.config.auto_compact_enabled {
+            FoldPolicy {
+                threshold: self
+                    .config
+                    .auto_compact_threshold
+                    .min(self.config.compact_at_tokens),
+                keep_recent: self.config.auto_compact_turns,
+            }
+        } else {
+            FoldPolicy {
+                threshold: self.config.compact_at_tokens,
+                keep_recent: self.config.keep_recent_turns,
+            }
+        }
+    }
+
+    /// The policy a fold the user asked for by hand runs under: the threshold is irrelevant
+    /// (`force` skips the check), and the kept tail is the configured `keep_recent_turns`.
+    fn explicit_fold_policy(&self) -> FoldPolicy {
+        FoldPolicy {
+            threshold: self.config.compact_at_tokens,
+            keep_recent: self.config.keep_recent_turns,
+        }
     }
 
     /// The attached saver, if any (used by the CLI to report the mode).
@@ -692,7 +762,12 @@ where
         let system_text = self.system_prompt("").await?;
         let mut messages = Vec::new();
         let notice = match self
-            .compact_once(&history, &system_text, &mut messages, true)
+            .compact_now(
+                &history,
+                &system_text,
+                &mut messages,
+                self.explicit_fold_policy(),
+            )
             .await?
         {
             Some(notice) => notice,
@@ -827,46 +902,32 @@ where
         //    Size reports a fold has retired are dropped here: they measure a prompt that is no
         //    longer sent, and every estimate taken from this vector — the gauge, the compaction
         //    threshold — would otherwise be the size of the folded transcript.
-        let (mut history, replay_notice) = self.load_history().await?;
+        let (history, replay_notice) = self.load_history().await?;
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::system(system_text.clone()));
         messages.extend(sendable_messages(&history));
         messages.push(Message::user(user_input));
 
-        // Auto-compact check:
-        // In Agent.run_turn estimate token usage, and if enabled && tokens > threshold
-        // call compact_oldest_n with the configured turn count, then reload the trimmed history before the model request.
-        if self.config.auto_compact_enabled {
-            let tokens = estimate_tokens(&messages).tokens as usize;
-            if tokens > self.config.auto_compact_threshold {
-                if let Some(ref binding) = self.session {
-                    let compacted_count = binding
-                        .store
-                        .compact_oldest_n(&binding.session_id, self.config.auto_compact_turns)
-                        .await?;
-                    debug!(
-                        "Auto-compact triggered (tokens: {} > threshold: {}): compacted {} messages across oldest {} turns",
-                        tokens, self.config.auto_compact_threshold, compacted_count, self.config.auto_compact_turns
-                    );
-                    let (reloaded_history, _) = self.load_history().await?;
-                    history = reloaded_history;
-                    messages.clear();
-                    messages.push(Message::system(system_text.clone()));
-                    messages.extend(sendable_messages(&history));
-                    messages.push(Message::user(user_input));
-                }
-            }
-        }
-
         // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
         self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
             .await?;
 
-        // 2. Bound the context, once per turn: compaction either succeeds, finds nothing to fold,
-        // or fails and leaves the transcript alone. No retry inside the turn.
-        let compaction = self
-            .compact_once(&history, &system_text, &mut messages, false)
-            .await?;
+        // 2. Bound the context — without holding the turn. An automatic fold is started here and
+        //    waited for by nobody: this turn runs on the transcript it has, and the folded
+        //    transcript is what the next turn replays. The fold is a bound on the *next* request,
+        //    so making the user wait out a summariser before their own prompt is even sent buys
+        //    nothing.
+        //
+        // `fold_policy` is the only place the bar is decided (the auto-compact settings when they
+        // are on, else `compact_at_tokens`), and `run_fold` is the only place a fold is written —
+        // a fold that marked rows without writing a summary would replace the turns it removed
+        // with nothing, which reads as the agent losing the conversation.
+        let fold_policy = self.fold_policy();
+        // The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
+        // stored transcript, and the checks below use this to tell "still over the bar" from "over
+        // the bar a fold has already answered".
+        let fold_watermark = last_fold_seq(&history);
+        self.spawn_fold_if_needed(&messages, &history, fold_policy);
 
         // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
         // ones, so a later turn cannot silently capture into the wrong checkpoint.
@@ -909,6 +970,16 @@ where
                 observer(AgentEvent::ContextTokensUpdated {
                     tokens_used: current_tokens,
                 });
+            }
+
+            // The turn's own growth counts against the fold policy too. A tool loop can append its
+            // way past the bar with nobody looking: the check at the top of the turn has already
+            // happened, so without this the fold waits for the user's next message to notice. A
+            // crossing is folded once: the guard inside the spawn covers a fold in flight, and the
+            // watermark covers one that has already landed.
+            if current_tokens as usize > fold_policy.threshold {
+                self.spawn_fold_from_stored(fold_policy, fold_watermark)
+                    .await;
             }
 
             debug!(
@@ -1048,12 +1119,18 @@ where
                 messages.push(final_response);
                 // The reply is final: anything the saver does now is off the critical path.
                 self.spawn_background_saver(&messages);
+                // The turn just grew the transcript, so look at the fold bar before returning: a
+                // session that only folded on the *next* prompt reported compaction as something
+                // the user had to come back for.
+                if estimate_tokens(&messages).tokens as usize > fold_policy.threshold {
+                    self.spawn_fold_from_stored(fold_policy, fold_watermark)
+                        .await;
+                }
                 return Ok(TurnOutcome {
                     reply: final_reply,
                     reasoning: last_reasoning,
                     tool_calls: executed_tools,
                     replayed: replay_notice,
-                    compaction,
                     usage: turn_usage,
                     duration_ms: turn_started.elapsed().as_millis() as u64,
                 });
@@ -1599,48 +1676,194 @@ where
         Ok((replay.history, Some(notice)))
     }
 
-    /// Summarise the oldest turns when the estimate crosses `agent.compact_at_tokens`, and swap the
-    /// sent vector for the bounded one. A provider failure is non-fatal: the vector is untouched,
-    /// a warning is logged, and the turn continues on the full history.
-    async fn compact_once(
+    /// Start an automatic fold and return at once: the turn does not wait for the summariser.
+    ///
+    /// The fold is a bound on the *next* request, not part of this turn's answer, so the turn runs
+    /// on the transcript it already has and the folded transcript is replayed by the next one.
+    /// Waiting here is what used to hold the turn: the user's prompt sat idle for the length of a
+    /// whole model call before its own model call had started. The transcript that tripped the
+    /// threshold is one a previous turn sent successfully, so carrying it once more costs at most
+    /// the new user line — the fold's threshold is a policy bar, not the model's window.
+    ///
+    /// One fold at a time: a turn arriving while a summary is still being written runs unfolded
+    /// rather than starting a second fold over the same turns.
+    fn spawn_fold_if_needed(
+        &self,
+        messages: &[Message],
+        history: &[StoredMessage],
+        policy: FoldPolicy,
+    ) {
+        let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
+            return;
+        };
+
+        let estimate = estimate_tokens(messages);
+        if estimate.tokens as usize <= policy.threshold {
+            debug!(
+                "Transcript estimate {} tokens ({:?}) is within the fold threshold = {}",
+                estimate.tokens, estimate.source, policy.threshold
+            );
+            return;
+        }
+        if self.fold_in_flight.swap(true, Ordering::SeqCst) {
+            debug!("A fold is already in flight; running this turn on the transcript as it stands");
+            return;
+        }
+        debug!(
+            "Transcript estimate {} tokens exceeds the fold threshold = {}; folding in the background",
+            estimate.tokens, policy.threshold
+        );
+
+        // Told before the spawn, so the animation starts while the summary call is in flight rather
+        // than after it has already finished.
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::CompactionStarted { forced: false });
+        }
+
+        let store = binding.store.clone();
+        let session_id = binding.session_id.clone();
+        let provider = setup.provider.clone();
+        let model = setup.model.clone();
+        let history = history.to_vec();
+        let keep_recent = policy.keep_recent;
+        let observer = self.observer.clone();
+        let guard = FoldInFlight(self.fold_in_flight.clone());
+
+        tokio::spawn(async move {
+            let _guard = guard;
+            match run_fold(
+                store.as_ref(),
+                &session_id,
+                provider.as_ref(),
+                &model,
+                &history,
+                keep_recent,
+            )
+            .await
+            {
+                Ok(Some(outcome)) => {
+                    if let Some(observer) = observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: Some(CompactionNotice {
+                                session_id: session_id.clone(),
+                                turns: outcome.folded_turns,
+                                messages: outcome.folded_messages,
+                            }),
+                            error: None,
+                        });
+                    }
+                }
+                Ok(None) => {
+                    debug!(
+                        "Nothing to fold: the transcript holds no more turns than the policy keeps \
+                         and fits the compaction budget"
+                    );
+                    if let Some(observer) = observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: None,
+                            error: None,
+                        });
+                    }
+                }
+                // Non-fatal by design: the transcript is untouched, and the turn this fold was
+                // started for has already run on the full history.
+                Err(failure) => {
+                    warn!(
+                        "Compaction failed, continuing on the full transcript: {}",
+                        failure
+                    );
+                    if let Some(observer) = observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: None,
+                            error: None,
+                        });
+                    }
+                }
+            }
+            // No `ContextTokensUpdated` here: a turn is in flight and will report the usage of the
+            // prompt it actually sent. Announcing the folded size now would describe a transcript
+            // the running turn is not using; the next request corrects the gauge for real.
+        });
+    }
+
+    /// Re-check the fold bar against the transcript the session now holds, and start a fold if it is
+    /// over. The second look behind [`Self::spawn_fold_if_needed`], which only ever runs at the top
+    /// of a turn.
+    ///
+    /// Measured on the *stored* transcript, not on the in-memory copy the turn is carrying: a fold
+    /// that landed earlier in this turn has already shrunk the store, and estimating the copy the
+    /// running turn still holds would start a second fold of rows that are no longer there — and
+    /// animate it. What is estimated here is exactly what the next turn will send.
+    ///
+    /// `watermark` is the newest fold in the transcript when this turn began
+    /// ([`last_fold_seq`]). A fold that finished during the turn has rewritten the stored history,
+    /// and the numbers a caller can see afterwards describe the transcript it replaced: the turn's
+    /// own model calls go on reporting the *unfolded* prompt size, because that is the transcript
+    /// the running turn is still carrying. Without this check the turn's last request looks over the
+    /// bar again and the session folds a second time — summarising the summary out of a history that
+    /// was just bounded.
+    async fn spawn_fold_from_stored(&self, policy: FoldPolicy, watermark: Option<i64>) {
+        if self.session.is_none() || self.compaction.is_none() {
+            return;
+        }
+        // Nothing worth re-reading for: this crossing is already being folded.
+        if self.fold_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        let (history, _) = match self.load_history().await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // A failed read is not a failed turn: the fold is a bound on the next request, and
+                // the next check will find it again.
+                warn!("Cannot re-read the session to fold it: {}", error);
+                return;
+            }
+        };
+        if last_fold_seq(&history) != watermark {
+            debug!(
+                "A fold landed during this turn; leaving the transcript it rewrote bound instead of folding again"
+            );
+            return;
+        }
+        // The same shape the next turn sends — system prompt plus the replayed transcript — so this
+        // estimate and the one the turn makes at its top measure the same thing.
+        let system_text = self.system_prompt("").await.unwrap_or_default();
+        let mut messages = Vec::with_capacity(history.len() + 1);
+        messages.push(Message::system(system_text));
+        messages.extend(sendable_messages(&history));
+        self.spawn_fold_if_needed(&messages, &history, policy);
+    }
+
+    /// Fold the oldest turns now and swap the sent vector for the bounded one — for a caller that
+    /// asked for it and will report the result (`/compact`, summarize-and-new). Automatic folds do
+    /// not come through here: see [`Self::spawn_fold_if_needed`].
+    ///
+    /// A provider failure is the caller's to report: the vector is untouched and the error is
+    /// returned.
+    async fn compact_now(
         &self,
         history: &[StoredMessage],
         system_text: &str,
         messages: &mut Vec<Message>,
-        force: bool,
+        policy: FoldPolicy,
     ) -> Result<Option<CompactionNotice>, HarnessError> {
         let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
             return Ok(None);
         };
 
-        if !force {
-            let estimate = estimate_tokens(messages);
-            if estimate.tokens as usize <= self.config.compact_at_tokens {
-                debug!(
-                    "Transcript estimate {} tokens ({:?}) is within agent.compact_at_tokens = {}",
-                    estimate.tokens, estimate.source, self.config.compact_at_tokens
-                );
-                return Ok(None);
-            }
-
-            debug!(
-                "Transcript estimate {} tokens exceeds agent.compact_at_tokens = {}; compacting",
-                estimate.tokens, self.config.compact_at_tokens
-            );
-        }
-
-        // From here on the fold really happens, so the observer is told before the summary call is
-        // made: the wait is seconds long and a UI that only learns about it afterwards has nothing
-        // to show while the user is waiting.
+        // The observer is told before the summary call is made: the wait is seconds long and a UI
+        // that only learns about it afterwards has nothing to show while the user is waiting.
         if let Some(ref observer) = self.observer {
-            observer(AgentEvent::CompactionStarted { forced: force });
+            observer(AgentEvent::CompactionStarted { forced: true });
         }
 
-        let outcome: CompactionOutcome = match compact(
+        let outcome = match run_fold(
+            binding.store.as_ref(),
+            &binding.session_id,
             setup.provider.as_ref(),
             &setup.model,
             history,
-            Some(self.config.keep_recent_turns),
+            policy.keep_recent,
         )
         .await
         {
@@ -1653,46 +1876,23 @@ where
                     });
                 }
                 debug!(
-                        "Nothing to fold: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
-                    );
+                    "Nothing to fold: the transcript holds no more turns than the policy keeps \
+                     and fits the compaction budget"
+                );
                 return Ok(None);
             }
             Err(failure) => {
-                // The user asked for the fold: a failure is the answer, not a silent
-                // "there was nothing to compact". Say what actually went wrong.
-                if force {
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::CompactionFinished {
-                            folded: None,
-                            error: Some(failure.to_string()),
-                        });
-                    }
-                    return Err(failure);
-                }
-                // Non-fatal by design: the transcript is unchanged, the turn runs on the full
-                // history, and this turn makes no second attempt.
-                warn!(
-                    "Compaction failed, continuing on the full transcript: {}",
-                    failure
-                );
+                // The user asked for this fold: a failure is the answer, not a silent "there was
+                // nothing to compact". Say what actually went wrong.
                 if let Some(ref observer) = self.observer {
                     observer(AgentEvent::CompactionFinished {
                         folded: None,
-                        error: None,
+                        error: Some(failure.to_string()),
                     });
                 }
-                return Ok(None);
+                return Err(failure);
             }
         };
-
-        // The summary row is what a later resume replays, and the folded rows stay readable
-        // (`compacted_at` set) for a future rewind. A store failure here is an error, not a
-        // warning: silently running without the summary would make the next resume replay a
-        // transcript this turn never sent.
-        binding
-            .store
-            .record_compaction(&binding.session_id, &outcome.folded_ids, &outcome.summary)
-            .await?;
 
         let user_line = messages.pop();
         *messages = outcome.bounded_messages(system_text.to_string());
@@ -1738,6 +1938,33 @@ where
             .await
             .map(|_| ())
     }
+}
+
+/// Fold `history` into a summary and record it: the work every fold does, whether the caller waits
+/// for it or not.
+///
+/// Free rather than a method because the fold a turn does not wait for is spawned as its own task,
+/// and that task needs the store, the summarising provider and the transcript — not the agent
+/// around them.
+///
+/// The summary row is what a later resume replays, and the folded rows stay readable
+/// (`compacted_at` set) for a future rewind. A store failure is an error, not a warning: running
+/// on without the summary would make the next resume replay a transcript no request ever sent.
+async fn run_fold(
+    store: &dyn SessionStore,
+    session_id: &str,
+    provider: &dyn ModelProvider,
+    model: &str,
+    history: &[StoredMessage],
+    keep_recent: usize,
+) -> Result<Option<CompactionOutcome>, HarnessError> {
+    let Some(outcome) = compact(provider, model, history, Some(keep_recent)).await? else {
+        return Ok(None);
+    };
+    store
+        .record_compaction(session_id, &outcome.folded_ids, &outcome.summary)
+        .await?;
+    Ok(Some(outcome))
 }
 
 /// The sequence of the newest fold in `history`, if the session has been folded.

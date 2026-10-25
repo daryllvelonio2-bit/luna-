@@ -75,9 +75,12 @@ pub struct Config {
     /// Token threshold at which automatic compaction triggers (100k - 700k).
     #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold: usize,
-    /// Number of oldest turns to compact when auto-compaction triggers.
+    /// Number of newest turns each auto-compaction fold keeps verbatim.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
+    /// Messaging platform gateway (Telegram, Discord, WhatsApp).
+    #[serde(default)]
+    pub gateway: GatewaySettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -118,6 +121,7 @@ impl Default for Config {
             auto_compact_enabled: true,
             auto_compact_threshold: AUTO_COMPACT_DEFAULT_THRESHOLD,
             auto_compact_turns: AUTO_COMPACT_DEFAULT_TURNS,
+            gateway: GatewaySettings::default(),
         }
     }
 }
@@ -143,7 +147,9 @@ impl Config {
         {
             return Err(HarnessError::ConfigurationError(format!(
                 "agent.auto_compact_threshold must be between {} and {}, got {}",
-                AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, self.agent.auto_compact_threshold
+                AUTO_COMPACT_MIN_THRESHOLD,
+                AUTO_COMPACT_MAX_THRESHOLD,
+                self.agent.auto_compact_threshold
             )));
         }
         if self.agent.auto_compact_turns == 0 {
@@ -167,6 +173,55 @@ pub struct PersonaSettings {
     pub id: u8,
     /// The persona's display name, stored next to the id so the file reads as intent, not a code.
     pub name: String,
+}
+
+/// Messaging platform gateway settings (Telegram, Discord, WhatsApp).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatewaySettings {
+    /// Enable messaging platform gateway. Default `false`.
+    pub enabled: bool,
+    /// Active platform name: "telegram", "discord", "whatsapp", or "none".
+    pub platform: String,
+    /// Telegram Bot token from @BotFather.
+    pub telegram_bot_token: Option<String>,
+    /// Allowed Telegram user IDs or usernames (empty = allow all).
+    pub telegram_allowed_users: Vec<String>,
+    /// Discord Bot token from Discord Developer Portal.
+    pub discord_bot_token: Option<String>,
+    /// Default Discord channel ID to monitor.
+    pub discord_channel_id: Option<String>,
+    /// Allowed Discord user IDs (empty = allow all).
+    pub discord_allowed_users: Vec<String>,
+    /// WhatsApp Cloud API access token.
+    pub whatsapp_token: Option<String>,
+    /// WhatsApp Cloud Phone Number ID.
+    pub whatsapp_phone_number_id: Option<String>,
+    /// WhatsApp webhook verification token.
+    pub whatsapp_verify_token: Option<String>,
+    /// Port for webhook servers (e.g. WhatsApp). Default 8080.
+    pub port: u16,
+    /// Whether gateway turns can execute mutating tool calls without asking.
+    pub allow_mutating_tools: bool,
+}
+
+impl Default for GatewaySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            platform: "none".to_string(),
+            telegram_bot_token: None,
+            telegram_allowed_users: Vec::new(),
+            discord_bot_token: None,
+            discord_channel_id: None,
+            discord_allowed_users: Vec::new(),
+            whatsapp_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            port: 8080,
+            allow_mutating_tools: false,
+        }
+    }
 }
 
 /// Lifecycle-hook settings.

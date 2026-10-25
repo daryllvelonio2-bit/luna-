@@ -22,22 +22,27 @@ use harness_notes::{
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
-use super::approval::{
-    approval_settings, build_approver, render_approval_box, ApprovalChoice, ChatApprover,
-    APPROVAL_ACTIONS,
-};
+use super::approval::{approval_settings, build_approver, ApprovalChoice, ChatApprover};
 use super::context_window::context_window;
 use super::sessions::{open_store, resolve_session, SessionSelection};
 use tokio::sync::oneshot;
 
 pub mod commands;
 pub(crate) mod connect;
+pub(crate) mod history;
 pub(crate) mod keys;
 pub(crate) mod memory_writer;
+pub(crate) mod modal;
+pub(crate) mod prompts;
 pub(crate) mod render;
+pub(crate) mod status;
 pub mod todo;
+pub(crate) mod turn;
 pub mod ui;
 pub mod viewer;
+
+#[cfg(test)]
+mod tests;
 
 use commands::{
     execute_slash_command, handle_auto_compact_command, handle_compact_command,
@@ -48,8 +53,8 @@ use commands::{
 use keys::AppKey;
 use render::{
     compaction_report, format_approval_verdict, format_patch_diff, format_tool_call,
-    format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
-    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    format_tool_result, parse_turns_from_history, render_transcript, OutputBlockKind,
+    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, BackgroundTaskState, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -70,61 +75,12 @@ fn redraw_transcript(turns: &[TurnRecord], expanded: bool) {
     render_transcript(turns, expanded, get_terminal_width());
 }
 
-/// Puts the terminal's key reporting back the way it was found, however the chat ends.
-struct KittyKeyboardGuard;
-
-impl Drop for KittyKeyboardGuard {
-    fn drop(&mut self) {
-        keys::disable_kitty_keyboard();
-    }
-}
-
-/// Wipe the terminal on session exit, so only the shell prompt remains.
-/// Cosmetic: a failure to write is ignored on purpose (see `commands::clear_screen`).
-pub(crate) fn clear_on_exit() {
-    crate::commands::clear_screen();
-}
-
-fn load_prompt_history(
-    path: Option<&std::path::Path>,
-    initial_turns: &[TurnRecord],
-) -> Vec<String> {
-    let mut prompts = Vec::new();
-    if let Some(p) = path {
-        if let Ok(content) = std::fs::read_to_string(p) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && prompts.last().map(|s| s != trimmed).unwrap_or(true) {
-                    prompts.push(trimmed.to_string());
-                }
-            }
-        }
-    }
-    for turn in initial_turns {
-        let q = turn.user_query.trim();
-        if !q.is_empty() && !q.starts_with('•') && prompts.last().map(|s| s != q).unwrap_or(true)
-        {
-            prompts.push(q.to_string());
-        }
-    }
-    prompts
-}
-
-fn append_prompt_history(path: Option<&std::path::Path>, prompt: &str) {
-    if let Some(p) = path {
-        use std::io::Write;
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(p)
-        {
-            let _ = writeln!(file, "{}", prompt);
-        }
-    }
-}
+pub(crate) use history::clear_on_exit;
+use history::{append_prompt_history, load_prompt_history, KittyKeyboardGuard};
+use prompts::{prompt_approval_choice, prompt_sudo_password_dialog, ChatSudoPrompter};
+pub(crate) use status::refresh_antigravity_status_if_needed;
+use turn::handle_composer_command;
+use turn::{cancel_running_turn, drain_queue, launch_turn, submission, Submission};
 
 pub async fn run_interactive_chat(
     config: Config,
@@ -457,9 +413,13 @@ pub async fn run_interactive_chat(
     let in_flight_tools_obs = in_flight_tools.clone();
     // The observer reads the session's list back, so the transcript can show the tasks.
     let todo_scope_obs = todo_scope.clone();
-    // True for the whole duration of a fold, automatic or asked for. The input path reads it to
-    // decide between queueing a message and interrupting a turn: while the transcript is being
-    // rewritten, a turn started now would be built on history that is about to change.
+    // True only while a fold the *user* asked for is rewriting the session in place. The input
+    // path reads it to decide between queueing a message and interrupting a turn: a turn started
+    // then would be built on history that is about to change under it.
+    //
+    // An automatic fold no longer sets it. Its summary lands while the turn that tripped it runs,
+    // and blocking the composer for the length of a summarising call is what made auto-compact
+    // feel like a stall — the agent has a transcript to work from either way.
     let compacting = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let compacting_obs = compacting.clone();
 
@@ -570,7 +530,8 @@ pub async fn run_interactive_chat(
                 ui_obs.emit_above(&line);
             }
             harness_core::AgentEvent::CompactionStarted { forced } => {
-                compacting_obs.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Only a fold that rewrites what the composer would send holds the composer.
+                compacting_obs.store(forced, std::sync::atomic::Ordering::SeqCst);
                 ui_obs.start_compaction(forced);
             }
             harness_core::AgentEvent::CompactionFinished { folded, error } => {
@@ -839,7 +800,9 @@ pub async fn run_interactive_chat(
             if query.starts_with("/auto-compact") {
                 let arg = query.strip_prefix("/auto-compact").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
-                handle_auto_compact_command(&ui, &agent, arg_opt).await?;
+                // Piped stdin has no composer, so there is no key channel to hand the setup box:
+                // this path prints the settings and the two arguments it can act on.
+                handle_auto_compact_command(&ui, &agent, arg_opt, None).await?;
                 continue;
             }
             if query.starts_with("/compact") {
@@ -1248,8 +1211,9 @@ pub async fn run_interactive_chat(
                     continue;
                 }
 
-                ui.clear_live_and_box();
-                let choice = prompt_approval_choice(&mut key_rx, &request, &ui, &mut decision_tx).await;
+                // The popup owns the screen while it is up, so nothing is cleared here and no
+                // composer is redrawn on the way out: the verdict below restores it.
+                let choice = prompt_approval_choice(&mut key_rx, &request, &mut decision_tx).await;
                 if matches!(choice, ApprovalChoice::AllSession) {
                     // Sticky "approve all": flip the gate once and it stays for this chat.
                     allow_all_session.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1282,12 +1246,10 @@ pub async fn run_interactive_chat(
                     None => continue,
                 };
 
-                ui.clear_live_and_box();
+                // The dialog owns the screen while it is up (see `prompt_sudo_password_dialog`):
+                // nothing to clear here, and it prints its own outcome on the way back.
                 let password = prompt_sudo_password_dialog(&mut key_rx, &command).await;
                 let _ = decision_tx.send(password);
-                if ui.is_attended {
-                    ui.draw_initial_box();
-                }
             }
 
             maybe_clarify = clarify_rx.recv() => {
@@ -1296,12 +1258,12 @@ pub async fn run_interactive_chat(
                     None => continue,
                 };
 
-                ui.clear_live_and_box();
+                // Nothing is cleared and no box is drawn on the way out: the question is asked on
+                // the alternate screen, which leaves the transcript and the composer untouched,
+                // and the lines it records on the way back restore the composer themselves. A
+                // second `draw_initial_box` here would draw a second box over the live one.
                 let response = crate::commands::clarify::prompt_clarify_choice(&mut key_rx, &request, &ui).await;
                 let _ = response_tx.send(response);
-                if ui.is_attended {
-                    ui.draw_initial_box();
-                }
             }
 
             maybe_key = key_rx.recv() => {
@@ -1416,6 +1378,33 @@ pub async fn run_interactive_chat(
                         if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
                             ui.input_buf.lock().unwrap().clear();
                             ui.redraw_input_line();
+                            // The menu can name a composer command too — picking `/interrupt`
+                            // while Luna is thinking has to interrupt — so it goes through the
+                            // same handler the typed form does.
+                            if handle_composer_command(
+                                &cmd,
+                                &mut queue,
+                                &steer_handle,
+                                &ui,
+                                &mut active_turn,
+                                &current_cancel,
+                                &mut turns,
+                                &in_flight_tools,
+                                turn_start,
+                                &current_query,
+                                process_expanded,
+                                &agent,
+                                context_window(
+                                    &config,
+                                    &discovery,
+                                    &current_provider,
+                                    &current_model,
+                                ),
+                            )
+                            .await
+                            {
+                                continue;
+                            }
                             if execute_slash_command(
                                 &cmd,
                                 &mut key_rx,
@@ -1507,6 +1496,30 @@ pub async fn run_interactive_chat(
                             if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
                                 ui.input_buf.lock().unwrap().clear();
                                 ui.redraw_input_line();
+                                if handle_composer_command(
+                                    &cmd,
+                                    &mut queue,
+                                    &steer_handle,
+                                    &ui,
+                                    &mut active_turn,
+                                    &current_cancel,
+                                    &mut turns,
+                                    &in_flight_tools,
+                                    turn_start,
+                                    &current_query,
+                                    process_expanded,
+                                    &agent,
+                                    context_window(
+                                        &config,
+                                        &discovery,
+                                        &current_provider,
+                                        &current_model,
+                                    ),
+                                )
+                                .await
+                                {
+                                    continue;
+                                }
                                 if execute_slash_command(
                                     &cmd,
                                     &mut key_rx,
@@ -1531,6 +1544,30 @@ pub async fn run_interactive_chat(
                                     break;
                                 }
                             }
+                            continue;
+                        }
+
+                        // The three commands that act on this loop's own machinery — the pending
+                        // queue, the steer handle, the turn in flight — are handled here, before
+                        // the command menu sees them: the menu carries the bare name only, and
+                        // these are only useful with their argument.
+                        if handle_composer_command(
+                            &query,
+                            &mut queue,
+                            &steer_handle,
+                            &ui,
+                            &mut active_turn,
+                            &current_cancel,
+                            &mut turns,
+                            &in_flight_tools,
+                            turn_start,
+                            &current_query,
+                            process_expanded,
+                            &agent,
+                            context_window(&config, &discovery, &current_provider, &current_model),
+                        )
+                        .await
+                        {
                             continue;
                         }
 
@@ -1680,6 +1717,9 @@ pub async fn run_interactive_chat(
                 }
             } => {
                 active_turn = None;
+                // Nothing is in flight any more, whatever the turn did: the hint goes back to
+                // the idle line before the transcript below is redrawn.
+                ui.set_turn_active(false);
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
@@ -1900,491 +1940,4 @@ pub async fn run_interactive_chat(
         );
     }
     Ok(())
-}
-
-/// What a submitted line does when the agent may not be free to take it.
-///
-/// The rule a user can hold onto: a plain message *replaces* what is running, `/steer` *adds* to
-/// it, and a message typed while the transcript is being folded waits — a turn started mid-fold
-/// would be built on a history that is about to be rewritten. (`/steer` never reaches here: it is
-/// a slash command, and the queue it feeds is pushed without taking the agent lock the running
-/// turn holds.)
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Submission {
-    /// Nothing is in flight: start a turn.
-    Turn,
-    /// Stop the running turn and start a new one with this line.
-    Interrupt,
-    /// Hold the line until the fold finishes; the queue pump sends it in order.
-    Queue,
-}
-
-fn submission(_line: &str, turn_active: bool, compacting: bool) -> Submission {
-    if compacting {
-        return Submission::Queue;
-    }
-    if turn_active {
-        return Submission::Interrupt;
-    }
-    Submission::Turn
-}
-
-/// Echo a submitted message the way the current mode shows it, then start the turn that answers it.
-///
-/// One body for the Enter path, the queue drain and the queue pump, so all three send turns the
-/// same way: prompt history, plan-mode decoration, attached images and the spawn itself cannot
-/// drift apart between them.
-#[allow(clippy::too_many_arguments)]
-fn launch_turn(
-    query: &str,
-    ui: &ChatUi,
-    turns: &[TurnRecord],
-    process_expanded: bool,
-    pending_images: &Arc<Mutex<Vec<String>>>,
-    plan_mode: &std::sync::atomic::AtomicBool,
-    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
-    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
-    current_cancel: &mut CancellationToken,
-    current_query: &mut String,
-    turn_start: &mut std::time::Instant,
-    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
-) {
-    // Attached screenshots become OpenAI-style data-URL blocks appended to the prompt text; the
-    // provider layer expands them into content parts. Each URL is one paste, oldest first.
-    // Image paths typed into the prompt are inlined the same way, so naming a file on disk sends
-    // its pixels rather than a path the model would have to OCR through a shell tool.
-    let images = std::mem::take(&mut *pending_images.lock().unwrap());
-    let query = crate::commands::prompt_images::inline_image_paths(query);
-    let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
-        format!(
-            "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
-            query
-        )
-    } else {
-        query.to_string()
-    };
-    let q_with_images = if images.is_empty() {
-        q
-    } else {
-        format!("{}\n\n{}", q, images.join("\n\n"))
-    };
-
-    ui.clear_patch_diff();
-
-    if ui.is_attended {
-        crate::commands::clear_screen();
-        redraw_transcript(turns, process_expanded);
-        println!();
-        println!(
-            "{}",
-            right_aligned_user_message(&query, get_terminal_width())
-        );
-        ui.draw_initial_box();
-    } else {
-        ui.begin_block(OutputBlockKind::User);
-        ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
-    }
-
-    *current_cancel = CancellationToken::new();
-    let cancel_child = current_cancel.child_token();
-    let ag_ref = agent.clone();
-    *current_query = query.to_string();
-    *turn_start = std::time::Instant::now();
-    in_flight_tools.lock().unwrap().clear();
-    *active_turn = Some(tokio::spawn(async move {
-        let ag = ag_ref.lock().await;
-        ag.run_turn(&q_with_images, cancel_child).await
-    }));
-}
-
-/// Stop the turn in flight and record it as cancelled: the body Ctrl+C, Escape and an interrupting
-/// message all share, so the three cannot drift apart. Reports whether there was a turn to stop.
-#[allow(clippy::too_many_arguments)]
-async fn cancel_running_turn(
-    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
-    current_cancel: &CancellationToken,
-    ui: &ChatUi,
-    turns: &mut Vec<TurnRecord>,
-    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
-    turn_start: std::time::Instant,
-    current_query: &str,
-    process_expanded: bool,
-    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
-    context_max: u32,
-) -> bool {
-    let Some(handle) = active_turn.take() else {
-        return false;
-    };
-    current_cancel.cancel();
-    handle.abort();
-    ui.stop_activity();
-    ui.clear_live_state();
-    let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
-
-    let record = TurnRecord {
-        user_query: current_query.to_string(),
-        reasoning: None,
-        tools: Vec::new(),
-        tool_items: current_tools,
-        duration: turn_start.elapsed(),
-        reply: "✖ Cancelled".to_string(),
-    };
-    turns.push(record);
-
-    if ui.is_attended {
-        crate::commands::clear_screen();
-        redraw_transcript(turns, process_expanded);
-        ui.draw_initial_box();
-    } else {
-        println!("{}", "✖ Cancelled".red());
-    }
-
-    let context_used = agent
-        .lock()
-        .await
-        .estimate_session_tokens()
-        .await
-        .unwrap_or(0);
-    ui.update_status(context_used, context_max);
-    true
-}
-
-/// Send the next queued message, if there is one and nothing is in the way.
-///
-/// Called when a turn ends and from the animation tick: the tick is what unblocks a queue built up
-/// during a fold the user asked for, because that fold produces no turn-end event to drain it.
-#[allow(clippy::too_many_arguments)]
-fn drain_queue(
-    queue: &mut VecDeque<String>,
-    ui: &ChatUi,
-    turns: &[TurnRecord],
-    process_expanded: bool,
-    pending_images: &Arc<Mutex<Vec<String>>>,
-    plan_mode: &std::sync::atomic::AtomicBool,
-    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
-    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
-    current_cancel: &mut CancellationToken,
-    current_query: &mut String,
-    turn_start: &mut std::time::Instant,
-    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
-) {
-    if active_turn.is_some() {
-        return;
-    }
-    let Some(next_query) = queue.pop_front() else {
-        return;
-    };
-    ui.set_queue_depth(queue.len());
-    launch_turn(
-        &next_query,
-        ui,
-        turns,
-        process_expanded,
-        pending_images,
-        plan_mode,
-        agent,
-        in_flight_tools,
-        current_cancel,
-        current_query,
-        turn_start,
-        active_turn,
-    );
-}
-
-async fn prompt_approval_choice(
-    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
-    request: &ApprovalRequest,
-    ui: &ChatUi,
-    decision_tx: &mut oneshot::Sender<harness_core::ApprovalDecision>,
-) -> ApprovalChoice {
-    let mut width = get_terminal_width().saturating_sub(2);
-    let mut selected = 0; // index into APPROVAL_ACTIONS
-
-    // Drain any leftover keys in channel
-    while key_rx.try_recv().is_ok() {}
-
-    // The popup renders above the composer: erase box + live region, draw the popup, redraw
-    // the composer beneath it once the answer lands.
-    ui.clear_box_on_exit();
-
-    let (initial_text, mut line_count) = render_approval_box(request, selected, width);
-    print!("{}", initial_text);
-    let _ = io::stdout().flush();
-
-    loop {
-        let key = tokio::select! {
-            _ = decision_tx.closed() => {
-                // The agent timed out waiting for approval or the turn was cancelled.
-                // Cleanly erase the popup box and return Deny immediately so the UI loop does not hang!
-                print!("\r\x1b[{}A", line_count);
-                for _ in 0..line_count {
-                    print!("\x1b[2K\x1b[1B");
-                }
-                print!("\r\x1b[{}A", line_count);
-                let _ = io::stdout().flush();
-                ui.draw_initial_box();
-                return ApprovalChoice::Deny;
-            }
-            maybe_key = key_rx.recv() => {
-                match maybe_key {
-                    Some(k) => k,
-                    None => break,
-                }
-            }
-        };
-
-        let chosen = match key {
-            AppKey::Up | AppKey::Left | AppKey::BackTab => {
-                selected = (selected + APPROVAL_ACTIONS.len() - 1) % APPROVAL_ACTIONS.len();
-                None
-            }
-            AppKey::Down | AppKey::Right | AppKey::Tab => {
-                selected = (selected + 1) % APPROVAL_ACTIONS.len();
-                None
-            }
-            AppKey::Char('y') | AppKey::Char('Y') | AppKey::Char('1') => Some(ApprovalChoice::Once),
-            AppKey::Char('a') | AppKey::Char('A') | AppKey::Char('2') => {
-                Some(ApprovalChoice::AllSession)
-            }
-            AppKey::Char('n')
-            | AppKey::Char('N')
-            | AppKey::Char('3')
-            | AppKey::Char('c')
-            | AppKey::Char('C')
-            | AppKey::Char('d')
-            | AppKey::Char('D')
-            | AppKey::Escape
-            | AppKey::CtrlC => Some(ApprovalChoice::Deny),
-            AppKey::Enter => match selected {
-                0 => Some(ApprovalChoice::Once),
-                1 => Some(ApprovalChoice::AllSession),
-                _ => Some(ApprovalChoice::Deny),
-            },
-            AppKey::Char(' ') => match selected {
-                0 => Some(ApprovalChoice::Once),
-                1 => Some(ApprovalChoice::AllSession),
-                _ => Some(ApprovalChoice::Deny),
-            },
-            _ => continue,
-        };
-
-        if let Some(choice) = chosen {
-            // Erase the popup and restore the composer before returning.
-            print!("\r\x1b[{}A", line_count);
-            for _ in 0..line_count {
-                print!("\x1b[2K\x1b[1B");
-            }
-            print!("\r\x1b[{}A", line_count);
-            let _ = io::stdout().flush();
-            ui.draw_initial_box();
-            return choice;
-        }
-
-        // Repaint in place: jump to the first popup row, clear lines, and overwrite cleanly.
-        print!("\r\x1b[{}A", line_count);
-        for _ in 0..line_count {
-            print!("\x1b[2K\x1b[1B");
-        }
-        print!("\r\x1b[{}A", line_count);
-        width = get_terminal_width().saturating_sub(2);
-        let (new_text, new_count) = render_approval_box(request, selected, width);
-        print!("{}", new_text);
-        line_count = new_count;
-        let _ = io::stdout().flush();
-    }
-
-    ui.draw_initial_box();
-    ApprovalChoice::Deny
-}
-
-pub struct ChatSudoPrompter {
-    request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
-}
-
-impl ChatSudoPrompter {
-    pub fn new(
-        request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
-    ) -> Self {
-        Self { request_tx }
-    }
-}
-
-#[async_trait::async_trait]
-impl harness_core::tools::SudoPrompter for ChatSudoPrompter {
-    async fn prompt_sudo_password(&self, command: &str) -> Result<Option<String>, HarnessError> {
-        let (tx, rx) = oneshot::channel();
-        if self.request_tx.send((command.to_string(), tx)).is_err() {
-            return Ok(None);
-        }
-        match rx.await {
-            Ok(pwd) => Ok(pwd),
-            Err(_) => Ok(None),
-        }
-    }
-}
-
-async fn prompt_sudo_password_dialog(
-    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
-    command: &str,
-) -> Option<String> {
-    while key_rx.try_recv().is_ok() {}
-
-    println!();
-    println!(
-        "  {} {}",
-        "🔐".bold(),
-        "Sudo password required for command:".bold()
-    );
-    println!("     {}", command.cyan());
-    println!(
-        "     {}",
-        "(Enter password; press Enter to confirm, Esc to skip)".dimmed()
-    );
-    print!("  Password: ");
-    let _ = io::stdout().flush();
-
-    let mut password = String::new();
-    loop {
-        let key = match key_rx.recv().await {
-            Some(k) => k,
-            None => break,
-        };
-        match key {
-            AppKey::Enter => {
-                println!();
-                if password.is_empty() {
-                    println!("  {} Skipped - continuing without sudo\n", "⏭".dimmed());
-                    let _ = io::stdout().flush();
-                    return None;
-                } else {
-                    println!(
-                        "  {} Password received and cached for this session\n",
-                        "✔".green().bold()
-                    );
-                    let _ = io::stdout().flush();
-                    return Some(password);
-                }
-            }
-            AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
-                println!("\n  {} Cancelled - continuing without sudo\n", "⏭".dimmed());
-                let _ = io::stdout().flush();
-                return None;
-            }
-            AppKey::Backspace => {
-                if !password.is_empty() {
-                    password.pop();
-                    print!("\x08 \x08");
-                    let _ = io::stdout().flush();
-                }
-            }
-            AppKey::Char(c) => {
-                if c == '\n' || c == '\r' {
-                    println!();
-                    if password.is_empty() {
-                        println!("  {} Skipped - continuing without sudo\n", "⏭".dimmed());
-                        let _ = io::stdout().flush();
-                        return None;
-                    } else {
-                        println!(
-                            "  {} Password received and cached for this session\n",
-                            "✔".green().bold()
-                        );
-                        let _ = io::stdout().flush();
-                        return Some(password);
-                    }
-                } else if !c.is_control() {
-                    password.push(c);
-                    print!("•");
-                    let _ = io::stdout().flush();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-pub(crate) async fn refresh_antigravity_status_if_needed(
-    ui: &ChatUi,
-    current_provider: &str,
-    current_model: &str,
-    cred_manager: &Arc<CredentialManager>,
-) {
-    if current_provider.eq_ignore_ascii_case("antigravity")
-        || current_provider.eq_ignore_ascii_case("agy")
-    {
-        let creds = cred_manager.get_credentials("antigravity").await;
-        if let Some(primary) = creds
-            .iter()
-            .find(|c| c.is_priority && !c.is_temporarily_disabled)
-            .or_else(|| creds.iter().find(|c| !c.is_temporarily_disabled))
-        {
-            let client = match harness_providers::build_http_client(30) {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-
-            let strict_email =
-                harness_providers::resolve_antigravity_email_strict(&client, &primary.api_key)
-                    .await;
-            let account_name = strict_email.clone().unwrap_or_else(|| {
-                if !primary.label.is_empty() {
-                    primary.label.clone()
-                } else {
-                    "antigravity".to_string()
-                }
-            });
-            ui.set_account_name(Some(account_name));
-
-            if let Ok(summary) = harness_providers::retrieve_antigravity_quota(
-                &client,
-                &primary.api_key,
-                Some(cred_manager),
-            )
-            .await
-            {
-                if let Some(display) = summary.format_quota_display(current_model) {
-                    ui.set_quota_display(Some(display));
-                }
-            }
-        } else {
-            ui.set_account_name(None);
-            ui.set_quota_display(None);
-        }
-    } else {
-        ui.set_account_name(None);
-        ui.set_quota_display(None);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::submission;
-
-    /// The three states a submit can meet, and the one rule that must not wobble: while the
-    /// transcript is being folded, nothing starts a turn — not even an interrupting message,
-    /// because the history it would be built on is being rewritten underneath it.
-    #[test]
-    fn a_free_agent_takes_the_message_and_a_busy_one_replaces_the_turn() {
-        assert_eq!(
-            submission("run the tests", false, false),
-            super::Submission::Turn
-        );
-        assert_eq!(
-            submission("run the tests", true, false),
-            super::Submission::Interrupt
-        );
-    }
-
-    #[test]
-    fn a_fold_holds_everything_back() {
-        assert_eq!(
-            submission("run the tests", false, true),
-            super::Submission::Queue
-        );
-        assert_eq!(
-            submission("run the tests", true, true),
-            super::Submission::Queue
-        );
-    }
 }

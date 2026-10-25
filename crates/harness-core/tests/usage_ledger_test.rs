@@ -529,7 +529,6 @@ async fn a_turn_the_provider_did_not_measure_writes_no_row() {
         reasoning: None,
         tool_calls: vec![],
         replayed: None,
-        compaction: None,
         usage: None,
         duration_ms: 5,
     };

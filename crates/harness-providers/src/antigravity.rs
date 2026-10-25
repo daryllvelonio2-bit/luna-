@@ -86,7 +86,9 @@ impl AntigravityQuotaSummary {
 
         let resolved = resolve_antigravity_model(model, None);
 
-        // Check model-specific quotaInfo from fetchAvailableModels first if Gemini
+        // Check model-specific quotaInfo from fetchAvailableModels first if Gemini.
+        // Google Antigravity exposes the 5-hour rolling limit for Gemini models via quotaInfo in
+        // fetchAvailableModels (resetTime <= 5 hours), NOT in retrieveUserQuotaSummary groups.
         if is_gemini {
             if let Some(q_info) = self.models_quota.get(&resolved).or_else(|| {
                 self.models_quota
@@ -96,56 +98,75 @@ impl AntigravityQuotaSummary {
                     })
                     .map(|(_, v)| v)
             }) {
-                let weekly_part = q_info.remaining_fraction.map(|frac| {
-                    let pct_str = format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round());
-                    let time_str = q_info
-                        .reset_time
-                        .as_ref()
-                        .map(|t| format_reset_time_remaining(t))
-                        .unwrap_or_default();
-                    if time_str.is_empty() {
+                let pct_str = q_info
+                    .remaining_fraction
+                    .map(|frac| format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round()))
+                    .unwrap_or_else(|| "100%".to_string());
+                let time_str = q_info
+                    .reset_time
+                    .as_ref()
+                    .map(|t| format_reset_time_remaining(t))
+                    .unwrap_or_default();
+
+                let is_weekly_reset = q_info
+                    .reset_time
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|dt| (dt.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days() > 1)
+                    .unwrap_or(false);
+
+                let mut hourly_part = None;
+                let mut weekly_part = None;
+
+                if is_weekly_reset {
+                    let part = if time_str.is_empty() {
                         format!("w {}", pct_str)
                     } else {
                         format!("w {} {}", pct_str, time_str)
-                    }
-                });
+                    };
+                    weekly_part = Some(part);
+                } else {
+                    let part = if time_str.is_empty() {
+                        format!("5h {}", pct_str)
+                    } else {
+                        format!("5h {} {}", pct_str, time_str)
+                    };
+                    hourly_part = Some(part);
+                }
 
-                // Check if any group has 5h bucket for Gemini
-                let hourly_part = self
-                    .groups
-                    .iter()
-                    .find(|g| {
+                // Check if any group has a dedicated weekly bucket for Gemini
+                if weekly_part.is_none() {
+                    if let Some(group) = self.groups.iter().find(|g| {
                         g.display_name
                             .as_deref()
                             .unwrap_or("")
                             .to_lowercase()
                             .contains("gemini")
-                    })
-                    .and_then(|g| {
-                        g.buckets.iter().find(|b| {
+                    }) {
+                        if let Some(b) = group.buckets.iter().find(|b| {
                             let w = b.window.as_deref().unwrap_or("").to_lowercase();
                             let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
-                            w == "5h" || b_id.contains("5h")
-                        })
-                    })
-                    .map(|b| {
-                        let pct_str = if let Some(frac) = b.remaining_fraction {
-                            format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
-                        } else {
-                            "100%".to_string()
-                        };
-                        let time_str = b
-                            .reset_time
-                            .as_ref()
-                            .map(|t| format_reset_time_remaining(t))
-                            .unwrap_or_default();
-                        if time_str.is_empty() {
-                            format!("5h {}", pct_str)
-                        } else {
-                            format!("5h {} {}", pct_str, time_str)
+                            w == "weekly" || w == "w" || b_id.contains("weekly")
+                        }) {
+                            let w_pct = if let Some(frac) = b.remaining_fraction {
+                                format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+                            } else {
+                                "100%".to_string()
+                            };
+                            let w_time = b
+                                .reset_time
+                                .as_ref()
+                                .map(|t| format_reset_time_remaining(t))
+                                .unwrap_or_default();
+                            let part = if w_time.is_empty() {
+                                format!("w {}", w_pct)
+                            } else {
+                                format!("w {} {}", w_pct, w_time)
+                            };
+                            weekly_part = Some(part);
                         }
-                    })
-                    .or_else(|| Some("5h 100%".to_string()));
+                    }
+                }
 
                 return match (hourly_part, weekly_part) {
                     (Some(h), Some(w)) => Some(format!("{} · {}", h, w)),
@@ -171,7 +192,13 @@ impl AntigravityQuotaSummary {
                     false
                 }
             })
-            .or_else(|| self.groups.first());
+            .or_else(|| {
+                if !is_gemini {
+                    self.groups.first()
+                } else {
+                    None
+                }
+            });
 
         let group = target_group?;
 
@@ -771,36 +798,43 @@ fn build_antigravity_payload(
                     .filter_map(|m| {
                         m.tool_calls
                             .iter()
-                            .find(|tc| tc.id == call_id)
+                            .find(|tc| {
+                                tc.id == call_id || (tc.id.is_empty() && call_id == "call_0")
+                            })
                             .map(|tc| tc.name.as_str())
                     })
                     .next();
 
-                let Some(tool_name) = tool_name else {
+                let resp_part = if let Some(tool_name) = tool_name {
+                    json!({
+                        "functionResponse": {
+                            "id": call_id,
+                            "name": tool_name,
+                            "response": { "result": result_content }
+                        }
+                    })
+                } else {
                     // Do not emit an orphaned functionResponse without a matching functionCall
-                    continue;
+                    // (which Gemini rejects). Emit as user text instead.
+                    json!({ "text": format!("[Tool result]: {}", result_content) })
                 };
 
-                let resp_part = json!({
-                    "functionResponse": {
-                        "id": call_id,
-                        "name": tool_name,
-                        "response": { "result": result_content }
-                    }
-                });
+                let is_func_resp = resp_part.get("functionResponse").is_some();
 
-                // Merge into previous user turn if it already contains functionResponse
-                if let Some(last_entry) = gemini_contents.last_mut() {
-                    if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
-                        if let Some(parts_arr) =
-                            last_entry.get_mut("parts").and_then(|p| p.as_array_mut())
-                        {
-                            let has_func_resp = parts_arr
-                                .iter()
-                                .any(|p| p.get("functionResponse").is_some());
-                            if has_func_resp {
-                                parts_arr.push(resp_part);
-                                continue;
+                // Merge into previous user turn if both contain functionResponse
+                if is_func_resp {
+                    if let Some(last_entry) = gemini_contents.last_mut() {
+                        if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
+                            if let Some(parts_arr) =
+                                last_entry.get_mut("parts").and_then(|p| p.as_array_mut())
+                            {
+                                let has_func_resp = parts_arr
+                                    .iter()
+                                    .any(|p| p.get("functionResponse").is_some());
+                                if has_func_resp {
+                                    parts_arr.push(resp_part);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -846,6 +880,40 @@ fn build_antigravity_payload(
             }
         } else {
             merged_contents.push(content);
+        }
+    }
+
+    // Gemini strictly requires the first content turn to have role: "user".
+    // If compaction, session replay, or callers provide messages starting with a model turn
+    // (especially one containing functionCall), prepend a synthetic user turn so Gemini never
+    // rejects it with HTTP 400 ("Please ensure that function call turn comes immediately after a user turn").
+    if merged_contents
+        .first()
+        .and_then(|c| c.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("model")
+    {
+        merged_contents.insert(
+            0,
+            json!({
+                "role": "user",
+                "parts": [{ "text": "[Conversation continued from previous turn]" }]
+            }),
+        );
+    }
+
+    if merged_contents.is_empty() {
+        merged_contents.push(json!({
+            "role": "user",
+            "parts": [{ "text": "" }]
+        }));
+    }
+
+    for turn in &mut merged_contents {
+        if let Some(parts) = turn.get_mut("parts").and_then(|p| p.as_array_mut()) {
+            if parts.is_empty() {
+                parts.push(json!({ "text": "" }));
+            }
         }
     }
 
@@ -1377,6 +1445,7 @@ pub async fn execute_antigravity_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_core::ToolResult;
 
     #[test]
     fn test_resolve_antigravity_model_mappings() {
@@ -1662,16 +1731,129 @@ mod tests {
             models_quota,
         };
 
-        // When active model is gemini, it must select the 6% quotaInfo from models_quota
+        // When active model is gemini, it must select the 6% quotaInfo from models_quota as the 5h limit
         let gemini_fmt = summary
             .format_quota_display("gemini-3.8-flash")
             .expect("gemini quota");
-        assert_eq!(gemini_fmt, "5h 100% · w 6%");
+        assert_eq!(gemini_fmt, "5h 6%");
 
-        // When active model is claude, it must select the Claude and GPT models group (46%)
+        // When active model is claude, it must select the Claude and GPT models group (5h 100% · w 46%)
         let claude_fmt = summary
             .format_quota_display("claude-sonnet-4-6")
             .expect("claude quota");
         assert_eq!(claude_fmt, "5h 100% · w 46%");
+    }
+
+    #[test]
+    fn format_quota_display_gemini_with_both_5h_and_weekly() {
+        let mut models_quota = std::collections::HashMap::new();
+        models_quota.insert(
+            "gemini-2.5-flash".to_string(),
+            AntigravityModelQuotaInfo {
+                remaining_fraction: Some(0.93),
+                reset_time: Some("2026-10-24T17:41:46Z".to_string()),
+            },
+        );
+
+        let summary = AntigravityQuotaSummary {
+            groups: vec![AntigravityQuotaGroup {
+                display_name: Some("Gemini models".to_string()),
+                buckets: vec![AntigravityQuotaBucket {
+                    bucket_id: Some("gemini-weekly".to_string()),
+                    display_name: Some("Weekly Limit".to_string()),
+                    window: Some("weekly".to_string()),
+                    reset_time: None,
+                    remaining_fraction: Some(0.85),
+                }],
+            }],
+            models_quota,
+        };
+
+        let gemini_fmt = summary
+            .format_quota_display("gemini-2.5-flash")
+            .expect("gemini quota");
+        assert!(gemini_fmt.starts_with("5h 93%"));
+        assert!(gemini_fmt.contains("· w 85%"));
+    }
+
+    #[test]
+    fn build_antigravity_payload_ensures_valid_turn_order_even_if_opened_with_assistant_tool_call()
+    {
+        let call = ToolCall {
+            id: "call-xyz".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "src/main.rs"}),
+            signature: None,
+        };
+        // Simulated history that opens with an assistant message issuing tool calls (e.g. from compacted history)
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: None,
+                tool_calls: vec![],
+                tool_result: Some(ToolResult::success("call-xyz", "fn main() {}")),
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::User,
+                content: Some("next task".to_string()),
+                tool_calls: vec![],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+        let contents = payload["request"]["contents"]
+            .as_array()
+            .expect("contents array");
+
+        // 1. Must start with a user turn
+        assert_eq!(contents[0]["role"], "user", "turn 0 must be user");
+
+        // 2. Turn 1 is the model turn containing functionCall
+        assert_eq!(contents[1]["role"], "model", "turn 1 is model");
+        let has_fc = contents[1]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.get("functionCall").is_some());
+        assert!(has_fc, "turn 1 has functionCall");
+
+        // 3. Turn 2 is user turn with functionResponse
+        assert_eq!(contents[2]["role"], "user", "turn 2 is user");
+        let has_fr = contents[2]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.get("functionResponse").is_some());
+        assert!(has_fr, "turn 2 has functionResponse");
+
+        // 4. Turn 3 is the next user turn merged into turn 2 or strictly alternating
+        for (i, turn) in contents.iter().enumerate() {
+            if i > 0 {
+                assert_ne!(
+                    contents[i - 1]["role"],
+                    turn["role"],
+                    "adjacent turns must strictly alternate roles at index {}",
+                    i
+                );
+            }
+        }
     }
 }

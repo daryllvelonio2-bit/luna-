@@ -17,6 +17,17 @@ pub const LIVE_REASONING_ROWS: usize = 4;
 /// How often the live region advances a spinner frame and refreshes its elapsed time.
 pub const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
 
+/// What the empty composer says when nothing is in flight: the one line that teaches the way in.
+const IDLE_HINT: &str = "Luna is inactive — type /help for commands";
+
+/// What the empty composer says while a turn is in flight. The commands that only work mid-turn
+/// are named here, because a running turn is exactly when they are worth knowing about.
+const BUSY_HINT: &str = "Luna is thinking — /interrupt to stop · /steer or /queue to add";
+
+/// Columns of room the prompt row must have before a hint is drawn at all. Below this the hint
+/// would be a clipped fragment that teaches nothing, so the prompt is drawn bare instead.
+const HINT_MIN_ROOM: usize = 12;
+
 /// Holds the terminal in raw mode for the whole interactive session, restoring the original
 /// settings when dropped.
 pub struct RawTerminal {
@@ -188,6 +199,9 @@ pub struct ChatUi {
     /// Messages the user submitted while the agent could not take them yet, still waiting to be
     /// sent. Only the count lives here: the queue itself belongs to the loop that drains it.
     queue_depth: Arc<AtomicUsize>,
+    /// Whether a turn is in flight. Only the composer's hint reads it: the empty line says
+    /// something different depending on whether Luna is idle or working.
+    turn_active: Arc<AtomicBool>,
     box_drawn: Arc<AtomicBool>,
     drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
     pub is_attended: bool,
@@ -248,6 +262,7 @@ impl ChatUi {
             todo_snapshot: Arc::new(Mutex::new(None)),
             todo_collapsed: Arc::new(AtomicBool::new(false)),
             queue_depth: Arc::new(AtomicUsize::new(0)),
+            turn_active: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             drawn_metrics: Arc::new(Mutex::new(None)),
             is_attended,
@@ -477,10 +492,6 @@ impl ChatUi {
         if had_diff {
             self.animate_tick();
         }
-    }
-
-    pub fn clear_live_and_box(&self) {
-        self.clear_box_on_exit();
     }
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
@@ -962,7 +973,7 @@ impl ChatUi {
             return None;
         }
 
-        let prompt = self.prompt_row(buf);
+        let (prompt, hint_width) = self.prompt_row_drawn(buf);
         let mut sequence = String::new();
         // Tracks the cursor's current vertical offset above the prompt row (0 = on prompt row).
         let mut current_offset = 0usize;
@@ -991,13 +1002,14 @@ impl ChatUi {
         if prompt != metrics.prompt_drawn {
             sequence.push_str("\r\x1b[2K");
             sequence.push_str(&prompt);
+        }
+        // The caret belongs where typing happens: at the end of the row, less the hint it walks
+        // back over. An unchanged prompt row is not rewritten, only re-seated.
+        let column = visible_width(&prompt).saturating_sub(hint_width);
+        if column > 0 {
+            sequence.push_str(&format!("\r\x1b[{column}C"));
         } else {
-            // The prompt text is unchanged, so it is not rewritten: the caret only walks back to
-            // the end of it.
-            let caret = visible_width(&prompt);
-            if caret > 0 {
-                sequence.push_str(&format!("\r\x1b[{caret}C"));
-            }
+            sequence.push('\r');
         }
 
         // Keep the measurements honest: the rows changed, the height did not.
@@ -1104,7 +1116,7 @@ impl ChatUi {
             rows.push(status);
         }
         rows.push(divider.clone());
-        rows.push(self.prompt_row(buf));
+        rows.push(self.prompt_row_drawn(buf).0);
         rows.push(divider);
         rows
     }
@@ -1113,6 +1125,12 @@ impl ChatUi {
         let rows = self.composer_rows(width, buf);
         let prompt_str = rows[rows.len() - 2].clone();
         let bottom_rule = rows[rows.len() - 1].clone();
+        // The hint is drawn after a caret that belongs before it, so the cursor walks back over
+        // it: the next keypress has to land right after the prompt, not after the hint.
+        let hint_width = self
+            .hint_for(width, buf)
+            .map(|hint| visible_width(&hint))
+            .unwrap_or(0);
 
         for row in &rows[..rows.len() - 2] {
             println!("{}", row);
@@ -1122,6 +1140,9 @@ impl ChatUi {
         println!();
         println!("{}", bottom_rule);
         print!("\x1b[2A\r{}", prompt_str);
+        if hint_width > 0 {
+            print!("\x1b[{hint_width}D");
+        }
         let _ = io::stdout().flush();
 
         let live_rows = self.live.lock().unwrap().rows.clone();
@@ -1169,6 +1190,62 @@ impl ChatUi {
         format!("{}{}", PROMPT.bold().yellow(), self.visible_input(buf))
     }
 
+    /// Mark whether a turn is in flight, so the empty composer's hint can say what is happening.
+    ///
+    /// Only the hint reads this: it decides between the idle line and the working one. The chat
+    /// loop sets it when it spawns a turn and clears it on every path a turn can end by.
+    pub fn set_turn_active(&self, active: bool) {
+        self.turn_active.store(active, Ordering::SeqCst);
+    }
+
+    /// Whether a turn is in flight, as far as the composer's hint is concerned.
+    pub fn turn_active(&self) -> bool {
+        self.turn_active.load(Ordering::SeqCst)
+    }
+
+    /// The hint an empty composer shows in a terminal `width` columns wide, if it fits at all.
+    ///
+    /// `None` when the composer holds text (the line belongs to the user then) or when there is no
+    /// room for it: the hint is drawn on the prompt row, so a hint that made the row wrap would
+    /// desync every cursor move the in-place repaint makes.
+    fn hint_for(&self, width: usize, buf: &str) -> Option<String> {
+        if !buf.is_empty() {
+            return None;
+        }
+        let room = width
+            .saturating_sub(PROMPT.chars().count())
+            .saturating_sub(1);
+        if room < HINT_MIN_ROOM {
+            return None;
+        }
+        let text = if self.turn_active() {
+            BUSY_HINT
+        } else {
+            IDLE_HINT
+        };
+        if text.chars().count() <= room {
+            return Some(text.to_string());
+        }
+        let kept: String = text.chars().take(room.saturating_sub(1)).collect();
+        Some(format!("{}…", kept))
+    }
+
+    /// The prompt row as the composer paints it, plus the visible width of the hint it carries.
+    ///
+    /// The hint is drawn *after* the caret on purpose: the caller walks the cursor back over it, so
+    /// typing starts right after the prompt and the first character simply overwrites the hint.
+    /// The width comes back with the row because only the caller knows what it is about to print.
+    pub fn prompt_row_drawn(&self, buf: &str) -> (String, usize) {
+        let prompt = self.prompt_row(buf);
+        match self.hint_for(get_terminal_width(), buf) {
+            Some(hint) => {
+                let width = visible_width(&hint);
+                (format!("{}{}", prompt, hint.dimmed()), width)
+            }
+            None => (prompt, 0),
+        }
+    }
+
     pub fn redraw_input_line(&self) {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
@@ -1186,7 +1263,11 @@ impl ChatUi {
             return;
         }
         let buf = self.input_buf.lock().unwrap();
-        print!("\r\x1b[K{}", self.prompt_row(&buf));
+        let (row, hint_width) = self.prompt_row_drawn(&buf);
+        print!("\r\x1b[K{}", row);
+        if hint_width > 0 {
+            print!("\x1b[{hint_width}D");
+        }
         let _ = io::stdout().flush();
     }
 
@@ -1303,23 +1384,23 @@ impl ChatUi {
     }
 }
 
+/// Helpers shared by this crate's test modules.
+///
+/// The interfaces under test here draw with cursor moves rather than by writing a whole screen, so
+/// the only way to see what they put where is to read the bytes they wrote.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serialises the captures: every capture swaps the process's stdout, so two captures running
-    /// at the same time write into each other's file and each test reads the other's bytes.
-    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Capture what the UI writes to stdout while `f` runs.
+pub(crate) mod test_support {
+    /// Capture what something writes to stdout while it runs.
     ///
-    /// The composer draws with cursor moves rather than by rewriting the screen, so
-    /// the only way to see what it put where is to read the bytes it wrote. The work
-    /// runs on its own thread: the test harness captures `println!` per thread, and
-    /// a fresh thread writes to the real stdout, which is the redirected file.
-    fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
+    /// The work runs on its own thread: the test harness captures `println!` per thread, and a
+    /// fresh thread writes to the real stdout, which is the redirected file.
+    pub(crate) fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
+
+        /// Serialises the captures: every capture swaps the process's stdout, so two running at
+        /// once write into each other's file and each test reads the other's bytes.
+        static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
         let _guard = CAPTURE_LOCK
             .lock()
@@ -1335,7 +1416,7 @@ mod tests {
         std::thread::spawn(f)
             .join()
             .expect("the captured work panicked");
-        let _ = io::stdout().flush();
+        let _ = std::io::stdout().flush();
 
         unsafe { libc::dup2(saved, libc::STDOUT_FILENO) };
         unsafe { libc::close(saved) };
@@ -1347,519 +1428,7 @@ mod tests {
             .unwrap();
         out
     }
-
-    fn a_snapshot() -> TodoSnapshot {
-        TodoSnapshot {
-            items: vec![harness_core::tools::todo::TodoItem {
-                id: 0,
-                text: "a task".to_string(),
-                status: harness_core::tools::todo::TodoStatus::Pending,
-            }],
-        }
-    }
-
-    #[test]
-    fn the_todo_panel_is_drawn_above_the_composer() {
-        let ui = ChatUi::new(true);
-        ui.set_todo_panel(Some(a_snapshot()));
-
-        let rows = ui.composer_rows(80, "hello");
-        let panel_at = rows
-            .iter()
-            .position(|r| r.contains("Todo"))
-            .expect("the panel is drawn");
-        let prompt_at = rows
-            .iter()
-            .position(|r| r.contains("hello"))
-            .expect("the composer is drawn");
-        assert!(
-            panel_at < prompt_at,
-            "the panel belongs above the composer: {:?}",
-            rows
-        );
-        // The panel is the first thing in the composer: nothing is drawn over the
-        // top of the terminal, so the list stays in front of the user.
-        assert_eq!(panel_at, 0, "the panel is at the top: {:?}", rows);
-    }
-
-    #[test]
-    fn the_panel_rows_are_counted_with_the_box() {
-        let ui = ChatUi::new(true);
-        ui.set_todo_panel(Some(a_snapshot()));
-        // A header, one task and a footer.
-        assert_eq!(ui.box_row_count(), 4 + 3);
-
-        let boxed = ui.clone();
-        capture_stdout(move || boxed.draw_box(80, ""));
-        let metrics = ui.drawn_metrics.lock().unwrap();
-        let drawn = metrics.as_ref().expect("the box was drawn");
-        assert_eq!(drawn.panel_rows_lens.len(), 3);
-    }
-
-    #[test]
-    fn a_fresh_list_replaces_the_old_one() {
-        let ui = ChatUi::new(true);
-        ui.set_todo_panel(Some(a_snapshot()));
-        assert_eq!(ui.todo_panel_rows(80).len(), 3);
-
-        let mut second = a_snapshot();
-        second.items.push(harness_core::tools::todo::TodoItem {
-            id: 1,
-            text: "another task".to_string(),
-            status: harness_core::tools::todo::TodoStatus::Done,
-        });
-        ui.set_todo_panel(Some(second));
-        assert_eq!(ui.todo_panel_rows(80).len(), 4);
-
-        // An empty list has no panel at all.
-        ui.set_todo_panel(None);
-        assert!(ui.todo_panel_rows(80).is_empty());
-        assert_eq!(ui.box_row_count(), 4);
-    }
-
-    #[test]
-    fn the_panel_folds_and_unfolds() {
-        let ui = ChatUi::new(true);
-        assert!(!ui.todo_collapsed(), "the panel starts open");
-        assert!(
-            ui.toggle_todo_collapsed(),
-            "folding says the panel is folded"
-        );
-        assert!(ui.todo_collapsed());
-        assert!(!ui.toggle_todo_collapsed(), "unfolding says it is open");
-        assert!(!ui.todo_collapsed());
-    }
-
-    #[test]
-    fn queued_messages_get_a_line_and_lose_it_when_the_queue_drains() {
-        let ui = ChatUi::new(true);
-        assert!(
-            ui.format_queue_line(80).is_none(),
-            "nothing queued, no line"
-        );
-
-        ui.set_queue_depth(2);
-        assert_eq!(ui.queue_depth(), 2);
-        let line = ui
-            .format_queue_line(80)
-            .expect("queued messages are announced");
-        let plain = dialoguer::console::strip_ansi_codes(&line).to_string();
-        assert!(plain.contains('2'), "the count is shown: {plain}");
-        assert!(plain.contains("queued"), "the state is named: {plain}");
-
-        // Drained: the line goes away again, and the row count with it.
-        let with_line = ui.box_row_count();
-        ui.set_queue_depth(0);
-        assert!(ui.format_queue_line(80).is_none());
-        assert_eq!(ui.box_row_count(), with_line - 1);
-    }
-
-    /// A queued line sits in the composer like the background-task line it imitates, and the erase
-    /// metrics record it: a row the erase does not know about is left behind on the next redraw.
-    #[test]
-    fn the_queued_line_is_part_of_the_drawn_box() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 0, 1_000);
-        ui.set_queue_depth(1);
-
-        let rows = ui.composer_rows(80, "");
-        let queue_at = rows
-            .iter()
-            .position(|r| r.contains("queued"))
-            .expect("the queue line is drawn");
-        let status_at = rows
-            .iter()
-            .position(|r| r.contains("ctx"))
-            .expect("the status line is drawn");
-        assert!(
-            queue_at < status_at,
-            "the queue line sits above the status line: {:?}",
-            rows
-        );
-
-        let boxed = ui.clone();
-        capture_stdout(move || boxed.draw_box(80, ""));
-        let metrics = ui.drawn_metrics.lock().unwrap();
-        let drawn = metrics.as_ref().expect("the box was drawn");
-        assert!(drawn.queued_line_len > 0, "the drawn row is measured");
-    }
-
-    #[test]
-    fn compaction_animates_between_start_and_finish() {
-        let ui = ChatUi::new(true);
-        assert!(!ui.is_compacting(), "no fold is running");
-
-        ui.start_compaction(false);
-        assert!(ui.is_compacting(), "the fold is marked as running");
-
-        ui.start_compaction(true);
-        assert!(
-            ui.is_compacting(),
-            "a second start replaces, not duplicates"
-        );
-
-        ui.finish_compaction();
-        assert!(!ui.is_compacting(), "the fold is over");
-
-        // Finishing with nothing running is a no-op, not a panic.
-        ui.finish_compaction();
-        assert!(!ui.is_compacting());
-    }
-
-    /// Replays the shape of a turn: the composer is drawn, the agent answers, the
-    /// agent opens a task list, and the answer comes again.
-    ///
-    /// Ignored by default: it is a scenario to render in a terminal, not an
-    /// assertion. Run it with `--ignored --nocapture` and read the screen.
-    #[test]
-    #[ignore]
-    fn the_panel_stays_pinned_while_the_conversation_scrolls() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 1200, 128_000);
-        ui.draw_initial_box();
-        ui.emit_above("Luna: working on it");
-        ui.set_todo_panel(Some(TodoSnapshot {
-            items: vec![
-                harness_core::tools::todo::TodoItem {
-                    id: 0,
-                    text: "read the panel code".to_string(),
-                    status: harness_core::tools::todo::TodoStatus::Done,
-                },
-                harness_core::tools::todo::TodoItem {
-                    id: 1,
-                    text: "pin it above the composer".to_string(),
-                    status: harness_core::tools::todo::TodoStatus::Pending,
-                },
-            ],
-        }));
-        ui.emit_above("Luna: the panel is pinned above the composer");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
-    /// Prints a composer and one in-place repaint, so the escape sequence can be replayed in a
-    /// terminal and read back. Ignored by default: it is a scenario to watch, not an assertion.
-    #[test]
-    #[ignore]
-    fn demo_the_in_place_repaint() {
-        let ui = ChatUi::new(true);
-        ui.set_status("minimaxai/minimax-m3.1-flash", 194_000, 246_000);
-        let width = get_terminal_width();
-        let status = ui.format_status_line(width).expect("status line");
-        let divider = "─".repeat(width).dimmed().to_string();
-        let prompt = ui.prompt_row("");
-
-        {
-            let mut metrics = ui.drawn_metrics.lock().unwrap();
-            *metrics = Some(BoxDrawnMetrics {
-                width,
-                bg_line_len: 0,
-                queued_line_len: 0,
-                status_line_len: visible_width(&status),
-                divider_len: width,
-                prompt_len: visible_width(&prompt),
-                live_rows_lens: vec![visible_width("⠋ reading")],
-                panel_rows_lens: Vec::new(),
-                block_rows: vec!["⠋ reading".to_string(), status.clone(), divider.clone()],
-                prompt_drawn: prompt.clone(),
-            });
-        }
-        ui.box_drawn.store(true, Ordering::SeqCst);
-        {
-            let mut live = ui.live.lock().unwrap();
-            live.rows = vec!["⠋ reading".to_string()];
-        }
-
-        println!("\x01DEMO_START");
-        // The screen as it stands: transcript, live row, composer, prompt.
-        println!("a transcript line above");
-        println!("{}", "⠋ reading");
-        println!("{}", status);
-        println!("{}", divider);
-        println!();
-        println!("{}", divider);
-        print!("\x1b[2A\r{}", prompt);
-
-        {
-            let mut live = ui.live.lock().unwrap();
-            live.rows = vec!["⠙ reading".to_string()];
-        }
-        let sequence = ui
-            .repaint_block_sequence(width, "")
-            .expect("the same height repaints in place");
-        print!("{sequence}");
-        println!("\x01DEMO_END");
-        let _ = io::stdout().flush();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-
-    #[test]
-    fn the_live_region_refreshes_in_place_instead_of_blanking_the_screen() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 68_000, 272_000);
-        let width = get_terminal_width();
-        let status = ui.format_status_line(width).expect("status line");
-        let divider = "─".repeat(width).dimmed().to_string();
-
-        // Stand in for a drawn composer: the repaint reads the measurements, not the screen.
-        {
-            let mut metrics = ui.drawn_metrics.lock().unwrap();
-            *metrics = Some(BoxDrawnMetrics {
-                width,
-                bg_line_len: 0,
-                queued_line_len: 0,
-                status_line_len: visible_width(&status),
-                divider_len: width,
-                prompt_len: visible_width(&ui.prompt_row("")),
-                live_rows_lens: Vec::new(),
-                panel_rows_lens: Vec::new(),
-                block_rows: vec![status.clone(), divider.clone()],
-                prompt_drawn: ui.prompt_row(""),
-            });
-        }
-        ui.box_drawn.store(true, Ordering::SeqCst);
-
-        // A live row makes the block taller: the composer has to move, so there is no in-place
-        // repaint and the caller falls back to the full redraw.
-        {
-            let mut live = ui.live.lock().unwrap();
-            live.rows = vec!["⠋ reading".to_string()];
-        }
-        assert!(
-            ui.repaint_block_sequence(width, "").is_none(),
-            "a height change cannot be repainted in place"
-        );
-
-        // Same height, new frame: only the row that changed is rewritten.
-        {
-            let mut metrics = ui.drawn_metrics.lock().unwrap();
-            if let Some(m) = metrics.as_mut() {
-                m.block_rows = vec!["⠋ reading".to_string(), status.clone(), divider.clone()];
-                m.live_rows_lens = vec![visible_width("⠋ reading")];
-            }
-        }
-        {
-            let mut live = ui.live.lock().unwrap();
-            live.rows = vec!["⠙ reading".to_string()];
-        }
-        let sequence = ui
-            .repaint_block_sequence(width, "")
-            .expect("the same height repaints in place");
-        assert!(
-            !sequence.contains("\x1b[J"),
-            "a same-height refresh must not blank the screen:\n{sequence}"
-        );
-        assert!(sequence.contains("⠙ reading"), "the new frame is written");
-        assert!(
-            !sequence.contains("test-model"),
-            "the unchanged status line is left alone, not cleared and redrawn:\n{sequence}"
-        );
-        assert!(
-            sequence.contains("\x1b[2K"),
-            "the changed row is cleared before it is rewritten"
-        );
-    }
-
-    #[test]
-    fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 10_000, 100_000);
-        let width = get_terminal_width();
-        let status = ui.format_status_line(width).expect("status line");
-        let divider = "─".repeat(width).dimmed().to_string();
-
-        {
-            let mut metrics = ui.drawn_metrics.lock().unwrap();
-            *metrics = Some(BoxDrawnMetrics {
-                width,
-                bg_line_len: 0,
-                queued_line_len: 0,
-                status_line_len: visible_width(&status),
-                divider_len: width,
-                prompt_len: visible_width(&ui.prompt_row("")),
-                live_rows_lens: vec![
-                    visible_width("thinking row 1"),
-                    visible_width("thinking row 2"),
-                ],
-                panel_rows_lens: Vec::new(),
-                block_rows: vec![
-                    "thinking row 1".to_string(),
-                    "thinking row 2".to_string(),
-                    status.clone(),
-                    divider.clone(),
-                ],
-                prompt_drawn: ui.prompt_row(""),
-            });
-        }
-        ui.box_drawn.store(true, Ordering::SeqCst);
-
-        // Both rows change at the same time:
-        {
-            let mut live = ui.live.lock().unwrap();
-            live.rows = vec![
-                "updated thinking 1".to_string(),
-                "updated thinking 2".to_string(),
-            ];
-        }
-        let sequence = ui
-            .repaint_block_sequence(width, "")
-            .expect("repaints in place");
-
-        // The sequence should move up to the first row (offset 4), then move DOWN by 1 to the second row (offset 3),
-        // and finally move DOWN by 3 back to the prompt line.
-        assert!(
-            sequence.contains("\x1b[4A"),
-            "moves up to top row: {sequence}"
-        );
-        assert!(
-            sequence.contains("\x1b[1B"),
-            "steps down to next row: {sequence}"
-        );
-        assert!(
-            sequence.contains("\x1b[3B"),
-            "returns down to prompt row: {sequence}"
-        );
-        // It must NOT compound moves up (e.g. \x1b[4A followed by \x1b[3A) which would blast off the top of screen!
-        assert!(
-            !sequence.contains("\x1b[3A"),
-            "must not compound upward movements: {sequence}"
-        );
-    }
-
-    #[test]
-    fn test_format_background_task_line() {
-        let ui = ChatUi::new(true);
-        ui.set_background_task(Some(BackgroundTaskState {
-            job_id: "job_0d24ea53".to_string(),
-            task: "Fix search_notes".to_string(),
-            current_tool: "read chat.rs".to_string(),
-            started_at: std::time::Instant::now() - std::time::Duration::from_secs(1440),
-            status: "running".to_string(),
-        }));
-
-        let line = ui.format_background_task_line(80).expect("bg line");
-        let stripped = dialoguer::console::strip_ansi_codes(&line);
-        assert!(stripped.contains("evolver-harness"));
-        assert!(stripped.contains("24m"));
-        assert!(stripped.contains("read chat.rs"));
-        assert!(stripped.contains("[Ctrl+B]"));
-    }
-
-    #[test]
-    fn status_line_context_is_humanized() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 68_000, 272_000);
-
-        let line = ui.format_status_line(80).expect("status line");
-        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
-        assert!(stripped.contains("ctx: 25% (68k/272k)"), "{stripped}");
-        assert!(!stripped.contains("68000"), "{stripped}");
-    }
-
-    #[test]
-    fn humanize_tokens_stays_exact_below_10k() {
-        assert_eq!(humanize_tokens(0), "0");
-        assert_eq!(humanize_tokens(999), "999");
-        assert_eq!(humanize_tokens(9_999), "9999");
-        assert_eq!(humanize_tokens(10_000), "10k");
-        assert_eq!(humanize_tokens(12_345), "12.3k");
-        assert_eq!(humanize_tokens(272_000), "272k");
-        assert_eq!(humanize_tokens(1_000_000), "1M");
-        assert_eq!(humanize_tokens(2_000_000), "2M");
-    }
-
-    #[test]
-    fn status_line_displays_antigravity_account_and_quota_format() {
-        let ui = ChatUi::new(true);
-        ui.set_status("gemini-3.8-flash", 0, 1_000_000);
-        ui.set_account_name(Some("daryllvelonio9@gmail.com".to_string()));
-        ui.set_quota_display(Some("5h 100% (4h 59m) · w 100% (6d 23h)".to_string()));
-
-        let line = ui.format_status_line(120).expect("status line");
-        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
-        assert!(
-            stripped.contains("gemini-3.8-flash · daryllvelonio9@gmail.com"),
-            "{stripped}"
-        );
-        assert!(
-            stripped.contains("0/1M · 5h 100% (4h 59m) · w 100% (6d 23h)"),
-            "{stripped}"
-        );
-    }
-
-    #[test]
-    fn status_line_handles_zero_context_max() {
-        let ui = ChatUi::new(true);
-        ui.set_status("test-model", 0, 0);
-
-        let line = ui.format_status_line(80).expect("status line");
-        let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
-        assert!(stripped.contains("ctx: 0/0"), "{stripped}");
-    }
-
-    #[test]
-    fn physical_line_count_calculates_wrapped_rows() {
-        assert_eq!(physical_line_count(0, 80), 1);
-        assert_eq!(physical_line_count(80, 80), 1);
-        assert_eq!(physical_line_count(81, 80), 2);
-        assert_eq!(physical_line_count(100, 70), 2);
-        assert_eq!(physical_line_count(140, 70), 2);
-        assert_eq!(physical_line_count(141, 70), 3);
-    }
-
-    #[test]
-    fn status_line_never_exceeds_terminal_width_even_when_narrow() {
-        let ui = ChatUi::new(true);
-        ui.set_status("z-ai/glm-5.3-flash", 3902, 1_000_000);
-        ui.set_session_name("long-session-name-here");
-
-        for width in [15, 20, 30, 45, 60, 80, 120] {
-            let line = ui.format_status_line(width).expect("status line");
-            let stripped = dialoguer::console::strip_ansi_codes(&line);
-            assert!(
-                stripped.chars().count() <= width,
-                "width {width}: line length {} exceeds width: {:?}",
-                stripped.chars().count(),
-                stripped
-            );
-        }
-    }
-
-    #[test]
-    fn background_task_line_never_exceeds_terminal_width_even_when_narrow() {
-        let ui = ChatUi::new(true);
-        ui.set_background_task(Some(BackgroundTaskState {
-            job_id: "job_0d24ea53".to_string(),
-            task: "Fix search_notes".to_string(),
-            current_tool: "read chat.rs".to_string(),
-            started_at: std::time::Instant::now(),
-            status: "running".to_string(),
-        }));
-
-        for width in [15, 20, 30, 45, 60, 80, 120] {
-            let line = ui.format_background_task_line(width).expect("bg line");
-            let stripped = dialoguer::console::strip_ansi_codes(&line);
-            assert!(
-                stripped.chars().count() <= width,
-                "width {width}: bg line length {} exceeds width: {:?}",
-                stripped.chars().count(),
-                stripped
-            );
-        }
-    }
-
-    #[test]
-    fn patch_diff_lifecycle_in_live_region() {
-        let ui = ChatUi::new(false);
-        assert!(ui.live.lock().unwrap().patch_diff.is_none());
-
-        let diff = vec!["- old".to_string(), "+ new".to_string()];
-        ui.show_patch_diff(diff.clone());
-        assert_eq!(
-            ui.live.lock().unwrap().patch_diff.as_deref(),
-            Some(diff.as_slice())
-        );
-
-        ui.clear_patch_diff();
-        assert!(ui.live.lock().unwrap().patch_diff.is_none());
-    }
 }
+
+#[cfg(test)]
+mod tests;

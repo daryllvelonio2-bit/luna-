@@ -35,7 +35,7 @@ pub fn render_approval_box(
     request: &ApprovalRequest,
     selected: usize, // index into APPROVAL_ACTIONS
     width: usize,
-) -> (String, usize) {
+) -> String {
     let total = width.clamp(32, 76);
     let visible_len = |s: &str| dialoguer::console::strip_ansi_codes(s).chars().count();
     let cut = |s: &str, room: usize| -> String {
@@ -171,8 +171,9 @@ pub fn render_approval_box(
     lines.push(row(&format!(" {}", hint.dimmed())));
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
 
-    let count = lines.len();
-    (lines.join("\n") + "\n", count)
+    // The box's height is a property of the text (`lines().count()`), so nothing that draws it has
+    // to be handed it separately.
+    lines.join("\n") + "\n"
 }
 
 /// Approver for interactive Chat mode: routes approval requests through a channel to the UI loop.
@@ -229,7 +230,7 @@ pub struct TerminalApprover;
 #[async_trait]
 impl Approver for TerminalApprover {
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError> {
-        let (text, _) = render_approval_box(request, 0, 72);
+        let text = render_approval_box(request, 0, 72);
         print!("{}", text);
         print!("Choose [y]es / [n]o: ");
         let _ = io::stdout().flush();
@@ -389,9 +390,8 @@ mod render_tests {
             diff: None,
             arguments: serde_json::json!({"command": "ls -la"}),
         };
-        let (text, lines) = render_approval_box(&request, 0, 74);
+        let text = render_approval_box(&request, 0, 74);
         print!("\n{}", text);
-        assert_eq!(lines, text.lines().count());
         assert!(text.contains("Tool Execution Approval"));
         assert!(text.contains("The agent requested access to: terminal"));
         assert!(text.contains("$ ls -la && head -100 README.md"));
@@ -420,7 +420,7 @@ mod render_tests {
             arguments: serde_json::json!({}),
         };
         for selected in 0..3 {
-            let (text, _) = render_approval_box(&request, selected, 74);
+            let text = render_approval_box(&request, selected, 74);
             let plain = dialoguer::console::strip_ansi_codes(&text).to_string();
             let focused = plain.lines().filter(|l| l.contains('❯')).count();
             assert_eq!(
@@ -445,8 +445,7 @@ mod render_tests {
             arguments: serde_json::json!({"command": "ls -la"}),
         };
         for width in [36, 42, 50, 60] {
-            let (text, lines) = render_approval_box(&request, 0, width);
-            assert_eq!(lines, text.lines().count());
+            let text = render_approval_box(&request, 0, width);
             let widths: Vec<usize> = text
                 .lines()
                 .map(|l| dialoguer::console::strip_ansi_codes(l).chars().count())

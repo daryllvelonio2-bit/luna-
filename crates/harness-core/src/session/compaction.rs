@@ -181,16 +181,33 @@ fn budget_boundary(history: &[StoredMessage], budget: usize) -> usize {
 
 /// The first index at or after `desired` whose message can open the kept tail.
 ///
-/// The kept tail is a suffix of the transcript, and a tool result may not stand alone: the
-/// assistant message that called it has to be in the tail too, or the provider rejects the
-/// vector. A boundary that lands on a tool result therefore moves forward to the next message
-/// that can open a conversation.
+/// The kept tail is a suffix of the transcript, and neither a tool result nor an assistant
+/// message issuing tool calls may stand alone: Gemini strictly requires that a function call
+/// turn immediately follow a user turn or function response turn, and other providers reject
+/// orphaned tool calls without the user prompt that elicited them. A boundary landing on a
+/// tool result or an assistant tool-call therefore advances forward to the next clean turn.
 fn safe_boundary(history: &[StoredMessage], desired: usize) -> usize {
     let mut index = desired;
-    while index < history.len() && history[index].message.role == Role::Tool {
+    while index < history.len()
+        && (history[index].message.role == Role::Tool
+            || (history[index].message.role == Role::Assistant
+                && !history[index].message.tool_calls.is_empty()))
+    {
         index += 1;
     }
-    index
+    if index < history.len() {
+        return index;
+    }
+    // If advancing forward reached the end (e.g. desired was inside the latest tool execution),
+    // scan backward to find the User prompt that initiated this turn.
+    let mut back = desired;
+    while back > 0 {
+        back -= 1;
+        if history[back].message.role == Role::User {
+            return back;
+        }
+    }
+    desired
 }
 
 /// What a successful compaction produced.

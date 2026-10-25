@@ -69,7 +69,11 @@ pub fn persist(
     config::set_in_file(
         layers,
         AUTO_COMPACT_ENABLED_KEY,
-        if auto_compact.enabled { "true" } else { "false" },
+        if auto_compact.enabled {
+            "true"
+        } else {
+            "false"
+        },
     )?;
     config::set_in_file(
         layers,
