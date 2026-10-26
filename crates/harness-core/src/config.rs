@@ -365,9 +365,10 @@ impl std::str::FromStr for MemoryMode {
 
 /// Memory and note persistence: who writes it, and with what budget.
 ///
-/// The *engines* are chosen by `paths.memory_db` / `paths.notes_db`; these keys only decide who
-/// drives them. Both modes write through the same `save_memory` / `save_note` code path, so
-/// switching modes changes when a memory appears, not what a memory looks like.
+/// The *engines* are chosen by `paths.memory_db` (memory records live in SQLite) and
+/// `paths.notes_dir` (notes live as markdown files); these keys only decide who drives them. Both
+/// modes write through the same `save_memory` / `save_note` code path, so switching modes changes
+/// when a memory appears, not what a memory looks like.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemorySettings {
