@@ -392,14 +392,25 @@ async fn import_opencode(
 
     for cred in detected {
         let id = cred_manager
-            .add_credential(&cred.provider, &cred.label, &cred.api_key, true)
+            .add_credential(&cred.provider, &cred.label, &cred.api_key, cred.is_priority)
             .await?;
-        ui.emit_above(&format!(
-            "{} {} imported ({})",
-            "✔".green().bold(),
-            cred.provider.cyan(),
-            id.dimmed()
-        ));
+        // The metered free-tier token is a fallback: promoting it would make every request
+        // wait out the provider's rate limiter while the account key sits unused in the pool.
+        if cred.is_priority {
+            ui.emit_above(&format!(
+                "{} {} imported as the priority key ({})",
+                "✔".green().bold(),
+                cred.provider.cyan(),
+                id.dimmed()
+            ));
+        } else {
+            ui.emit_above(&format!(
+                "{} {} imported as a fallback ({})",
+                "✔".green().bold(),
+                cred.provider.cyan(),
+                id.dimmed()
+            ));
+        }
     }
     Ok(())
 }

@@ -153,6 +153,13 @@ pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessEr
         })
 }
 
+/// How many times one request may be re-sent with another credential before the provider's
+/// error is handed back to the caller.
+///
+/// The pool is small, so this is a backstop against a pool that keeps rejecting rather than a
+/// real budget: the request has to give up eventually.
+const MAX_CREDENTIAL_FAILOVER_ATTEMPTS: usize = 4;
+
 /// How long a 429 says to wait, from the response itself.
 ///
 /// The header is the provider's own statement about its limiter, so it beats any guess. A
@@ -296,6 +303,27 @@ impl GenericProviderClient {
         retired
     }
 
+    /// Retire the credential the provider just rejected and say whether the request may be
+    /// re-sent with another one.
+    ///
+    /// A rate-limited or revoked key is a property of the KEY, not of the request: when the
+    /// pool holds another key, the request can be served by that one at once. Handing the error
+    /// back instead makes the caller wait out the provider's `Retry-After` — up to ten minutes
+    /// — before it discovers the other key. The retirement is what picks the next key, so both
+    /// decisions are the same one.
+    async fn fail_over_to_another_credential(
+        &self,
+        secret: &SecretString,
+        attempts: usize,
+    ) -> bool {
+        // The key is retired either way: a rejected key must not be handed out again.
+        let retired = self.retire_failed_credential(secret).await;
+        if attempts >= MAX_CREDENTIAL_FAILOVER_ATTEMPTS {
+            return false;
+        }
+        retired
+    }
+
     /// Serialize the transcript for an OpenAI-compatible `/chat/completions` body.
     ///
     /// `model` decides whether a replayed function call must carry Google's thought signature: the
@@ -406,18 +434,13 @@ impl ModelProvider for GenericProviderClient {
         if self.provider_id == "supercode" {
             let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
         }
-        let (headers, query_param, secret) = self.build_auth_headers().await?;
-        let mut url = format!("{}/chat/completions", self.base_url);
-        if let Some(q) = query_param {
-            url = format!("{}?{}", url, q);
-        }
-
         let model = options
             .model
             .clone()
             .unwrap_or_else(|| self.default_model.clone());
 
         if self.provider_id == "supercode" {
+            let (_, _, secret) = self.build_auth_headers().await?;
             let res = crate::supercode::execute_supercode_completion(
                 &self.http_client,
                 secret.expose_secret(),
@@ -440,6 +463,7 @@ impl ModelProvider for GenericProviderClient {
         }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
+            let (_, _, secret) = self.build_auth_headers().await?;
             let res = crate::kiro::execute_kiro_completion(
                 &self.http_client,
                 secret.expose_secret(),
@@ -462,6 +486,7 @@ impl ModelProvider for GenericProviderClient {
         }
 
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
+            let (_, _, secret) = self.build_auth_headers().await?;
             let res = crate::antigravity::execute_antigravity_completion(
                 &self.http_client,
                 secret.expose_secret(),
@@ -587,30 +612,19 @@ impl ModelProvider for GenericProviderClient {
             }
         }
 
-        let mut resp = match self
-            .http_client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(HarnessError::ProviderError {
-                    provider: self.provider_id.clone(),
-                    message: format!("HTTP error: {}", e),
-                })
+        // One request may be re-sent with another credential: a rate-limited or revoked key is
+        // a property of the KEY, and the pool can hold a key that still works. Handing the error
+        // back instead makes the caller wait out the provider's `Retry-After` — up to ten
+        // minutes — before it discovers the other key.
+        let mut failover_attempts = 0usize;
+        let resp = loop {
+            let (headers, query_param, secret) = self.build_auth_headers().await?;
+            let mut url = format!("{}/chat/completions", self.base_url);
+            if let Some(q) = query_param {
+                url = format!("{}?{}", url, q);
             }
-        };
 
-        // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
-        // retry once without reasoning_effort for models that do not support it.
-        if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
-            if let Some(map) = body.as_object_mut() {
-                map.remove("reasoning_effort");
-            }
-            if let Ok(retry_resp) = self
+            let mut resp = match self
                 .http_client
                 .post(&url)
                 .headers(headers.clone())
@@ -618,31 +632,77 @@ impl ModelProvider for GenericProviderClient {
                 .send()
                 .await
             {
-                resp = retry_resp;
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(HarnessError::ProviderError {
+                        provider: self.provider_id.clone(),
+                        message: format!("HTTP error: {}", e),
+                    })
+                }
+            };
+
+            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
+            // retry once without reasoning_effort for models that do not support it.
+            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+                if let Some(map) = body.as_object_mut() {
+                    map.remove("reasoning_effort");
+                }
+                if let Ok(retry_resp) = self
+                    .http_client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    resp = retry_resp;
+                }
             }
-        }
 
-        if resp.status().as_u16() == 429 {
-            self.retire_failed_credential(&secret).await;
-            return Err(HarnessError::RateLimited {
-                provider: self.provider_id.clone(),
-                retry_after_secs: retry_after_secs(&resp),
-            });
-        }
-
-        if !resp.status().is_success() {
             let status = resp.status();
-            // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it and
-            // let the next turn fail over instead of replaying it forever.
-            if matches!(status.as_u16(), 401 | 403) {
-                self.retire_failed_credential(&secret).await;
+            if status.as_u16() == 429 {
+                let retry_after = retry_after_secs(&resp);
+                if self
+                    .fail_over_to_another_credential(&secret, failover_attempts)
+                    .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rate-limited this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                return Err(HarnessError::RateLimited {
+                    provider: self.provider_id.clone(),
+                    retry_after_secs: retry_after,
+                });
             }
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: format!("HTTP {}: {}", status, body_text),
-            });
-        }
+
+            if !status.is_success() {
+                // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it
+                // and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403)
+                    && self
+                        .fail_over_to_another_credential(&secret, failover_attempts)
+                        .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rejected this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: format!("HTTP {}: {}", status, body_text),
+                });
+            }
+
+            break resp;
+        };
 
         let resp_json: serde_json::Value =
             resp.json().await.map_err(|e| HarnessError::ProviderError {
@@ -880,12 +940,6 @@ impl ModelProvider for GenericProviderClient {
             return res;
         }
 
-        let (headers, query_param, secret) = self.build_auth_headers().await?;
-        let mut url = format!("{}/chat/completions", self.base_url);
-        if let Some(q) = query_param {
-            url = format!("{}?{}", url, q);
-        }
-
         let mut body = json!({
             "model": model,
             "messages": self.serialize_messages(messages, model.as_str()),
@@ -906,60 +960,97 @@ impl ModelProvider for GenericProviderClient {
             crate::opencode::ensure_compat_tools(&mut body);
         }
 
-        let mut resp = self
-            .http_client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: format!("HTTP error: {}", e),
-            })?;
-
-        // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
-        // retry once without reasoning_effort for models that do not support it.
-        if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
-            if let Some(map) = body.as_object_mut() {
-                map.remove("reasoning_effort");
+        // One request may be re-sent with another credential: a rate-limited or revoked key is
+        // a property of the KEY, and the pool can hold a key that still works. Handing the error
+        // back instead makes the caller wait out the provider's `Retry-After` — up to ten
+        // minutes — before it discovers the other key.
+        let mut failover_attempts = 0usize;
+        let resp = loop {
+            let (headers, query_param, secret) = self.build_auth_headers().await?;
+            let mut url = format!("{}/chat/completions", self.base_url);
+            if let Some(q) = query_param {
+                url = format!("{}?{}", url, q);
             }
-            if let Ok(retry_resp) = self
+
+            let mut resp = self
                 .http_client
                 .post(&url)
-                .headers(headers)
+                .headers(headers.clone())
                 .json(&body)
                 .send()
                 .await
-            {
-                resp = retry_resp;
-            }
-        }
+                .map_err(|e| HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: format!("HTTP error: {}", e),
+                })?;
 
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            self.retire_failed_credential(&secret).await;
-            return Err(HarnessError::RateLimited {
-                provider: self.provider_id.clone(),
-                retry_after_secs: retry_after_secs(&resp),
-            });
-        }
-        if !status.is_success() {
-            if matches!(status.as_u16(), 401 | 403) {
-                self.retire_failed_credential(&secret).await;
+            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
+            // retry once without reasoning_effort for models that do not support it.
+            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+                if let Some(map) = body.as_object_mut() {
+                    map.remove("reasoning_effort");
+                }
+                if let Ok(retry_resp) = self
+                    .http_client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    resp = retry_resp;
+                }
             }
-            let body_text = resp.text().await.unwrap_or_default();
-            let is_overloaded =
-                status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
-            return Err(HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: if is_overloaded {
-                    format!("Model is overloaded (HTTP {}): {}", status, body_text)
-                } else {
-                    format!("HTTP {}: {}", status, body_text)
-                },
-            });
-        }
+
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let retry_after = retry_after_secs(&resp);
+                if self
+                    .fail_over_to_another_credential(&secret, failover_attempts)
+                    .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rate-limited this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                return Err(HarnessError::RateLimited {
+                    provider: self.provider_id.clone(),
+                    retry_after_secs: retry_after,
+                });
+            }
+            if !status.is_success() {
+                // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it
+                // and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403)
+                    && self
+                        .fail_over_to_another_credential(&secret, failover_attempts)
+                        .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rejected this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                let body_text = resp.text().await.unwrap_or_default();
+                let is_overloaded =
+                    status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: if is_overloaded {
+                        format!("Model is overloaded (HTTP {}): {}", status, body_text)
+                    } else {
+                        format!("HTTP {}: {}", status, body_text)
+                    },
+                });
+            }
+
+            break resp;
+        };
 
         let event_source = resp.bytes_stream().eventsource();
         let provider_id = self.provider_id.clone();

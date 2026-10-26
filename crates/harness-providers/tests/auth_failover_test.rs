@@ -1,10 +1,14 @@
-//! Key failover: the credential that a provider actually rejected must be the one retired, and the
-//! next call must be served by another key.
+//! Key failover: the credential that a provider actually rejected must be the one retired, and
+//! the request must be served by another key.
 //!
-//! `mark_credential_failed` used to ignore its `api_key` argument (retiring whatever came first) and
-//! early-return unless the strategy was `FillFirst`, and nothing in the client ever called it — so a
-//! revoked or rate-limited key stayed selected forever. These tests cover both halves: the manager
-//! primitive, and the client reporting a 401/429 back to it.
+//! `mark_credential_failed` used to ignore its `api_key` argument (retiring whatever came first)
+//! and early-return unless the strategy was `FillFirst`, and nothing in the client ever called
+//! it, so a revoked or rate-limited key stayed selected forever. These tests cover both halves:
+//! the manager primitive, and the client reporting a 401/429 back to it.
+//!
+//! The failover happens INSIDE the request: a rejected key is retired and the request is re-sent
+//! with the next key at once. Handing the error back instead made the caller wait out the
+//! provider's `Retry-After` (up to ten minutes) before it discovered the other key.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,25 +48,43 @@ fn disabled_labels(creds: &[harness_providers::CredentialEntry]) -> Vec<String> 
         .collect()
 }
 
-/// One-shot stub provider: captures the request it received and answers `status_line`.
-async fn stub_provider(status_line: &'static str) -> (String, JoinHandle<String>) {
+/// Stub provider: answers each connection with the next status in `statuses` and records the
+/// request it received. It serves exactly `statuses.len()` connections and then stops, so a
+/// client that asks for more is told so by a refused connection.
+async fn stub_provider(statuses: Vec<&'static str>) -> (String, JoinHandle<Vec<String>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let handle = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 8192];
-        let n = sock.read(&mut buf).await.unwrap();
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let response = format!(
-            "HTTP/1.1 {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-            status_line
-        );
-        let _ = sock.write_all(response.as_bytes()).await;
-        let _ = sock.flush().await;
-        // Give the client a moment to read the response before the socket drops.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        request
+        let mut requests = Vec::new();
+        for status in statuses {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = match sock.read(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+            let body = if status.starts_with("200") {
+                r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+            } else {
+                ""
+            };
+            let response = format!(
+                "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Give the client a moment to read the response before the socket drops.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        requests
     });
 
     (format!("http://{}", addr), handle)
@@ -148,8 +170,77 @@ async fn only_the_reported_key_is_disabled() {
 }
 
 #[tokio::test]
+async fn a_rate_limited_key_is_replaced_within_the_request() {
+    let (base_url, server) = stub_provider(vec!["429 Too Many Requests", "200 OK"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = manager(&dir);
+    seed_two_keys(&mgr).await;
+
+    let client = client_for(base_url, &mgr, &dir);
+    let reply = client
+        .complete(&[Message::user("ping")], &[], &CompletionOptions::default())
+        .await
+        .expect("the second key must serve the request");
+    let requests = server.await.unwrap();
+
+    assert_eq!(requests.len(), 2, "the request must be re-sent once");
+    assert!(
+        requests[0].contains("Bearer sk-22222"),
+        "the first attempt must use the priority key: {}",
+        requests[0].lines().next().unwrap_or_default()
+    );
+    assert!(
+        requests[1].contains("Bearer sk-11111"),
+        "the retry must use the other key: {}",
+        requests[1].lines().next().unwrap_or_default()
+    );
+    assert_eq!(
+        reply.content.as_deref(),
+        Some("ok"),
+        "the successful attempt's answer is the one returned"
+    );
+    assert_eq!(
+        disabled_labels(&mgr.get_credentials("openai").await),
+        vec!["priority".to_string()],
+        "the rate-limited key is retired"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_key_is_replaced_within_the_request() {
+    let (base_url, server) = stub_provider(vec!["401 Unauthorized", "200 OK"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = manager(&dir);
+    seed_two_keys(&mgr).await;
+
+    let client = client_for(base_url, &mgr, &dir);
+    let reply = client
+        .complete(&[Message::user("ping")], &[], &CompletionOptions::default())
+        .await
+        .expect("the second key must serve the request");
+    let requests = server.await.unwrap();
+
+    assert_eq!(requests.len(), 2, "the request must be re-sent once");
+    assert!(
+        requests[0].contains("Bearer sk-22222"),
+        "the first attempt must use the priority key"
+    );
+    assert!(
+        requests[1].contains("Bearer sk-11111"),
+        "the retry must use the other key"
+    );
+    assert_eq!(reply.content.as_deref(), Some("ok"));
+    assert_eq!(
+        disabled_labels(&mgr.get_credentials("openai").await),
+        vec!["priority".to_string()],
+        "the rejected key is retired"
+    );
+}
+
+#[tokio::test]
 async fn client_retires_the_rate_limited_key_on_429() {
-    let (base_url, server) = stub_provider("429 Too Many Requests").await;
+    let (base_url, server) =
+        stub_provider(vec!["429 Too Many Requests", "429 Too Many Requests"]).await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = manager(&dir);
     seed_two_keys(&mgr).await;
@@ -158,7 +249,7 @@ async fn client_retires_the_rate_limited_key_on_429() {
     let err = client
         .complete(&[Message::user("ping")], &[], &CompletionOptions::default())
         .await
-        .expect_err("a 429 must surface as an error");
+        .expect_err("both keys are rate limited, so the error must surface");
     let _ = server.await;
 
     assert!(
@@ -182,7 +273,7 @@ async fn client_retires_the_rate_limited_key_on_429() {
 
 #[tokio::test]
 async fn client_retires_the_rejected_key_on_401() {
-    let (base_url, server) = stub_provider("401 Unauthorized").await;
+    let (base_url, server) = stub_provider(vec!["401 Unauthorized", "401 Unauthorized"]).await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = manager(&dir);
     seed_two_keys(&mgr).await;
@@ -191,13 +282,13 @@ async fn client_retires_the_rejected_key_on_401() {
     let err = client
         .complete(&[Message::user("ping")], &[], &CompletionOptions::default())
         .await
-        .expect_err("a 401 must surface as an error");
+        .expect_err("both keys are rejected, so the error must surface");
 
-    let request = server.await.unwrap();
+    let requests = server.await.unwrap();
     assert!(
-        request.contains("Bearer sk-22222"),
+        requests[0].contains("Bearer sk-22222"),
         "the client must have sent the priority key first: {}",
-        request.lines().next().unwrap_or_default()
+        requests[0].lines().next().unwrap_or_default()
     );
     assert!(
         format!("{:?}", err).contains("401"),
@@ -221,7 +312,7 @@ async fn client_retires_the_rejected_key_on_401() {
 
 #[tokio::test]
 async fn client_retires_the_rejected_key_on_stream_401() {
-    let (base_url, server) = stub_provider("401 Unauthorized").await;
+    let (base_url, server) = stub_provider(vec!["401 Unauthorized", "401 Unauthorized"]).await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = manager(&dir);
     seed_two_keys(&mgr).await;
@@ -235,9 +326,9 @@ async fn client_retires_the_rejected_key_on_stream_401() {
         Err(e) => e,
     };
 
-    let request = server.await.unwrap();
+    let requests = server.await.unwrap();
     assert!(
-        request.contains("Bearer sk-22222"),
+        requests[0].contains("Bearer sk-22222"),
         "the client must have sent the priority key first"
     );
     assert!(
@@ -257,5 +348,35 @@ async fn client_retires_the_rejected_key_on_stream_401() {
             .unwrap()
             .expose_secret(),
         "sk-11111"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_key_is_replaced_within_the_stream_request() {
+    let (base_url, server) = stub_provider(vec!["429 Too Many Requests", "200 OK"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = manager(&dir);
+    seed_two_keys(&mgr).await;
+
+    let client = client_for(base_url, &mgr, &dir);
+    let _stream = client
+        .stream(&[Message::user("ping")], &[], &CompletionOptions::default())
+        .await
+        .expect("the second key must serve the stream");
+    let requests = server.await.unwrap();
+
+    assert_eq!(requests.len(), 2, "the stream request must be re-sent once");
+    assert!(
+        requests[0].contains("Bearer sk-22222"),
+        "the first attempt must use the priority key"
+    );
+    assert!(
+        requests[1].contains("Bearer sk-11111"),
+        "the retry must use the other key"
+    );
+    assert_eq!(
+        disabled_labels(&mgr.get_credentials("openai").await),
+        vec!["priority".to_string()],
+        "the rate-limited key is retired"
     );
 }

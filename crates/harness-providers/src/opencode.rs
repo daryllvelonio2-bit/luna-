@@ -1,7 +1,7 @@
 use harness_core::HarnessError;
 use rand::Rng;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +17,43 @@ pub struct DetectedOpencodeCredential {
     pub provider: String,
     pub label: String,
     pub api_key: String,
+    /// Whether this key should be the one the pool hands out first.
+    ///
+    /// The anonymous free-tier token is a FALLBACK: it is registered so a machine with no
+    /// OpenCode account still has something to send, but it must never outrank a real key.
+    /// The free tier is metered, and a metered token that wins the rotation turns every
+    /// request into a rate-limit wait.
+    pub is_priority: bool,
+}
+
+/// Where OpenCode keeps its own credential store.
+///
+/// OpenCode writes `auth.json` under its XDG data directory, which is
+/// `~/.local/share/opencode` by default. Both are checked because the environment variable is
+/// the documented way to relocate it.
+fn opencode_auth_paths(home: &Path, xdg_data_home: Option<&str>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(xdg) = xdg_data_home {
+        if !xdg.trim().is_empty() {
+            paths.push(PathBuf::from(xdg).join("opencode").join("auth.json"));
+        }
+    }
+    paths.push(
+        home.join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+    paths
+}
+
+/// Read one JSON file, if it is there and it parses.
+fn read_json_file(path: &Path) -> Option<serde_json::Value> {
+    if !path.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&content).ok()
 }
 
 /// Mint a SessionID in the exact shape OpenCode v2's id generator emits.
@@ -125,73 +162,99 @@ pub fn ensure_compat_tools(body: &mut serde_json::Value) {
 }
 
 pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, HarnessError> {
-    let mut detected = Vec::new();
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let xdg = std::env::var("XDG_DATA_HOME").ok();
+    detect_opencode_credentials_in(&PathBuf::from(home), xdg.as_deref())
+}
 
-    // 1. OpenCode Zen free tier: keyless access via 'public' token
+/// The same detection against an explicit home directory, so the behaviour can be tested
+/// without touching the machine's environment.
+pub fn detect_opencode_credentials_in(
+    home: &Path,
+    xdg_data_home: Option<&str>,
+) -> Result<Vec<DetectedOpencodeCredential>, HarnessError> {
+    let mut detected = Vec::new();
+
+    // 1. OpenCode's own account key. OpenCode stores one entry per provider the user logged
+    //    into, and the entry for its own Zen service is the credential Luna must send to
+    //    opencode.ai. This file used to be read for Groq only, so a logged-in OpenCode account
+    //    was invisible to Luna and every request went out anonymously on the metered free tier.
+    for path in opencode_auth_paths(home, xdg_data_home) {
+        let Some(val) = read_json_file(&path) else {
+            continue;
+        };
+        if let Some(key) = val
+            .get("opencode")
+            .and_then(|entry| entry.get("key"))
+            .and_then(|k| k.as_str())
+        {
+            if !key.trim().is_empty() {
+                detected.push(DetectedOpencodeCredential {
+                    provider: "opencode".to_string(),
+                    label: "opencode-account".to_string(),
+                    api_key: key.to_string(),
+                    is_priority: true,
+                });
+            }
+        }
+        if let Some(key) = val
+            .get("groq")
+            .and_then(|entry| entry.get("key"))
+            .and_then(|k| k.as_str())
+        {
+            if !key.trim().is_empty() {
+                // Groq is a provider of its own: its key belongs to the Groq pool, never to the
+                // OpenCode pool, where it would only earn a rejection from opencode.ai.
+                detected.push(DetectedOpencodeCredential {
+                    provider: "groq".to_string(),
+                    label: "opencode-groq".to_string(),
+                    api_key: key.to_string(),
+                    is_priority: true,
+                });
+            }
+        }
+    }
+
+    // 2. ~/.shiina/auth.json (opencode-zen token)
+    let shiina_auth = home.join(".shiina").join("auth.json");
+    if let Some(val) = read_json_file(&shiina_auth) {
+        let pool = val.get("credential_pool");
+        if let Some(creds) = pool
+            .and_then(|p| p.get("opencode-zen"))
+            .and_then(|c| c.as_array())
+        {
+            for c in creds {
+                if let Some(tok) = c
+                    .get("access_token")
+                    .or_else(|| c.get("api_key"))
+                    .and_then(|t| t.as_str())
+                {
+                    if !tok.is_empty() && tok != "public" {
+                        let label = c
+                            .get("label")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("opencode-zen");
+                        detected.push(DetectedOpencodeCredential {
+                            provider: "opencode".to_string(),
+                            label: label.to_string(),
+                            api_key: tok.to_string(),
+                            is_priority: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. OpenCode Zen free tier: keyless access via the 'public' token. Registered last and
+    //    never as the priority key, so it is the fallback for a machine with no account rather
+    //    than the credential that shadows the account the user actually has.
     detected.push(DetectedOpencodeCredential {
         provider: "opencode".to_string(),
         label: "opencode-free".to_string(),
         api_key: "public".to_string(),
+        is_priority: false,
     });
-
-    // 2. ~/.shiina/auth.json (opencode-zen token)
-    let shiina_auth = PathBuf::from(&home).join(".shiina").join("auth.json");
-    if shiina_auth.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&shiina_auth) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                let pool = val.get("credential_pool");
-                if let Some(creds) = pool
-                    .and_then(|p| p.get("opencode-zen"))
-                    .and_then(|c| c.as_array())
-                {
-                    for c in creds {
-                        if let Some(tok) = c
-                            .get("access_token")
-                            .or_else(|| c.get("api_key"))
-                            .and_then(|t| t.as_str())
-                        {
-                            if !tok.is_empty() && tok != "public" {
-                                let label = c
-                                    .get("label")
-                                    .and_then(|l| l.as_str())
-                                    .unwrap_or("opencode-zen");
-                                detected.push(DetectedOpencodeCredential {
-                                    provider: "opencode".to_string(),
-                                    label: label.to_string(),
-                                    api_key: tok.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. ~/.local/share/opencode/auth.json (Groq integration)
-    let local_auth = PathBuf::from(&home)
-        .join(".local")
-        .join("share")
-        .join("opencode")
-        .join("auth.json");
-    if local_auth.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&local_auth) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(groq) = val.get("groq") {
-                    if let Some(key) = groq.get("key").and_then(|k| k.as_str()) {
-                        if !key.is_empty() {
-                            detected.push(DetectedOpencodeCredential {
-                                provider: "groq".to_string(),
-                                label: "opencode-groq".to_string(),
-                                api_key: key.to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     Ok(detected)
 }

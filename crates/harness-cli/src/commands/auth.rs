@@ -281,7 +281,12 @@ pub async fn handle_auth_command(
                 );
                 for cred in detected {
                     let id = cred_manager
-                        .add_credential(&cred.provider, &cred.label, &cred.api_key, true)
+                        .add_credential(
+                            &cred.provider,
+                            &cred.label,
+                            &cred.api_key,
+                            cred.is_priority,
+                        )
                         .await?;
                     println!(
                         "  {} Registered credential for provider '{}' ({})",
@@ -290,7 +295,14 @@ pub async fn handle_auth_command(
                         cred.label.bold()
                     );
                     println!("    Credential ID:   {}", id);
-                    println!("    Set as priority: {}", "yes".green());
+                    // The metered free-tier token is registered as a fallback, never as the
+                    // key the pool hands out first: a priority free token turns every request
+                    // into a rate-limit wait even though the account key sits in the same pool.
+                    if cred.is_priority {
+                        println!("    Set as priority: {}", "yes".green());
+                    } else {
+                        println!("    Set as priority: {}", "no (fallback)".yellow());
+                    }
                 }
             }
         },

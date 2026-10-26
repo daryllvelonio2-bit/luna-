@@ -23,6 +23,6 @@ pub use catalog::{
 pub use client::{build_http_client, GenericProviderClient};
 pub use discovery::{ModelDiscovery, ModelListing};
 pub use opencode::{
-    detect_opencode_credentials, ensure_compat_tools, get_or_create_opencode_session_id,
-    new_opencode_session_id, DetectedOpencodeCredential,
+    detect_opencode_credentials, detect_opencode_credentials_in, ensure_compat_tools,
+    get_or_create_opencode_session_id, new_opencode_session_id, DetectedOpencodeCredential,
 };

@@ -138,41 +138,56 @@ impl CredentialManager {
         })
     }
 
-    /// Fold the on-disk store into an in-memory one: a provider missing locally is taken whole,
-    /// a provider present locally absorbs the disk's credentials that are not there yet.
+    /// Apply one change to the credential store on disk and write it back.
     ///
-    /// Every merge is deduplicated afterwards. The per-credential `id`/`api_key` check cannot
-    /// catch the stack, because the rows being stacked share nothing on id or key — only the
-    /// label — so without the dedupe pass every read pulls the stack back in again.
-    /// `luna auth list` reads what lands on disk, so this is where the list gets its shape.
-    fn merge_from_disk(to_write: &mut LunaAuthStorage, path: &Path) -> Result<(), HarnessError> {
-        // A store that cannot be read means "cannot merge", not "there is nothing to merge": the
-        // error goes back to the caller, which decides whether that is fatal (`save_to_disk`) or
-        // merely a lost merge (`persist_state`, which must not fail a working request).
-        let disk = Self::load_from_disk(path)?;
-        for (p_id, disk_state) in disk.providers {
-            if !to_write.providers.contains_key(&p_id) {
-                to_write.providers.insert(p_id, disk_state);
-                continue;
-            }
-            let local = to_write.providers.get_mut(&p_id).expect("checked above");
-            for disk_cred in disk_state.credentials {
-                let already = local
-                    .credentials
-                    .iter()
-                    .any(|c| c.id == disk_cred.id || c.api_key == disk_cred.api_key);
-                if !already {
-                    local.credentials.push(disk_cred);
-                }
-            }
-        }
-        // One pass over everything that ended up in the store, local rows included: the
-        // in-memory stack predates the label-keyed `add_credential`, so it needs the same
-        // collapse the merged rows do, or `luna auth list` still shows the duplicates.
-        for p in to_write.providers.values_mut() {
+    /// The file is the source of truth for WHICH credentials exist and which of them is the
+    /// priority one: another Luna process (a chat session, an `luna auth` command) may have
+    /// changed it while this process was running. Every write therefore starts from what is on
+    /// disk and applies only this process's own change, so an edit made elsewhere is never
+    /// undone by a write made here. Writing this process's whole in-memory view back instead is
+    /// what brought deleted credentials back from the dead and silently demoted the key the
+    /// user had just promoted.
+    async fn mutate_store_on_disk<F>(&self, mutate: F) -> Result<LunaAuthStorage, HarnessError>
+    where
+        F: FnOnce(&mut LunaAuthStorage),
+    {
+        let mut disk = Self::load_from_disk(&self.storage_path)?;
+        mutate(&mut disk);
+        for p in disk.providers.values_mut() {
             Self::dedupe_by_label(p);
         }
-        Ok(())
+        let bytes = serde_json::to_string_pretty(&disk)
+            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+        self.write_store(&bytes)?;
+        Ok(disk)
+    }
+
+    /// Adopt the on-disk state in memory, keeping this process's failover flags.
+    ///
+    /// `is_temporarily_disabled` is deliberately process-local: a key retired here because it
+    /// was rate-limited stays retired for the rest of this run, but it is never written to the
+    /// file. Everything else (which credentials exist, which one is the priority one) is
+    /// whatever the file says, because another process may have changed it.
+    async fn sync_memory_from_disk(&self, disk: &LunaAuthStorage) {
+        let mut state = self.state.write().await;
+        for (p_id, disk_state) in &disk.providers {
+            let disabled: Vec<String> = state
+                .providers
+                .get(p_id)
+                .map(|p| {
+                    p.credentials
+                        .iter()
+                        .filter(|c| c.is_temporarily_disabled)
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut disk_state = disk_state.clone();
+            for cred in &mut disk_state.credentials {
+                cred.is_temporarily_disabled = disabled.contains(&cred.id);
+            }
+            state.providers.insert(p_id.clone(), disk_state);
+        }
     }
 
     /// Collapse rows that describe the same account, keeping the one that carries the most
@@ -215,24 +230,52 @@ impl CredentialManager {
     /// round-robin position must survive a restart (t_29ea5d7c) or `LeastUsed` restarts from the
     /// same key in every new process and `luna auth list` shows `Used: 0` forever.
     ///
+    /// The file is the source of truth for the credential set and the priority flags; only the
+    /// rotation counters come from memory. Writing this process's whole view back instead is
+    /// what made `luna auth remove` and `luna auth priority` look like they did nothing: the
+    /// next request from a session that was already running wrote its stale view over the
+    /// change, and the credential the user had just deleted came back.
+    ///
     /// Deliberately NOT persisted (process-local by design, per t_d79b9293): the
-    /// `is_temporarily_disabled` failover flag. A key retired because it was rate-limited must be
-    /// retried on the next run, so `persist_state` serializes a copy of the state with those flags
-    /// cleared instead of writing what is in memory. Persistence failures are logged, not returned:
-    /// a full disk must not turn a working API key into a failed request.
+    /// `is_temporarily_disabled` failover flag. A key retired because it was rate-limited must
+    /// be retried on the next run, so the file is written with those flags cleared.
+    /// Persistence failures are logged, not returned: a full disk must not turn a working API
+    /// key into a failed request.
     async fn persist_state(&self) {
-        let mut to_write = self.state.read().await.clone();
-        // A store that cannot be read is logged, not returned: this runs after a successful
-        // acquire, and a full disk or a transient read failure must not fail the request itself.
-        if let Err(e) = Self::merge_from_disk(&mut to_write, &self.storage_path) {
-            warn!(error = %e, "cannot merge on-disk credential state; persisting in-memory view");
+        let memory = self.state.read().await.clone();
+
+        let mut disk = match Self::load_from_disk(&self.storage_path) {
+            Ok(disk) => disk,
+            Err(e) => {
+                warn!(error = %e, "cannot read the credential store; persisting the in-memory view");
+                memory.clone()
+            }
+        };
+
+        for (p_id, mem_state) in &memory.providers {
+            let Some(disk_state) = disk.providers.get_mut(p_id) else {
+                // The provider is not on disk at all: keep this process's rows for it.
+                disk.providers.insert(p_id.clone(), mem_state.clone());
+                continue;
+            };
+            disk_state.current_round_robin_index = mem_state.current_round_robin_index;
+            for mem_cred in &mem_state.credentials {
+                if let Some(disk_cred) = disk_state.credentials.iter_mut().find(|d| {
+                    d.id == mem_cred.id
+                        || (d.api_key == mem_cred.api_key && d.label == mem_cred.label)
+                }) {
+                    disk_cred.usage_count = mem_cred.usage_count;
+                    disk_cred.last_used = mem_cred.last_used;
+                }
+            }
         }
-        for p in to_write.providers.values_mut() {
+
+        for p in disk.providers.values_mut() {
             for cred in &mut p.credentials {
                 cred.is_temporarily_disabled = false;
             }
         }
-        let bytes = match serde_json::to_string_pretty(&to_write) {
+        let bytes = match serde_json::to_string_pretty(&disk) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(error = %e, "cannot serialize credential rotation state; skipping persist");
@@ -248,30 +291,6 @@ impl CredentialManager {
         }
     }
 
-    pub async fn save_to_disk(&self) -> Result<(), HarnessError> {
-        let mut to_write = self.state.read().await.clone();
-        // Propagating matters: `load_from_disk` refuses a corrupt store on purpose, and silently
-        // treating a corrupt file as "nothing there" is how an empty state gets persisted over
-        // every registered key. The merge helper takes a Result for exactly this reason.
-        Self::merge_from_disk(&mut to_write, &self.storage_path)?;
-        let bytes = serde_json::to_string_pretty(&to_write)
-            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
-        self.write_store(&bytes)
-    }
-
-    /// Persist the in-memory state directly without merging from disk.
-    /// Used when mutating operations (such as credential removal) must not resurrect
-    /// keys that were explicitly deleted.
-    pub async fn save_exact(&self) -> Result<(), HarnessError> {
-        let mut to_write = self.state.read().await.clone();
-        for p in to_write.providers.values_mut() {
-            Self::dedupe_by_label(p);
-        }
-        let bytes = serde_json::to_string_pretty(&to_write)
-            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
-        self.write_store(&bytes)
-    }
-
     pub async fn add_credential(
         &self,
         provider: &str,
@@ -279,60 +298,69 @@ impl CredentialManager {
         key: &str,
         is_priority: bool,
     ) -> Result<String, HarnessError> {
-        let mut state = self.state.write().await;
-        let provider_state = state.providers.entry(provider.to_lowercase()).or_default();
+        let provider_lower = provider.to_lowercase();
+        let mut new_id = String::new();
 
-        // One account is one entry, keyed by the label the account is known by. Re-registering
-        // an account — `luna auth antigravity copy` after a token refresh, or re-adding the same
-        // provider/label — used to append a second row with a fresh UUID, so a single Gmail
-        // account accumulated a row per refresh. The token itself rotates, so neither `id` nor
-        // `api_key` could identify the account; the label is the only stable handle on it.
-        let existing = provider_state
-            .credentials
-            .iter_mut()
-            .find(|c| c.label == label);
+        // The change is applied to the file, not to this process's view of it: the file is what
+        // every other Luna process reads, and it may hold rows this process has never seen.
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                let provider_state = store.providers.entry(provider_lower.clone()).or_default();
 
-        let id = match existing {
-            Some(cred) => {
-                // Refresh in place: keep the identity, the usage history and the priority flag,
-                // so a token rotation does not reset `luna auth list` counters or drop the
-                // account back out of the rotation order.
-                cred.api_key = key.to_string();
-                if is_priority {
-                    cred.is_priority = true;
-                }
-                cred.is_temporarily_disabled = false;
-                cred.id.clone()
-            }
-            None => {
-                let id = uuid::Uuid::new_v4().to_string();
-                let entry = CredentialEntry {
-                    id: id.clone(),
-                    label: label.to_string(),
-                    api_key: key.to_string(),
-                    encrypted_in_keyring: None,
-                    is_priority,
-                    usage_count: 0,
-                    last_used: None,
-                    is_temporarily_disabled: false,
+                // One account is one entry, keyed by the label the account is known by.
+                // Re-registering an account (after a token refresh, or re-adding the same
+                // provider/label) used to append a second row with a fresh UUID, so a single
+                // account accumulated a row per refresh. The token itself rotates, so neither
+                // `id` nor `api_key` could identify the account; the label is the only stable
+                // handle on it.
+                let existing = provider_state
+                    .credentials
+                    .iter_mut()
+                    .find(|c| c.label == label);
+
+                let id = match existing {
+                    Some(cred) => {
+                        // Refresh in place: keep the identity, the usage history and the
+                        // priority flag, so a token rotation does not reset the usage counters
+                        // or drop the account back out of the rotation order.
+                        cred.api_key = key.to_string();
+                        if is_priority {
+                            cred.is_priority = true;
+                        }
+                        cred.is_temporarily_disabled = false;
+                        cred.id.clone()
+                    }
+                    None => {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let entry = CredentialEntry {
+                            id: id.clone(),
+                            label: label.to_string(),
+                            api_key: key.to_string(),
+                            encrypted_in_keyring: None,
+                            is_priority,
+                            usage_count: 0,
+                            last_used: None,
+                            is_temporarily_disabled: false,
+                        };
+                        provider_state.credentials.push(entry);
+                        id
+                    }
                 };
-                provider_state.credentials.push(entry);
-                id
-            }
-        };
 
-        if is_priority {
-            for cred in &mut provider_state.credentials {
-                cred.is_priority = false;
-            }
-            if let Some(cred) = provider_state.credentials.iter_mut().find(|c| c.id == id) {
-                cred.is_priority = true;
-            }
-        }
+                if is_priority {
+                    for cred in &mut provider_state.credentials {
+                        cred.is_priority = false;
+                    }
+                    if let Some(cred) = provider_state.credentials.iter_mut().find(|c| c.id == id) {
+                        cred.is_priority = true;
+                    }
+                }
+                new_id = id;
+            })
+            .await?;
 
-        drop(state);
-        self.save_to_disk().await?;
-        Ok(id)
+        self.sync_memory_from_disk(&disk).await;
+        Ok(new_id)
     }
 
     pub async fn remove_credential(
@@ -340,21 +368,23 @@ impl CredentialManager {
         provider: &str,
         label_or_id: &str,
     ) -> Result<bool, HarnessError> {
-        let mut state = self.state.write().await;
-        if let Some(provider_state) = state.providers.get_mut(&provider.to_lowercase()) {
-            let initial_len = provider_state.credentials.len();
-            provider_state
-                .credentials
-                .retain(|c| c.id != label_or_id && c.label != label_or_id);
-            let removed = provider_state.credentials.len() < initial_len;
-            drop(state);
-            if removed {
-                self.save_exact().await?;
-            }
-            Ok(removed)
-        } else {
-            Ok(false)
-        }
+        let provider_lower = provider.to_lowercase();
+        let mut removed = false;
+
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                if let Some(provider_state) = store.providers.get_mut(&provider_lower) {
+                    let initial_len = provider_state.credentials.len();
+                    provider_state
+                        .credentials
+                        .retain(|c| c.id != label_or_id && c.label != label_or_id);
+                    removed = provider_state.credentials.len() < initial_len;
+                }
+            })
+            .await?;
+
+        self.sync_memory_from_disk(&disk).await;
+        Ok(removed)
     }
 
     pub async fn set_rotation_strategy(
@@ -362,11 +392,17 @@ impl CredentialManager {
         provider: &str,
         strategy: RotationStrategy,
     ) -> Result<(), HarnessError> {
-        let mut state = self.state.write().await;
-        let provider_state = state.providers.entry(provider.to_lowercase()).or_default();
-        provider_state.strategy = strategy;
-        drop(state);
-        self.save_to_disk().await?;
+        let provider_lower = provider.to_lowercase();
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                store
+                    .providers
+                    .entry(provider_lower.clone())
+                    .or_default()
+                    .strategy = strategy;
+            })
+            .await?;
+        self.sync_memory_from_disk(&disk).await;
         Ok(())
     }
 
@@ -375,25 +411,56 @@ impl CredentialManager {
         provider: &str,
         label_or_id: &str,
     ) -> Result<bool, HarnessError> {
-        let mut state = self.state.write().await;
-        if let Some(provider_state) = state.providers.get_mut(&provider.to_lowercase()) {
-            let mut found = false;
-            for cred in &mut provider_state.credentials {
-                if cred.id == label_or_id || cred.label == label_or_id {
-                    cred.is_priority = true;
-                    found = true;
-                } else {
-                    cred.is_priority = false;
+        let provider_lower = provider.to_lowercase();
+        let mut found = false;
+
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                if let Some(provider_state) = store.providers.get_mut(&provider_lower) {
+                    for cred in &mut provider_state.credentials {
+                        if cred.id == label_or_id || cred.label == label_or_id {
+                            cred.is_priority = true;
+                            found = true;
+                        } else {
+                            cred.is_priority = false;
+                        }
+                    }
                 }
-            }
-            drop(state);
-            if found {
-                self.save_to_disk().await?;
-            }
-            Ok(found)
-        } else {
-            Ok(false)
-        }
+            })
+            .await?;
+
+        self.sync_memory_from_disk(&disk).await;
+        Ok(found)
+    }
+
+    /// Take the priority flag away from one credential.
+    ///
+    /// `set_priority_credential` can only move the flag onto a key, but a pool can hold a
+    /// fallback key that must never be handed out first: the metered free tier of a provider is
+    /// one. Clearing it needs its own path.
+    pub async fn clear_priority_credential(
+        &self,
+        provider: &str,
+        label_or_id: &str,
+    ) -> Result<bool, HarnessError> {
+        let provider_lower = provider.to_lowercase();
+        let mut found = false;
+
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                if let Some(provider_state) = store.providers.get_mut(&provider_lower) {
+                    for cred in &mut provider_state.credentials {
+                        if cred.id == label_or_id || cred.label == label_or_id {
+                            cred.is_priority = false;
+                            found = true;
+                        }
+                    }
+                }
+            })
+            .await?;
+
+        self.sync_memory_from_disk(&disk).await;
+        Ok(found)
     }
 
     /// Atomically updates a credential's secret (used for OAuth token rotation).
@@ -403,48 +470,39 @@ impl CredentialManager {
         old_key: &str,
         new_key: &str,
     ) -> Result<bool, HarnessError> {
-        let mut state = self.state.write().await;
-        if let Some(pool) = state.providers.get_mut(&provider.to_lowercase()) {
-            let mut found = false;
-            for cred in &mut pool.credentials {
-                if cred.api_key == old_key {
-                    cred.api_key = new_key.to_string();
-                    found = true;
-                    break;
+        let provider_lower = provider.to_lowercase();
+        let mut found = false;
+
+        let disk = self
+            .mutate_store_on_disk(|store| {
+                if let Some(pool) = store.providers.get_mut(&provider_lower) {
+                    for cred in &mut pool.credentials {
+                        if cred.api_key == old_key {
+                            cred.api_key = new_key.to_string();
+                            found = true;
+                            break;
+                        }
+                    }
                 }
-            }
-            drop(state);
-            if found {
-                self.save_to_disk().await?;
-            }
-            Ok(found)
-        } else {
-            Ok(false)
-        }
+            })
+            .await?;
+
+        self.sync_memory_from_disk(&disk).await;
+        Ok(found)
     }
 
     /// Fold the on-disk store into the in-memory one, in place. Every load path funnels through
     /// this so the two never disagree about which rows exist.
     async fn absorb_disk_state(&self) -> Result<(), HarnessError> {
-        let mut merged = self.state.read().await.clone();
-        Self::merge_from_disk(&mut merged, &self.storage_path)?;
-        let mut state = self.state.write().await;
-        for (p_id, p_state) in merged.providers {
-            state.providers.insert(p_id, p_state);
-        }
+        let disk = Self::load_from_disk(&self.storage_path)?;
+        self.sync_memory_from_disk(&disk).await;
         Ok(())
     }
 
     pub async fn get_credentials(&self, provider: &str) -> Vec<CredentialEntry> {
         let p_lower = provider.to_lowercase();
-        {
-            let state = self.state.read().await;
-            if let Some(p) = state.providers.get(&p_lower) {
-                if !p.credentials.is_empty() {
-                    return p.credentials.clone();
-                }
-            }
-        }
+        // The file first: `luna auth list` must show what the user last arranged, not what this
+        // process happened to load when it started.
         if let Err(e) = self.absorb_disk_state().await {
             tracing::warn!("Failed to absorb credentials from disk: {}", e);
         }
@@ -458,21 +516,12 @@ impl CredentialManager {
 
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
         let p_lower = provider.to_lowercase();
+        // The file is the source of truth: another process may have added, removed or promoted a
+        // credential since this process last looked, and the key it hands out must be the one
+        // the user last arranged. A stale in-memory view is how a deleted key kept coming back
+        // and a promoted key kept losing its place.
+        let _ = self.absorb_disk_state().await;
         let mut state = self.state.write().await;
-        if !state.providers.contains_key(&p_lower) {
-            // Merge under no lock, then take the lock again: holding the write lock across a
-            // blocking read makes every other acquirer wait on two filesystem reads.
-            let mut merged = state.clone();
-            drop(state);
-            // Nothing on disk to offer: the provider must already be in memory, or the request
-            // is about to fail with its own "no credentials" error, which names the provider
-            // more usefully than a read failure would.
-            let _ = Self::merge_from_disk(&mut merged, &self.storage_path);
-            state = self.state.write().await;
-            for (p_id, p_state) in merged.providers {
-                state.providers.entry(p_id).or_insert(p_state);
-            }
-        }
         let provider_state = state.providers.get_mut(&p_lower).ok_or_else(|| {
             HarnessError::AuthenticationFailed {
                 provider: provider.to_string(),
@@ -630,8 +679,8 @@ impl CredentialManager {
             state.providers.keys().cloned().collect()
         };
 
-        for p in targets {
-            if let Some(p_state) = state.providers.get_mut(&p) {
+        for p in &targets {
+            if let Some(p_state) = state.providers.get_mut(p) {
                 for c in &mut p_state.credentials {
                     if c.is_temporarily_disabled {
                         c.is_temporarily_disabled = false;
@@ -642,8 +691,20 @@ impl CredentialManager {
         }
 
         drop(state);
+        // The flags are process-local in the current build and are always written to the file
+        // cleared, so a reset needs no write. A store written by an older build may still carry
+        // them, so the file is cleared as well.
         if reset_count > 0 {
-            self.save_to_disk().await?;
+            self.mutate_store_on_disk(|store| {
+                for p in &targets {
+                    if let Some(p_state) = store.providers.get_mut(p) {
+                        for c in &mut p_state.credentials {
+                            c.is_temporarily_disabled = false;
+                        }
+                    }
+                }
+            })
+            .await?;
         }
         Ok(reset_count)
     }
