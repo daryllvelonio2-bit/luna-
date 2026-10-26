@@ -330,6 +330,28 @@ fn is_benign_exit(cmd: &str, code: i32) -> bool {
     )
 }
 
+/// Kill a command's whole process group, not just its shell.
+///
+/// `kill_on_drop` reaches the direct child only, and the direct child is a shell: a timed-out
+/// `cargo test` leaves cargo and rustc behind, still compiling and still holding the
+/// target-directory lock — which is what makes a timeout cascade, because the retry then blocks on
+/// that lock and times out too. The child is spawned with `process_group(0)` so it leads a group of
+/// its own, and a negative pid signals that whole group.
+#[cfg(unix)]
+fn kill_process_group(leader: Option<u32>) {
+    if let Some(pid) = leader {
+        // SAFETY: a negative pid signals the process group whose id is `pid`; the leader was spawned
+        // with `process_group(0)`, so that group is exactly this command's tree. A group that is
+        // already gone only makes the call fail.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_leader: Option<u32>) {}
+
 #[async_trait]
 impl Tool for TerminalTool {
     fn name(&self) -> &str {
@@ -337,15 +359,21 @@ impl Tool for TerminalTool {
     }
 
     fn description(&self) -> &str {
-        "Execute shell commands in the workspace (builds, tests, git, package managers, processes). Do NOT use for inspecting or searching files — use read_file and search_files instead."
+        "Execute shell commands in the workspace (builds, tests, git, package managers, processes). A cold build or a full test suite routinely outruns the default timeout: give those a larger timeout_s, or run them with background: true and poll them. Do NOT use for inspecting or searching files — use read_file and search_files instead."
     }
 
     fn parameters(&self) -> serde_json::Value {
+        // The budget is not guessable from the schema, and a model that does not know it is 120s
+        // retries the same too-long command instead of raising it (see the timeout message).
+        let timeout_hint = format!(
+            "Max seconds to wait before timing out (default {})",
+            self.default_timeout_secs
+        );
         json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to execute" },
-                "timeout_s": { "type": "integer", "description": "Max seconds to wait before timing out" },
+                "timeout_s": { "type": "integer", "description": timeout_hint },
                 "workdir": { "type": "string", "description": "Working directory relative to workspace root" },
                 "background": { "type": "boolean", "description": "Run asynchronously in the background task queue" }
             },
@@ -482,6 +510,12 @@ impl Tool for TerminalTool {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
+        // Put the shell at the head of its own process group, so a timeout can take the whole tree
+        // with it: `kill_on_drop` alone kills the shell and leaves its children running (see
+        // `kill_process_group`).
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         if sudo_stdin.is_some() {
             cmd.stdin(std::process::Stdio::piped());
         } else {
@@ -514,6 +548,9 @@ impl Tool for TerminalTool {
                 ))
             }
         };
+        // The group leader (see `process_group(0)` above): a timeout takes the group down, not
+        // just the shell.
+        let child_pid = child.id();
 
         if let Some(ref data) = sudo_stdin {
             if let Some(mut stdin) = child.stdin.take() {
@@ -524,6 +561,7 @@ impl Tool for TerminalTool {
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
+                kill_process_group(child_pid);
                 Ok(ToolResult::error(call_id, "Command cancelled"))
             }
             res = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()) => {
@@ -570,9 +608,15 @@ impl Tool for TerminalTool {
                         Ok(ToolResult::error(call_id, format!("Process error: {}", e)))
                     }
                     Err(_) => {
+                        kill_process_group(child_pid);
                         Ok(ToolResult {
                             call_id: call_id.to_string(),
-                            content: format!("Command timed out after {}s", timeout_secs),
+                            content: format!(
+                                "Command timed out after {}s; it and everything it had started were killed. \
+                                 A cold build or a full test suite needs a bigger budget: pass timeout_s \
+                                 (e.g. 600) for this call, or run it with background: true and poll it.",
+                                timeout_secs
+                            ),
                             is_error: true,
                         })
                     }
