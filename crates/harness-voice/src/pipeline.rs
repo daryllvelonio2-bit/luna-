@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 use crate::traits::{SpeechToText, TextToSpeech, WakeWordDetector};
 use harness_core::{
-    Agent, EvolverEngine, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry,
+    Agent, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry,
 };
 
 pub struct VoicePipelineConfig {
@@ -65,16 +65,15 @@ where
     }
 
     /// Run the hands-free voice interaction loop
-    pub async fn run_hands_free_loop<P, M, N, E, R>(
+    pub async fn run_hands_free_loop<P, M, N, R>(
         &self,
-        agent: Arc<Agent<P, M, N, E, R>>,
+        agent: Arc<Agent<P, M, N, R>>,
         cancel: CancellationToken,
     ) -> Result<(), HarnessError>
     where
         P: ModelProvider + 'static,
         M: MemoryEngine + 'static,
         N: NotesEngine + 'static,
-        E: EvolverEngine + 'static,
         R: ToolRegistry + 'static,
     {
         info!(

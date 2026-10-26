@@ -10,6 +10,8 @@ async fn test_memory_superseding_and_active_state() {
         subject: "user".to_string(),
         predicate: "preferred_language".to_string(),
         object: "Python".to_string(),
+        name: None,
+        path: None,
         raw_content: "user preferred_language Python".to_string(),
         category: MemoryCategory::UserProfile,
         confidence: 1.0,
@@ -31,6 +33,8 @@ async fn test_memory_superseding_and_active_state() {
         subject: "user".to_string(),
         predicate: "preferred_language".to_string(),
         object: "Rust".to_string(),
+        name: None,
+        path: None,
         raw_content: "user preferred_language Rust".to_string(),
         category: MemoryCategory::UserProfile,
         confidence: 1.0,
@@ -75,6 +79,8 @@ fn record(id: &str, subject: &str, predicate: &str, object: &str) -> MemoryRecor
         subject: subject.to_string(),
         predicate: predicate.to_string(),
         object: object.to_string(),
+        name: None,
+        path: None,
         raw_content: format!("{} {} {}", subject, predicate, object),
         category: MemoryCategory::Fact,
         confidence: 1.0,
@@ -174,6 +180,31 @@ async fn test_update_accepts_rendered_display_name() {
     assert_eq!(res[0].id, "project_x_profile.profile");
     assert_eq!(res[0].object, "v2");
     assert!(res[0].is_active);
+}
+
+#[tokio::test]
+async fn test_only_one_active_memory_per_topic() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    let mut rec1 = record("project.astra.1", "project.astra", "profile", "v1 details");
+    rec1.name = Some("Astra".to_string());
+    rec1.path = Some("/home/janelle/astra".to_string());
+    engine.save(&rec1).await.unwrap();
+
+    let mut rec2 = record("project.astra.2", "project.astra", "profile", "v2 details");
+    rec2.name = Some("Astra".to_string());
+    rec2.path = Some("/home/janelle/astra".to_string());
+    engine.save(&rec2).await.unwrap();
+
+    let res = engine.retrieve("astra", 10).await.unwrap();
+    assert_eq!(res.len(), 1, "only 1 active record per topic must exist");
+    assert_eq!(res[0].id, "project.astra.2");
+    assert_eq!(res[0].object, "v2 details");
+    assert_eq!(res[0].name.as_deref(), Some("Astra"));
+    assert_eq!(res[0].path.as_deref(), Some("/home/janelle/astra"));
+
+    let prompt = engine.format_as_system_prompt(&res);
+    assert!(prompt.contains("project.astra: Astra · v2 details · path: /home/janelle/astra"));
 }
 
 #[tokio::test]

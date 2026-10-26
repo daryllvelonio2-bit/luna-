@@ -240,7 +240,6 @@ pub enum MemoryCategory {
     WorkflowRule,
     Fact,
     NotePointer,
-    HarnessImprovement,
 }
 
 impl std::fmt::Display for MemoryCategory {
@@ -251,17 +250,35 @@ impl std::fmt::Display for MemoryCategory {
             Self::WorkflowRule => write!(f, "workflow_rule"),
             Self::Fact => write!(f, "fact"),
             Self::NotePointer => write!(f, "note_pointer"),
-            Self::HarnessImprovement => write!(f, "harness_improvement"),
         }
     }
 }
 
+/// One memory record: the index card of a single topic.
+///
+/// A record is *lean on purpose*. The agent reads every active record on every turn, so a record
+/// that carries a paragraph costs a paragraph of tokens on every request. The three fields that
+/// matter are therefore kept apart and short:
+///
+/// - `subject` — the topic key (`project.astra`). One active record per subject: the engine
+///   supersedes the previous one, so a topic never fragments into several records.
+/// - `object` — what the topic is about, in a handful of words.
+/// - `name` / `path` — the display name and where it lives on disk.
+///
+/// Everything longer than that belongs in a note, which is read on demand instead of every turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
     pub subject: String,
     pub predicate: String,
+    /// What the topic is about — a short phrase, not a paragraph.
     pub object: String,
+    /// Display name of the topic (e.g. `Astra`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Where the topic lives on disk (repo root, file, directory).
+    #[serde(default)]
+    pub path: Option<String>,
     pub raw_content: String,
     pub category: MemoryCategory,
     pub confidence: f32,

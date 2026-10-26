@@ -38,9 +38,6 @@ pub enum HarnessError {
     #[error("Plugin/Wasm execution error: {0}")]
     PluginError(String),
 
-    #[error("Evolver self-improvement error: {0}")]
-    EvolverError(String),
-
     #[error("Voice pipeline error: {0}")]
     VoiceError(String),
 
@@ -56,11 +53,8 @@ pub enum HarnessError {
     #[error("Human approval rejected: {0}")]
     ApprovalRejected(String),
 
-    #[error("Surface validation error: {0}")]
-    SurfaceValidationError(String),
-
-    #[error("Ledger budget error: {0}")]
-    LedgerError(String),
+    #[error("Strict mode failure: {0}")]
+    StrictFailure(String),
 }
 
 impl From<std::io::Error> for HarnessError {

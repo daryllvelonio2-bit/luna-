@@ -205,7 +205,6 @@ fn demo_the_in_place_repaint() {
         let mut metrics = ui.drawn_metrics.lock().unwrap();
         *metrics = Some(BoxDrawnMetrics {
             width,
-            bg_line_len: 0,
             queued_line_len: 0,
             status_line_len: visible_width(&status),
             divider_len: width,
@@ -258,7 +257,6 @@ fn the_live_region_refreshes_in_place_instead_of_blanking_the_screen() {
         let mut metrics = ui.drawn_metrics.lock().unwrap();
         *metrics = Some(BoxDrawnMetrics {
             width,
-            bg_line_len: 0,
             queued_line_len: 0,
             status_line_len: visible_width(&status),
             divider_len: width,
@@ -324,7 +322,6 @@ fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
         let mut metrics = ui.drawn_metrics.lock().unwrap();
         *metrics = Some(BoxDrawnMetrics {
             width,
-            bg_line_len: 0,
             queued_line_len: 0,
             status_line_len: visible_width(&status),
             divider_len: width,
@@ -376,25 +373,6 @@ fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
         !sequence.contains("\x1b[3A"),
         "must not compound upward movements: {sequence}"
     );
-}
-
-#[test]
-fn test_format_background_task_line() {
-    let ui = ChatUi::new(true);
-    ui.set_background_task(Some(BackgroundTaskState {
-        job_id: "job_0d24ea53".to_string(),
-        task: "Fix search_notes".to_string(),
-        current_tool: "read chat.rs".to_string(),
-        started_at: std::time::Instant::now() - std::time::Duration::from_secs(1440),
-        status: "running".to_string(),
-    }));
-
-    let line = ui.format_background_task_line(80).expect("bg line");
-    let stripped = dialoguer::console::strip_ansi_codes(&line);
-    assert!(stripped.contains("evolver-harness"));
-    assert!(stripped.contains("24m"));
-    assert!(stripped.contains("read chat.rs"));
-    assert!(stripped.contains("[Ctrl+B]"));
 }
 
 #[test]
@@ -471,29 +449,6 @@ fn status_line_never_exceeds_terminal_width_even_when_narrow() {
         assert!(
             stripped.chars().count() <= width,
             "width {width}: line length {} exceeds width: {:?}",
-            stripped.chars().count(),
-            stripped
-        );
-    }
-}
-
-#[test]
-fn background_task_line_never_exceeds_terminal_width_even_when_narrow() {
-    let ui = ChatUi::new(true);
-    ui.set_background_task(Some(BackgroundTaskState {
-        job_id: "job_0d24ea53".to_string(),
-        task: "Fix search_notes".to_string(),
-        current_tool: "read chat.rs".to_string(),
-        started_at: std::time::Instant::now(),
-        status: "running".to_string(),
-    }));
-
-    for width in [15, 20, 30, 45, 60, 80, 120] {
-        let line = ui.format_background_task_line(width).expect("bg line");
-        let stripped = dialoguer::console::strip_ansi_codes(&line);
-        assert!(
-            stripped.chars().count() <= width,
-            "width {width}: bg line length {} exceeds width: {:?}",
             stripped.chars().count(),
             stripped
         );

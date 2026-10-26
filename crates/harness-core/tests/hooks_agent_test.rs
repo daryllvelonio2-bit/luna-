@@ -163,23 +163,6 @@ impl NotesEngine for NoNotes {
     }
 }
 
-struct NoEvolver;
-#[async_trait]
-impl EvolverEngine for NoEvolver {
-    async fn inspect_source(&self, _p: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _d: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn test_patch_sandbox(&self, _p: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _p: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 // ---- helpers ------------------------------------------------------------------------------
 
 fn write_hooks(dir: &Path, body: &str) -> PathBuf {
@@ -230,7 +213,6 @@ async fn run_turn_with_hooks(
         }),
         Arc::new(NoMemory),
         Arc::new(NoNotes),
-        Arc::new(NoEvolver),
         registry,
         AgentConfig::default(),
     )
@@ -361,7 +343,6 @@ async fn a_gating_event_can_refuse_the_turn_and_an_observation_event_cannot() {
         }),
         Arc::new(NoMemory),
         Arc::new(NoNotes),
-        Arc::new(NoEvolver),
         registry,
         AgentConfig::default(),
     )

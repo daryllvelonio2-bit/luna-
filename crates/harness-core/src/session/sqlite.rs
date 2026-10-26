@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, params_from_iter, types::Value, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -253,31 +253,24 @@ fn raw_to_stored(raw: RawRow) -> Result<StoredMessage, HarnessError> {
     })
 }
 
-/// Query the live transcript: `summaries` selects the synthetic summary rows (`is_summary = 1`)
-/// instead of the ordinary ones; ordinary rows are always restricted to `compacted_at IS NULL`, so
-/// folded rows never come back while staying readable for a later rewind.
+/// Query the messages of a session that match `filter`, oldest first.
+///
+/// `min_seq` bounds the window from below; the caller decides where the window starts.
 fn query_rows(
     conn: &Connection,
     session_id: &str,
-    summaries: bool,
-    limit: Option<usize>,
+    filter: &str,
+    min_seq: Option<i64>,
 ) -> Result<Vec<StoredMessage>, HarnessError> {
-    let filter = if summaries {
-        "is_summary = 1"
-    } else {
-        "is_summary = 0 AND compacted_at IS NULL"
-    };
     let mut sql = format!(
         "SELECT id, seq, role, content, reasoning, tool_calls_json, tool_result_json, usage_json, is_summary
          FROM messages
-         WHERE session_id = ?1 AND {filter}
-         ORDER BY seq DESC"
+         WHERE session_id = ?1 AND {filter}"
     );
-    if let Some(limit) = limit {
-        if limit < usize::MAX {
-            sql.push_str(&format!(" LIMIT {}", limit.min(i64::MAX as usize)));
-        }
+    if let Some(min_seq) = min_seq {
+        sql.push_str(&format!(" AND seq >= {}", min_seq));
     }
+    sql.push_str(" ORDER BY seq ASC");
 
     let mut stmt = conn
         .prepare(&sql)
@@ -300,22 +293,118 @@ fn query_rows(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| session_error("failed to read session messages", error))?;
 
-    // Read newest-first (that is where a LIMIT has to bite), hand back oldest-first.
-    let mut stored: Vec<StoredMessage> = rows
-        .into_iter()
-        .rev()
-        .map(raw_to_stored)
-        .collect::<Result<Vec<_>, _>>()?;
-    if !summaries {
-        // If a limit boundary cuts in the middle of a turn, drop leading messages until
-        // the first User message so replayed history always starts on a clean user turn.
-        if let Some(first_user) = stored.iter().position(|m| m.message.role == Role::User) {
-            if first_user > 0 {
-                stored.drain(0..first_user);
-            }
+    rows.into_iter().map(raw_to_stored).collect()
+}
+
+/// The synthetic summary rows: every one of them, whatever the bound is.
+fn query_summary_rows(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<StoredMessage>, HarnessError> {
+    query_rows(conn, session_id, "is_summary = 1", None)
+}
+
+/// The live transcript, bounded by `limit` rows.
+///
+/// The bound counts rows, but a row is not a turn: one long turn (a hundred tool calls) can fill
+/// the whole window, and a window that holds no user row replays as nothing at all — the console
+/// prints an empty transcript and the model is handed tool results whose calls are missing. A
+/// window that would land inside a turn is therefore pulled back to the user message that anchors
+/// that turn, so the turn comes in whole.
+fn query_ordinary_rows(
+    conn: &Connection,
+    session_id: &str,
+    limit: Option<usize>,
+) -> Result<Vec<StoredMessage>, HarnessError> {
+    let Some(start) = ordinary_window_start(conn, session_id, limit)? else {
+        return Ok(Vec::new());
+    };
+    let mut stored = query_rows(
+        conn,
+        session_id,
+        "is_summary = 0 AND compacted_at IS NULL",
+        Some(start),
+    )?;
+    // If a limit boundary cuts in the middle of a turn, drop leading messages until
+    // the first User message so replayed history always starts on a clean user turn.
+    if let Some(first_user) = stored.iter().position(|m| m.message.role == Role::User) {
+        if first_user > 0 {
+            stored.drain(0..first_user);
         }
     }
     Ok(stored)
+}
+
+/// Where the bounded window starts: the seq of its oldest row, pulled back to the user message
+/// that anchors the last turn when the bound would otherwise land inside one.
+///
+/// `None` means the session holds no live rows to replay.
+fn ordinary_window_start(
+    conn: &Connection,
+    session_id: &str,
+    limit: Option<usize>,
+) -> Result<Option<i64>, HarnessError> {
+    let Some(limit) = limit else {
+        return first_live_seq(conn, session_id);
+    };
+    if limit == 0 {
+        return Ok(None);
+    }
+    if limit >= i64::MAX as usize {
+        return first_live_seq(conn, session_id);
+    }
+    // The seq of the oldest row the bound allows: the window is the newest `limit` rows.
+    let boundary: Option<i64> = conn
+        .query_row(
+            "SELECT seq FROM messages
+             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+             ORDER BY seq DESC LIMIT 1 OFFSET ?2",
+            params![session_id, (limit - 1) as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| session_error("failed to read the session replay window", error))?;
+    let Some(boundary) = boundary else {
+        // Fewer live rows than the bound allows: the window is the whole transcript.
+        return first_live_seq(conn, session_id);
+    };
+    // A window that already holds a user row starts on a turn; there is nothing to pull back.
+    let anchored: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM messages
+             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+               AND role = 'user' AND seq >= ?2
+             LIMIT 1",
+            params![session_id, boundary],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| session_error("failed to read the replay window anchor", error))?;
+    if anchored.is_some() {
+        return Ok(Some(boundary));
+    }
+    // The window lies inside one turn: pull it back to the user row that anchors that turn.
+    let anchor: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(seq) FROM messages
+             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+               AND role = 'user' AND seq < ?2",
+            params![session_id, boundary],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| session_error("failed to read the replay window anchor", error))?;
+    Ok(Some(anchor.unwrap_or(boundary)))
+}
+
+/// The seq of the first live row of a session, if it holds one.
+fn first_live_seq(conn: &Connection, session_id: &str) -> Result<Option<i64>, HarnessError> {
+    conn.query_row(
+        "SELECT MIN(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL",
+        params![session_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .map_err(|error| session_error("failed to read the session replay window", error))
 }
 
 fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError> {
@@ -515,8 +604,8 @@ impl SessionStore for SqliteSessionStore {
         let total = count_live(&conn, session_id)?;
         // Summaries are never dropped by the bound: they are the only trace of the turns they
         // replaced, and there is at most a handful of them.
-        let mut history = query_rows(&conn, session_id, true, None)?;
-        history.extend(query_rows(&conn, session_id, false, Some(limit))?);
+        let mut history = query_summary_rows(&conn, session_id)?;
+        history.extend(query_ordinary_rows(&conn, session_id, Some(limit))?);
 
         let replayed = history.len();
         Ok(ReplayOutcome {

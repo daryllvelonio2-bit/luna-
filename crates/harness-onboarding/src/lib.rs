@@ -24,6 +24,7 @@ pub mod flow;
 pub mod gateway_step;
 pub mod memory_step;
 pub mod menu;
+pub mod notes_step;
 pub mod persona;
 pub mod screen;
 pub mod signal;

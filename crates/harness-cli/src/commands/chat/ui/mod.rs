@@ -146,20 +146,9 @@ struct ChatStatus {
     session_name: String,
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct BackgroundTaskState {
-    pub job_id: String,
-    pub task: String,
-    pub current_tool: String,
-    pub started_at: std::time::Instant,
-    pub status: String,
-}
-
 #[derive(Clone, Default, Debug)]
 struct BoxDrawnMetrics {
     width: usize,
-    bg_line_len: usize,
     queued_line_len: usize,
     status_line_len: usize,
     divider_len: usize,
@@ -252,7 +241,6 @@ pub struct ChatUi {
     live: Arc<Mutex<LiveRegion>>,
     last_block: Arc<Mutex<OutputBlockKind>>,
     transient_error: Arc<Mutex<Option<String>>>,
-    bg_task: Arc<Mutex<Option<BackgroundTaskState>>>,
     /// The todo panel's source: the session's list, as it stands.
     ///
     /// The list is kept rather than the rows it was drawn into, so the panel is
@@ -304,17 +292,6 @@ fn humanize_tokens(count: u32) -> String {
     }
 }
 
-fn format_elapsed(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
 impl ChatUi {
     pub fn new(is_attended: bool) -> Self {
         Self {
@@ -323,7 +300,6 @@ impl ChatUi {
             live: Arc::new(Mutex::new(LiveRegion::default())),
             last_block: Arc::new(Mutex::new(OutputBlockKind::None)),
             transient_error: Arc::new(Mutex::new(None)),
-            bg_task: Arc::new(Mutex::new(None)),
             todo_snapshot: Arc::new(Mutex::new(None)),
             todo_collapsed: Arc::new(AtomicBool::new(false)),
             queue_depth: Arc::new(AtomicUsize::new(0)),
@@ -348,37 +324,6 @@ impl ChatUi {
 
     pub fn has_status(&self) -> bool {
         self.status.lock().unwrap().is_some()
-    }
-
-    pub fn set_background_task(&self, state: Option<BackgroundTaskState>) {
-        {
-            let mut bg = self.bg_task.lock().unwrap();
-            *bg = state;
-        }
-        if self.is_attended && self.box_drawn.load(Ordering::SeqCst) {
-            self.redraw_box();
-        }
-    }
-
-    pub fn update_background_task_tool(&self, current_tool: &str) {
-        {
-            let mut bg = self.bg_task.lock().unwrap();
-            if let Some(ref mut task) = *bg {
-                task.current_tool = current_tool.to_string();
-            }
-        }
-        if self.is_attended && self.box_drawn.load(Ordering::SeqCst) {
-            self.redraw_background_task_line();
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn background_task(&self) -> Option<BackgroundTaskState> {
-        self.bg_task.lock().unwrap().clone()
-    }
-
-    pub fn has_background_task(&self) -> bool {
-        self.bg_task.lock().unwrap().is_some()
     }
 
     /// The rows the todo panel is drawn from, empty when the list is.
@@ -442,8 +387,7 @@ impl ChatUi {
     }
 
     pub fn box_row_count(&self) -> usize {
-        4 + if self.has_background_task() { 1 } else { 0 }
-            + if self.queue_depth() > 0 { 1 } else { 0 }
+        4 + if self.queue_depth() > 0 { 1 } else { 0 }
             + self.todo_panel_rows(get_terminal_width()).len()
     }
 
@@ -663,57 +607,6 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
-    pub fn format_background_task_line(&self, width: usize) -> Option<String> {
-        let bg = self.bg_task.lock().unwrap();
-        let task = bg.as_ref()?;
-
-        let icon = "⚙".cyan().bold();
-        let tag = "evolver-harness".cyan().bold();
-        let elapsed = format_elapsed(task.started_at.elapsed())
-            .dimmed()
-            .to_string();
-        let right_hint = "[Ctrl+B]".dimmed().bold().to_string();
-        let right_visible = dialoguer::console::strip_ansi_codes(&right_hint).to_string();
-        let right_len = right_visible.chars().count();
-
-        let tool_str = if task.current_tool.is_empty() {
-            "running".to_string()
-        } else {
-            task.current_tool.clone()
-        };
-
-        // Format: ⚙ evolver-harness 24m read chats.rs                         [Ctrl+B]
-        let left_part = format!("{} {} {} {}", icon, tag, elapsed, tool_str.dimmed());
-        let left_visible = dialoguer::console::strip_ansi_codes(&left_part).to_string();
-        let left_len = left_visible.chars().count();
-
-        if left_len + right_len + 2 <= width {
-            let spaces = width.saturating_sub(left_len + right_len);
-            Some(format!("{}{}{}", left_part, " ".repeat(spaces), right_hint))
-        } else if left_len <= width {
-            Some(left_part)
-        } else {
-            let available = width.saturating_sub(right_len + 2);
-            if available > 2 {
-                let truncated = format!(
-                    "{}…",
-                    left_visible
-                        .chars()
-                        .take(available.saturating_sub(1))
-                        .collect::<String>()
-                );
-                let spaces = width.saturating_sub(truncated.chars().count() + right_len);
-                Some(format!("{}{}{}", truncated, " ".repeat(spaces), right_hint))
-            } else {
-                let cut = width.saturating_sub(1);
-                Some(format!(
-                    "{}…",
-                    left_visible.chars().take(cut).collect::<String>()
-                ))
-            }
-        }
-    }
-
     /// The line that says messages are waiting, drawn above the status line.
     ///
     /// A message the user submitted while the agent could not take it is acknowledged here instead
@@ -878,11 +771,6 @@ impl ChatUi {
             } else {
                 0
             };
-            let bg_rows = if m.bg_line_len > 0 {
-                physical_line_count(m.bg_line_len, current_width)
-            } else {
-                0
-            };
             let queued_rows = if m.queued_line_len > 0 {
                 physical_line_count(m.queued_line_len, current_width)
             } else {
@@ -904,7 +792,6 @@ impl ChatUi {
             let above = prompt_rows.saturating_sub(1)
                 + top_divider_rows
                 + status_rows
-                + bg_rows
                 + queued_rows
                 + live_rows
                 + panel_rows;
@@ -1000,7 +887,6 @@ impl ChatUi {
 
         let live_rows = self.live.lock().unwrap().rows.clone();
         let panel_rows = self.todo_panel_rows(width);
-        let bg_line = self.format_background_task_line(width);
         let queued_line = self.format_queue_line(width);
         let status_line = self.format_status_line(width);
 
@@ -1008,9 +894,6 @@ impl ChatUi {
         let mut block: Vec<String> = Vec::with_capacity(live_rows.len() + panel_rows.len() + 4);
         block.extend(live_rows.iter().cloned());
         block.extend(panel_rows.iter().cloned());
-        if let Some(line) = &bg_line {
-            block.push(line.clone());
-        }
         if let Some(line) = &queued_line {
             block.push(line.clone());
         }
@@ -1083,7 +966,6 @@ impl ChatUi {
             if let Some(m) = guard.as_mut() {
                 m.live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
                 m.panel_rows_lens = panel_rows.iter().map(|r| visible_width(r)).collect();
-                m.bg_line_len = bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.queued_line_len = queued_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.status_line_len = status_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.prompt_len = visible_width(&prompt);
@@ -1155,8 +1037,8 @@ impl ChatUi {
         self.set_live(rows);
     }
 
-    /// The composer as it stands, top to bottom: the todo panel, the background
-    /// task line, the status line, and the two rules around the prompt.
+    /// The composer as it stands, top to bottom: the todo panel, the status line, and the two
+    /// rules around the prompt.
     ///
     /// The prompt sits between the rules, so the row the rules leave blank is the
     /// prompt's own row.
@@ -1166,9 +1048,6 @@ impl ChatUi {
         // The panel is chrome: it is drawn above the composer, so it stays put while
         // the conversation scrolls under it.
         rows.extend(self.todo_panel_rows(width));
-        if let Some(bg) = self.format_background_task_line(width) {
-            rows.push(bg);
-        }
         if let Some(queued) = self.format_queue_line(width) {
             rows.push(queued);
         }
@@ -1209,7 +1088,6 @@ impl ChatUi {
         let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
 
         let panel = self.todo_panel_rows(width);
-        let bg_line = self.format_background_task_line(width);
         let queue_line = self.format_queue_line(width);
         let status_str = self.format_status_line(width);
 
@@ -1220,7 +1098,6 @@ impl ChatUi {
 
         *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
             width,
-            bg_line_len: bg_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             queued_line_len: queue_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             status_line_len: status_str.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             divider_len: width,
@@ -1401,16 +1278,6 @@ impl ChatUi {
 
     pub fn redraw_status_line(&self) {
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
-            return;
-        }
-        self.redraw_box();
-    }
-
-    pub fn redraw_background_task_line(&self) {
-        if !self.is_attended
-            || !self.box_drawn.load(Ordering::SeqCst)
-            || !self.has_background_task()
-        {
             return;
         }
         self.redraw_box();

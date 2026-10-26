@@ -12,12 +12,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::{Agent, SessionBinding};
-use crate::approval::{AllowAll, ApprovalSettings, ToolPreview};
+use crate::approval::{AllowAll, ApprovalSettings};
 use crate::config::Config;
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
 use crate::session::{SessionStore, SqliteSessionStore};
-use crate::traits::{EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry};
+use crate::traits::{MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry};
 use crate::types::{
     CompletionOptions, MemoryRecord, Message, Note, StreamEvent, ToolDefinition, ToolResult,
 };
@@ -118,28 +118,6 @@ impl NotesEngine for DynNotes {
     }
 }
 
-#[derive(Clone)]
-struct DynEvolver(Arc<dyn EvolverEngine>);
-
-#[async_trait]
-impl EvolverEngine for DynEvolver {
-    async fn inspect_source(&self, path: &str) -> Result<String, HarnessError> {
-        self.0.inspect_source(path).await
-    }
-    async fn propose_patch(&self, description: &str, diff: &str) -> Result<String, HarnessError> {
-        self.0.propose_patch(description, diff).await
-    }
-    async fn test_patch_sandbox(&self, patch_id: &str) -> Result<bool, HarnessError> {
-        self.0.test_patch_sandbox(patch_id).await
-    }
-    async fn apply_patch(&self, patch_id: &str) -> Result<(), HarnessError> {
-        self.0.apply_patch(patch_id).await
-    }
-    async fn preview_patch(&self, patch_id: &str) -> Option<ToolPreview> {
-        self.0.preview_patch(patch_id).await
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubagentStatus {
     Running,
@@ -174,7 +152,6 @@ pub struct DelegateTaskTool {
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
-    evolver: Arc<dyn EvolverEngine>,
     store: Option<Arc<SqliteSessionStore>>,
     config: Config,
     max_concurrent: usize,
@@ -188,7 +165,6 @@ impl DelegateTaskTool {
         provider: Arc<dyn ModelProvider>,
         memory: Arc<dyn MemoryEngine>,
         notes: Arc<dyn NotesEngine>,
-        evolver: Arc<dyn EvolverEngine>,
         store: Option<Arc<SqliteSessionStore>>,
         config: Config,
     ) -> Self {
@@ -196,7 +172,6 @@ impl DelegateTaskTool {
             provider,
             memory,
             notes,
-            evolver,
             store,
             config,
             max_concurrent: 4,
@@ -237,7 +212,6 @@ async fn run_single_subagent(
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
-    evolver: Arc<dyn EvolverEngine>,
     store: Option<Arc<SqliteSessionStore>>,
     config: Config,
     child_session_id: String,
@@ -278,9 +252,8 @@ async fn run_single_subagent(
     let provider = Arc::new(DynProvider(provider));
     let memory = Arc::new(DynMemory(memory));
     let notes = Arc::new(DynNotes(notes));
-    let evolver = Arc::new(DynEvolver(evolver));
 
-    let mut agent = Agent::new(provider, memory, notes, evolver, child_registry, child_cfg)
+    let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
         .with_permissions(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
                 .unwrap_or_default(),
@@ -623,7 +596,6 @@ impl Tool for DelegateTaskTool {
                         let provider = Arc::new(DynProvider(self.provider.clone()));
                         let memory = Arc::new(DynMemory(self.memory.clone()));
                         let notes = Arc::new(DynNotes(self.notes.clone()));
-                        let evolver = Arc::new(DynEvolver(self.evolver.clone()));
                         let store = self.store.clone();
                         let config = self.config.clone();
                         let sub_cancel = cancel_token.child_token();
@@ -636,7 +608,6 @@ impl Tool for DelegateTaskTool {
                                 provider,
                                 memory,
                                 notes,
-                                evolver,
                                 store,
                                 config,
                                 child_session_id,
@@ -734,7 +705,6 @@ impl Tool for DelegateTaskTool {
                     let provider = Arc::new(DynProvider(self.provider.clone()));
                     let memory = Arc::new(DynMemory(self.memory.clone()));
                     let notes = Arc::new(DynNotes(self.notes.clone()));
-                    let evolver = Arc::new(DynEvolver(self.evolver.clone()));
                     let store = self.store.clone();
                     let config = self.config.clone();
                     let sub_cancel = cancel_token.child_token();
@@ -750,7 +720,6 @@ impl Tool for DelegateTaskTool {
                             provider,
                             memory,
                             notes,
-                            evolver,
                             store,
                             config,
                             cid,

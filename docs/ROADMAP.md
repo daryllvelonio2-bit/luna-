@@ -135,7 +135,6 @@ card creates the file. "unknown" means the body does not pin the location (a wor
 | `t_2ccd2241` | Credential safety: keyring, 0600, redaction | luna-audit | review | 78 | `crates/harness-providers/src/auth.rs`, `crates/harness-providers/src/lib.rs`, `crates/harness-providers/Cargo.toml`, `crates/harness-providers/tests/auth_keyring_test.rs` + `auth_security_test.rs`, `crates/harness-cli/src/commands/auth.rs`, `scripts/register-nvidia-key.py` |
 | `t_448d659f` | Cache-stable prompt assembly + cache telemetry | luna-dev-1 | todo | 78 | `crates/harness-core/src/agent.rs`, `crates/harness-core/src/registry.rs`, `crates/harness-core/src/types.rs`, `crates/harness-providers/src/client.rs`, `crates/harness-telemetry/src/lib.rs`, `crates/harness-cli/src/commands/chat.rs` |
 | `t_83845462` | Eval suite + `luna eval` gate | luna-qa | ready | 78 | `tests/eval/*` (new), `crates/harness-cli/src/commands/eval.rs` (new), `crates/harness-cli/src/main.rs`, `docs/EVALS.md` (new); a `crates/harness-evals/` crate is left as the worker's call |
-| `t_26fb21a1` | Evolver applies unverified patches | luna-dev-1 | ready | 75 | `crates/harness-evolver/src/engine.rs`, `crates/harness-evolver/src/sandbox.rs`, `crates/harness-evolver/tests/` (new) |
 | `t_75ed9224` | `AGENTS.md` into the stable prompt | luna-dev-1 | todo | 74 | `crates/harness-core/src/agent.rs`, `crates/harness-cli/src/commands/agents.rs` (new), `crates/harness-cli/src/main.rs`, `crates/harness-core/src/config.rs` |
 | `t_cfd6facc` | Deferred tool catalog | luna-dev-2 | todo | 72 | `crates/harness-core/src/registry.rs`, `crates/harness-core/src/tools/catalog.rs` (new), `crates/harness-core/src/traits.rs`, `crates/harness-cli/src/commands/chat.rs`, `crates/harness-mcp/` (integration test) |
 | `t_eb80814a` | Setup-path verification from a fresh clone | luna-qa | running | 72 | `docs/AGENT_RULES.md`, `README.md` (doc fixes on its branch); `/tmp/luna-fresh` is outside the repo |
@@ -181,7 +180,6 @@ card's output".
 | M10 | `t_2a4b4808` → `t_83845462` | the eval suite is scripted against a non-interactive entry point; `luna eval run` driving the binary needs `luna ask` / `chat --once` to exist. Today `main.rs` has no such path (`:25-55`), which is exactly why `t_7c2387f4`'s step 5 says "if it does not, say so". |
 | M11 | `t_2a4b4808` → `t_7c2387f4` | same reason, weaker: install verification asks for a non-interactive round-trip in step 5. |
 | M12 | `t_c6cf04fa` and `t_c4f9c07d` → `t_83845462` | the eval suite's cases are "two-step write-then-read" and "denied-approval turn" — they have nothing to assert until the tools and the gate exist. Offline-fixture cost, not a hard block. |
-| M13 | `t_26fb21a1` → `t_fc182dc9` | both change how an unverified/hostile command is allowed to run (`harness-evolver/src/sandbox.rs` vs the shared `tools.sandbox.*` policy). If the sandbox card lands first, the evolver should reuse it instead of keeping its own `cargo test` copy. Direction is a judgement call; the conflict (two sandboxes) is not. |
 
 Satisfied-by-landing, no edge needed: `t_8935ed8a` → `t_22f8ed85`. The `blocking_lock()` panic that
 was blocking the memory tests is fixed on `main` (`e5ae82c`, merged `639c38e`), and
@@ -213,7 +211,6 @@ open cards only.
 | `crates/harness-providers/src/discovery.rs` | 1: `t_aed83347` | |
 | `crates/harness-mcp/src/stdio.rs` | 1: `t_16a223b8` | `:102` hardcoded `2024-11-05` |
 | `crates/harness-telemetry/src/lib.rs` | 1: `t_448d659f` | `TokenTracker` `:15` |
-| `crates/harness-evolver/src/{engine,sandbox}.rs` | 1: `t_26fb21a1` | |
 | `crates/harness-memory/src/tools.rs` | 1: `t_22f8ed85` | |
 | `docs/AGENT_RULES.md` | 1 author: `t_eb80814a` (doc fixes) | `t_37ec9e28` repairs the two *citations* of it, not the file |
 
@@ -223,17 +220,16 @@ Cross-lane pairs, which is what matters with two developers:
 
 | pair | why it is disjoint |
 |---|---|
-| `t_26fb21a1` (dev-1) ∥ `t_22f8ed85` (dev-2) | `harness-evolver` vs `harness-memory`; no shared file, no shared type |
 | `t_aed83347` (dev-1) ∥ `t_40de5ef3` (dev-2) | `discovery.rs` + `commands/models.rs` vs `client.rs` + `types.rs` + `agent.rs`. **Conditional**: only if `t_aed83347` fixes the README instead of wiring the auto-fetch into `add_credential` — that branch touches `auth.rs` and collides with the whole M1–M3 chain |
 | `t_c4f9c07d` (dev-1) ∥ `t_22f8ed85` (dev-2) | `harness-core` vs `harness-memory` |
 | `t_d75d32db` (dev-1) ∥ `t_22f8ed85` (dev-2) | CLI exit codes vs memory engine. **Not** parallel with `t_29ea5d7c`/`t_2ccd2241` (all three edit `auth.rs`) |
 | `t_c6cf04fa` (dev-1) ∥ `t_22f8ed85` (dev-2) | fs/shell tools vs memory |
-| `t_83845462` (qa) ∥ `t_26fb21a1` (dev-1), ∥ `t_22f8ed85` (dev-2) | the eval suite is new files under `tests/eval/` + a new command; it reads the binary, it does not edit it |
+| `t_83845462` (qa) ∥ `t_22f8ed85` (dev-2) | the eval suite is new files under `tests/eval/` + a new command; it reads the binary, it does not edit it |
 | `t_7c2387f4` (qa) ∥ *everything* | verification report, `dir` workspace, no source edits |
 | `t_eb80814a` (qa) ∥ `t_5d1ad34e`-style doc lanes | docs-only edits on its own branch |
 
-Within a lane the only clean parallel pair is `t_26fb21a1` ∥ `t_aed83347` (evolver vs
-providers/discovery) — dev-1's queue is otherwise a chain through `chat.rs` and `auth.rs`, which is
+Within a lane the only clean parallel pair is `t_aed83347` ∥ `t_40de5ef3` (providers/discovery vs
+client/types) — dev-1's queue is otherwise a chain through `chat.rs` and `auth.rs`, which is
 why the recommendation in B3 matters more than any reordering.
 
 ### 3.2 Pairs that must be serialised (same file)
@@ -279,8 +275,7 @@ with the reason.
 | 17 | `t_75ed9224` | 74 | AGENTS.md block goes into the stable prefix `t_448d659f` defines | — |
 | 18 | `t_cfd6facc` | 72 | last: M6 requires the sorted `list_tools()` and the flat MCP registry | — |
 | 19 | `t_83845462` | 78 | the eval gate asserts on tools, gate and the one-shot path, and is the fleet's regression net for everything above | yes — near the end on purpose (it is how the rest is kept honest) |
-| 20 | `t_26fb21a1` | 75 | evolver; independent, and best landed after the sandbox policy exists (M13) | — |
-| 21 | `t_eb80814a`, `t_37ec9e28` | 72/68 | in flight; documentation lanes | — |
+| 20 | `t_eb80814a`, `t_37ec9e28` | 72/68 | in flight; documentation lanes | — |
 
 Other inversions worth stating plainly, with the reason:
 
@@ -329,7 +324,7 @@ match the code. `STALE` = an anchor moved, an API changed, or a landed card chan
 | spec | verdict | evidence at `639c38e` |
 |---|---|---|
 | §2.1 config file (row 1) | LIVE | `crates/harness-core/src/` holds only `agent.rs error.rs lib.rs registry.rs traits.rs types.rs` — no config module; `crates/harness-cli/src/main.rs:28` still `default_value = "openai"`; `t_5c1eca76` running |
-| §2.2 fs/shell tools (row 2) | LIVE | `grep -rn harness_mcp\|harness_plugins crates/harness-cli/src` → 0; `commands/chat.rs:44-57` still registers only memory/notes/evolver |
+| §2.2 fs/shell tools (row 2) | LIVE | `grep -rn harness_mcp\|harness_plugins crates/harness-cli/src` → 0; `commands/chat.rs:44-57` still registers only memory/notes |
 | §2.3 HITL gate (row 3) | LIVE | `require_hitl_for_mutation` appears exactly three times: `agent.rs:12` (declaration), `:20` (default), `tests/agent_guardrail_test.rs:165` — still read by no production path; `HarnessError::ApprovalRejected` has no producer |
 | §2.4 sessions + compaction (row 4) | LIVE | `agent.rs:89` `let mut messages = Vec::new();`, `agent.rs:135` `.complete(...)` on the fresh vector, `commands/chat.rs:88` one `run_task` per input line |
 | §2.5 MCP from config (row 5) | LIVE | `harness-mcp/src/stdio.rs:21 spawn`, `:100 initialize`, `:117 list_tools`, `:132 call_tool` all present; `harness-cli/src` has 0 refs |
@@ -339,7 +334,7 @@ match the code. `STALE` = an anchor moved, an API changed, or a landed card chan
 | §3.4–§3.7, §3.9 (web, cron, wasm, voice, subagents) | LIVE | `harness-plugins/src/wasm.rs:57` still echoes its payload; `commands/voice.rs:26-53` still the three stubs; no HTTP tool, no cron, no delegate |
 | §3.8 telemetry | LIVE | `TokenTracker` appears only at `harness-telemetry/src/lib.rs:15,20` — declared, never constructed |
 | §3.10 credential hardening | **STALE (superseded by an in-flight branch)** | the *main-side* claim is still literally true (`auth.rs:33 pub api_key: String`, `Cargo.toml:40 keyring` unused, `auth.rs:82-91` writes it verbatim), but the work exists on branch `luna-harness/t_2ccd2241-…` @ `6f447b5` (`CredentialStorage`, keyring test, `auth_security_test.rs`) and the card is in `review`. Read this spec as "land `t_2ccd2241`", not "write §3.10" |
-| §3.11 self-evolution | LIVE | `commands/supervisor.rs:34` is still `if code == 42 {`; `evolver/src/sandbox.rs:19` + `engine.rs:100` unchanged. Note `t_26fb21a1` (filed by audit pass 2) now owns the unverified-patch half |
+| §3.11 self-evolution | LIVE | `commands/supervisor.rs:34` is still `if code == 42 {`. The self-evolution subsystem was removed from the harness; the supervisor stub remains |
 | §3.12 retry/backoff | LIVE, but now overlapping | `client.rs:206` still maps 429 straight to `RateLimited`; `t_d79b9293` is editing that same function region for key retirement — two cards, one `if` |
 | §3.13 CLI surface | LIVE | `main.rs:25-55` still five subcommands (`chat`, `auth`, `models`, `voice`, `supervisor`) |
 | §3.14 provider matrix honesty | LIVE | `client.rs:72-79` sets the Anthropic header and then serialises OpenAI-shaped JSON; `catalog.rs:20-92` unchanged |

@@ -137,28 +137,6 @@ pub trait NotesEngine: Send + Sync {
 }
 
 #[async_trait]
-pub trait EvolverEngine: Send + Sync {
-    /// Inspect the harness repository source tree
-    async fn inspect_source(&self, path: &str) -> Result<String, HarnessError>;
-
-    /// Propose a code patch and generate a patch ID
-    async fn propose_patch(&self, description: &str, diff: &str) -> Result<String, HarnessError>;
-
-    /// Run `cargo check` and `cargo test` on patch in an isolated build sandbox
-    async fn test_patch_sandbox(&self, patch_id: &str) -> Result<bool, HarnessError>;
-
-    /// Apply an approved and tested patch to the working repository
-    async fn apply_patch(&self, patch_id: &str) -> Result<(), HarnessError>;
-
-    /// What a human should see before [`Self::apply_patch`] runs: the target file and a unified
-    /// diff of the staged content against what is on disk. `None` when there is nothing to show —
-    /// the gate then still prompts, with the tool name alone.
-    async fn preview_patch(&self, _patch_id: &str) -> Option<ToolPreview> {
-        None
-    }
-}
-
-#[async_trait]
 pub trait Tool: Send + Sync {
     /// Unique name of the tool
     fn name(&self) -> &str;

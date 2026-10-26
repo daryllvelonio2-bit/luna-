@@ -13,7 +13,7 @@ use harness_core::{Agent, AgentConfig, HarnessError, ModelProvider, TokenUsage};
 
 use super::scenario::Scenario;
 use super::scripted::{OFFLINE_MODEL_ID, OFFLINE_PROVIDER_ID};
-use super::stubs::{NoopEvolver, NoopMemory, NoopNotes};
+use super::stubs::{NoopMemory, NoopNotes};
 use super::tools::{register_builtin, EvalSandbox, ObservedCall, RecordingRegistry};
 
 /// How the case's model turns are produced.
@@ -275,7 +275,6 @@ async fn drive<P: ModelProvider + 'static>(
         provider,
         Arc::new(NoopMemory),
         Arc::new(NoopNotes),
-        Arc::new(NoopEvolver),
         registry.clone(),
         AgentConfig::default(),
     )

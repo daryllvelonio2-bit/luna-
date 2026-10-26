@@ -7,65 +7,20 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use harness_core::tasks::{BackgroundTaskQueue, JobSummary};
-use harness_evolver::{CodebaseEvolver, EvolverEvent, JobRecord, JobStatus};
 
 use super::keys::AppKey;
 use super::render::{render_all_turns, TurnRecord};
 use super::ui::ChatUi;
 
-enum TaskEntry {
-    Evolver(JobRecord),
-    Process(JobSummary),
-}
-
-impl TaskEntry {
-    fn id(&self) -> &str {
-        match self {
-            Self::Evolver(j) => &j.id,
-            Self::Process(j) => &j.id,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn title(&self) -> String {
-        match self {
-            Self::Evolver(j) => {
-                let short_task = if j.task.len() > 40 {
-                    format!("{}…", &j.task[..39])
-                } else {
-                    j.task.clone()
-                };
-                format!("evolver/{} • {}", j.id, short_task)
-            }
-            Self::Process(j) => {
-                let short_cmd = if j.command.len() > 40 {
-                    format!("{}…", &j.command[..39])
-                } else {
-                    j.command.clone()
-                };
-                format!("proc/{} • {}", j.id, short_cmd)
-            }
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        match self {
-            Self::Evolver(j) => matches!(j.status, JobStatus::Running | JobStatus::Queued),
-            Self::Process(j) => j.status == "running",
-        }
-    }
-}
-
 pub async fn show_background_task_viewer(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
-    evolver: &CodebaseEvolver,
     bg_queue: Option<&BackgroundTaskQueue>,
     ui: &ChatUi,
     turns: &[TurnRecord],
     process_expanded: bool,
 ) {
     // 1. Collect all available background tasks
-    let mut tasks = collect_tasks(evolver, bg_queue).await;
+    let mut tasks = collect_tasks(bg_queue).await;
     if tasks.is_empty() {
         ui.emit_above(&format!(
             "{} No background tasks active or recorded",
@@ -78,17 +33,16 @@ pub async fn show_background_task_viewer(
 
     let mut selected_idx: usize = 0;
     // Prefer selecting an actively running task if available
-    if let Some(pos) = tasks.iter().position(|t| t.is_running()) {
+    if let Some(pos) = tasks.iter().position(|t| t.status == "running") {
         selected_idx = pos;
     }
 
     let mut scroll_offset: usize = 0;
     let mut auto_scroll = true;
-    let mut evolver_rx = evolver.subscribe();
     let mut refresh_interval = tokio::time::interval(Duration::from_millis(500));
 
-    let render = |task: &TaskEntry,
-                  all_tasks: &[TaskEntry],
+    let render = |task: &JobSummary,
+                  all_tasks: &[JobSummary],
                   cur_idx: usize,
                   offset: usize|
      -> (usize, usize) {
@@ -100,7 +54,7 @@ pub async fn show_background_task_viewer(
         let mut header_lines = Vec::new();
 
         // 1. Top bar: Summary & Controls
-        let running_count = all_tasks.iter().filter(|t| t.is_running()).count();
+        let running_count = all_tasks.iter().filter(|t| t.status == "running").count();
         let header_left = format!(
             "{} {} {}",
             "●".cyan().bold(),
@@ -129,12 +83,12 @@ pub async fn show_background_task_viewer(
             for (i, t) in all_tasks.iter().enumerate() {
                 let is_sel = i == cur_idx;
                 let num = i + 1;
-                let dot = if t.is_running() {
+                let dot = if t.status == "running" {
                     "●".cyan()
                 } else {
                     "○".dimmed()
                 };
-                let short_id = t.id();
+                let short_id = t.id.as_str();
                 let tab_label = if is_sel {
                     format!("[{num}] {dot} {short_id}*")
                         .bold()
@@ -152,123 +106,51 @@ pub async fn show_background_task_viewer(
         }
 
         // 3. Task Metadata Card
-        match task {
-            TaskEntry::Evolver(rec) => {
-                let status_badge = format_evolver_status(&rec.status);
-                let current_step = rec.current_tool.as_deref().unwrap_or("idle");
-                header_lines.push(format!(
-                    "  {} {}",
-                    "Task:".bold(),
-                    dialoguer::console::truncate_str(&rec.task, width.saturating_sub(10), "…")
-                ));
-                header_lines.push(format!(
-                    "  {} {}   {} {}",
-                    "Status:".bold(),
-                    status_badge,
-                    "Step:".bold(),
-                    current_step.cyan()
-                ));
-                header_lines.push(format!(
-                    "  {} {}   {} {}",
-                    "Branch:".dimmed(),
-                    rec.branch.dimmed(),
-                    "Worktree:".dimmed(),
-                    rec.worktree_dir.dimmed()
-                ));
-                if !rec.modified_files.is_empty() {
-                    header_lines.push(format!(
-                        "  {} {}",
-                        "Changes:".bold(),
-                        dialoguer::console::truncate_str(
-                            &rec.modified_files.join(", "),
-                            width.saturating_sub(12),
-                            "…"
-                        )
-                        .dimmed()
-                    ));
-                }
-                if let Some(ref sum) = rec.summary {
-                    let first_line = sum.lines().next().unwrap_or(sum);
-                    header_lines.push(format!(
-                        "  {} {}",
-                        "Summary:".green().bold(),
-                        dialoguer::console::truncate_str(first_line, width.saturating_sub(12), "…")
-                    ));
-                }
-            }
-            TaskEntry::Process(proc) => {
-                let status_badge = format_process_status(&proc.status);
-                header_lines.push(format!(
-                    "  {} {}",
-                    "Command:".bold(),
-                    dialoguer::console::truncate_str(&proc.command, width.saturating_sub(12), "…")
-                ));
-                header_lines.push(format!(
-                    "  {} {}   {} {}",
-                    "Status:".bold(),
-                    status_badge,
-                    "Elapsed:".dimmed(),
-                    format!("{}s", proc.elapsed_secs).dimmed()
-                ));
-                header_lines.push(format!(
-                    "  {} {}",
-                    "Workdir:".dimmed(),
-                    dialoguer::console::truncate_str(&proc.workdir, width.saturating_sub(12), "…")
-                ));
-                header_lines.push(format!(
-                    "  {} {}",
-                    "Log:".dimmed(),
-                    dialoguer::console::truncate_str(&proc.log_path, width.saturating_sub(12), "…")
-                ));
-            }
-        }
+        let status_badge = format_process_status(&task.status);
+        header_lines.push(format!(
+            "  {} {}",
+            "Command:".bold(),
+            dialoguer::console::truncate_str(&task.command, width.saturating_sub(12), "…")
+        ));
+        header_lines.push(format!(
+            "  {} {}   {} {}",
+            "Status:".bold(),
+            status_badge,
+            "Elapsed:".dimmed(),
+            format!("{}s", task.elapsed_secs).dimmed()
+        ));
+        header_lines.push(format!(
+            "  {} {}",
+            "Workdir:".dimmed(),
+            dialoguer::console::truncate_str(&task.workdir, width.saturating_sub(12), "…")
+        ));
+        header_lines.push(format!(
+            "  {} {}",
+            "Log:".dimmed(),
+            dialoguer::console::truncate_str(&task.log_path, width.saturating_sub(12), "…")
+        ));
         header_lines.push(divider.clone());
 
         // 4. Output / Logs Content
         let mut content_lines = Vec::new();
-        match task {
-            TaskEntry::Evolver(rec) => {
-                if let Some(ref ev) = rec.evidence {
-                    content_lines.push(format!("Context Evidence: {}", ev).dimmed().to_string());
-                    content_lines.push(String::new());
-                }
-                for log in &rec.logs {
-                    for sub in log.lines() {
-                        let formatted = if sub.starts_with("• Tool:") {
-                            format!("  {}", sub.cyan().bold())
-                        } else if sub.starts_with("✔") {
-                            format!("  {}", sub.green().bold())
-                        } else if sub.starts_with("✖") || sub.to_lowercase().contains("error:") {
-                            format!("  {}", sub.red())
-                        } else {
-                            format!("  {}", sub)
-                        };
-                        content_lines.push(formatted);
+        match std::fs::read_to_string(&task.log_path) {
+            Ok(s) => {
+                let lines: Vec<&str> = s.lines().collect();
+                if lines.is_empty() {
+                    content_lines.push("  (waiting for output...)".dimmed().to_string());
+                } else {
+                    for l in lines {
+                        content_lines.push(format!("  {}", l));
                     }
-                }
-                if content_lines.is_empty() {
-                    content_lines.push("  (no execution logs recorded yet)".dimmed().to_string());
                 }
             }
-            TaskEntry::Process(proc) => match std::fs::read_to_string(&proc.log_path) {
-                Ok(s) => {
-                    let lines: Vec<&str> = s.lines().collect();
-                    if lines.is_empty() {
-                        content_lines.push("  (waiting for output...)".dimmed().to_string());
-                    } else {
-                        for l in lines {
-                            content_lines.push(format!("  {}", l));
-                        }
-                    }
-                }
-                Err(e) => {
-                    content_lines.push(
-                        format!("  (unable to read log file: {})", e)
-                            .dimmed()
-                            .to_string(),
-                    );
-                }
-            },
+            Err(e) => {
+                content_lines.push(
+                    format!("  (unable to read log file: {})", e)
+                        .dimmed()
+                        .to_string(),
+                );
+            }
         }
 
         let footer_lines_count = 2;
@@ -324,7 +206,7 @@ pub async fn show_background_task_viewer(
         tokio::select! {
             _ = refresh_interval.tick() => {
                 // Periodically refresh job statuses and logs
-                tasks = collect_tasks(evolver, bg_queue).await;
+                tasks = collect_tasks(bg_queue).await;
                 if selected_idx >= tasks.len() {
                     selected_idx = tasks.len().saturating_sub(1);
                 }
@@ -333,22 +215,6 @@ pub async fn show_background_task_viewer(
                     let (eff, max) = render(current, &tasks, selected_idx, target_offset);
                     scroll_offset = eff;
                     max_offset = max;
-                }
-            }
-            maybe_ev = evolver_rx.recv() => {
-                if let Ok(ev) = maybe_ev {
-                    match ev {
-                        EvolverEvent::JobProgress { .. } | EvolverEvent::JobCompleted { .. } => {
-                            tasks = collect_tasks(evolver, bg_queue).await;
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let target_offset = if auto_scroll { usize::MAX } else { scroll_offset };
-                                let (eff, max) = render(current, &tasks, selected_idx, target_offset);
-                                scroll_offset = eff;
-                                max_offset = max;
-                            }
-                        }
-                        _ => {}
-                    }
                 }
             }
             maybe_key = key_rx.recv() => {
@@ -457,17 +323,10 @@ pub async fn show_background_task_viewer(
                     AppKey::Char('x') | AppKey::Char('X') => {
                         // Kill / cancel active job
                         if let Some(task) = tasks.get(selected_idx) {
-                            match task {
-                                TaskEntry::Process(p) => {
-                                    if let Some(q) = bg_queue {
-                                        let _ = q.kill(&p.id);
-                                    }
-                                }
-                                TaskEntry::Evolver(_) => {
-                                    // Evolver jobs run in background tasks
-                                }
+                            if let Some(q) = bg_queue {
+                                let _ = q.kill(&task.id);
                             }
-                            tasks = collect_tasks(evolver, bg_queue).await;
+                            tasks = collect_tasks(bg_queue).await;
                             if let Some(current) = tasks.get(selected_idx) {
                                 let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
                                 scroll_offset = eff;
@@ -498,41 +357,17 @@ pub async fn show_background_task_viewer(
     ui.draw_initial_box();
 }
 
-async fn collect_tasks(
-    evolver: &CodebaseEvolver,
-    bg_queue: Option<&BackgroundTaskQueue>,
-) -> Vec<TaskEntry> {
+async fn collect_tasks(bg_queue: Option<&BackgroundTaskQueue>) -> Vec<JobSummary> {
     let mut tasks = Vec::new();
 
-    // 1. Evolver jobs
-    if let Ok(ev_jobs) = evolver.list_jobs().await {
-        for job in ev_jobs {
-            tasks.push(TaskEntry::Evolver(job));
-        }
-    } else if let Ok(latest) = evolver.latest_job().await {
-        tasks.push(TaskEntry::Evolver(latest));
-    }
-
-    // 2. Terminal Background Jobs
+    // Terminal Background Jobs
     if let Some(q) = bg_queue {
         for job in q.list() {
-            tasks.push(TaskEntry::Process(job));
+            tasks.push(job);
         }
     }
 
     tasks
-}
-
-fn format_evolver_status(status: &JobStatus) -> colored::ColoredString {
-    match status {
-        JobStatus::Queued => "⏳ QUEUED".yellow(),
-        JobStatus::Running => "● RUNNING".cyan().bold(),
-        JobStatus::FailedTest { error } => format!("✖ TEST FAILED ({})", error).red().bold(),
-        JobStatus::ReadyForReenactment { .. } => "✔ READY".green().bold(),
-        JobStatus::Verified => "✔ VERIFIED".green().bold(),
-        JobStatus::FailedVerification { reason } => format!("✖ FAILED ({})", reason).red().bold(),
-        JobStatus::ScheduledUpdate { .. } => "✔ STAGED FOR UPDATE".green().bold(),
-    }
 }
 
 fn format_process_status(status: &str) -> colored::ColoredString {

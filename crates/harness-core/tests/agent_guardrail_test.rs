@@ -140,29 +140,11 @@ impl NotesEngine for MockNotes {
     }
 }
 
-struct MockEvolver;
-#[async_trait]
-impl EvolverEngine for MockEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("patch_1".to_string())
-    }
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn test_5_consecutive_failures_halts_agent() {
     let provider = Arc::new(MockProvider::new());
     let memory = Arc::new(MockMemory);
     let notes = Arc::new(MockNotes);
-    let evolver = Arc::new(MockEvolver);
     let registry = Arc::new(DefaultToolRegistry::new());
 
     registry.register(Arc::new(FailingTool)).await.unwrap();
@@ -171,7 +153,6 @@ async fn test_5_consecutive_failures_halts_agent() {
         provider,
         memory,
         notes,
-        evolver,
         registry,
         AgentConfig {
             max_consecutive_failures: 5,
@@ -276,14 +257,12 @@ async fn test_agent_retries_transient_overloaded_error_and_succeeds() {
     });
     let memory = Arc::new(MockMemory);
     let notes = Arc::new(MockNotes);
-    let evolver = Arc::new(MockEvolver);
     let registry = Arc::new(DefaultToolRegistry::new());
 
     let agent = Agent::new(
         provider.clone(),
         memory,
         notes,
-        evolver,
         registry,
         AgentConfig::default(),
     );
@@ -326,14 +305,12 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
     let provider = Arc::new(EmptyMockProvider);
     let memory = Arc::new(MockMemory);
     let notes = Arc::new(MockNotes);
-    let evolver = Arc::new(MockEvolver);
     let registry = Arc::new(DefaultToolRegistry::new());
 
     let agent = Agent::new(
         provider,
         memory,
         notes,
-        evolver,
         registry,
         AgentConfig::default(),
     );
@@ -403,7 +380,6 @@ async fn test_mid_turn_steering_delivers_user_message() {
     });
     let memory = Arc::new(MockMemory);
     let notes = Arc::new(MockNotes);
-    let evolver = Arc::new(MockEvolver);
     let registry = Arc::new(DefaultToolRegistry::new());
     registry.register(Arc::new(FailingTool)).await.unwrap();
 
@@ -411,7 +387,6 @@ async fn test_mid_turn_steering_delivers_user_message() {
         provider,
         memory,
         notes,
-        evolver,
         registry,
         AgentConfig {
             max_consecutive_failures: 5,

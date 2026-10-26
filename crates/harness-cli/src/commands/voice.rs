@@ -5,13 +5,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
-use harness_evolver::{
-    CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, InspectSourceTool,
-    VerifyAndStageUpdateTool,
-};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
-    DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
+    DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
@@ -97,14 +93,10 @@ pub async fn run_voice_loop(
     let memory = Arc::new(SqliteMemoryEngine::new(Some(
         config.paths.memory_db.clone(),
     ))?);
-    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
-    let evolver = Arc::new(
-        CodebaseEvolver::new(
-            config.paths.workspace_root.clone(),
-            config.paths.jobs_dir.clone(),
-        )
-        .with_provider(provider.clone()),
-    );
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
     let registry = Arc::new(DefaultToolRegistry::new());
 
     let background_mode = config.memory.mode.is_background();
@@ -136,18 +128,6 @@ pub async fn run_voice_loop(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(InspectSourceTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(CheckImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(VerifyAndStageUpdateTool::new(evolver.clone())))
         .await?;
 
     // Register core filesystem and shell tools (§2.2)
@@ -201,7 +181,7 @@ pub async fn run_voice_loop(
     agent_cfg.memory_mode = config.memory.mode;
 
     let agent = Arc::new(
-        Agent::new(provider, memory, notes, evolver, registry, agent_cfg)
+        Agent::new(provider, memory, notes, registry, agent_cfg)
             .with_permissions(harness_core::PermissionEngine::validate(
                 config.tools.permissions.clone(),
             )?)

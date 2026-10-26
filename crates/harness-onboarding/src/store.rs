@@ -46,6 +46,8 @@ pub const GATEWAY_TELEGRAM_BOT_TOKEN_KEY: &str = "gateway.telegram_bot_token";
 pub const GATEWAY_DISCORD_BOT_TOKEN_KEY: &str = "gateway.discord_bot_token";
 /// The config key holding the WhatsApp access token.
 pub const GATEWAY_WHATSAPP_TOKEN_KEY: &str = "gateway.whatsapp_token";
+/// The config key holding where markdown notes are stored.
+pub const NOTES_DIR_KEY: &str = "paths.notes_dir";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
 
@@ -88,12 +90,14 @@ pub fn persist(
     layers: &Layers,
     persona: &Persona,
     memory: MemoryMode,
+    notes_dir: &std::path::Path,
     auto_compact: &AutoCompactSelection,
     gateway: &GatewaySelection,
 ) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
     config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
     config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
+    config::set_in_file(layers, NOTES_DIR_KEY, &notes_dir.to_string_lossy())?;
     config::set_in_file(
         layers,
         AUTO_COMPACT_ENABLED_KEY,

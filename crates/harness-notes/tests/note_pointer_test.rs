@@ -3,7 +3,7 @@ use harness_notes::*;
 
 #[tokio::test]
 async fn test_notes_fts_and_pointer_distillation() {
-    let engine = SqliteNotesEngine::in_memory().unwrap();
+    let engine = FileNotesEngine::in_memory().unwrap();
 
     let title = "Stripe Payment Gateway Integration Specification 2026";
     let content = "This document describes the webhook callbacks, charge dispute handling, and idempotency key conventions for Stripe.";
@@ -29,7 +29,7 @@ async fn test_notes_fts_and_pointer_distillation() {
 
 #[tokio::test]
 async fn test_delete_note_removes_row_and_fts_entry() {
-    let engine = SqliteNotesEngine::in_memory().unwrap();
+    let engine = FileNotesEngine::in_memory().unwrap();
 
     let note = engine
         .save_note(
@@ -66,7 +66,7 @@ async fn test_delete_note_removes_row_and_fts_entry() {
 
 #[tokio::test]
 async fn test_delete_missing_note_is_not_an_error() {
-    let engine = SqliteNotesEngine::in_memory().unwrap();
+    let engine = FileNotesEngine::in_memory().unwrap();
 
     // Deleting an id that was never stored is a no-op, not a failure.
     assert!(!engine.delete_note("note_does_not_exist").await.unwrap());
@@ -74,7 +74,7 @@ async fn test_delete_missing_note_is_not_an_error() {
 
 #[tokio::test]
 async fn test_list_notes_orders_by_updated_and_paginates() {
-    let engine = std::sync::Arc::new(SqliteNotesEngine::in_memory().unwrap());
+    let engine = std::sync::Arc::new(FileNotesEngine::in_memory().unwrap());
 
     engine.save_note("Note 1", "Content 1", &[]).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -109,4 +109,46 @@ async fn test_list_notes_orders_by_updated_and_paginates() {
     let list: Vec<serde_json::Value> = serde_json::from_str(&res.content).unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["title"], "Note 3");
+}
+
+#[tokio::test]
+async fn test_legacy_notes_db_import_and_rename() {
+    let temp_dir = std::env::temp_dir().join(format!("luna-notes-legacy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let legacy_db = temp_dir.join("notes.db");
+    {
+        let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                summary_pointer TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO notes (id, title, content, summary_pointer, tags)
+            VALUES ('legacy-doc', 'Legacy Document Title', 'Content of the legacy doc.', 'Legacy Document', '["legacy"]');
+            "#,
+        ).unwrap();
+    }
+
+    let notes_dir = temp_dir.join("notes");
+    let engine = FileNotesEngine::new(notes_dir.clone(), Some(legacy_db.clone())).unwrap();
+
+    let imported = engine.read_note("legacy-doc").await.unwrap();
+    assert_eq!(imported.title, "Legacy Document Title");
+    assert_eq!(imported.content, "Content of the legacy doc.");
+    assert_eq!(imported.summary_pointer, "Legacy Document");
+    assert_eq!(imported.tags, vec!["legacy".to_string()]);
+
+    // Check that legacy db was renamed to notes.db.imported
+    assert!(!legacy_db.exists());
+    assert!(temp_dir.join("notes.db.imported").exists());
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

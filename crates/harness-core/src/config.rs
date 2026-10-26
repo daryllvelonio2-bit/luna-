@@ -365,9 +365,10 @@ impl std::str::FromStr for MemoryMode {
 
 /// Memory and note persistence: who writes it, and with what budget.
 ///
-/// The *engines* are chosen by `paths.memory_db` / `paths.notes_db`; these keys only decide who
-/// drives them. Both modes write through the same `save_memory` / `save_note` code path, so
-/// switching modes changes when a memory appears, not what a memory looks like.
+/// The *engines* are chosen by `paths.memory_db` (memory records live in SQLite) and
+/// `paths.notes_dir` (notes live as markdown files); these keys only decide who drives them. Both
+/// modes write through the same `save_memory` / `save_note` code path, so switching modes changes
+/// when a memory appears, not what a memory looks like.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemorySettings {
@@ -409,12 +410,18 @@ impl Default for MemorySettings {
 #[serde(default, deny_unknown_fields)]
 pub struct PathsSettings {
     pub memory_db: PathBuf,
+    /// Legacy note store. Notes are files now; this database is only read once, to import the
+    /// notes an older install left behind.
     pub notes_db: PathBuf,
+    /// Where notes are written: one markdown file per note, so the user can read them outside the
+    /// harness. Chosen during onboarding and changeable at any time with
+    /// `luna config set paths.notes_dir <path>`.
+    pub notes_dir: PathBuf,
     pub sessions_db: PathBuf,
     pub credentials: PathBuf,
     pub models_cache: PathBuf,
     /// Scope every filesystem/shell tool is confined to. Defaults to the process working
-    /// directory, which is what the evolver used before this key existed.
+    /// directory.
     pub workspace_root: PathBuf,
     pub jobs_dir: PathBuf,
     pub skills_dir: PathBuf,
@@ -438,6 +445,7 @@ impl Default for PathsSettings {
         Self {
             memory_db: luna.join("memory.db"),
             notes_db: luna.join("notes.db"),
+            notes_dir: luna.join("notes"),
             sessions_db: luna.join("sessions.db"),
             credentials: luna.join("credentials.json"),
             models_cache: luna.join("models_cache.json"),
@@ -1144,6 +1152,7 @@ fn expand_paths(paths: &mut PathsSettings) {
     let fields = [
         &mut paths.memory_db,
         &mut paths.notes_db,
+        &mut paths.notes_dir,
         &mut paths.sessions_db,
         &mut paths.credentials,
         &mut paths.models_cache,

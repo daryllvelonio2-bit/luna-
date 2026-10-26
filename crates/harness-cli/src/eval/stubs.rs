@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use harness_core::{EvolverEngine, HarnessError, MemoryEngine, MemoryRecord, Note, NotesEngine};
+use harness_core::{HarnessError, MemoryEngine, MemoryRecord, Note, NotesEngine};
 
 const NOOP: &str = "the eval runner installs a no-op engine; the tool that reaches it is not registered by any case";
 
@@ -80,26 +80,5 @@ impl NotesEngine for NoopNotes {
 
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
         Err(HarnessError::NotesError(NOOP.to_string()))
-    }
-}
-
-pub struct NoopEvolver;
-
-#[async_trait]
-impl EvolverEngine for NoopEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Err(HarnessError::EvolverError(NOOP.to_string()))
-    }
-
-    async fn propose_patch(&self, _description: &str, _diff: &str) -> Result<String, HarnessError> {
-        Err(HarnessError::EvolverError(NOOP.to_string()))
-    }
-
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Err(HarnessError::EvolverError(NOOP.to_string()))
-    }
-
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::EvolverError(NOOP.to_string()))
     }
 }

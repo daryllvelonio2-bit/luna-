@@ -77,7 +77,7 @@ runs `cargo` commands unattended and still refuses a `write_file`. See [`PERMISS
 
 ## What `exec` shares with the chat
 
-Memory tools, note tools, the evolver tools, skills, the full core filesystem/shell surface, the
+Memory tools, note tools, skills, the full core filesystem/shell surface, the
 permission rules and per-turn checkpoints (`/rewind` data comes from the same place). A headless run
 that could do less than the chat would be a different agent wearing the same name — and one that
 skipped checkpoints would be a run with no undo.

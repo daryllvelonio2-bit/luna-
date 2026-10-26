@@ -6,7 +6,6 @@ members = [
     "crates/harness-plugins",
     "crates/harness-memory",
     "crates/harness-notes",
-    "crates/harness-evolver",
     "crates/harness-voice",
     "crates/harness-telemetry",
     "crates/harness-onboarding",
@@ -65,7 +64,6 @@ harness-mcp = { path = "crates/harness-mcp" }
 harness-plugins = { path = "crates/harness-plugins" }
 harness-memory = { path = "crates/harness-memory" }
 harness-notes = { path = "crates/harness-notes" }
-harness-evolver = { path = "crates/harness-evolver" }
 harness-voice = { path = "crates/harness-voice" }
 harness-telemetry = { path = "crates/harness-telemetry" }
 harness-onboarding = { path = "crates/harness-onboarding" }

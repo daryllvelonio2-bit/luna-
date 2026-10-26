@@ -23,12 +23,9 @@ use harness_core::{
     approval, Agent, AgentConfig, AgentEvent, Config, DefaultToolRegistry, HarnessError,
     PermissionEngine, ReplayNotice, SessionBinding, SessionStore, ToolRegistry,
 };
-use harness_evolver::{
-    CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, ListImprovementJobsTool,
-};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
-    DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
+    DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
@@ -101,14 +98,10 @@ pub async fn run_exec(
     let memory = Arc::new(SqliteMemoryEngine::new(Some(
         config.paths.memory_db.clone(),
     ))?);
-    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
-    let evolver = Arc::new(
-        CodebaseEvolver::new(
-            config.paths.workspace_root.clone(),
-            config.paths.jobs_dir.clone(),
-        )
-        .with_provider(provider.clone()),
-    );
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
 
     // The tool surface matches the interactive chat: a headless run that could do less than the
     // chat could would be a different agent wearing the same name.
@@ -142,15 +135,6 @@ pub async fn run_exec(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
-        .await?;
-    registry
-        .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(CheckImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(ListImprovementJobsTool::new(evolver.clone())))
         .await?;
 
     let mut all_skills = Vec::new();
@@ -231,7 +215,7 @@ pub async fn run_exec(
         &config.hooks,
     )?);
 
-    let mut agent: ChatAgent = Agent::new(provider, memory, notes, evolver, registry, agent_cfg)
+    let mut agent: ChatAgent = Agent::new(provider, memory, notes, registry, agent_cfg)
         .with_permissions(permissions)
         .with_hooks(hooks)
         .with_checkpoints(checkpoints)
@@ -376,7 +360,7 @@ pub async fn run_exec(
                 )));
             }
             if options.strict && failed_tools > 0 {
-                return Err(HarnessError::SurfaceValidationError(format!(
+                return Err(HarnessError::StrictFailure(format!(
                     "luna exec --strict: {failed_tools} tool call(s) failed"
                 )));
             }

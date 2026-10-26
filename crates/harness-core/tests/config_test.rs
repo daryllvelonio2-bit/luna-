@@ -56,6 +56,7 @@ fn defaults_match_the_previous_literals() {
 
     assert_eq!(config.paths.memory_db, luna.join("memory.db"));
     assert_eq!(config.paths.notes_db, luna.join("notes.db"));
+    assert_eq!(config.paths.notes_dir, luna.join("notes"));
     assert_eq!(config.paths.credentials, luna.join("credentials.json"));
     assert_eq!(config.paths.models_cache, luna.join("models_cache.json"));
     assert_eq!(
@@ -311,6 +312,22 @@ fn set_expands_tilde_in_paths() {
         expected.to_string_lossy()
     );
     assert_eq!(resolved.config().paths.notes_db, expected);
+}
+
+#[test]
+fn the_notes_dir_is_a_settable_path() {
+    let dir = TempDir::new().unwrap();
+    let layers = layers(Some(config_path(&dir)));
+
+    set_in_file(&layers, "paths.notes_dir", "~/notes/markdown").unwrap();
+
+    let resolved = resolve(&layers).unwrap();
+    let expected = home_dir().join("notes/markdown");
+    assert_eq!(
+        resolved.get("paths.notes_dir").unwrap(),
+        expected.to_string_lossy()
+    );
+    assert_eq!(resolved.config().paths.notes_dir, expected);
 }
 
 #[test]
