@@ -688,11 +688,26 @@ pub fn shorten_paths_in_text(raw: &str) -> String {
     out.join(" ")
 }
 
+/// The effective runtime paths, resolved once per process from the config file and the
+/// environment.
+///
+/// The transcript renders tool calls by looking a record up in the stores it was written to, so
+/// the paths have to be the *configured* ones (`paths.memory_db`, `paths.notes_dir`) — a hardcoded
+/// `~/.luna` would show nothing for an install that moved its state elsewhere.
+fn effective_paths() -> &'static harness_core::config::PathsSettings {
+    static PATHS: std::sync::LazyLock<harness_core::config::PathsSettings> =
+        std::sync::LazyLock::new(|| {
+            harness_core::config::process_layers(harness_core::Config::default())
+                .ok()
+                .and_then(|layers| harness_core::config::resolve(&layers).ok())
+                .map(|resolved| resolved.into_config().paths)
+                .unwrap_or_default()
+        });
+    &PATHS
+}
+
 fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
-    let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home)
-        .join(".luna")
-        .join("memory.db");
+    let db_path = effective_paths().memory_db.clone();
     if !db_path.exists() {
         return None;
     }
@@ -711,39 +726,46 @@ fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
     None
 }
 
-fn lookup_note_title_from_db(id: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let luna = std::path::PathBuf::from(home).join(".luna");
+/// The title of a note, by its id (file stem) or by its exact title.
+///
+/// File-backed notes are plain markdown, so the title comes from the front matter of
+/// `<notes_dir>/<id>.md`; a title that is not a file name is matched by scanning the folder.
+fn lookup_note_title(id: &str) -> Option<String> {
+    let paths = effective_paths();
+    let dir = &paths.notes_dir;
 
-    // 1. Try file-backed note in ~/.luna/notes/<id>.md
-    let note_path = luna.join("notes").join(format!("{}.md", id));
-    if note_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&note_path) {
-            for line in content.lines() {
-                if let Some((k, v)) = line.split_once(':') {
-                    if k.trim() == "title" {
-                        let title = v.trim().to_string();
-                        if !title.is_empty() {
-                            return Some(title);
-                        }
-                    }
+    let direct = dir.join(format!("{}.md", id));
+    if direct.exists() {
+        if let Some(title) = read_note_title(&direct) {
+            return Some(title);
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(title) = read_note_title(&path) {
+                if title.eq_ignore_ascii_case(id) {
+                    return Some(title);
                 }
             }
         }
     }
 
-    // 2. Legacy notes.db (or .imported) fallback
-    let db_path = luna.join("notes.db");
-    let active_db = if db_path.exists() {
-        db_path
+    // Legacy store, before the import ran (or for a note the import skipped).
+    let db_path = if paths.notes_db.exists() {
+        paths.notes_db.clone()
     } else {
-        luna.join("notes.db.imported")
+        paths.notes_db.with_extension("db.imported")
     };
-    if !active_db.exists() {
+    if !db_path.exists() {
         return None;
     }
     let conn =
-        rusqlite::Connection::open_with_flags(&active_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     let mut stmt = conn
         .prepare("SELECT title FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE LIMIT 1")
@@ -752,6 +774,26 @@ fn lookup_note_title_from_db(id: &str) -> Option<String> {
     if let Ok(Some(row)) = rows.next() {
         let title: String = row.get(0).ok()?;
         return Some(title);
+    }
+    None
+}
+
+/// The `title:` field of a note's front matter, if the file has one.
+fn read_note_title(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if line.trim() == "---" {
+            // The front matter ended without a title.
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim() == "title" {
+                let title = value.trim().to_string();
+                if !title.is_empty() {
+                    return Some(title);
+                }
+            }
+        }
     }
     None
 }
@@ -1063,7 +1105,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
                 let display_title =
-                    lookup_note_title_from_db(target).unwrap_or_else(|| target.to_string());
+                    lookup_note_title(target).unwrap_or_else(|| target.to_string());
                 let action = match name {
                     "update_note" => suffix("(update)".to_string()),
                     "delete_note" => suffix("(delete)".to_string()),
@@ -1194,7 +1236,7 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 .or_else(|| text_arg("id"))
                 .or_else(|| text_arg("title"))
                 .unwrap_or("note");
-            let display_name = lookup_note_title_from_db(id).unwrap_or_else(|| {
+            let display_name = lookup_note_title(id).unwrap_or_else(|| {
                 if id.len() > 16 && id.starts_with("note_") {
                     format!("{}…", &id[..13])
                 } else {

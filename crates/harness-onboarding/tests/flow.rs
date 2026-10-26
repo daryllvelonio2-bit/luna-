@@ -436,14 +436,19 @@ fn compact_step_parsers() {
 fn onboarding_configures_custom_notes_dir() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
+    let notes_dir = tmp.path().join("custom-notes");
 
     // persona 1, memory 1, auto-compact default, gateway default, custom notes_dir
-    let (outcome, rendered) = drive(&file, "1\n1\n1\n\n\n1\n/custom/notes/path\n");
+    let (outcome, rendered) = drive(&file, &format!("1\n1\n1\n\n\n1\n{}\n", notes_dir.display()));
 
-    assert_eq!(outcome.notes_dir, std::path::PathBuf::from("/custom/notes/path"));
+    assert_eq!(outcome.notes_dir, notes_dir);
+    assert!(notes_dir.is_dir(), "the chosen folder is created");
 
     let config = read_config(&file);
-    assert_eq!(config["paths"]["notes_dir"].as_str(), Some("/custom/notes/path"));
+    assert_eq!(
+        config["paths"]["notes_dir"].as_str(),
+        Some(notes_dir.to_str().unwrap())
+    );
     assert!(rendered.contains("Notes directory"));
-    assert!(rendered.contains("/custom/notes/path"));
+    assert!(rendered.contains(notes_dir.to_str().unwrap()));
 }

@@ -93,4 +93,17 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_memory_protocol_describes_lean_cards_and_file_notes() {
+        let body = section(MEMORY_SESSION_PROMPT).expect("memory prompt loads");
+        assert!(body.contains("Lean Index Cards"), "{body}");
+        assert!(body.contains("One Record Per Topic"), "{body}");
+        assert!(body.contains("notes_dir"), "{body}");
+        // The old contract — a rich record per entity — is gone.
+        assert!(
+            !body.contains("consolidated memory record"),
+            "{body}"
+        );
+    }
 }

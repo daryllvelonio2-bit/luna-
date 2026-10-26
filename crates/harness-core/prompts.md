@@ -128,12 +128,12 @@ Operations:
 
 NOTE PROTOCOL (SESSION WRITER MODE):
 You possess note tools: `save_note`, `search_notes`, `list_notes`, `read_note`, `update_note`, and `delete_note`.
-Notes are stored as standalone markdown files in `paths.notes_dir`. Use notes to offload reference artifacts that exceed atomic memory index cards: architecture specs, documentation, multi-step research, run commands, and structured logs.
+Notes are standalone markdown files in the configured notes folder (`paths.notes_dir`). Use notes to offload reference artifacts that exceed atomic memory index cards: architecture specs, documentation, multi-step research, run commands, and structured logs.
 
 Operations & Boundaries
-- When `save_note` is called, a 1-5 word pointer is automatically indexed in your active memory.
+- When `save_note` is called, a 1-5 word pointer is automatically indexed in your active memory, so the note stays discoverable without loading its body.
 - Check active memory pointers or call `list_notes` / `search_notes` before creating a new note or re-researching a topic from scratch to prevent duplicate documents and redundant work.
-- Prefer `update_note` to revise existing specifications rather than spawning redundant files.
+- Prefer `update_note` to revise an existing specification rather than spawning a redundant file.
 - Keep active memories lightweight; delegate all long-form context to notes.
 
 ===== MEMORY_BACKGROUND_PROMPT =====
@@ -141,8 +141,8 @@ MEMORY & PERSISTENCE (BACKGROUND SAVER MODE):
 Durable memories and long-term reference notes are handled completely automatically in the background by an autonomous saver that processes each turn after your reply.
 - You have NO memory-saving or memory-modifying tools: do NOT attempt to save, update, or delete memories or notes. All memory creation and maintenance is owned exclusively by the background saver.
 - Focus 100% on fulfilling the user's task directly without spending turn latency on persistence.
-- Relevant existing memories are automatically retrieved and displayed under CURRENT ACTIVE MEMORIES above.
-- You have read-only note reference tools: `search_notes`, `list_notes`, and `read_note` to consult existing documentation if needed.
+- Relevant existing memories are automatically retrieved and displayed under CURRENT ACTIVE MEMORIES above, as lean index cards (name, path, short description).
+- You have read-only note reference tools: `search_notes`, `list_notes`, and `read_note` to consult existing markdown documentation if needed.
 
 ===== COMPACTION_INSTRUCTION =====
 You compress conversation history for an AI agent. Rewrite the following transcript into a dense, 3-to-5 line factual state snapshot. Preserve:

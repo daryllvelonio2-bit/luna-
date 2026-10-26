@@ -10,7 +10,7 @@ use harness_core::error::HarnessError;
 
 use crate::menu::{self, Panel};
 use crate::screen::{self, Size};
-use crate::style::{Line, Span, ACCENT_COLOR, NAME_COLOR};
+use crate::style::{Line, Span, ACCENT_COLOR, ERROR_COLOR, NAME_COLOR};
 use crate::typewriter::{Pacer, Typewriter};
 
 pub const PANEL: Panel = Panel {
@@ -93,15 +93,44 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
     writer.write_block(&hint_lines(size))?;
     writer.blank()?;
 
-    for _attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=MAX_ATTEMPTS {
         writer.write_prompt_line(&prompt_line(size, PROMPT))?;
         let mut answer = String::new();
         if reader.read_line(&mut answer)? == 0 {
             // EOF: default to standard location
             return Ok(default_notes_dir());
         }
-        return Ok(parse_path(&answer));
+        let path = parse_path(&answer);
+        match validate_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) => {
+                writer.write_centered(&format!("✗ {}", error), Some(ERROR_COLOR))?;
+                if attempt == MAX_ATTEMPTS {
+                    return Err(HarnessError::ConfigurationError(format!(
+                        "no usable notes directory was chosen: {}",
+                        error
+                    )));
+                }
+            }
+        }
     }
 
     Ok(default_notes_dir())
+}
+
+/// Checks that the folder can actually hold notes: it is created if missing, and it has to be a
+/// directory rather than a file.
+///
+/// The check is the difference between a config value that works and one that fails at the first
+/// `save_note` with an opaque I/O error.
+pub fn validate_dir(path: &std::path::Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("the notes directory path is empty".to_string());
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(format!("'{}' is a file, not a directory", path.display()));
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("could not create '{}': {}", path.display(), error))?;
+    Ok(())
 }

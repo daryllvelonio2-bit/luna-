@@ -443,7 +443,7 @@ mod tests {
     use super::*;
     use harness_core::types::ToolCall;
     use harness_core::MemoryCategory;
-    use harness_notes::SqliteNotesEngine;
+    use harness_notes::FileNotesEngine;
 
     use crate::SqliteMemoryEngine;
 
@@ -524,9 +524,9 @@ mod tests {
 
     fn saver(
         provider: Arc<dyn ModelProvider>,
-    ) -> (MemorySaver, Arc<SqliteMemoryEngine>, Arc<SqliteNotesEngine>) {
+    ) -> (MemorySaver, Arc<SqliteMemoryEngine>, Arc<FileNotesEngine>) {
         let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory db"));
-        let notes = Arc::new(SqliteNotesEngine::in_memory().expect("notes db"));
+        let notes = Arc::new(FileNotesEngine::in_memory().expect("notes dir"));
         let saver = MemorySaver::new(
             provider,
             memory.clone(),
@@ -705,7 +705,7 @@ mod tests {
             "y".repeat(MIN_NOTE_CHARS)
         ));
         let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory db"));
-        let notes = Arc::new(SqliteNotesEngine::in_memory().expect("notes db"));
+        let notes = Arc::new(FileNotesEngine::in_memory().expect("notes dir"));
         let mut policy = SaverPolicy::new("canned");
         policy.notes = false;
         let saver = MemorySaver::new(provider, memory, notes.clone(), policy);
