@@ -1710,9 +1710,9 @@ where
         history: &[StoredMessage],
         policy: FoldPolicy,
     ) {
-        let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
+        if self.session.is_none() || self.compaction.is_none() {
             return;
-        };
+        }
 
         let estimate = estimate_tokens(messages);
         if estimate.tokens as usize <= policy.threshold {
@@ -1736,6 +1736,15 @@ where
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::CompactionStarted { forced: false });
         }
+        self.spawn_fold_run(history, policy);
+    }
+
+    /// Spawn the background fold of `history`, having already taken the in-flight latch and
+    /// announced the start.
+    fn spawn_fold_run(&self, history: &[StoredMessage], policy: FoldPolicy) {
+        let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
+            return;
+        };
 
         let store = binding.store.clone();
         let session_id = binding.session_id.clone();
@@ -1837,9 +1846,34 @@ where
             }
         };
         if last_fold_seq(&history) != watermark {
+            // A fold landed earlier in THIS turn. That fold answered one crossing, not every
+            // crossing: a long agentic turn keeps growing after its fold, and pinning the
+            // watermark until the next user message would let one unbounded turn pin an unbounded
+            // transcript. Re-arm instead: adopt the fold that just landed as the new watermark and
+            // measure again, so the next crossing folds on its own merits.
+            let rearmed = last_fold_seq(&history);
             debug!(
-                "A fold landed during this turn; leaving the transcript it rewrote bound instead of folding again"
+                "A fold landed during this turn; re-arming the watermark to {:?} for the next crossing",
+                rearmed
             );
+            let mut messages = Vec::with_capacity(history.len() + 1);
+            messages.push(Message::system(
+                self.system_prompt("").await.unwrap_or_default(),
+            ));
+            messages.extend(sendable_messages(&history));
+            // The re-armed watermark only counts folds newer than the one just seen: pass the
+            // fresh value through a nested call by checking size directly here.
+            let estimate = estimate_tokens(&messages);
+            if estimate.tokens as usize <= policy.threshold {
+                return;
+            }
+            if self.fold_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::CompactionStarted { forced: false });
+            }
+            self.spawn_fold_run(&history, policy);
             return;
         }
         // The same shape the next turn sends — system prompt plus the replayed transcript — so this

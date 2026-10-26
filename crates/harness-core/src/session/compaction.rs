@@ -158,6 +158,62 @@ pub fn fold_boundary(
 /// it.
 pub const FALLBACK_KEEP_TOKENS: usize = 16_000;
 
+/// The newest boundary that folds the oldest messages while keeping the tail within `budget`.
+///
+/// This is the escape hatch for the transcript that is one giant user turn: the turn rule has
+/// nothing older to fold and `budget_boundary`'s backward scan resolves to the turn's own start,
+/// which folds nothing. The walk here runs FORWARD from the oldest message, so the boundary lands
+/// where the tail first fits the budget, and `safe_boundary` then moves it to a row the providers
+/// accept at the head of a kept tail — an assistant tool-call row whose tool results follow it.
+/// Zero means nothing is foldable: the transcript fits the budget on its own.
+fn oldest_foldable_boundary(history: &[StoredMessage], budget: usize) -> usize {
+    if heuristic_tokens(
+        &history
+            .iter()
+            .map(|s| s.message.clone())
+            .collect::<Vec<_>>(),
+    ) as usize
+        <= budget
+    {
+        return 0;
+    }
+
+    // Walk from the oldest message forward, keeping everything from `index` onward; the boundary
+    // is the newest `index` whose kept tail still exceeds the budget by as little as possible —
+    // equivalently, the first `index` where the tail fits.
+    let mut total = 0usize;
+    let tokens: Vec<usize> = history
+        .iter()
+        .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+        .collect();
+    for count in &tokens {
+        total += count;
+    }
+
+    let mut kept = 0usize;
+    let mut boundary = 0usize;
+    for (index, count) in tokens.iter().enumerate() {
+        if total - kept <= budget {
+            break;
+        }
+        kept += count;
+        boundary = index + 1;
+    }
+    // Snap to a round start: the kept tail must open on a row the providers accept — an
+    // assistant tool-call row whose results follow it, not an orphaned tool result. Walking
+    // backward from the raw boundary to the nearest such row keeps every cut inside whole
+    // tool rounds. A snap back over a huge round could exceed the budget, but a round is one
+    // call and its result — not the turn.
+    while boundary > 0 {
+        let row = &history[boundary - 1].message;
+        if row.role == Role::Assistant && !row.tool_calls.is_empty() {
+            break;
+        }
+        boundary -= 1;
+    }
+    boundary
+}
+
 /// The start of the most recent stretch of messages that fits `budget` tokens.
 ///
 /// Walking back from the end, the newest message is always kept: it is the last thing said, and a
@@ -356,9 +412,22 @@ pub async fn compact(
     history: &[StoredMessage],
     keep_recent_turns: Option<usize>,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
-    let boundary = fold_boundary(history, keep_recent_turns);
+    let mut boundary = fold_boundary(history, keep_recent_turns);
     if boundary == 0 {
-        return Ok(None);
+        // The whole transcript is one user turn — an agentic turn that has been running tool
+        // rounds for hours. The turn rule has nothing older to fold, and `safe_boundary`'s
+        // backward scan resolved the budget boundary to the turn's own start, because a kept tail
+        // may not open on an orphaned tool row. Refusing to fold here is how one unbounded turn
+        // pinned an unbounded transcript: the session grows forever under an armed fold.
+        //
+        // Fold the oldest complete tool rounds instead: walk forward from the oldest message to
+        // the newest boundary that keeps the newest stretch within the fallback budget, then let
+        // `safe_boundary` clean the cut. The kept tail still opens on an assistant tool-call row
+        // whose result it carries — a call and its answer stay together.
+        boundary = oldest_foldable_boundary(history, FALLBACK_KEEP_TOKENS);
+        if boundary == 0 {
+            return Ok(None);
+        }
     }
 
     let folded = &history[..boundary];
