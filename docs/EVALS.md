@@ -95,7 +95,14 @@ model sees, never a panic — that is what `malformed_tool_arguments.yaml` pins 
 
 `read_only_turn` (zero tool calls) · `write_then_read` (exact bytes on disk) · `denied_approval`
 (nothing written, rejection reaches the model) · `failing_tool_recovery` (a failing tool does not end
-the turn) · `malformed_tool_arguments` (tool error, loop continues).
+the turn) · `malformed_tool_arguments` (tool error, loop continues) · `permission_rule_allow` (a
+standing allow rule does not block) · `permission_rule_deny` (a standing deny rule refuses before
+the registry is reached) · `missing-file-read-recovery` (a missing file errors, the loop recovers
+and the file ends up written) · `failure-counter-reset` (three failures in a row stay under the cap
+and the next success clears the counter) · `denied-call-not-a-failure` (a policy denial is not tool
+thrashing: it does not count toward the failure cap and does not end the turn) ·
+`sandbox-path-escape` (a path outside the sandbox is refused, the in-sandbox write still lands) ·
+`multi-call-single-turn` (several tool calls in one assistant message all execute, in order).
 
 Adding a case: drop a YAML file in `tests/eval/`, run
 `target/release/luna eval run --suite tests/eval --offline --filter <your-case>`, and confirm it

@@ -207,6 +207,18 @@ enum Commands {
     /// Run the setup / onboarding flow: choose a personality core and rewrite the config
     #[command(name = "setup", alias = "onboard", alias = "onboarding")]
     Setup,
+    /// Connect Luna to external chat platforms (Telegram, Discord, WhatsApp)
+    Gateway {
+        /// Platform to run: telegram, discord, whatsapp, or all
+        #[arg(short, long)]
+        platform: Option<String>,
+        /// Approve mutating tool calls without asking (headless default is deny)
+        #[arg(long)]
+        yes: bool,
+        /// Port for webhook servers (e.g. WhatsApp)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Run the scripted end-to-end scenario suite (offline fake provider, or live NIM)
     Eval {
         #[command(subcommand)]
@@ -277,7 +289,7 @@ async fn main() -> Result<(), HarnessError> {
             model.as_ref().or(cli.model.as_ref()),
             *yes || cli.yes,
         ),
-        Some(Commands::Exec { yes, .. }) => {
+        Some(Commands::Exec { yes, .. }) | Some(Commands::Gateway { yes, .. }) => {
             (cli.provider.as_ref(), cli.model.as_ref(), *yes || cli.yes)
         }
         None => (cli.provider.as_ref(), cli.model.as_ref(), cli.yes),
@@ -547,6 +559,18 @@ async fn main() -> Result<(), HarnessError> {
                 outcome.config_path.display()
             );
             handle_interactive_auth(cred_manager).await?;
+        }
+        Some(Commands::Gateway {
+            platform,
+            yes,
+            port,
+        }) => {
+            let options = commands::gateway::GatewayOptions {
+                platform,
+                yes,
+                port,
+            };
+            commands::gateway::run_gateway(config, cred_manager, discovery, options).await?;
         }
         Some(Commands::Eval { subcommand }) => {
             handle_eval_command(subcommand, cred_manager, discovery, &config).await?;

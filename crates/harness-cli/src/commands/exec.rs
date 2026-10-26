@@ -341,9 +341,12 @@ pub async fn run_exec(
             let denied = outcome.tool_calls.iter().filter(|call| call.denied).count();
 
             if options.json {
+                // The turn completed; `ok` says so. Which tools errored is in `tool_calls`, where
+                // the caller can see that a failing command or a sandbox refusal was the task's
+                // point rather than a broken run — a turn that ends normally is not a failed run.
                 emit(&serde_json::json!({
                     "type": "result",
-                    "ok": failed_tools == 0 && denied == 0,
+                    "ok": true,
                     "answer": outcome.reply,
                     "reasoning": outcome.reasoning,
                     "session": session_id,

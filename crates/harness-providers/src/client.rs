@@ -153,6 +153,26 @@ pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessEr
         })
 }
 
+/// How long a 429 says to wait, from the response itself.
+///
+/// The header is the provider's own statement about its limiter, so it beats any guess. A
+/// provider that sends none — or one that sends an HTTP date instead of a delay — gets the
+/// conservative default: waiting too long costs seconds, waiting too short costs the account.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
+    const DEFAULT_RETRY_AFTER_SECS: u64 = 30;
+    let header = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok());
+
+    // The header is either a delay in seconds or an HTTP date. Only the numeric form is
+    // actionable here.
+    match header.and_then(|value| value.trim().parse::<u64>().ok()) {
+        Some(seconds) => Some(seconds.clamp(1, 600)),
+        None => Some(DEFAULT_RETRY_AFTER_SECS),
+    }
+}
+
 pub struct GenericProviderClient {
     provider_id: String,
     base_url: String,
@@ -606,7 +626,7 @@ impl ModelProvider for GenericProviderClient {
             self.retire_failed_credential(&secret).await;
             return Err(HarnessError::RateLimited {
                 provider: self.provider_id.clone(),
-                retry_after_secs: Some(30),
+                retry_after_secs: retry_after_secs(&resp),
             });
         }
 
@@ -921,7 +941,7 @@ impl ModelProvider for GenericProviderClient {
             self.retire_failed_credential(&secret).await;
             return Err(HarnessError::RateLimited {
                 provider: self.provider_id.clone(),
-                retry_after_secs: Some(10),
+                retry_after_secs: retry_after_secs(&resp),
             });
         }
         if !status.is_success() {

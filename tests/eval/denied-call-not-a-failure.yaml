@@ -1,0 +1,32 @@
+# A policy denial is an intentional choice, not malfunctioning tool thrashing: it must not count
+# toward the consecutive-failure cap and it must not end the turn. The denied call must not touch
+# the filesystem, and the loop must continue to the next call.
+case: denied-call-not-a-failure
+prompt: Write the text must-not-land into denied.txt, then report what happened.
+tools:
+  - eval_write_file
+  - eval_echo
+approval:
+  deny:
+    - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "denied.txt", content: "must-not-land" }
+  - tool_calls:
+      - name: eval_echo
+        arguments: { text: "denial handled" }
+  - answer: The write was denied by approval, so nothing landed; the turn continued.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      arguments_contain: { path: "denied.txt" }
+      error: true
+    - name: eval_echo
+      arguments_contain: { text: "denial handled" }
+      error: false
+  final_answer_contains:
+    - "denied"
+  files:
+    - path: denied.txt
+      exists: false

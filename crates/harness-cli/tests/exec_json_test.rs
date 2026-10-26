@@ -300,8 +300,16 @@ fn a_denied_write_fails_the_run_and_leaves_no_file() {
     let events = events(&output.stdout);
     let result = events.last().expect("a result event");
     assert_eq!(result["type"], "result");
-    assert_eq!(result["ok"], false);
+    // The turn itself completed; `ok` says the turn finished. The denial is on the call and on
+    // stderr (exit 1 above) — the caller asked for work policy refused, and the exit status says
+    // the run failed even though the turn ran to its end.
+    assert_eq!(result["ok"], true);
     assert_eq!(result["tool_calls"][0]["denied"], true);
+    assert_eq!(result["tool_calls"][0]["ok"], false);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("denied"),
+        "the denial reason belongs on stderr"
+    );
     assert!(!dir.join("ws").join("report.md").exists());
 }
 

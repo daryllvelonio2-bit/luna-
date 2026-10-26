@@ -184,21 +184,21 @@ pub struct GatewaySettings {
     /// Active platform name: "telegram", "discord", "whatsapp", or "none".
     pub platform: String,
     /// Telegram Bot token from @BotFather.
-    pub telegram_bot_token: Option<String>,
+    pub telegram_bot_token: String,
     /// Allowed Telegram user IDs or usernames (empty = allow all).
     pub telegram_allowed_users: Vec<String>,
     /// Discord Bot token from Discord Developer Portal.
-    pub discord_bot_token: Option<String>,
+    pub discord_bot_token: String,
     /// Default Discord channel ID to monitor.
-    pub discord_channel_id: Option<String>,
+    pub discord_channel_id: String,
     /// Allowed Discord user IDs (empty = allow all).
     pub discord_allowed_users: Vec<String>,
     /// WhatsApp Cloud API access token.
-    pub whatsapp_token: Option<String>,
+    pub whatsapp_token: String,
     /// WhatsApp Cloud Phone Number ID.
-    pub whatsapp_phone_number_id: Option<String>,
+    pub whatsapp_phone_number_id: String,
     /// WhatsApp webhook verification token.
-    pub whatsapp_verify_token: Option<String>,
+    pub whatsapp_verify_token: String,
     /// Port for webhook servers (e.g. WhatsApp). Default 8080.
     pub port: u16,
     /// Whether gateway turns can execute mutating tool calls without asking.
@@ -210,14 +210,14 @@ impl Default for GatewaySettings {
         Self {
             enabled: false,
             platform: "none".to_string(),
-            telegram_bot_token: None,
+            telegram_bot_token: String::new(),
             telegram_allowed_users: Vec::new(),
-            discord_bot_token: None,
-            discord_channel_id: None,
+            discord_bot_token: String::new(),
+            discord_channel_id: String::new(),
             discord_allowed_users: Vec::new(),
-            whatsapp_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
+            whatsapp_token: String::new(),
+            whatsapp_phone_number_id: String::new(),
+            whatsapp_verify_token: String::new(),
             port: 8080,
             allow_mutating_tools: false,
         }

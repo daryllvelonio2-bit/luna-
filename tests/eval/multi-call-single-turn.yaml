@@ -1,0 +1,30 @@
+# One assistant message may carry several tool calls: every call must execute, in the order the
+# model emitted them, and each one must reach the sandbox with its exact bytes.
+case: multi-call-single-turn
+prompt: Write one.txt and two.txt in the same turn, then report both.
+tools:
+  - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "one.txt", content: "1\n" }
+      - name: eval_write_file
+        arguments: { path: "two.txt", content: "2\n" }
+  - answer: Wrote one.txt and two.txt.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      arguments_contain: { path: "one.txt" }
+      error: false
+    - name: eval_write_file
+      arguments_contain: { path: "two.txt" }
+      error: false
+  final_answer_contains:
+    - "one.txt"
+  files:
+    - path: one.txt
+      exists: true
+      content_equals: "1\n"
+    - path: two.txt
+      exists: true
+      content_equals: "2\n"

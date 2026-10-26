@@ -620,6 +620,127 @@ fn the_hint_is_part_of_the_drawn_composer() {
     );
 }
 
+/// While the model is thinking the block is drawn whole: the live region is the only place the
+/// reasoning is visible at all, so a fixed tail there is a fixed blind spot in it.
+#[test]
+fn the_whole_thought_block_streams_while_thinking() {
+    let ui = ChatUi::new(true);
+    ui.push_reasoning(&thought_lines(9));
+
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.animate_tick());
+
+    let rows = ui.live.lock().unwrap().rows.clone();
+    assert_eq!(rows.len(), 9, "every row of the block is drawn: {rows:?}");
+    assert!(strip(&rows[0]).contains("thought line 1"), "{rows:?}");
+    assert!(strip(&rows[8]).contains("thought line 9"), "{rows:?}");
+}
+
+/// The screen bounds the block, not a fixed count — and when it cannot fit, the newest rows are
+/// the ones kept, because the interesting end of a stream is its end.
+#[test]
+fn a_thought_block_taller_than_the_screen_keeps_its_newest_rows() {
+    let ui = ChatUi::new(true);
+    ui.push_reasoning(&thought_lines(200));
+
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.animate_tick());
+
+    let rows = ui.live.lock().unwrap().rows.clone();
+    let height = get_terminal_height();
+    assert!(rows.len() >= MIN_LIVE_REASONING_ROWS, "{rows:?}");
+    assert!(
+        rows.len() + ui.box_row_count() + 2 <= height,
+        "the block still leaves the composer its rows: {} of {height}",
+        rows.len()
+    );
+    assert!(
+        strip(rows.last().unwrap()).contains("thought line 200"),
+        "the newest row is kept: {rows:?}"
+    );
+    assert!(
+        !strip(&rows[0]).ends_with("thought line 1"),
+        "the rows that went are the oldest: {rows:?}"
+    );
+}
+
+/// A thought block of `count` numbered rows. No trailing newline: the row a trailing one would
+/// wrap to is a real blank row, and these tests count rows.
+fn thought_lines(count: usize) -> String {
+    (1..=count)
+        .map(|n| format!("thought line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Thinking over, the transcript keeps the last few rows and says how many it folded away.
+///
+/// The fold is asserted where it is decided rather than in captured output: the UI writes with
+/// `println!`, which the test harness captures before any redirected descriptor can see it (see
+/// [`capture_stdout`]).
+#[test]
+fn a_finished_thought_block_folds_to_its_last_five_rows() {
+    let rows = reasoning_rows(&thought_lines(12), 80);
+    assert_eq!(rows.len(), 12, "one row per thought line: {rows:?}");
+
+    let folded = folded_reasoning_rows(rows);
+    assert_eq!(
+        folded.len(),
+        FINISHED_REASONING_ROWS + 1,
+        "five rows behind a count of what went: {folded:?}"
+    );
+    assert!(
+        strip(&folded[0]).contains("7 earlier lines"),
+        "the fold says what it hid: {folded:?}"
+    );
+    assert!(
+        strip(&folded[1]).contains("thought line 8"),
+        "the rows kept are the last five: {folded:?}"
+    );
+    assert!(
+        strip(folded.last().unwrap()).contains("thought line 12"),
+        "up to the newest: {folded:?}"
+    );
+}
+
+/// One hidden row is announced in the singular: the count is read by a person.
+#[test]
+fn the_fold_says_one_line_in_the_singular() {
+    let folded = folded_reasoning_rows(reasoning_rows(&thought_lines(6), 80));
+
+    assert_eq!(
+        strip(&folded[0]),
+        "  … (1 earlier line)",
+        "one row hidden, one line announced: {folded:?}"
+    );
+}
+
+#[test]
+fn a_short_thought_block_is_printed_whole() {
+    let rows = reasoning_rows("opening thought\nmiddle\nthe decision", 80);
+    let folded = folded_reasoning_rows(rows.clone());
+
+    assert_eq!(folded, rows, "nothing is hidden, so nothing changes");
+    assert!(
+        !folded.iter().any(|r| strip(r).contains("earlier lines")),
+        "and nothing is announced: {folded:?}"
+    );
+}
+
+/// A finished block belongs to the transcript: the live region gives it up rather than drawing it
+/// twice.
+#[test]
+fn finishing_a_thought_block_hands_it_to_the_transcript() {
+    let ui = ChatUi::new(true);
+    ui.push_reasoning(&thought_lines(3));
+    ui.finish_reasoning();
+
+    assert!(
+        ui.live.lock().unwrap().reasoning.is_empty(),
+        "the live block is taken"
+    );
+}
+
 fn strip(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
 }

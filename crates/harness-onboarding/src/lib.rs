@@ -21,6 +21,7 @@
 
 pub mod compact_step;
 pub mod flow;
+pub mod gateway_step;
 pub mod memory_step;
 pub mod menu;
 pub mod persona;
@@ -31,9 +32,10 @@ pub mod style;
 pub mod typewriter;
 
 pub use flow::{needs_onboarding, run, run_interactive, Outcome};
+pub use gateway_step::Choice as GatewayChoice;
 pub use memory_step::Choice as MemoryChoice;
 pub use persona::{Persona, CATALOG};
 pub use screen::Size;
-pub use store::persist;
+pub use store::{persist, GatewaySelection};
 pub use style::Line;
 pub use typewriter::{InstantPacer, Pacer, RealPacer};

@@ -42,7 +42,7 @@ fn report_at(path: &Path) -> serde_json::Value {
     serde_json::from_str(&raw).expect("eval-report.json parses")
 }
 
-const REQUIRED_CASES: [&str; 7] = [
+const REQUIRED_CASES: [&str; 12] = [
     "read-only-turn",
     "write-then-read",
     "denied-approval",
@@ -50,6 +50,11 @@ const REQUIRED_CASES: [&str; 7] = [
     "malformed-tool-arguments",
     "permission-rule-deny",
     "permission-rule-allow",
+    "missing-file-read-recovery",
+    "failure-counter-reset",
+    "denied-call-not-a-failure",
+    "sandbox-path-escape",
+    "multi-call-single-turn",
 ];
 
 #[test]

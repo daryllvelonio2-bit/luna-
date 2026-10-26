@@ -36,8 +36,35 @@ pub const AUTO_COMPACT_ENABLED_KEY: &str = "auto_compact_enabled";
 pub const AUTO_COMPACT_THRESHOLD_KEY: &str = "auto_compact_threshold";
 /// The config key holding auto-compaction turns.
 pub const AUTO_COMPACT_TURNS_KEY: &str = "auto_compact_turns";
+/// The config key holding whether the messaging gateway is enabled.
+pub const GATEWAY_ENABLED_KEY: &str = "gateway.enabled";
+/// The config key holding the messaging gateway platform.
+pub const GATEWAY_PLATFORM_KEY: &str = "gateway.platform";
+/// The config key holding the Telegram bot token.
+pub const GATEWAY_TELEGRAM_BOT_TOKEN_KEY: &str = "gateway.telegram_bot_token";
+/// The config key holding the Discord bot token.
+pub const GATEWAY_DISCORD_BOT_TOKEN_KEY: &str = "gateway.discord_bot_token";
+/// The config key holding the WhatsApp access token.
+pub const GATEWAY_WHATSAPP_TOKEN_KEY: &str = "gateway.whatsapp_token";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewaySelection {
+    pub enabled: bool,
+    pub platform: String,
+    pub token: Option<String>,
+}
+
+impl Default for GatewaySelection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            platform: "none".to_string(),
+            token: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoCompactSelection {
@@ -62,6 +89,7 @@ pub fn persist(
     persona: &Persona,
     memory: MemoryMode,
     auto_compact: &AutoCompactSelection,
+    gateway: &GatewaySelection,
 ) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
     config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
@@ -85,6 +113,25 @@ pub fn persist(
         AUTO_COMPACT_TURNS_KEY,
         &auto_compact.turns.to_string(),
     )?;
+    config::set_in_file(
+        layers,
+        GATEWAY_ENABLED_KEY,
+        if gateway.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, GATEWAY_PLATFORM_KEY, &gateway.platform)?;
+    if let Some(token) = &gateway.token {
+        if !token.is_empty() {
+            let key = match gateway.platform.as_str() {
+                "telegram" => GATEWAY_TELEGRAM_BOT_TOKEN_KEY,
+                "discord" => GATEWAY_DISCORD_BOT_TOKEN_KEY,
+                "whatsapp" => GATEWAY_WHATSAPP_TOKEN_KEY,
+                _ => "",
+            };
+            if !key.is_empty() {
+                config::set_in_file(layers, key, token)?;
+            }
+        }
+    }
     config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
     config_file(layers)
 }

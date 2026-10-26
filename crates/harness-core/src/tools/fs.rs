@@ -733,7 +733,12 @@ impl Tool for SearchFilesTool {
                 ))
             }
         };
-        let search_path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        // A blank path means the workspace root, same as `list_files`: the parameter documents a
+        // default, and a model sending `""` is asking for that default.
+        let search_path_str = match args.get("path").and_then(|p| p.as_str()) {
+            Some(path) if !path.trim().is_empty() => path,
+            _ => ".",
+        };
         let file_glob = args.get("file_glob").and_then(|g| g.as_str());
         let output_mode = args
             .get("output_mode")
@@ -1018,7 +1023,12 @@ impl Tool for ListFilesTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        // A blank path means the workspace root: the parameter documents a default, and a model
+        // that sends `""` is asking for that default, not making a mistake worth a failed call.
+        let path_str = match args.get("path").and_then(|p| p.as_str()) {
+            Some(path) if !path.trim().is_empty() => path,
+            _ => ".",
+        };
         let glob = args.get("glob").and_then(|g| g.as_str());
 
         let resolved = match self.sandbox().resolve(path_str) {

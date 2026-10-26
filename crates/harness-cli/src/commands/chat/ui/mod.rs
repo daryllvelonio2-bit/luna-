@@ -10,9 +10,21 @@ use super::render::{
     tool_activity_detail, OutputBlockKind, PROMPT,
 };
 
-/// Rows of reasoning kept in the live region before the oldest roll into the transcript. Keeping
-/// a shallow tail is what makes long reasoning stream smoothly instead of scrolling the screen.
-pub const LIVE_REASONING_ROWS: usize = 4;
+/// Fewest rows the live region gives the thought block. On a screen with no room left the block
+/// still shows this much: below it the region stops saying anything at all.
+pub const MIN_LIVE_REASONING_ROWS: usize = 4;
+
+/// Rows of a live patch diff the region may show, at most. Bounded so a large patch cannot take
+/// the screen the thought block is streaming into.
+pub const MAX_LIVE_DIFF_ROWS: usize = 6;
+
+/// Rows of a finished thought block that stay in the transcript.
+///
+/// While the model is thinking the block is shown whole in the live region; once thinking is done
+/// it folds to this many rows, because the transcript is the record of what the agent did rather
+/// than a second copy of its working. The rest is not lost: Ctrl+O expands the turn's process
+/// header, which re-renders the block in full from the stored turn.
+pub const FINISHED_REASONING_ROWS: usize = 5;
 
 /// How often the live region advances a spinner frame and refreshes its elapsed time.
 pub const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
@@ -167,6 +179,59 @@ struct BoxDrawnMetrics {
 
 pub fn visible_width(s: &str) -> usize {
     dialoguer::console::measure_text_width(s)
+}
+
+/// Rows of a live patch diff the region may show on a screen this tall.
+fn max_live_diff_rows(height: usize) -> usize {
+    height.saturating_sub(10).clamp(2, MAX_LIVE_DIFF_ROWS)
+}
+
+/// The thought rows the live region shows, given everything else the region carries and everything
+/// the composer draws below it.
+///
+/// The whole block is shown while the model thinks: the live region is the only place reasoning is
+/// visible at all, so a fixed tail is a fixed blind spot. The screen is the only bound, and when
+/// the block cannot fit, the rows kept are the *newest* — the interesting end of a stream is its
+/// end. `chrome` counts the rows drawn below the region, so a tall block pushes the transcript up
+/// instead of pushing the prompt off the screen.
+fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<String> {
+    let all = if live.reasoning.is_empty() {
+        Vec::new()
+    } else {
+        reasoning_rows(&live.reasoning, width)
+    };
+    let height = get_terminal_height();
+    let reserved = usize::from(live.activity.is_some())
+        + usize::from(live.compaction.is_some())
+        + live
+            .patch_diff
+            .as_ref()
+            .map(|diff| diff.len().min(max_live_diff_rows(height)))
+            .unwrap_or(0);
+    let budget = height
+        .saturating_sub(chrome + reserved + 1)
+        .max(MIN_LIVE_REASONING_ROWS);
+    let start = all.len().saturating_sub(budget);
+    all[start..].to_vec()
+}
+
+/// The transcript's form of a finished thought block: its last [`FINISHED_REASONING_ROWS`] rows,
+/// behind a count of what the fold hides.
+///
+/// The tail is kept rather than the opening so the rows the user was just reading stay where they
+/// are: the fold takes away what has already scrolled past, not what the thought arrived at.
+pub(crate) fn folded_reasoning_rows(rows: Vec<String>) -> Vec<String> {
+    if rows.len() <= FINISHED_REASONING_ROWS {
+        return rows;
+    }
+    let hidden = rows.len() - FINISHED_REASONING_ROWS;
+    let noun = if hidden == 1 { "line" } else { "lines" };
+    let mut folded = vec![format!(
+        "  {}",
+        format!("… ({hidden} earlier {noun})").dimmed()
+    )];
+    folded.extend(rows[hidden..].iter().cloned());
+    folded
 }
 
 pub fn physical_line_count(visible_len: usize, width: usize) -> usize {
@@ -405,7 +470,7 @@ impl ChatUi {
         };
         if !rows.is_empty() {
             self.begin_block(OutputBlockKind::Thinking);
-            self.emit_above(&rows.join("\n"));
+            self.emit_above(&folded_reasoning_rows(rows).join("\n"));
         }
     }
 
@@ -1034,16 +1099,13 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
+        // Rows the composer below the region draws: the block may fill the rest of the screen, and
+        // it is measured before the live lock is taken so the two locks are never held together.
+        let chrome = self.box_row_count() + 2;
 
         let rows = {
             let mut live = self.live.lock().unwrap();
-            let all = if live.reasoning.is_empty() {
-                Vec::new()
-            } else {
-                reasoning_rows(&live.reasoning, width)
-            };
-            let start = all.len().saturating_sub(LIVE_REASONING_ROWS);
-            let mut rows = all[start..].to_vec();
+            let mut rows = reasoning_window(&live, width, chrome);
 
             if let Some(activity) = &mut live.activity {
                 activity.frame = activity.frame.wrapping_add(1);
@@ -1067,10 +1129,8 @@ impl ChatUi {
             }
 
             if let Some(diff) = &live.patch_diff {
-                let term_height = get_terminal_height();
-                let max_live_diff = term_height.saturating_sub(10).clamp(2, 6);
                 let count = diff.len();
-                let display_count = count.min(max_live_diff);
+                let display_count = count.min(max_live_diff_rows(get_terminal_height()));
                 for line in &diff[..display_count] {
                     rows.push(fit_diff_line_to_width(line, width));
                 }
@@ -1288,16 +1348,11 @@ impl ChatUi {
         }
         let width = get_terminal_width();
         let buf = self.input_buf.lock().unwrap().clone();
+        let chrome = self.box_row_count() + 2;
 
         let rows = {
             let mut live = self.live.lock().unwrap();
-            let all = if live.reasoning.is_empty() {
-                Vec::new()
-            } else {
-                reasoning_rows(&live.reasoning, width)
-            };
-            let start = all.len().saturating_sub(LIVE_REASONING_ROWS);
-            let mut rows = all[start..].to_vec();
+            let mut rows = reasoning_window(&live, width, chrome);
 
             if let Some(activity) = &mut live.activity {
                 rows.push(activity_line(
@@ -1392,8 +1447,14 @@ impl ChatUi {
 pub(crate) mod test_support {
     /// Capture what something writes to stdout while it runs.
     ///
-    /// The work runs on its own thread: the test harness captures `println!` per thread, and a
-    /// fresh thread writes to the real stdout, which is the redirected file.
+    /// The work runs on its own thread: a fresh thread has no output capture of its own, so it
+    /// writes to the real stdout, which is the redirected file.
+    ///
+    /// This only sees writes that go to [`std::io::stdout`] directly. `print!` and `println!` go
+    /// through the harness's own capture first and never reach the redirected descriptor, so a test
+    /// that captures a `println!` gets an empty string and asserts nothing — check the returned
+    /// bytes are non-empty when the assertion matters.
+    ///
     pub(crate) fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
@@ -1413,9 +1474,12 @@ pub(crate) mod test_support {
         assert!(saved >= 0, "cannot save stdout");
         assert!(unsafe { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) } >= 0);
 
-        std::thread::spawn(f)
-            .join()
-            .expect("the captured work panicked");
+        std::thread::spawn(move || {
+            f();
+            let _ = std::io::stdout().flush();
+        })
+        .join()
+        .expect("the captured work panicked");
         let _ = std::io::stdout().flush();
 
         unsafe { libc::dup2(saved, libc::STDOUT_FILENO) };

@@ -8,6 +8,7 @@ pub mod context_window;
 pub mod diff;
 pub mod evolve;
 pub mod exec;
+pub mod gateway;
 pub mod heartbeat;
 pub mod hooks;
 pub mod models;

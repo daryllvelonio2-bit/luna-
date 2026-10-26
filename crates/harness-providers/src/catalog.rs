@@ -179,7 +179,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("nemotron-3.5-lightning-free", 1_000_000),
                 ("nemotron-3.5-super-vl-free", 1_000_000),
                 ("mimo-v2.6-flash-free", 1_048_576),
-                ("minimax-m3.1-flash-free", 245_760),
+                ("minimax-m3.1-flash-free", 1_000_000),
                 ("muse-spark-1.3-contributor-free", 1_048_576),
                 ("muse-spark-1.2-contributor-free", 1_048_576),
                 ("beam-free", 128_000),
@@ -254,6 +254,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
                 ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
                 ("deepseek-ai/deepseek-v4-flash", 1_000_000),
                 ("deepseek-ai/deepseek-v4-pro", 262_144),
+                ("minimaxai/minimax-m3.1-flash", 262_144),
                 ("z-ai/glm-5.3-flash", 1_000_000),
                 ("z-ai/glm-4-9b-chat", 1_000_000),
                 ("stepfun-ai/step-5-preview", 1_000_000),
@@ -310,7 +311,14 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             models_endpoint: "/models".to_string(),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("abab6.5s-chat", 245_760)]),
+            context_windows: ctx_windows(&[
+                ("abab6.5s-chat", 245_760),
+                // The M2 line is a 200k model family; the M3 line is 1M.
+                ("minimax-m2.5", 204_800),
+                ("minimax-m2.7", 204_800),
+                ("minimax-m3", 1_000_000),
+                ("minimax-m3.1-flash", 1_000_000),
+            ]),
         },
         ProviderDescriptor {
             id: "huggingface".to_string(),
@@ -641,18 +649,24 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         }
     }
 
-    // 2. Cross-provider catalog lookup
+    // 2. Cross-provider catalog lookup.
+    //
+    // A provider's entry is that provider's DEPLOYMENT of the model, which may cap it lower than
+    // the model allows (an aggregator serving a 1M model through a 196k window). So the lookup
+    // takes the LARGEST window any provider publishes for this model: that is the model's own
+    // capability, and the chosen provider's own cap still wins in step 1 above.
+    let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+    let mut cross_provider: Option<u32> = None;
     for desc in get_provider_catalog() {
         for (k, v) in &desc.context_windows {
-            if k.eq_ignore_ascii_case(model_trimmed) {
-                return Some(*v);
-            }
             let k_leaf = k.rsplit('/').next().unwrap_or(k);
-            let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
-            if k_leaf.eq_ignore_ascii_case(leaf) {
-                return Some(*v);
+            if k.eq_ignore_ascii_case(model_trimmed) || k_leaf.eq_ignore_ascii_case(leaf) {
+                cross_provider = Some(cross_provider.map_or(*v, |current| current.max(*v)));
             }
         }
+    }
+    if let Some(window) = cross_provider {
+        return Some(window);
     }
 
     // 3. Known architectural model families & token heuristics (matching Shiina model_metadata)
@@ -715,7 +729,12 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
         return Some(1_000_000);
     }
 
+    // MiniMax M3 and M3.1 are 1M-context models; the older M2 line is 200k. The provider's own
+    // deployment may cap lower (nvidia serves M3.1 at 262k), and the provider descriptor wins.
     if leaf.contains("minimax") {
+        if leaf.contains("m3") {
+            return Some(1_000_000);
+        }
         return Some(245_760);
     }
 
@@ -738,6 +757,26 @@ mod tests {
             AuthHeaderFormat::Bearer
         ));
         assert_eq!(get_default_model("gemini"), "gemini-3.5-flash-lite");
+    }
+
+    #[test]
+    fn minimax_m3_is_a_million_token_model() {
+        // The M3 line is 1M everywhere; nvidia's own deployment of M3.1 is capped at 262k, and the
+        // provider descriptor must win over the family heuristic.
+        assert_eq!(
+            get_context_window("openrouter", "minimax/minimax-m3"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_context_window("openrouter", "minimax/minimax-m3.1-flash"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_context_window("nvidia", "minimaxai/minimax-m3.1-flash"),
+            Some(262_144)
+        );
+        // The older M2 line stays at its own window.
+        assert_eq!(get_context_window("minimax", "minimax-m2.5"), Some(204_800));
     }
 
     #[test]

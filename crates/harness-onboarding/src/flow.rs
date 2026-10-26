@@ -56,6 +56,8 @@ pub struct Outcome {
     pub memory: MemoryMode,
     /// Automatic compaction settings.
     pub auto_compact: store::AutoCompactSelection,
+    /// Messaging platform gateway settings.
+    pub gateway: store::GatewaySelection,
     /// The config file the choice was written to.
     pub config_path: PathBuf,
 }
@@ -96,15 +98,26 @@ where
     // Phase 2c: auto-compact setup.
     let auto_compact = crate::compact_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, persona, memory, &auto_compact)?;
+    // Phase 2d: messaging gateway setup.
+    let gateway = crate::gateway_step::select(&mut writer, reader)?;
+
+    let config_path = store::persist(layers, persona, memory, &auto_compact, &gateway)?;
 
     let mut writer = Typewriter::new(out, pacer, size);
-    confirmation(&mut writer, persona, memory, &auto_compact, &config_path)?;
+    confirmation(
+        &mut writer,
+        persona,
+        memory,
+        &auto_compact,
+        &gateway,
+        &config_path,
+    )?;
 
     Ok(Outcome {
         persona,
         memory,
         auto_compact,
+        gateway,
         config_path,
     })
 }
@@ -216,11 +229,19 @@ fn confirmation<W: Write, P: Pacer>(
     persona: &Persona,
     memory: MemoryMode,
     auto_compact: &store::AutoCompactSelection,
+    gateway: &store::GatewaySelection,
     config_path: &Path,
 ) -> Result<(), HarnessError> {
     writer.clear_screen()?;
     writer.show_cursor()?;
-    let lines = confirmation_lines(persona, memory, auto_compact, config_path, writer.size());
+    let lines = confirmation_lines(
+        persona,
+        memory,
+        auto_compact,
+        gateway,
+        config_path,
+        writer.size(),
+    );
     writer.write_block(&lines)?;
     Ok(())
 }
@@ -230,6 +251,7 @@ pub fn confirmation_lines(
     persona: &Persona,
     memory: MemoryMode,
     auto_compact: &store::AutoCompactSelection,
+    gateway: &store::GatewaySelection,
     config_path: &Path,
     size: Size,
 ) -> Vec<Line> {
@@ -276,6 +298,20 @@ pub fn confirmation_lines(
         }
     }
     lines.push(Line::blank());
+    let gw_label = "Messaging gateway";
+    let gw_summary = crate::gateway_step::summary(gateway);
+    if gw_label.len() + 2 + gw_summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{gw_label}  ")))
+                .with(Span::strong(gw_summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(gw_label)));
+        for wrapped in screen::wrap(&gw_summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
+    lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
         limit,
@@ -305,10 +341,12 @@ mod tests {
         let persona = persona::by_id(3).expect("in the catalog");
         let path = PathBuf::from("/home/janelle/.luna/config.yaml");
         let ac = store::AutoCompactSelection::default();
+        let gw = store::GatewaySelection::default();
         let block = confirmation_lines(
             persona,
             MemoryMode::Background,
             &ac,
+            &gw,
             &path,
             Size::new(90, 24),
         )
@@ -331,10 +369,12 @@ mod tests {
         let persona = persona::by_id(9).expect("in the catalog");
         for columns in [40u16, 80, 120] {
             let ac = store::AutoCompactSelection::default();
+            let gw = store::GatewaySelection::default();
             for line in confirmation_lines(
                 persona,
                 MemoryMode::Session,
                 &ac,
+                &gw,
                 &PathBuf::from("~/.luna/config.yaml"),
                 Size::new(columns, 24),
             ) {

@@ -1,0 +1,29 @@
+# A missing file must error, not panic, and the loop must carry on: the agent reads a file that is
+# not there, sees the error, writes the file and ends with the bytes on disk.
+case: missing-file-read-recovery
+prompt: Read notes/report.md from the sandbox, then write it with a summary line and read it back.
+tools:
+  - eval_read_file
+  - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_read_file
+        arguments: { path: "notes/report.md" }
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "notes/report.md", content: "summary line\n" }
+  - answer: notes/report.md was missing; I created it and it now holds the summary line.
+expect:
+  tool_calls:
+    - name: eval_read_file
+      arguments_contain: { path: "notes/report.md" }
+      error: true
+    - name: eval_write_file
+      arguments_contain: { path: "notes/report.md" }
+      error: false
+  final_answer_contains:
+    - "missing"
+  files:
+    - path: notes/report.md
+      exists: true
+      content_equals: "summary line\n"

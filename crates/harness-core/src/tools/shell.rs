@@ -384,7 +384,11 @@ impl Tool for TerminalTool {
 
         let effective_command = self.resolve_command(command).await;
 
-        let workdir_str = args.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
+        // A blank workdir means the workspace root, same as the filesystem tools' path default.
+        let workdir_str = match args.get("workdir").and_then(|w| w.as_str()) {
+            Some(dir) if !dir.trim().is_empty() => dir,
+            _ => ".",
+        };
         let sandbox = crate::tools::sandbox::Sandbox::with_extra_roots(
             self.workspace_root.clone(),
             self.extra_roots.clone(),

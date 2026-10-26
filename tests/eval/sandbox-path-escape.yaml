@@ -1,0 +1,28 @@
+# The sandbox refuses any path that leaves it: an absolute path or a '..' component is an error the
+# model sees, nothing lands outside the case sandbox, and the in-sandbox write still succeeds.
+case: sandbox-path-escape
+prompt: Try to write a file outside the sandbox, then write it inside the sandbox instead.
+tools:
+  - eval_write_file
+script:
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "../../escape.txt", content: "must-not-land" }
+  - tool_calls:
+      - name: eval_write_file
+        arguments: { path: "inside.txt", content: "kept\n" }
+  - answer: The path outside the sandbox was refused; inside.txt holds the kept bytes.
+expect:
+  tool_calls:
+    - name: eval_write_file
+      arguments_contain: { path: "../../escape.txt" }
+      error: true
+    - name: eval_write_file
+      arguments_contain: { path: "inside.txt" }
+      error: false
+  final_answer_contains:
+    - "refused"
+  files:
+    - path: inside.txt
+      exists: true
+      content_equals: "kept\n"

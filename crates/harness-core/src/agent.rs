@@ -72,6 +72,23 @@ fn default_auto_compact_enabled() -> bool {
     true
 }
 
+/// How long to wait before retrying a failed model request.
+///
+/// A provider that says how long to wait says it for a reason: retrying earlier is the same
+/// request that just failed, and hammering a rate limit is how one 429 becomes a ban. So the
+/// provider's `Retry-After` wins, and the exponential backoff is only the floor for errors that
+/// carry no timing of their own.
+pub fn retry_delay_secs(error: &HarnessError, attempt: u32) -> u64 {
+    let exponential_floor = 2u64.pow(attempt);
+    match error {
+        HarnessError::RateLimited {
+            retry_after_secs: Some(seconds),
+            ..
+        } => (*seconds).max(exponential_floor),
+        _ => exponential_floor,
+    }
+}
+
 fn default_auto_compact_threshold() -> usize {
     150_000
 }
@@ -1003,7 +1020,7 @@ where
                         break;
                     }
                     Err(e) if e.is_retryable() && attempt < max_retries => {
-                        let delay_secs = 2u64.pow(attempt as u32);
+                        let delay_secs = retry_delay_secs(&e, attempt);
                         warn!(
                             "Model request failed ({}), retrying attempt {}/{} in {}s...",
                             e,

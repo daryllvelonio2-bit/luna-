@@ -677,6 +677,48 @@ async fn test_list_files_is_non_mutating() {
     assert!(!reader.is_mutating(), "list_files is read-only");
 }
 
+/// A model that asks for the workspace root sometimes sends `path: ""` rather than "." or
+/// omitting the field. That is asking for the documented default, not making a mistake, and it
+/// must not cost a failed tool call.
+#[tokio::test]
+async fn a_blank_path_lists_the_workspace_root() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    tokio::fs::write(root.join("main.rs"), "fn main() {}")
+        .await
+        .unwrap();
+
+    let res = ListFilesTool::new(root)
+        .execute("l1", &json!({ "path": "" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(!res.is_error, "a blank path must not fail: {}", res.content);
+    assert!(res.content.contains("main.rs"), "got: {}", res.content);
+}
+
+/// The same blank-path rule holds for the search surface.
+#[tokio::test]
+async fn a_blank_path_searches_the_workspace_root() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    tokio::fs::write(root.join("notes.md"), "needle here")
+        .await
+        .unwrap();
+
+    let res = SearchFilesTool::new(root)
+        .execute("s1", &json!({ "pattern": "needle", "path": "" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(!res.is_error, "a blank path must not fail: {}", res.content);
+    assert!(res.content.contains("notes.md"), "got: {}", res.content);
+}
+
 #[tokio::test]
 async fn test_list_files_lists_tree_with_dir_markers() {
     let dir = tempdir().unwrap();

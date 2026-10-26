@@ -1,0 +1,39 @@
+# The failure-thrashing guardrail counts consecutive failures, and a success resets the counter.
+# Three failures in a row stay under the default cap of five, so the turn must survive them and the
+# next successful call must clear the counter.
+case: failure-counter-reset
+prompt: Make three tool calls fail, then make one succeed and report the result.
+tools:
+  - eval_fail
+  - eval_echo
+script:
+  - tool_calls:
+      - name: eval_fail
+        arguments: { message: "first failure" }
+  - tool_calls:
+      - name: eval_fail
+        arguments: { message: "second failure" }
+  - tool_calls:
+      - name: eval_fail
+        arguments: { message: "third failure" }
+  - tool_calls:
+      - name: eval_echo
+        arguments: { text: "recovered" }
+  - answer: Three failures were reported, then eval_echo returned recovered.
+expect:
+  tool_calls:
+    - name: eval_fail
+      arguments_contain: { message: "first failure" }
+      error: true
+    - name: eval_fail
+      arguments_contain: { message: "second failure" }
+      error: true
+    - name: eval_fail
+      arguments_contain: { message: "third failure" }
+      error: true
+    - name: eval_echo
+      arguments_contain: { text: "recovered" }
+      error: false
+  final_answer_contains:
+    - "recovered"
+  files: []

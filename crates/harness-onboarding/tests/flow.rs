@@ -352,6 +352,52 @@ fn onboarding_configures_custom_auto_compact() {
 }
 
 #[test]
+fn onboarding_configures_telegram_gateway() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // persona 1, memory 1, enable auto-compact, default th, default turns, gateway 2 (Telegram), bot token
+    let (outcome, rendered) = drive(
+        &file,
+        "1\n1\n1\n\n\n2\n123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11\n",
+    );
+
+    assert!(outcome.gateway.enabled);
+    assert_eq!(outcome.gateway.platform, "telegram");
+    assert_eq!(
+        outcome.gateway.token.as_deref(),
+        Some("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+    );
+
+    let config = read_config(&file);
+    assert_eq!(config["gateway"]["enabled"].as_bool(), Some(true));
+    assert_eq!(config["gateway"]["platform"].as_str(), Some("telegram"));
+    assert_eq!(
+        config["gateway"]["telegram_bot_token"].as_str(),
+        Some("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+    );
+    assert!(rendered.contains("Messaging gateway"));
+    assert!(rendered.contains("Telegram Bot (enabled)"));
+}
+
+#[test]
+fn onboarding_defaults_to_terminal_only_gateway() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // persona 1, memory 1, enable auto-compact, default th, default turns, gateway 1 (Terminal only)
+    let (outcome, rendered) = drive(&file, "1\n1\n1\n\n\n1\n");
+
+    assert!(!outcome.gateway.enabled);
+    assert_eq!(outcome.gateway.platform, "none");
+
+    let config = read_config(&file);
+    assert_eq!(config["gateway"]["enabled"].as_bool(), Some(false));
+    assert_eq!(config["gateway"]["platform"].as_str(), Some("none"));
+    assert!(rendered.contains("Terminal only (disabled)"));
+}
+
+#[test]
 fn onboarding_disables_auto_compact() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");

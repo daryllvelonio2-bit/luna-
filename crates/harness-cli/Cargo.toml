@@ -41,6 +41,8 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 rusqlite = { workspace = true }
 similar = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
