@@ -369,23 +369,6 @@ impl NotesEngine for NoNotes {
     }
 }
 
-struct NoEvolver;
-#[async_trait::async_trait]
-impl EvolverEngine for NoEvolver {
-    async fn inspect_source(&self, _p: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _d: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn test_patch_sandbox(&self, _p: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _p: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn a_whole_turn_is_undoable_through_the_production_wiring() {
     use tokio_util::sync::CancellationToken;
@@ -425,7 +408,6 @@ async fn a_whole_turn_is_undoable_through_the_production_wiring() {
         }),
         Arc::new(NoMemory),
         Arc::new(NoNotes),
-        Arc::new(NoEvolver),
         registry,
         AgentConfig::default(),
     )

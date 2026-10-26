@@ -419,23 +419,6 @@ impl NotesEngine for NoNotes {
     }
 }
 
-struct NoEvolver;
-#[async_trait]
-impl EvolverEngine for NoEvolver {
-    async fn inspect_source(&self, _p: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _d: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn test_patch_sandbox(&self, _p: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _p: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 async fn run_turn_with(
     rules: Vec<PermissionRule>,
     approver_answer: ApprovalDecision,
@@ -461,7 +444,6 @@ async fn run_turn_with(
         }),
         Arc::new(NoMemory),
         Arc::new(NoNotes),
-        Arc::new(NoEvolver),
         registry,
         AgentConfig::default(),
     )
@@ -533,7 +515,6 @@ async fn an_ask_rule_prompts_even_for_a_tool_that_would_not_ask() {
             }),
             Arc::new(NoMemory),
             Arc::new(NoNotes),
-            Arc::new(NoEvolver),
             registry,
             AgentConfig::default(),
         )
@@ -636,7 +617,6 @@ async fn rules_compose_with_the_real_write_tool() {
         }),
         Arc::new(NoMemory),
         Arc::new(NoNotes),
-        Arc::new(NoEvolver),
         registry,
         AgentConfig::default(),
     )

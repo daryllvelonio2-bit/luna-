@@ -125,9 +125,16 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
         }
     }
 
-    if let Some(q) = current_query {
+    // A history that opens inside a turn — the replay window landed past the user message that
+    // anchors it — still holds Luna's words. Dropping them would leave the resumed session
+    // showing nothing at all, so the leftover becomes a turn of its own with no user line.
+    if current_query.is_some()
+        || current_reasoning.is_some()
+        || !current_tools.is_empty()
+        || current_reply.is_some()
+    {
         turns.push(TurnRecord {
-            user_query: q,
+            user_query: current_query.unwrap_or_default(),
             reasoning: current_reasoning,
             tools: Vec::new(),
             tool_items: current_tools,
@@ -147,7 +154,11 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
         if i > 0 {
             println!();
         }
-        println!("{}", right_aligned_user_message(&turn.user_query, width));
+        // A turn that carries no user line (the replay opened inside a turn) shows Luna's side
+        // alone: there was no user message to put on the right.
+        if !turn.user_query.trim().is_empty() {
+            println!("{}", right_aligned_user_message(&turn.user_query, width));
+        }
 
         let has_reasoning = turn
             .reasoning
@@ -677,11 +688,26 @@ pub fn shorten_paths_in_text(raw: &str) -> String {
     out.join(" ")
 }
 
+/// The effective runtime paths, resolved once per process from the config file and the
+/// environment.
+///
+/// The transcript renders tool calls by looking a record up in the stores it was written to, so
+/// the paths have to be the *configured* ones (`paths.memory_db`, `paths.notes_dir`) — a hardcoded
+/// `~/.luna` would show nothing for an install that moved its state elsewhere.
+fn effective_paths() -> &'static harness_core::config::PathsSettings {
+    static PATHS: std::sync::LazyLock<harness_core::config::PathsSettings> =
+        std::sync::LazyLock::new(|| {
+            harness_core::config::process_layers(harness_core::Config::default())
+                .ok()
+                .and_then(|layers| harness_core::config::resolve(&layers).ok())
+                .map(|resolved| resolved.into_config().paths)
+                .unwrap_or_default()
+        });
+    &PATHS
+}
+
 fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
-    let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home)
-        .join(".luna")
-        .join("memory.db");
+    let db_path = effective_paths().memory_db.clone();
     if !db_path.exists() {
         return None;
     }
@@ -700,11 +726,41 @@ fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
     None
 }
 
-fn lookup_note_title_from_db(id: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home)
-        .join(".luna")
-        .join("notes.db");
+/// The title of a note, by its id (file stem) or by its exact title.
+///
+/// File-backed notes are plain markdown, so the title comes from the front matter of
+/// `<notes_dir>/<id>.md`; a title that is not a file name is matched by scanning the folder.
+fn lookup_note_title(id: &str) -> Option<String> {
+    let paths = effective_paths();
+    let dir = &paths.notes_dir;
+
+    let direct = dir.join(format!("{}.md", id));
+    if direct.exists() {
+        if let Some(title) = read_note_title(&direct) {
+            return Some(title);
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(title) = read_note_title(&path) {
+                if title.eq_ignore_ascii_case(id) {
+                    return Some(title);
+                }
+            }
+        }
+    }
+
+    // Legacy store, before the import ran (or for a note the import skipped).
+    let db_path = if paths.notes_db.exists() {
+        paths.notes_db.clone()
+    } else {
+        paths.notes_db.with_extension("db.imported")
+    };
     if !db_path.exists() {
         return None;
     }
@@ -718,6 +774,26 @@ fn lookup_note_title_from_db(id: &str) -> Option<String> {
     if let Ok(Some(row)) = rows.next() {
         let title: String = row.get(0).ok()?;
         return Some(title);
+    }
+    None
+}
+
+/// The `title:` field of a note's front matter, if the file has one.
+fn read_note_title(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if line.trim() == "---" {
+            // The front matter ended without a title.
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim() == "title" {
+                let title = value.trim().to_string();
+                if !title.is_empty() {
+                    return Some(title);
+                }
+            }
+        }
     }
     None
 }
@@ -1029,7 +1105,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
                 let display_title =
-                    lookup_note_title_from_db(target).unwrap_or_else(|| target.to_string());
+                    lookup_note_title(target).unwrap_or_else(|| target.to_string());
                 let action = match name {
                     "update_note" => suffix("(update)".to_string()),
                     "delete_note" => suffix("(delete)".to_string()),
@@ -1042,28 +1118,6 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                     quoted(&display_title),
                     action
                 );
-            }
-        }
-        "inspect_harness_source" => {
-            if let Some(path) = text("path") {
-                return format!("{} {} {}", glyph, verb_col(name), path.cyan());
-            }
-        }
-        "propose_harness_patch" => {
-            if let Some(path) = text("target_file") {
-                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
-                return format!(
-                    "{} {} {}{}",
-                    glyph,
-                    verb_col(name),
-                    path.cyan(),
-                    suffix(format!("{} lines", lines))
-                );
-            }
-        }
-        "apply_harness_update" => {
-            if let Some(id) = text("patch_id") {
-                return format!("{} {} {}", glyph, verb_col(verb), id.cyan());
             }
         }
         _ => {}
@@ -1182,7 +1236,7 @@ pub fn format_approval_verdict(is_approved: bool, request: &ApprovalRequest) -> 
                 .or_else(|| text_arg("id"))
                 .or_else(|| text_arg("title"))
                 .unwrap_or("note");
-            let display_name = lookup_note_title_from_db(id).unwrap_or_else(|| {
+            let display_name = lookup_note_title(id).unwrap_or_else(|| {
                 if id.len() > 16 && id.starts_with("note_") {
                     format!("{}…", &id[..13])
                 } else {

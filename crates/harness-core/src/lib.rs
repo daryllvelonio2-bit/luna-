@@ -5,14 +5,11 @@ pub mod config;
 pub mod error;
 pub mod glob;
 pub mod hooks;
-pub mod ledger;
 pub mod permission;
 pub mod prompts;
 pub mod registry;
 pub mod saver;
 pub mod session;
-pub mod substrate;
-pub mod surface;
 pub mod tasks;
 pub mod text;
 pub mod tools;
@@ -42,7 +39,6 @@ pub use hooks::{
     HookContext, HookEvent, HookOutcome, HookRunner, HookSpec, HookVerdict,
     DEFAULT_HOOK_TIMEOUT_SECS,
 };
-pub use ledger::{RolloutLedger, RolloutRecord, StageKind};
 pub use permission::{PermissionEngine, PermissionRule, RuleAction, RuleVerdict};
 pub use registry::DefaultToolRegistry;
 pub use saver::{transcript_tail, BackgroundSaver, SaveReport, SaverHook};
@@ -51,14 +47,9 @@ pub use session::{
     CompactionOutcome, Estimate, EstimateSource, ReplayOutcome, SessionRecord, SessionStore,
     SqliteSessionStore, StoredMessage, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE,
 };
-pub use substrate::{LocalAgentSubstrate, MockSubstrate, Substrate, SubstrateOutcome};
-pub use surface::{
-    GuardrailsSpec, MemorySpec, PluginSpec, ScriptSpec, SkillSpec, SubagentSpec, SurfaceSpec,
-    SystemPromptSpec,
-};
 pub use tasks::BackgroundTaskQueue;
 pub use traits::{
-    EvolverEngine, MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry,
+    MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry,
 };
 pub use types::*;
 pub use usage::{

@@ -201,7 +201,7 @@ fn the_greeting_is_centered_and_the_briefing_keeps_its_shape() {
         (columns().columns as usize - text.len()) / 2,
         "greeting is not centered: {greeting:?}"
     );
-    assert!(rendered.contains("I inspect, execute, reflect, and self-improve"));
+    assert!(rendered.contains("I inspect, execute, and reflect"));
     assert!(rendered.contains("tune my neural core to your style"));
     assert!(rendered.contains("NEURAL CORE CALIBRATION"));
     for persona in harness_onboarding::CATALOG {
@@ -430,4 +430,25 @@ fn compact_step_parsers() {
     assert_eq!(parse_turns("5").unwrap(), 5);
     assert_eq!(parse_turns("").unwrap(), 20);
     assert!(parse_turns("0").is_err());
+}
+
+#[test]
+fn onboarding_configures_custom_notes_dir() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let notes_dir = tmp.path().join("custom-notes");
+
+    // persona 1, memory 1, auto-compact default, gateway default, custom notes_dir
+    let (outcome, rendered) = drive(&file, &format!("1\n1\n1\n\n\n1\n{}\n", notes_dir.display()));
+
+    assert_eq!(outcome.notes_dir, notes_dir);
+    assert!(notes_dir.is_dir(), "the chosen folder is created");
+
+    let config = read_config(&file);
+    assert_eq!(
+        config["paths"]["notes_dir"].as_str(),
+        Some(notes_dir.to_str().unwrap())
+    );
+    assert!(rendered.contains("Notes directory"));
+    assert!(rendered.contains(notes_dir.to_str().unwrap()));
 }

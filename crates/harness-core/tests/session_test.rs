@@ -319,24 +319,6 @@ impl NotesEngine for MockNotes {
     }
 }
 
-struct MockEvolver;
-
-#[async_trait]
-impl EvolverEngine for MockEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _description: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("patch_1".to_string())
-    }
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------- helpers
 
 fn temp_store() -> (TempDir, std::path::PathBuf, SqliteSessionStore) {
@@ -522,6 +504,50 @@ async fn replay_bound_keeps_the_newest_and_reports_the_total() {
             Some("line 9".to_string())
         ]
     );
+}
+
+/// The bound counts rows, but a row is not a turn: one long turn can fill the whole window, and
+/// a window that holds no user row replays as nothing at all — the console prints an empty
+/// transcript and the model is handed tool results whose calls are missing. The window is pulled
+/// back to the user message that anchors the turn it landed in.
+#[tokio::test]
+async fn replay_window_pulls_back_to_the_user_message_that_anchors_the_turn() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+    store
+        .append("s1", &Message::user("the first question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("the first answer"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::user("the question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("the answer"), false)
+        .await
+        .unwrap();
+
+    // A bound of one row would take the answer alone and leave the question behind.
+    let replay = store.replay("s1", 1).await.unwrap();
+    let roles: Vec<Role> = replay
+        .history
+        .iter()
+        .map(|stored| stored.message.role)
+        .collect();
+    assert_eq!(
+        roles,
+        vec![Role::User, Role::Assistant],
+        "the turn comes in whole, so it can be read and replayed"
+    );
+    assert_eq!(
+        replay.history[0].message.content.as_deref(),
+        Some("the question")
+    );
+    assert!(replay.truncated(), "the bound still dropped the rest");
 }
 
 #[tokio::test]
@@ -1258,7 +1284,6 @@ async fn run_turn_does_not_wait_for_the_fold_and_the_next_turn_reaps_it() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1334,7 +1359,6 @@ async fn run_turn_survives_a_failing_compaction_provider_and_does_not_retry() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1399,7 +1423,6 @@ async fn the_explicit_compact_reports_a_failed_summary_as_a_failure() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1441,7 +1464,6 @@ async fn the_explicit_compact_says_when_no_compaction_provider_is_set_up() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1482,7 +1504,6 @@ async fn agent_summarize_current_session_works_and_rejects_empty() {
         provider.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1500,7 +1521,6 @@ async fn agent_summarize_current_session_works_and_rejects_empty() {
         provider.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1601,7 +1621,6 @@ async fn a_fold_announces_the_shrunken_context_without_waiting_for_a_model_call(
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1670,7 +1689,6 @@ async fn estimate_after_a_fold_ignores_the_usage_of_the_pre_fold_transcript() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         agent_config(),
     )
@@ -1778,7 +1796,6 @@ async fn auto_compact_folds_in_the_background_and_the_next_request_carries_the_s
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         cfg,
     )
@@ -1898,7 +1915,6 @@ async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         cfg,
     )
@@ -1948,20 +1964,24 @@ async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
 
 /// One fold per turn — even though the turn's own request still measures the *unfolded* transcript.
 ///
-/// A fold that lands while a turn runs rewrites the stored history, but the running turn keeps its
-/// own copy and its remaining model calls go on reporting that copy's size. Those reports describe a
-/// transcript the fold has already replaced, so a check that trusts them folds a second time —
-/// spending another summarising call to summarise the summary it has just written.
+/// A fold that lands while a turn runs rewrites the stored history, and the turn's remaining
+/// model calls go on reporting their own (stale, larger) size. The re-armed check measures the
+/// STORED transcript, so it folds again only when the store itself is still over the bar — never
+/// because of a stale in-memory report, and never folding the summary it just wrote.
 #[tokio::test]
 async fn a_turn_folds_once_even_when_its_reports_still_describe_the_unfolded_transcript() {
-    let (_dir, path, store) = seeded_store(6).await;
+    let (_dir, path, store) = seeded_store_with_reported_usage(6, 20_000).await;
     // Slow enough that the fold from the top of the turn has finished before the turn ends, which is
     // the state the check has to get right: nothing in flight, and a transcript already rewritten.
     let main = Arc::new(SlowProvider::new(300));
     let summariser = Arc::new(CannedProvider::new("FOLDED"));
 
     let mut cfg = agent_config();
-    cfg.compact_at_tokens = 1; // crossed before the turn's own work even starts
+    // The bar sits between the seeded transcript's REPORTED size (20k, crossed before the turn's
+    // own work starts) and the folded store (a summary plus the 2 kept turns plus the system
+    // prompt ≈ 3.3k). The re-armed check therefore finds the store under the bar and answers the
+    // crossing exactly once.
+    cfg.compact_at_tokens = 5_000;
     cfg.auto_compact_enabled = false;
     cfg.keep_recent_turns = 2;
 
@@ -1969,7 +1989,6 @@ async fn a_turn_folds_once_even_when_its_reports_still_describe_the_unfolded_tra
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         cfg,
     )
@@ -2050,7 +2069,6 @@ async fn auto_compact_never_empties_a_session_that_holds_fewer_turns_than_it_kee
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         cfg,
     )

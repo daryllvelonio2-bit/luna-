@@ -22,23 +22,17 @@ A production-grade, extensible **Autonomous AI Agent Harness** implemented in **
    - Automated **1–5 word memory pointer distillation** protocol bridge: note saves automatically register a concise 1–5 word pointer in persistent memory so the agent retains awareness without prompt bloat.
    - Native tools: `save_note`, `search_notes`, `read_note`, `update_note`.
 
-4. **Autonomous Self-Improvement & Evolution (`harness-evolver`)**:
-   - Diagnoses friction and missing capabilities across three tiers:
-     - **Tier 1**: Declarative Markdown/YAML skills under `.harness/skills/`.
-     - **Tier 2**: Dynamic Wasm plugins & MCP servers.
-     - **Tier 3**: Core codebase inspection (`inspect_harness_source`), patch proposal (`propose_harness_patch`), isolated build verification (`test_patch_sandbox` running `cargo test`), and supervisor recompile/restart.
-
-5. **Ecosystem Extensibility**:
+4. **Ecosystem Extensibility**:
    - Model Context Protocol (MCP) client implementation over Stdio and SSE.
    - Sandboxed Wasm plugins with memory and execution constraints.
    - Declarative Markdown prompt skills loader.
 
-6. **Adaptive Failure Detector & Safety Control**:
+5. **Adaptive Failure Detector & Safety Control**:
    - Unbounded execution loop that runs as long as productive progress is made.
    - **5 consecutive non-working calls threshold**: halts only when thrashing on 5 consecutive failures, resetting immediately on any successful call.
    - Cooperative cancellation via `CancellationToken`.
 
-7. **Hands-Free Dynamic Voice Interface (Wake Word "Luna", STT & TTS)**:
+6. **Hands-Free Dynamic Voice Interface (Wake Word "Luna", STT & TTS)**:
    - Background listening for wake word `"Luna"` via `cpal` (<2% CPU loop).
    - Voice Activity Detection (VAD) audio capture.
    - Pluggable STT and streaming TTS playback via `rodio`.
@@ -58,7 +52,6 @@ rust-agent-harness/
 │   ├── harness-plugins/         # Sandboxed Wasm plugin runtime & skill loader
 │   ├── harness-memory/          # Model-driven persistent memory engine & memory tools
 │   ├── harness-notes/           # Large document storage, FTS5 indexing, 1-5 word pointer bridge
-│   ├── harness-evolver/         # Self-improvement engine, codebase patcher, sandbox build runner
 │   ├── harness-voice/           # Hands-free "Luna" wake word, VAD, STT & streaming TTS
 │   ├── harness-telemetry/       # Structured logging, token tracker, tracing setup
 │   └── harness-cli/             # CLI frontend, `luna auth`, `luna voice`, REPL & supervisor

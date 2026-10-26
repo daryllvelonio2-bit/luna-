@@ -224,24 +224,6 @@ impl NotesEngine for MockNotes {
     }
 }
 
-struct MockEvolver;
-
-#[async_trait]
-impl EvolverEngine for MockEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _description: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("patch_1".to_string())
-    }
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 /// What one run of the loop did.
 struct Observed {
     reply: Result<String, HarnessError>,
@@ -276,7 +258,6 @@ async fn run_case(
         provider,
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         registry,
         config,
     )

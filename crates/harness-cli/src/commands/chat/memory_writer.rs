@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use harness_core::config::Config;
+use harness_core::NotesEngine;
 use harness_memory::{MemorySaver, SaverPolicy, SqliteMemoryEngine};
-use harness_notes::SqliteNotesEngine;
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
 /// Build the independent memory writer, or `None` when the config keeps the session as the writer.
@@ -39,7 +39,7 @@ use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery
 pub fn build_saver(
     config: &Config,
     memory: &Arc<SqliteMemoryEngine>,
-    notes: &Arc<SqliteNotesEngine>,
+    notes: Arc<dyn NotesEngine>,
     session_provider: &str,
     session_model: &str,
     cred_manager: Arc<CredentialManager>,
@@ -111,13 +111,13 @@ pub fn notice(config: &Config) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The policy is only reachable through the trait the agent uses, which is the point of the test.
     use harness_core::BackgroundSaver;
+    use harness_notes::FileNotesEngine;
 
-    fn temp_engines() -> (Arc<SqliteMemoryEngine>, Arc<SqliteNotesEngine>) {
+    fn temp_engines() -> (Arc<SqliteMemoryEngine>, Arc<dyn NotesEngine>) {
         (
             Arc::new(SqliteMemoryEngine::in_memory().expect("memory db")),
-            Arc::new(SqliteNotesEngine::in_memory().expect("notes db")),
+            Arc::new(FileNotesEngine::in_memory().expect("notes db")),
         )
     }
 
@@ -140,7 +140,7 @@ mod tests {
         build_saver(
             config,
             &memory,
-            &notes,
+            notes,
             "nvidia",
             "session-model",
             cred_manager,

@@ -22,7 +22,7 @@ impl Tool for SaveNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Save large text, logs, specifications, transcripts, or documentation to persistent storage. Automatically generates a 1-5 word memory pointer so you retain awareness of the document."
+        "Save large text, logs, specifications, transcripts, or documentation to persistent storage as a markdown file. Automatically generates a 1-5 word memory pointer so you retain awareness of the document."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -105,7 +105,7 @@ impl Tool for SearchNotesTool {
     }
 
     fn description(&self) -> &str {
-        "Perform full-text search (FTS5) across stored notes, titles, and documentation."
+        "Search stored notes by keyword across their titles, bodies, and tags."
     }
 
     fn parameters(&self) -> serde_json::Value {

@@ -460,23 +460,6 @@ impl NotesEngine for StubNotes {
     }
 }
 
-struct StubEvolver;
-#[async_trait]
-impl EvolverEngine for StubEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("patch_1".to_string())
-    }
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 struct RecorderTool {
     seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
@@ -529,14 +512,12 @@ async fn run_agent_with_hooks(
     });
     let memory = Arc::new(StubMemory);
     let notes = Arc::new(StubNotes);
-    let evolver = Arc::new(StubEvolver);
 
     let runner = HookRunner::load(workspace, &settings(true, trust_workspace)).unwrap();
     let agent = Agent::new(
         provider,
         memory,
         notes,
-        evolver,
         registry,
         AgentConfig::default(),
     )

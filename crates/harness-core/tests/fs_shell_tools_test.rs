@@ -295,6 +295,50 @@ async fn test_terminal_exit_code_and_timeout() {
         .unwrap();
     assert!(timeout_res.is_error);
     assert!(timeout_res.content.contains("timed out"));
+    // The model's next move after a timeout is to try again, so the message has to say how: the
+    // luna session that hit this twice repeated a 120s cargo test and timed out again, because
+    // nothing told it the budget was configurable.
+    assert!(
+        timeout_res.content.contains("timeout_s"),
+        "the timeout message must name the knob that raises it: {}",
+        timeout_res.content
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_command_leaves_no_children_behind() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+    let term = TerminalTool::new(root.clone(), 1, 50_000);
+
+    // The shell dies on the timeout; its own child does not. That child is what makes a timeout
+    // *cascade*: a killed `cargo test` leaves cargo and rustc compiling in the background, holding
+    // the target-directory lock, so the retry blocks on that lock and times out too. In the luna
+    // session this test is drawn from, two identical `cargo test --package harness-cli` calls were
+    // killed at the 120s mark and the third — same command, larger budget — finished in 33s,
+    // because the first two had kept building after their shells were gone.
+    //
+    // The trailing `; echo` is what makes the shell fork instead of exec-ing the inner one in
+    // place: without a second command there is no grandchild, and the bug hides.
+    let marker = root.join("grandchild_survived");
+    let res = term
+        .execute(
+            "call_orphan",
+            &json!({ "command": "sh -c 'sleep 3; touch grandchild_survived' ; echo done" }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(res.is_error, "the command must time out: {}", res.content);
+
+    // Give the grandchild more than its 3s of life to prove itself either way.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert!(
+        !tokio::fs::try_exists(&marker).await.unwrap(),
+        "the timed-out command's child kept running: {} appeared",
+        marker.display()
+    );
 }
 
 #[tokio::test]
@@ -1377,32 +1421,10 @@ async fn test_delegate_task_tool() {
         }
     }
 
-    struct MockEvol;
-    #[async_trait::async_trait]
-    impl harness_core::traits::EvolverEngine for MockEvol {
-        async fn inspect_source(&self, _p: &str) -> Result<String, harness_core::HarnessError> {
-            Ok(String::new())
-        }
-        async fn propose_patch(
-            &self,
-            _d: &str,
-            _diff: &str,
-        ) -> Result<String, harness_core::HarnessError> {
-            Ok("p1".to_string())
-        }
-        async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            Ok(true)
-        }
-        async fn apply_patch(&self, _id: &str) -> Result<(), harness_core::HarnessError> {
-            Ok(())
-        }
-    }
-
     let delegate = harness_core::tools::DelegateTaskTool::new(
         Arc::new(EchoProvider),
         Arc::new(MockMem),
         Arc::new(MockNotes),
-        Arc::new(MockEvol),
         None,
         config,
     );
@@ -1553,32 +1575,10 @@ async fn test_delegate_task_tool_background_dispatch_and_polling() {
         }
     }
 
-    struct MockEvol;
-    #[async_trait::async_trait]
-    impl harness_core::traits::EvolverEngine for MockEvol {
-        async fn inspect_source(&self, _p: &str) -> Result<String, harness_core::HarnessError> {
-            Ok(String::new())
-        }
-        async fn propose_patch(
-            &self,
-            _d: &str,
-            _diff: &str,
-        ) -> Result<String, harness_core::HarnessError> {
-            Ok("p1".to_string())
-        }
-        async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            Ok(true)
-        }
-        async fn apply_patch(&self, _id: &str) -> Result<(), harness_core::HarnessError> {
-            Ok(())
-        }
-    }
-
     let delegate = harness_core::tools::DelegateTaskTool::new(
         Arc::new(EchoProvider),
         Arc::new(MockMem),
         Arc::new(MockNotes),
-        Arc::new(MockEvol),
         None,
         config,
     );

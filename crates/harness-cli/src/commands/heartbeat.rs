@@ -90,7 +90,7 @@ pub async fn handle_chat_heartbeat(
     let git = get_git_status(&cwd).unwrap_or_else(|| "non-git".to_string());
 
     // Check agent state safely without deadlocking active turns
-    let (status_str, tools_str, evolver_str, context_str) = match agent.try_lock() {
+    let (status_str, tools_str, context_str) = match agent.try_lock() {
         Ok(ag) => {
             let tools = ag.registry().list_tools().await.unwrap_or_default();
             let tool_names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
@@ -99,25 +99,6 @@ pub async fn handle_chat_heartbeat(
                 tool_names.len(),
                 tool_names.join(", ")
             );
-
-            let evolver_desc = {
-                let jobs = ag.evolver().list_jobs().await.unwrap_or_default();
-                let active: Vec<_> = jobs
-                    .iter()
-                    .filter(|j| j.status == harness_evolver::JobStatus::Running)
-                    .collect();
-                if active.is_empty() {
-                    format!("idle ({} completed jobs)", jobs.len())
-                } else {
-                    let j = active[0];
-                    format!(
-                        "{} active: #{} [tool: {}]",
-                        active.len(),
-                        j.id,
-                        j.current_tool.as_deref().unwrap_or("running")
-                    )
-                }
-            };
 
             let ctx = ag.estimate_session_tokens().await.unwrap_or(0);
             let max_ctx = context_window_for(config, current_provider, current_model);
@@ -128,12 +109,11 @@ pub async fn handle_chat_heartbeat(
             };
             let ctx_desc = format!("{} / {}k tokens ({:.1}%)", ctx, max_ctx / 1000, pct);
 
-            ("idle", tools_desc, evolver_desc, ctx_desc)
+            ("idle", tools_desc, ctx_desc)
         }
         Err(_) => (
             "active (turn in progress)",
             "n/a (agent busy)".to_string(),
-            "n/a".to_string(),
             "n/a".to_string(),
         ),
     };
@@ -159,7 +139,6 @@ pub async fn handle_chat_heartbeat(
     ));
     lines.push(format!("  status:     {}", status_str));
     lines.push(format!("  tools:      {}", tools_str));
-    lines.push(format!("  evolver:    {}", evolver_str));
     lines.push(format!("  workspace:  {} ({})", dir_name, git));
 
     if arg == Some("ping") {

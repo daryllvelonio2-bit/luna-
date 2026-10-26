@@ -1265,7 +1265,6 @@ dependencies = [
  "dialoguer",
  "futures-util",
  "harness-core",
- "harness-evolver",
  "harness-mcp",
  "harness-memory",
  "harness-notes",
@@ -1303,27 +1302,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "similar",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "harness-evolver"
-version = "0.1.1"
-dependencies = [
- "async-trait",
- "chrono",
- "harness-core",
- "harness-providers",
- "libc",
- "serde",
- "serde_json",
  "similar",
  "tempfile",
  "thiserror 1.0.69",

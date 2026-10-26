@@ -73,7 +73,7 @@ Things worth knowing before writing a case:
 - **Approval** is applied by a registry wrapper in the eval runner, because the agent loop has no
   gate yet (`AgentConfig::require_hitl_for_mutation` is unused — card `t_c4f9c07d` owns that). A
   denied call returns `Human approval rejected: …` as a tool result and never reaches the tool.
-- **Memory, notes and the evolver are no-op engines** in a case: the suite measures the loop, the
+- **Memory and notes are no-op engines** in a case: the suite measures the loop, the
   provider and the case's tools, not persistence. A case that wants a real tool goes through
   `register_builtin` and the tool list below.
 - A live backend ignores `script:` — the real model decides its own tool calls, so a live run of case
