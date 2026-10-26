@@ -1964,20 +1964,24 @@ async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
 
 /// One fold per turn — even though the turn's own request still measures the *unfolded* transcript.
 ///
-/// A fold that lands while a turn runs rewrites the stored history, but the running turn keeps its
-/// own copy and its remaining model calls go on reporting that copy's size. Those reports describe a
-/// transcript the fold has already replaced, so a check that trusts them folds a second time —
-/// spending another summarising call to summarise the summary it has just written.
+/// A fold that lands while a turn runs rewrites the stored history, and the turn's remaining
+/// model calls go on reporting their own (stale, larger) size. The re-armed check measures the
+/// STORED transcript, so it folds again only when the store itself is still over the bar — never
+/// because of a stale in-memory report, and never folding the summary it just wrote.
 #[tokio::test]
 async fn a_turn_folds_once_even_when_its_reports_still_describe_the_unfolded_transcript() {
-    let (_dir, path, store) = seeded_store(6).await;
+    let (_dir, path, store) = seeded_store_with_reported_usage(6, 20_000).await;
     // Slow enough that the fold from the top of the turn has finished before the turn ends, which is
     // the state the check has to get right: nothing in flight, and a transcript already rewritten.
     let main = Arc::new(SlowProvider::new(300));
     let summariser = Arc::new(CannedProvider::new("FOLDED"));
 
     let mut cfg = agent_config();
-    cfg.compact_at_tokens = 1; // crossed before the turn's own work even starts
+    // The bar sits between the seeded transcript's REPORTED size (20k, crossed before the turn's
+    // own work starts) and the folded store (a summary plus the 2 kept turns plus the system
+    // prompt ≈ 3.3k). The re-armed check therefore finds the store under the bar and answers the
+    // crossing exactly once.
+    cfg.compact_at_tokens = 5_000;
     cfg.auto_compact_enabled = false;
     cfg.keep_recent_turns = 2;
 
