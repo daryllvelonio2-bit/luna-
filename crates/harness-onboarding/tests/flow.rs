@@ -431,3 +431,19 @@ fn compact_step_parsers() {
     assert_eq!(parse_turns("").unwrap(), 20);
     assert!(parse_turns("0").is_err());
 }
+
+#[test]
+fn onboarding_configures_custom_notes_dir() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+
+    // persona 1, memory 1, auto-compact default, gateway default, custom notes_dir
+    let (outcome, rendered) = drive(&file, "1\n1\n1\n\n\n1\n/custom/notes/path\n");
+
+    assert_eq!(outcome.notes_dir, std::path::PathBuf::from("/custom/notes/path"));
+
+    let config = read_config(&file);
+    assert_eq!(config["paths"]["notes_dir"].as_str(), Some("/custom/notes/path"));
+    assert!(rendered.contains("Notes directory"));
+    assert!(rendered.contains("/custom/notes/path"));
+}

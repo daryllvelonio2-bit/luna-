@@ -18,7 +18,7 @@ use harness_core::{
 };
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
-    DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
+    DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
@@ -83,7 +83,10 @@ pub async fn run_gateway(
     let memory = Arc::new(SqliteMemoryEngine::new(Some(
         config.paths.memory_db.clone(),
     ))?);
-    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
 
     // Build platform adapters
     let requested_platform =

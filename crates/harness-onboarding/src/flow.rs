@@ -54,6 +54,8 @@ pub struct Outcome {
     pub persona: &'static Persona,
     /// Who writes durable memory from now on.
     pub memory: MemoryMode,
+    /// Where markdown notes live on disk.
+    pub notes_dir: PathBuf,
     /// Automatic compaction settings.
     pub auto_compact: store::AutoCompactSelection,
     /// Messaging platform gateway settings.
@@ -101,13 +103,24 @@ where
     // Phase 2d: messaging gateway setup.
     let gateway = crate::gateway_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, persona, memory, &auto_compact, &gateway)?;
+    // Phase 2e: where markdown notes are stored.
+    let notes_dir = crate::notes_step::select(&mut writer, reader)?;
+
+    let config_path = store::persist(
+        layers,
+        persona,
+        memory,
+        &notes_dir,
+        &auto_compact,
+        &gateway,
+    )?;
 
     let mut writer = Typewriter::new(out, pacer, size);
     confirmation(
         &mut writer,
         persona,
         memory,
+        &notes_dir,
         &auto_compact,
         &gateway,
         &config_path,
@@ -116,6 +129,7 @@ where
     Ok(Outcome {
         persona,
         memory,
+        notes_dir,
         auto_compact,
         gateway,
         config_path,
@@ -228,6 +242,7 @@ fn confirmation<W: Write, P: Pacer>(
     writer: &mut Typewriter<'_, W, P>,
     persona: &Persona,
     memory: MemoryMode,
+    notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
     config_path: &Path,
@@ -237,6 +252,7 @@ fn confirmation<W: Write, P: Pacer>(
     let lines = confirmation_lines(
         persona,
         memory,
+        notes_dir,
         auto_compact,
         gateway,
         config_path,
@@ -250,6 +266,7 @@ fn confirmation<W: Write, P: Pacer>(
 pub fn confirmation_lines(
     persona: &Persona,
     memory: MemoryMode,
+    notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
     config_path: &Path,
@@ -280,6 +297,20 @@ pub fn confirmation_lines(
     } else {
         lines.push(Line::of(Span::muted(label)));
         for wrapped in screen::wrap(summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
+    lines.push(Line::blank());
+    let nd_label = "Notes directory";
+    let nd_summary = notes_dir.display().to_string();
+    if nd_label.len() + 2 + nd_summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{nd_label}  ")))
+                .with(Span::strong(nd_summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(nd_label)));
+        for wrapped in screen::wrap(&nd_summary, limit) {
             lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
         }
     }
@@ -340,11 +371,13 @@ mod tests {
     fn the_confirmation_names_the_persona_and_the_file() {
         let persona = persona::by_id(3).expect("in the catalog");
         let path = PathBuf::from("/home/janelle/.luna/config.yaml");
+        let notes_dir = PathBuf::from("/home/janelle/.luna/notes");
         let ac = store::AutoCompactSelection::default();
         let gw = store::GatewaySelection::default();
         let block = confirmation_lines(
             persona,
             MemoryMode::Background,
+            &notes_dir,
             &ac,
             &gw,
             &path,
@@ -367,12 +400,14 @@ mod tests {
     #[test]
     fn the_confirmation_fits_a_narrow_terminal() {
         let persona = persona::by_id(9).expect("in the catalog");
+        let notes_dir = PathBuf::from("~/.luna/notes");
         for columns in [40u16, 80, 120] {
             let ac = store::AutoCompactSelection::default();
             let gw = store::GatewaySelection::default();
             for line in confirmation_lines(
                 persona,
                 MemoryMode::Session,
+                &notes_dir,
                 &ac,
                 &gw,
                 &PathBuf::from("~/.luna/config.yaml"),

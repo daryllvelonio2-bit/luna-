@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
-    DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
+    DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
@@ -93,7 +93,10 @@ pub async fn run_voice_loop(
     let memory = Arc::new(SqliteMemoryEngine::new(Some(
         config.paths.memory_db.clone(),
     ))?);
-    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
     let registry = Arc::new(DefaultToolRegistry::new());
 
     let background_mode = config.memory.mode.is_background();

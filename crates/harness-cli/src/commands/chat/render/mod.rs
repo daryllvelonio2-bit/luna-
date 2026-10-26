@@ -713,14 +713,37 @@ fn lookup_memory_from_db(id: &str) -> Option<(String, String)> {
 
 fn lookup_note_title_from_db(id: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
-    let db_path = std::path::PathBuf::from(home)
-        .join(".luna")
-        .join("notes.db");
-    if !db_path.exists() {
+    let luna = std::path::PathBuf::from(home).join(".luna");
+
+    // 1. Try file-backed note in ~/.luna/notes/<id>.md
+    let note_path = luna.join("notes").join(format!("{}.md", id));
+    if note_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&note_path) {
+            for line in content.lines() {
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.trim() == "title" {
+                        let title = v.trim().to_string();
+                        if !title.is_empty() {
+                            return Some(title);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Legacy notes.db (or .imported) fallback
+    let db_path = luna.join("notes.db");
+    let active_db = if db_path.exists() {
+        db_path
+    } else {
+        luna.join("notes.db.imported")
+    };
+    if !active_db.exists() {
         return None;
     }
     let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(&active_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     let mut stmt = conn
         .prepare("SELECT title FROM notes WHERE id = ?1 OR title = ?1 COLLATE NOCASE LIMIT 1")

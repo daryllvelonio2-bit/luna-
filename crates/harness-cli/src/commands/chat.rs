@@ -13,7 +13,7 @@ use harness_core::{
 };
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
-    DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
+    DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
@@ -58,7 +58,7 @@ use viewer::show_background_task_viewer;
 pub(crate) type ChatAgent = Agent<
     GenericProviderClient,
     SqliteMemoryEngine,
-    SqliteNotesEngine,
+    FileNotesEngine,
     DefaultToolRegistry,
 >;
 
@@ -174,7 +174,10 @@ pub async fn run_interactive_chat(
     let memory = Arc::new(SqliteMemoryEngine::new(Some(
         config.paths.memory_db.clone(),
     ))?);
-    let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
 
     // Who writes durable memory. `session` (the default) keeps the original behaviour: the agent
     // decides mid-turn and calls `save_memory` / `save_note`. `background` hands the pen to an
@@ -184,7 +187,7 @@ pub async fn run_interactive_chat(
     let memory_saver = memory_writer::build_saver(
         &config,
         &memory,
-        &notes,
+        notes.clone(),
         &current_provider,
         &current_model,
         cred_manager.clone(),

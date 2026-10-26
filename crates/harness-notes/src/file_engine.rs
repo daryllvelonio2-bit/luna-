@@ -15,11 +15,35 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::distiller::PointerDistiller;
-use crate::engine::slugify;
 use harness_core::{HarnessError, Note, NotesEngine};
 
 /// Marks the end of the front matter block.
 const FRONT_MATTER_FENCE: &str = "---";
+
+/// Turns a title into a filename-safe slug (`Stripe Spec 2026` → `stripe-spec-2026`).
+pub fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in text.trim().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if c.is_whitespace() || c == '-' || c == '_' || c == '.' || c == '/' {
+            if !slug.is_empty() && !prev_dash {
+                slug.push('-');
+                prev_dash = true;
+            }
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "note".to_string()
+    } else {
+        slug
+    }
+}
 
 pub struct FileNotesEngine {
     dir: PathBuf,
