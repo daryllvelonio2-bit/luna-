@@ -11,10 +11,6 @@ use harness_core::{
     Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
     SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
 };
-use harness_evolver::{
-    apply_update_at_startup, CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool,
-    ListImprovementJobsTool,
-};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
@@ -56,14 +52,13 @@ use render::{
     format_tool_result, parse_turns_from_history, render_transcript, OutputBlockKind,
     TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
-use ui::{get_terminal_width, BackgroundTaskState, ChatUi, RawTerminal, ANIMATION_INTERVAL};
+use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
 
 pub(crate) type ChatAgent = Agent<
     GenericProviderClient,
     SqliteMemoryEngine,
     SqliteNotesEngine,
-    CodebaseEvolver,
     DefaultToolRegistry,
 >;
 
@@ -195,14 +190,6 @@ pub async fn run_interactive_chat(
         cred_manager.clone(),
         discovery.clone(),
     );
-    let evolver = Arc::new(
-        CodebaseEvolver::new(
-            config.paths.workspace_root.clone(),
-            config.paths.jobs_dir.clone(),
-        )
-        .with_provider(provider.clone()),
-    );
-
     let registry = Arc::new(DefaultToolRegistry::new());
 
     // Register native memory tools.
@@ -247,17 +234,6 @@ pub async fn run_interactive_chat(
             eprintln!("{line}");
         }
     }
-
-    // Register self-improvement evolver tools (delegated background engineer)
-    registry
-        .register(Arc::new(DelegateImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(CheckImprovementTool::new(evolver.clone())))
-        .await?;
-    registry
-        .register(Arc::new(ListImprovementJobsTool::new(evolver.clone())))
-        .await?;
 
     // Load skills from skills_dir and workspace .harness/skills
     let mut all_skills = Vec::new();
@@ -307,7 +283,6 @@ pub async fn run_interactive_chat(
         provider.clone(),
         memory.clone(),
         notes.clone(),
-        evolver.clone(),
         Some(store.clone()),
         config.clone(),
     ));
@@ -391,7 +366,6 @@ pub async fn run_interactive_chat(
         provider,
         memory,
         notes,
-        evolver.clone(),
         registry,
         agent_config.clone(),
     )
@@ -898,39 +872,6 @@ pub async fn run_interactive_chat(
         return Ok(());
     }
 
-    // Check for pending self-improvement update before clearing the screen
-    if is_attended {
-        if let Some(pending) = evolver.get_pending_update() {
-            print!(
-                "An improved version of Luna is ready (job {}: {}). Apply now? [Y/n] ",
-                pending.job_id, pending.task
-            );
-            let _ = io::stdout().flush();
-            let mut answer = String::new();
-            if io::stdin().read_line(&mut answer).is_ok() {
-                let trimmed = answer.trim();
-                if trimmed.is_empty()
-                    || trimmed.eq_ignore_ascii_case("y")
-                    || trimmed.eq_ignore_ascii_case("yes")
-                {
-                    match apply_update_at_startup(evolver.repo_root(), &config.paths.jobs_dir) {
-                        Ok(Some(msg)) => {
-                            println!("{}", msg.green());
-                            std::thread::sleep(std::time::Duration::from_millis(800));
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            eprintln!("{} Failed to apply update: {}", "✖".red(), e);
-                            std::thread::sleep(std::time::Duration::from_millis(1200));
-                        }
-                    }
-                } else {
-                    println!("Update deferred.");
-                }
-            }
-        }
-    }
-
     // Start from a clean screen: launching the REPL shouldn't leave whatever the shell was
     // showing above the input box. Attended-only by construction — the non-attended path
     // returned above and `clear_screen` no-ops on a piped stdout anyway.
@@ -950,7 +891,7 @@ pub async fn run_interactive_chat(
             println!(
                 "{}\n",
                 format!(
-                    "… {} earlier messages not shown (last {} resumed)",
+                    "… {} earlier messages not shown ({} shown)",
                     replayed.total - replayed.replayed,
                     replayed.replayed
                 )
@@ -1003,24 +944,6 @@ pub async fn run_interactive_chat(
     // Images pasted via Ctrl+V, waiting to ride the next prompt as data URLs.
     let pending_images: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    let mut evolver_rx = evolver.subscribe();
-    if let Some(active) = evolver.active_job().await {
-        let current_tool = active
-            .logs
-            .iter()
-            .rev()
-            .find(|l| l.starts_with("• Tool:"))
-            .cloned()
-            .unwrap_or_else(|| "Running in background".to_string());
-        ui.set_background_task(Some(BackgroundTaskState {
-            job_id: active.id,
-            task: active.task,
-            current_tool,
-            started_at: std::time::Instant::now(),
-            status: "running".to_string(),
-        }));
-    }
 
     // A resumed session carries its list: the panel is drawn from the start, above
     // the composer, so the tasks are in front of the user before the first prompt.
@@ -1155,52 +1078,6 @@ pub async fn run_interactive_chat(
                 }
             }
 
-            maybe_evolver = evolver_rx.recv() => {
-                if let Ok(event) = maybe_evolver {
-                    match event {
-                        harness_evolver::EvolverEvent::JobStarted { job_id, task } => {
-                            ui.set_background_task(Some(BackgroundTaskState {
-                                job_id,
-                                task,
-                                current_tool: "git worktree setup".to_string(),
-                                started_at: std::time::Instant::now(),
-                                status: "running".to_string(),
-                            }));
-                        }
-                        harness_evolver::EvolverEvent::JobProgress { current_tool, .. } => {
-                            ui.update_background_task_tool(&current_tool);
-                        }
-                        harness_evolver::EvolverEvent::JobCompleted { job_id, status, summary, .. } => {
-                            ui.set_background_task(None);
-                            let is_ok = matches!(
-                                status,
-                                harness_evolver::JobStatus::ScheduledUpdate { .. }
-                                    | harness_evolver::JobStatus::ReadyForReenactment { .. }
-                                    | harness_evolver::JobStatus::Verified
-                            );
-                            let notice = format!(
-                                "{} Background evolve task [{}] finished: {}",
-                                if is_ok { "✔".green().bold() } else { "✖".red().bold() },
-                                job_id.cyan(),
-                                summary
-                            );
-                            ui.emit_above(&notice);
-                            let _ = store
-                                .append(&session_id, &harness_core::Message::system(&notice), false)
-                                .await;
-
-                            let steer_notice = format!(
-                                "[BACKGROUND EVOLVER NOTIFICATION]\nBackground evolve task [{}] finished with status: {}.\nSummary:\n{}\n[/BACKGROUND EVOLVER NOTIFICATION]",
-                                job_id,
-                                if is_ok { "success" } else { "failed" },
-                                summary
-                            );
-                            steer_handle.lock().unwrap().push_back(steer_notice);
-                        }
-                    }
-                }
-            }
-
             maybe_approval = approval_rx.recv() => {
                 let (request, mut decision_tx) = match maybe_approval {
                     Some(pair) => pair,
@@ -1302,7 +1179,6 @@ pub async fn run_interactive_chat(
                         // Ctrl+B: inspect background tasks
                         show_background_task_viewer(
                             &mut key_rx,
-                            evolver.as_ref(),
                             Some(bg_queue.as_ref()),
                             &ui,
                             &turns,

@@ -38,7 +38,7 @@ pub const GREETING: &str = "Hi! I am Luna, your personal AI agent harness.";
 pub const MISSION: [&str; 3] = [
     "I live directly in your terminal, watching over your environments and workflows.",
     "I retain persistent memory across sessions — recalling your project layouts, past mistakes, architectural decisions, and customized conventions.",
-    "I don't just answer questions; I inspect, execute, reflect, and self-improve.",
+    "I don't just answer questions; I inspect, execute, and reflect.",
 ];
 /// The line that hands the floor to the user.
 pub const TRANSITION: &str = "── Let's tune my neural core to your style ──";
@@ -391,7 +391,7 @@ mod tests {
     fn the_briefing_copy_is_the_promised_copy() {
         assert_eq!(GREETING, "Hi! I am Luna, your personal AI agent harness.");
         assert_eq!(MISSION.len(), 3);
-        assert!(MISSION[2].contains("self-improve"));
+        assert!(MISSION[2].contains("inspect, execute"));
         assert!(TRANSITION.contains("tune my neural core"));
     }
 }

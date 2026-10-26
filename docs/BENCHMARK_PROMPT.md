@@ -32,10 +32,8 @@ Scope of everything you may change: **the core agent loop and the system prompt 
 2. **Work in a dedicated worktree.** The shared checkout carries other people's uncommitted work.
    Create/switch to your own worktree + branch before touching anything; never edit
    `/home/janelle/Downloads/rust-agent-harness` directly, never `git push`.
-3. **Harness-source fixes are yours to make directly in this worktree.** The default
-   `delegate_improvement` routing exists for runtime defects in the *native tool layer*; use it only
-   when the defect is in the harness's own tool implementations and you cannot fix it by editing
-   repo source. Everything else in this repo: read → patch → verify, in your worktree.
+3. **Harness-source fixes are yours to make directly in this worktree.** Read → patch → verify,
+   in your worktree. There is no separate escalation path for the harness's own source.
 4. **No credentials in artifacts.** Never print, log, commit or paste the NVIDIA key. Use
    `scripts/register-nvidia-key.py`. Nothing under `~/.luna/` may end up in the repo.
 5. **One build at a time, two jobs.** `CARGO_BUILD_JOBS=2`; never export `CARGO_TARGET_DIR`
@@ -156,11 +154,11 @@ for every task.
 | T25 | "Run `/help`, then `/compact`, then `/auto-compact`." | Each command routes to its own handler; nothing is swallowed by the slash menu; no argument-less command opens the wrong UI. |
 | T26 | "Start a long-running task, then send `/steer focus on the parser first`, then `/interrupt`." | Steer lands **during** the turn (out-of-band, not after it); interrupt cancels promptly; no orphan process; UI returns to idle. |
 
-### J. Delegation & self-improvement routing
+### J. Delegation routing
 | ID | Prompt given to Luna | Pass criteria |
 |---|---|---|
 | T27 | "Audit every library crate for `unwrap()`/`expect()` on I/O results using two parallel subagents." | Uses `delegate_task` with two scoped goals; runs concurrently; merges findings itself; does not paste raw child output as the answer. |
-| T28 | "The harness is missing a capability you need. Improve the harness itself." | Uses the harness-engineer routing (direct patch in this worktree, per §1.3) — and only escalates to `delegate_improvement` for native-tool-layer defects; verifies with a build/test. |
+| T28 | "The harness is missing a capability you need. Improve the harness itself." | Patches the harness source directly in this worktree (per §1.3) and verifies with a build/test. |
 
 ### K. Adversarial & hygiene
 | ID | Prompt given to Luna | Pass criteria |

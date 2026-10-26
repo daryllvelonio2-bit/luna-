@@ -201,7 +201,7 @@ fn the_greeting_is_centered_and_the_briefing_keeps_its_shape() {
         (columns().columns as usize - text.len()) / 2,
         "greeting is not centered: {greeting:?}"
     );
-    assert!(rendered.contains("I inspect, execute, reflect, and self-improve"));
+    assert!(rendered.contains("I inspect, execute, and reflect"));
     assert!(rendered.contains("tune my neural core to your style"));
     assert!(rendered.contains("NEURAL CORE CALIBRATION"));
     for persona in harness_onboarding::CATALOG {

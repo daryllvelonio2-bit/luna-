@@ -16,9 +16,6 @@ use harness_core::{
     approval, Agent, AgentConfig, Config, DefaultToolRegistry, HarnessError, PermissionEngine,
     SessionBinding, ToolRegistry,
 };
-use harness_evolver::{
-    CheckImprovementTool, CodebaseEvolver, DelegateImprovementTool, ListImprovementJobsTool,
-};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool, SqliteNotesEngine,
@@ -87,13 +84,6 @@ pub async fn run_gateway(
         config.paths.memory_db.clone(),
     ))?);
     let notes = Arc::new(SqliteNotesEngine::new(Some(config.paths.notes_db.clone()))?);
-    let evolver = Arc::new(
-        CodebaseEvolver::new(
-            config.paths.workspace_root.clone(),
-            config.paths.jobs_dir.clone(),
-        )
-        .with_provider(provider.clone()),
-    );
 
     // Build platform adapters
     let requested_platform =
@@ -281,9 +271,6 @@ pub async fn run_gateway(
                         let _ = registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await;
                         let _ = registry.register(Arc::new(ListNotesTool::new(notes.clone()))).await;
                         let _ = registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await;
-                        let _ = registry.register(Arc::new(DelegateImprovementTool::new(evolver.clone()))).await;
-                        let _ = registry.register(Arc::new(CheckImprovementTool::new(evolver.clone()))).await;
-                        let _ = registry.register(Arc::new(ListImprovementJobsTool::new(evolver.clone()))).await;
 
                         let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
                         let bg_queue = Arc::new(
@@ -327,7 +314,6 @@ pub async fn run_gateway(
                             provider.clone(),
                             memory.clone(),
                             notes.clone(),
-                            evolver.clone(),
                             registry,
                             agent_cfg,
                         )

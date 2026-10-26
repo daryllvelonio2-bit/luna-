@@ -97,24 +97,6 @@ impl NotesEngine for MockNotes {
     }
 }
 
-struct MockEvolver;
-
-#[async_trait]
-impl EvolverEngine for MockEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _desc: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("p".to_string())
-    }
-    async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 /// Records every pass it is asked to run; optionally panics, to prove the turn survives it.
 struct RecordingSaver {
     passes: Arc<Mutex<Vec<Vec<Message>>>>,
@@ -169,12 +151,11 @@ impl BackgroundSaver for RecordingSaver {
 
 fn agent(
     saver: Arc<dyn BackgroundSaver>,
-) -> Agent<MockProvider, MockMemory, MockNotes, MockEvolver, DefaultToolRegistry> {
+) -> Agent<MockProvider, MockMemory, MockNotes, DefaultToolRegistry> {
     Agent::new(
         Arc::new(MockProvider),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         AgentConfig {
             require_hitl_for_mutation: false,
@@ -278,7 +259,6 @@ async fn without_a_saver_nothing_is_spawned_and_the_turn_is_unchanged() {
         Arc::new(MockProvider),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         AgentConfig::default(),
     );
@@ -317,7 +297,6 @@ async fn memory_mode_switches_system_prompt_instructions_dynamically() {
         Arc::new(MockProvider),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         config,
     );

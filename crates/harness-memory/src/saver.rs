@@ -59,35 +59,23 @@ pub const INDEX_LIMIT: usize = 500;
 pub const SAVER_SYSTEM_PROMPT: &str = r#"You are Luna's background memory saver. You analyze finished conversations and persist durable facts, rules, preferences, and reference notes. You never talk to the user: you emit JSON and nothing else.
 
 MEMORY PROTOCOL:
-Save durable facts that will still matter in a future, unrelated session.
-
-Consolidation & Entity Scope:
-- Consolidate by entity: Store related facts together in a single consolidated memory record rather than fragmenting attributes into multiple micro-records.
-  * Personal profile: Maintain a single consolidated 'user.profile' record containing the user's identity, preferences, aesthetic standards, and habits. Never create separate micro-memories like 'user.name', 'user.favorite_language', or 'user.favorite_number'.
-  * Project profiles: Maintain a single consolidated memory record per project (e.g. 'project.astra', 'project.luna') containing its purpose, repository path, build commands, and architectural conventions. Never create multiple fragmented memories for the same project.
-  * Environment: Maintain a single 'env.system' record for host OS, toolchain paths, and hardware defaults.
-- Update Over Append: When learning new facts or refinements about an existing entity, update that entity's consolidated record rather than creating duplicate entries. Contradictions are resolved in favor of the newer record.
-
-Evaluation Criteria:
-Persist only durable, generalizable information that remains relevant across future, unrelated sessions:
-- Hardware, operating system, and primary environment defaults.
-- Coding conventions, architectural preferences, and UI/CLI aesthetic habits.
-- Permanent project definitions, repository layouts, build instructions, and naming conventions.
-- Explicit facts, project locations, or preferences stated by the user or established during work.
-
-Constraints:
-- Do not save transient task states, one-off commands, temporary bugs, or session scratchpad plans.
-- Do not save raw logs, full code files, or unparsed data outputs.
-- Never fragment a single entity or project across multiple memory records.
-
-Categories: user_profile, code_pattern, workflow_rule, fact, harness_improvement.
+Save lean index cards (name, path, and 2-5 words about what it is) into persistent memory.
+- Consolidate by entity: For every topic or entity (e.g. project, user profile, system env), maintain strictly ONE active memory record rather than fragmenting attributes.
+- Do NOT store large text, specs, rules, instructions, or documentation in memories. All rich content belongs in notes!
+- Fields:
+  * subject: entity identifier, e.g. "project.astra", "user.profile", "env.system"
+  * predicate: property or qualifier (default: "profile")
+  * object: concise 2-5 word description of what this entity is
+  * name: optional friendly name (e.g. "Astra")
+  * path: optional absolute filesystem path (e.g. "/home/janelle/Documents/projects/astra")
+  * category: user_profile, code_pattern, workflow_rule, fact
 
 NOTE PROTOCOL:
-Use notes to offload reference artifacts that exceed atomic memory limits: architecture specs, documentation, multi-step research, and structured logs.
+Use notes to offload all reference artifacts, documentation, specs, guides, architecture rules, multi-step workflows, and detailed knowledge.
 
 Answer with JSON only, in exactly this shape:
 
-{"memories":[{"subject":"project.astra","predicate":"profile","object":"Autonomous Rust agent harness located at /path/to/astra, built with cargo build --release.","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
+{"memories":[{"subject":"project.astra","predicate":"profile","object":"Mobile coding IDE","name":"Astra","path":"/home/janelle/Documents/projects/astra","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
 
 Use empty arrays only if the conversation contained genuinely no durable facts, project details, user preferences, or reference notes."#;
 
@@ -125,6 +113,10 @@ struct Item {
     predicate: String,
     #[serde(default)]
     object: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -270,6 +262,12 @@ impl MemorySaver {
                 "object": object,
                 "category": item.category.as_deref().unwrap_or("fact"),
             });
+            if let Some(name) = &item.name {
+                args["name"] = json!(name);
+            }
+            if let Some(path) = &item.path {
+                args["path"] = json!(path);
+            }
             if let Some(confidence) = item.confidence {
                 args["confidence"] = json!(confidence.clamp(0.0, 1.0));
             }
@@ -573,6 +571,8 @@ mod tests {
                 subject: "user".to_string(),
                 predicate: "profile".to_string(),
                 object: "Daryll, works on Luna".to_string(),
+                name: None,
+                path: None,
                 raw_content: "user profile Daryll, works on Luna".to_string(),
                 category: MemoryCategory::UserProfile,
                 confidence: 1.0,

@@ -25,19 +25,21 @@ impl Tool for SaveMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Save a durable fact, rule, or profile into persistent long-term memory. Consolidate by entity: keep all personal facts in a single 'user.profile' memory, and all facts about a project in a single 'project.<name>' memory. Do not fragment single entities into multiple separate records. When updating an existing entity, use update_memory instead."
+        "Save a lean index card into persistent memory (name, path, short 2-5 word about). Detailed notes, architectures, specs, and instructions belong in notes, not memories. Exactly one active memory record is kept per topic."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "subject": { "type": "string", "description": "Entity or subject (e.g. 'user', 'project', 'rust_compiler')" },
-                "predicate": { "type": "string", "description": "Relationship or property (e.g. 'preferred_language', 'coding_style')" },
-                "object": { "type": "string", "description": "Target value or statement (e.g. 'Rust', 'prefers explicit error handling')" },
+                "subject": { "type": "string", "description": "Entity topic or subject (e.g. 'project.astra', 'user.profile')" },
+                "predicate": { "type": "string", "description": "Property or qualifier (default: 'profile')" },
+                "object": { "type": "string", "description": "Short 2-5 word description of what it is about" },
+                "name": { "type": "string", "description": "Optional friendly name (e.g. 'Astra IDE')" },
+                "path": { "type": "string", "description": "Optional absolute project or file path" },
                 "category": {
                     "type": "string",
-                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact", "harness_improvement"],
+                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact"],
                     "description": "Category of memory"
                 },
                 "confidence": { "type": "number", "description": "Confidence score from 0.0 to 1.0 (default 1.0)" }
@@ -93,11 +95,21 @@ impl Tool for SaveMemoryTool {
             .and_then(|c| c.as_f64())
             .unwrap_or(1.0) as f32;
 
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let path = args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let category = match cat_str {
             "user_profile" => MemoryCategory::UserProfile,
             "code_pattern" => MemoryCategory::CodePattern,
             "workflow_rule" => MemoryCategory::WorkflowRule,
-            "harness_improvement" => MemoryCategory::HarnessImprovement,
             _ => MemoryCategory::Fact,
         };
 
@@ -139,6 +151,8 @@ impl Tool for SaveMemoryTool {
             subject: subject.to_string(),
             predicate: predicate.to_string(),
             object: object.to_string(),
+            name,
+            path,
             raw_content,
             category,
             confidence,
@@ -180,7 +194,7 @@ impl Tool for UpdateMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Update, merge, or correct an existing consolidated memory record (e.g. 'user.profile' or 'project.<name>'), superseding the prior record. Use this to append or revise facts about an entity."
+        "Update or correct an existing memory record (name, path, short 2-5 word about). Detailed notes belong in notes, not memories."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -188,12 +202,14 @@ impl Tool for UpdateMemoryTool {
             "type": "object",
             "properties": {
                 "memory_id": { "type": "string", "description": "ID of memory record being superseded" },
-                "subject": { "type": "string", "description": "Updated entity or subject" },
-                "predicate": { "type": "string", "description": "Updated property or relationship" },
-                "object": { "type": "string", "description": "Updated value or statement" },
+                "subject": { "type": "string", "description": "Updated entity or subject (e.g. 'project.astra')" },
+                "predicate": { "type": "string", "description": "Updated property or qualifier (default: 'profile')" },
+                "object": { "type": "string", "description": "Short 2-5 word description of what it is about" },
+                "name": { "type": "string", "description": "Optional friendly name (e.g. 'Astra IDE')" },
+                "path": { "type": "string", "description": "Optional absolute project or file path" },
                 "category": {
                     "type": "string",
-                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact", "harness_improvement"]
+                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact"]
                 }
             },
             "required": ["memory_id", "subject", "predicate", "object", "category"]
@@ -243,11 +259,21 @@ impl Tool for UpdateMemoryTool {
             .and_then(|c| c.as_str())
             .unwrap_or("fact");
 
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let path = args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let category = match cat_str {
             "user_profile" => MemoryCategory::UserProfile,
             "code_pattern" => MemoryCategory::CodePattern,
             "workflow_rule" => MemoryCategory::WorkflowRule,
-            "harness_improvement" => MemoryCategory::HarnessImprovement,
             _ => MemoryCategory::Fact,
         };
 
@@ -289,6 +315,8 @@ impl Tool for UpdateMemoryTool {
             subject: subject.to_string(),
             predicate: predicate.to_string(),
             object: object.to_string(),
+            name,
+            path,
             raw_content,
             category,
             confidence: 1.0,

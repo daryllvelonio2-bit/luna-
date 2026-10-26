@@ -699,6 +699,27 @@ fn parse_turns_from_history_handles_multistep_and_empty_queries() {
     assert_eq!(turns[1].reasoning.as_deref(), Some("thinking..."));
 }
 
+/// A replay that opens inside a turn — the window landed past the user message that anchors it
+/// — still holds Luna's words. Dropping them would leave the resumed session showing nothing.
+#[test]
+fn parse_turns_from_history_keeps_a_turn_that_has_no_user_line() {
+    use harness_core::Message;
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::assistant("the answer"),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1, "the reply is not thrown away");
+    assert_eq!(turns[0].user_query, "", "there was no user line to show");
+    assert_eq!(turns[0].reply, "the answer");
+}
+
 /// `colored` decides on escapes by whether stdout is a tty, which it never is under
 /// `cargo test`, so colour has to be forced. The override is process-global and these tests
 /// run in parallel — hence unset in a guard, and hence the geometry tests below reading

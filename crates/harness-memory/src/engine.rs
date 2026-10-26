@@ -59,6 +59,85 @@ impl SqliteMemoryEngine {
         conn.execute_batch(schema_sql).map_err(|e| {
             HarnessError::MemoryError(format!("Schema initialization failed: {}", e))
         })?;
+
+        // Migration for pre-existing databases: ensure lean fields exist.
+        Self::add_column_if_missing(conn, "memories", "name", "TEXT")?;
+        Self::add_column_if_missing(conn, "memories", "path", "TEXT")?;
+
+        // Normalize any legacy categories (e.g. from obsolete experiments) that would violate CHECK
+        let _ = conn.execute(
+            "UPDATE memories SET category = 'fact' WHERE category NOT IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer')",
+            [],
+        );
+
+        // Enforce topic uniqueness: collapse multiple active records for the same topic.
+        Self::collapse_duplicate_active_topics(conn)?;
+
+        Ok(())
+    }
+
+    fn add_column_if_missing(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        decl: &str,
+    ) -> Result<(), HarnessError> {
+        let mut pragma = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let rows = pragma
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for col_res in rows {
+            if let Ok(col_name) = col_res {
+                if col_name.eq_ignore_ascii_case(column) {
+                    return Ok(());
+                }
+            }
+        }
+        conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl), [])
+            .map_err(|e| HarnessError::MemoryError(format!("Failed to add column {}: {}", column, e)))?;
+        Ok(())
+    }
+
+    /// Guarantee that for each topic subject, only 1 active record remains in persistent memory.
+    fn collapse_duplicate_active_topics(conn: &Connection) -> Result<(), HarnessError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, subject, updated_at FROM memories
+                 WHERE is_active = 1 AND category != 'note_pointer'
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        let mut seen_subjects = std::collections::HashSet::new();
+        let mut stale_ids = Vec::new();
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        for r in rows.flatten() {
+            let (id, subject, _) = r;
+            let norm_sub = subject.trim().to_ascii_lowercase();
+            if !seen_subjects.insert(norm_sub) {
+                stale_ids.push(id);
+            }
+        }
+
+        for stale_id in stale_ids {
+            let _ = conn.execute(
+                "UPDATE memories SET is_active = 0, updated_at = ?1 WHERE id = ?2",
+                params![Utc::now().to_rfc3339(), stale_id],
+            );
+        }
+
         Ok(())
     }
 
@@ -75,8 +154,8 @@ impl SqliteMemoryEngine {
         record: &MemoryRecord,
     ) -> Result<(), HarnessError> {
         tx.execute(
-            "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 subject = excluded.subject,
                 predicate = excluded.predicate,
@@ -86,7 +165,9 @@ impl SqliteMemoryEngine {
                 confidence = excluded.confidence,
                 updated_at = excluded.updated_at,
                 is_active = excluded.is_active,
-                superseded_by = NULL",
+                superseded_by = NULL,
+                name = excluded.name,
+                path = excluded.path",
             params![
                 record.id,
                 record.subject,
@@ -99,6 +180,8 @@ impl SqliteMemoryEngine {
                 record.updated_at.to_rfc3339(),
                 if record.is_active { 1 } else { 0 },
                 record.superseded_by,
+                record.name,
+                record.path,
             ],
         )
         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -145,10 +228,10 @@ impl MemoryEngine for SqliteMemoryEngine {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by
+                "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                  FROM memories
                  WHERE is_active = 1
-                   AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
+                   AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
                  ORDER BY confidence DESC, updated_at DESC
                  LIMIT ?2",
             )
@@ -162,7 +245,6 @@ impl MemoryEngine for SqliteMemoryEngine {
                     "code_pattern" => MemoryCategory::CodePattern,
                     "workflow_rule" => MemoryCategory::WorkflowRule,
                     "note_pointer" => MemoryCategory::NotePointer,
-                    "harness_improvement" => MemoryCategory::HarnessImprovement,
                     _ => MemoryCategory::Fact,
                 };
 
@@ -181,6 +263,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                     subject: row.get(1)?,
                     predicate: row.get(2)?,
                     object: row.get(3)?,
+                    name: row.get(11)?,
+                    path: row.get(12)?,
                     raw_content: row.get(4)?,
                     category,
                     confidence: row.get(6)?,
@@ -204,7 +288,7 @@ impl MemoryEngine for SqliteMemoryEngine {
             let remaining = limit - memories.len();
             let mut recent_stmt = conn
                 .prepare(
-                    "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by
+                    "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                      FROM memories
                      WHERE is_active = 1
                      ORDER BY updated_at DESC
@@ -220,7 +304,6 @@ impl MemoryEngine for SqliteMemoryEngine {
                         "code_pattern" => MemoryCategory::CodePattern,
                         "workflow_rule" => MemoryCategory::WorkflowRule,
                         "note_pointer" => MemoryCategory::NotePointer,
-                        "harness_improvement" => MemoryCategory::HarnessImprovement,
                         _ => MemoryCategory::Fact,
                     };
                     let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
@@ -234,6 +317,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                         subject: row.get(1)?,
                         predicate: row.get(2)?,
                         object: row.get(3)?,
+                        name: row.get(11)?,
+                        path: row.get(12)?,
                         raw_content: row.get(4)?,
                         category,
                         confidence: row.get(6)?,
@@ -264,11 +349,10 @@ impl MemoryEngine for SqliteMemoryEngine {
             .transaction()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        // Auto-supersede conflicting active memories with matching subject & predicate.
-        // The conflict set is collected before the write so a row can never supersede itself,
-        // and `record.id` is skipped explicitly: ids are derived from subject + predicate, so a
-        // re-save of the same entity reuses the id and would otherwise deactivate itself.
-        let old_ids: Vec<String> = {
+        // Auto-supersede conflicting active memories:
+        // For note pointers: match on subject & predicate.
+        // For entity memories: strictly ONE active record per subject (case-insensitive)!
+        let old_ids: Vec<String> = if record.category == MemoryCategory::NotePointer {
             let mut check_stmt = tx
                 .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -277,11 +361,24 @@ impl MemoryEngine for SqliteMemoryEngine {
                 .query_map(params![record.subject, record.predicate], |row| row.get(0))
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
             let mut ids = Vec::new();
-            for r in rows {
-                if let Ok(id) = r {
-                    if id != record.id {
-                        ids.push(id);
-                    }
+            for r in rows.flatten() {
+                if r != record.id {
+                    ids.push(r);
+                }
+            }
+            ids
+        } else {
+            let mut check_stmt = tx
+                .prepare("SELECT id FROM memories WHERE LOWER(subject) = LOWER(?1) AND category != 'note_pointer' AND is_active = 1")
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+            let rows = check_stmt
+                .query_map(params![record.subject], |row| row.get(0))
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let mut ids = Vec::new();
+            for r in rows.flatten() {
+                if r != record.id {
+                    ids.push(r);
                 }
             }
             ids
@@ -333,8 +430,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                 "UPDATE memories
                  SET subject = ?1, predicate = ?2, object = ?3, raw_content = ?4,
                      category = ?5, confidence = ?6, updated_at = ?7, is_active = 1,
-                     superseded_by = NULL
-                 WHERE id = ?8",
+                     superseded_by = NULL, name = ?8, path = ?9
+                 WHERE id = ?10",
                 params![
                     updated.subject,
                     updated.predicate,
@@ -343,6 +440,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                     updated.category.to_string(),
                     updated.confidence,
                     Utc::now().to_rfc3339(),
+                    updated.name,
+                    updated.path,
                     id,
                 ],
             )
@@ -354,6 +453,16 @@ impl MemoryEngine for SqliteMemoryEngine {
             tx.execute(
                 "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
                 params![updated.id, Utc::now().to_rfc3339(), id],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        }
+
+        // Deactivate any other active duplicate topic records if this is not a note pointer
+        if updated.category != MemoryCategory::NotePointer {
+            tx.execute(
+                "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2
+                 WHERE LOWER(subject) = LOWER(?3) AND id != ?1 AND is_active = 1 AND category != 'note_pointer'",
+                params![updated.id, Utc::now().to_rfc3339(), updated.subject],
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         }
@@ -383,6 +492,8 @@ impl MemoryEngine for SqliteMemoryEngine {
             subject: "note".to_string(),
             predicate: format!("doc_{}", note_id),
             object: pointer.to_string(),
+            name: None,
+            path: None,
             raw_content: format!("Note: \"{}\"", pointer),
             category: MemoryCategory::NotePointer,
             confidence: 1.0,
@@ -409,16 +520,44 @@ impl MemoryEngine for SqliteMemoryEngine {
                 };
                 lines.push(format!("- [Note] {}", clean_content));
             } else {
-                let name = format!("{}.{}", m.subject, m.predicate);
                 let display_cat = match m.category {
                     MemoryCategory::UserProfile => "User Profile",
                     MemoryCategory::CodePattern => "Code Pattern",
                     MemoryCategory::WorkflowRule => "Workflow Rule",
-                    MemoryCategory::HarnessImprovement => "Improvement",
                     MemoryCategory::Fact => "Fact",
                     MemoryCategory::NotePointer => "Note",
                 };
-                lines.push(format!("- [{}] {}: {}", display_cat, name, m.object));
+
+                let mut parts = Vec::new();
+                if let Some(name) = &m.name {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(&m.subject) {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+                let obj_trimmed = m.object.trim();
+                if !obj_trimmed.is_empty() {
+                    parts.push(obj_trimmed.to_string());
+                }
+                if let Some(path) = &m.path {
+                    let trimmed = path.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(format!("path: {}", trimmed));
+                    }
+                }
+
+                let summary = if parts.is_empty() {
+                    m.object.clone()
+                } else {
+                    parts.join(" · ")
+                };
+
+                let key = if m.predicate == "profile" || m.predicate.is_empty() {
+                    m.subject.clone()
+                } else {
+                    format!("{}.{}", m.subject, m.predicate)
+                };
+                lines.push(format!("- [{}] {}: {}", display_cat, key, summary));
             }
         }
         lines.join("\n")

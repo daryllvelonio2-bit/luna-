@@ -4,12 +4,14 @@ CREATE TABLE IF NOT EXISTS memories (
     predicate TEXT NOT NULL,
     object TEXT NOT NULL,
     raw_content TEXT NOT NULL,
-    category TEXT NOT NULL CHECK(category IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'harness_improvement')),
+    category TEXT NOT NULL CHECK(category IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer')),
     confidence REAL NOT NULL DEFAULT 1.0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_active INTEGER NOT NULL DEFAULT 1,
-    superseded_by TEXT REFERENCES memories(id)
+    superseded_by TEXT REFERENCES memories(id),
+    name TEXT,
+    path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS memory_embeddings (

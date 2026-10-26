@@ -12,7 +12,6 @@ const PROMPTS_FILE: &str = include_str!("../prompts.md");
 /// The section names available in `prompts.md`.
 pub const SYSTEM_PROMPT: &str = "SYSTEM_PROMPT";
 pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
-pub const ENGINEER_SYSTEM_PROMPT: &str = "ENGINEER_SYSTEM_PROMPT";
 pub const MEMORY_SESSION_PROMPT: &str = "MEMORY_SESSION_PROMPT";
 pub const MEMORY_BACKGROUND_PROMPT: &str = "MEMORY_BACKGROUND_PROMPT";
 
@@ -49,7 +48,6 @@ mod tests {
         for name in [
             SYSTEM_PROMPT,
             COMPACTION_INSTRUCTION,
-            ENGINEER_SYSTEM_PROMPT,
             MEMORY_SESSION_PROMPT,
             MEMORY_BACKGROUND_PROMPT,
         ] {

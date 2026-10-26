@@ -125,9 +125,16 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
         }
     }
 
-    if let Some(q) = current_query {
+    // A history that opens inside a turn — the replay window landed past the user message that
+    // anchors it — still holds Luna's words. Dropping them would leave the resumed session
+    // showing nothing at all, so the leftover becomes a turn of its own with no user line.
+    if current_query.is_some()
+        || current_reasoning.is_some()
+        || !current_tools.is_empty()
+        || current_reply.is_some()
+    {
         turns.push(TurnRecord {
-            user_query: q,
+            user_query: current_query.unwrap_or_default(),
             reasoning: current_reasoning,
             tools: Vec::new(),
             tool_items: current_tools,
@@ -147,7 +154,11 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
         if i > 0 {
             println!();
         }
-        println!("{}", right_aligned_user_message(&turn.user_query, width));
+        // A turn that carries no user line (the replay opened inside a turn) shows Luna's side
+        // alone: there was no user message to put on the right.
+        if !turn.user_query.trim().is_empty() {
+            println!("{}", right_aligned_user_message(&turn.user_query, width));
+        }
 
         let has_reasoning = turn
             .reasoning
@@ -1042,28 +1053,6 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                     quoted(&display_title),
                     action
                 );
-            }
-        }
-        "inspect_harness_source" => {
-            if let Some(path) = text("path") {
-                return format!("{} {} {}", glyph, verb_col(name), path.cyan());
-            }
-        }
-        "propose_harness_patch" => {
-            if let Some(path) = text("target_file") {
-                let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
-                return format!(
-                    "{} {} {}{}",
-                    glyph,
-                    verb_col(name),
-                    path.cyan(),
-                    suffix(format!("{} lines", lines))
-                );
-            }
-        }
-        "apply_harness_update" => {
-            if let Some(id) = text("patch_id") {
-                return format!("{} {} {}", glyph, verb_col(verb), id.cyan());
             }
         }
         _ => {}

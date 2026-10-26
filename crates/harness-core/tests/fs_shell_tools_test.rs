@@ -1377,32 +1377,10 @@ async fn test_delegate_task_tool() {
         }
     }
 
-    struct MockEvol;
-    #[async_trait::async_trait]
-    impl harness_core::traits::EvolverEngine for MockEvol {
-        async fn inspect_source(&self, _p: &str) -> Result<String, harness_core::HarnessError> {
-            Ok(String::new())
-        }
-        async fn propose_patch(
-            &self,
-            _d: &str,
-            _diff: &str,
-        ) -> Result<String, harness_core::HarnessError> {
-            Ok("p1".to_string())
-        }
-        async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            Ok(true)
-        }
-        async fn apply_patch(&self, _id: &str) -> Result<(), harness_core::HarnessError> {
-            Ok(())
-        }
-    }
-
     let delegate = harness_core::tools::DelegateTaskTool::new(
         Arc::new(EchoProvider),
         Arc::new(MockMem),
         Arc::new(MockNotes),
-        Arc::new(MockEvol),
         None,
         config,
     );
@@ -1553,32 +1531,10 @@ async fn test_delegate_task_tool_background_dispatch_and_polling() {
         }
     }
 
-    struct MockEvol;
-    #[async_trait::async_trait]
-    impl harness_core::traits::EvolverEngine for MockEvol {
-        async fn inspect_source(&self, _p: &str) -> Result<String, harness_core::HarnessError> {
-            Ok(String::new())
-        }
-        async fn propose_patch(
-            &self,
-            _d: &str,
-            _diff: &str,
-        ) -> Result<String, harness_core::HarnessError> {
-            Ok("p1".to_string())
-        }
-        async fn test_patch_sandbox(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            Ok(true)
-        }
-        async fn apply_patch(&self, _id: &str) -> Result<(), harness_core::HarnessError> {
-            Ok(())
-        }
-    }
-
     let delegate = harness_core::tools::DelegateTaskTool::new(
         Arc::new(EchoProvider),
         Arc::new(MockMem),
         Arc::new(MockNotes),
-        Arc::new(MockEvol),
         None,
         config,
     );

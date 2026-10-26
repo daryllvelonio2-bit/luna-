@@ -46,31 +46,11 @@ pub async fn run_supervisor_loop(args: Vec<String>) -> Result<(), HarnessError> 
             break;
         } else {
             let code = status.code().unwrap_or(-1);
-            if code == 42 {
-                println!(
-                    "\n{} Self-evolution update detected! Rebuilding and restarting...",
-                    "⟳".yellow().bold()
-                );
-                let rebuild = Command::new("cargo")
-                    .args(["build", "--release"])
-                    .status()
-                    .await;
-
-                if let Ok(rb_status) = rebuild {
-                    if rb_status.success() {
-                        println!("{} Rebuild successful, respawning agent...", "✔".green());
-                        continue;
-                    }
-                }
-                error!("Rebuild failed. Aborting supervisor restart.");
-                break;
-            } else {
-                error!(
-                    "Agent exited with error code {}. Restarting in 3 seconds...",
-                    code
-                );
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            }
+            error!(
+                "Agent exited with error code {}. Restarting in 3 seconds...",
+                code
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         }
     }
 

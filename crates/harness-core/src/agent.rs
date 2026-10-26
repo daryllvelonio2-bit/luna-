@@ -241,18 +241,16 @@ pub struct TurnOutcome {
     pub duration_ms: u64,
 }
 
-pub struct Agent<P, M, N, E, R>
+pub struct Agent<P, M, N, R>
 where
     P: ModelProvider + 'static,
     M: MemoryEngine + 'static,
     N: NotesEngine + 'static,
-    E: EvolverEngine + 'static,
     R: ToolRegistry + 'static,
 {
     provider: Arc<P>,
     memory: Arc<M>,
     notes: Arc<N>,
-    evolver: Arc<E>,
     registry: Arc<R>,
     config: AgentConfig,
     approver: Arc<dyn Approver>,
@@ -309,19 +307,17 @@ enum GateOutcome {
     Denied(String),
 }
 
-impl<P, M, N, E, R> Agent<P, M, N, E, R>
+impl<P, M, N, R> Agent<P, M, N, R>
 where
     P: ModelProvider + 'static,
     M: MemoryEngine + 'static,
     N: NotesEngine + 'static,
-    E: EvolverEngine + 'static,
     R: ToolRegistry + 'static,
 {
     pub fn new(
         provider: Arc<P>,
         memory: Arc<M>,
         notes: Arc<N>,
-        evolver: Arc<E>,
         registry: Arc<R>,
         config: AgentConfig,
     ) -> Self {
@@ -329,7 +325,6 @@ where
             provider,
             memory,
             notes,
-            evolver,
             registry,
             config,
             // Fail closed: an agent that was never given an approver denies mutating calls rather
@@ -638,42 +633,12 @@ where
         }
     }
 
-    /// Apply an editable SurfaceSpec (Harness² c1–c8 components) to the agent loop.
-    pub fn with_surface(
-        mut self,
-        surface: crate::surface::SurfaceSpec,
-    ) -> Result<Self, HarnessError> {
-        surface.validate()?;
-        self.config.max_consecutive_failures = surface.c2_guardrails.max_consecutive_failures;
-        self.config.require_hitl_for_mutation = surface.c2_guardrails.require_hitl_for_mutation;
-
-        let rendered = surface.render_system_prompt();
-        if !rendered.is_empty() {
-            self.config.system_prompt_prefix = Some(rendered);
-        }
-
-        if !surface.c4_skills.is_empty() {
-            let summaries: Vec<String> = surface
-                .c4_skills
-                .iter()
-                .map(|s| format!("- {}: {}", s.name, s.description))
-                .collect();
-            self.config.skills_summary = Some(summaries.join("\n"));
-        }
-
-        Ok(self)
-    }
-
     pub fn memory(&self) -> &Arc<M> {
         &self.memory
     }
 
     pub fn notes(&self) -> &Arc<N> {
         &self.notes
-    }
-
-    pub fn evolver(&self) -> &Arc<E> {
-        &self.evolver
     }
 
     pub fn registry(&self) -> &Arc<R> {
