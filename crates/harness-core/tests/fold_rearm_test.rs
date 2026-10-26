@@ -186,24 +186,6 @@ impl NotesEngine for MockNotes {
     }
 }
 
-struct MockEvolver;
-
-#[async_trait]
-impl EvolverEngine for MockEvolver {
-    async fn inspect_source(&self, _path: &str) -> Result<String, HarnessError> {
-        Ok(String::new())
-    }
-    async fn propose_patch(&self, _description: &str, _diff: &str) -> Result<String, HarnessError> {
-        Ok("patch_1".to_string())
-    }
-    async fn test_patch_sandbox(&self, _patch_id: &str) -> Result<bool, HarnessError> {
-        Ok(true)
-    }
-    async fn apply_patch(&self, _patch_id: &str) -> Result<(), HarnessError> {
-        Ok(())
-    }
-}
-
 /// Counts the folds that reported themselves finished. A counter, not a Notify: two folds can
 /// finish while nobody is awaiting, and a Notify stores only one permit for that case.
 fn fold_counter() -> (AgentObserver, Arc<AtomicUsize>) {
@@ -263,7 +245,6 @@ async fn a_long_turn_folds_again_when_it_crosses_the_bar_a_second_time() {
         main.clone(),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
-        Arc::new(MockEvolver),
         Arc::new(DefaultToolRegistry::new()),
         cfg,
     )
