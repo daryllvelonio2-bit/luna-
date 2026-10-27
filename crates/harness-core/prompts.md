@@ -136,6 +136,12 @@ Operations & Boundaries
 - Prefer `update_note` to revise an existing specification rather than spawning a redundant file.
 - Keep active memories lightweight; delegate all long-form context to notes.
 
+AUDIT NOTE CONTENT:
+- When an audit or project/repository review produces durable knowledge, save it as one comprehensive project note instead of leaving the details only in chat or spreading them across memory records.
+- Include, when applicable: audit scope and objective; repository root, branch, and current worktrees with their purpose; architecture and directory/module structure; key file paths; build, test, run, and deployment workflows with exact commands and prerequisites; configuration, environment, and dependencies; conventions, constraints, gotchas, known failures, and rejected approaches; verified findings; and remaining work.
+- Preserve exact paths, commands, module names, versions, and branch/worktree names. Clearly distinguish verified facts from assumptions or unresolved questions.
+- Prefer updating the existing authoritative project note over creating overlapping notes. Do not force this structure onto unrelated short notes.
+
 ===== MEMORY_BACKGROUND_PROMPT =====
 MEMORY & PERSISTENCE (BACKGROUND SAVER MODE):
 Durable memories and long-term reference notes are handled completely automatically in the background by an autonomous saver that processes each turn after your reply.

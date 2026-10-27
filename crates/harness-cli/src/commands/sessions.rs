@@ -9,6 +9,9 @@ use harness_core::{Config, HarnessError, SessionStore, SqliteSessionStore};
 pub enum SessionsCommand {
     /// List stored chat sessions, most recently updated first
     List,
+    /// Interactively select a chat session (Up/Down arrows to select)
+    #[command(alias = "pick")]
+    Select,
     /// Fork an existing chat session into a new branch session
     Fork {
         /// Session id or name to fork
@@ -107,49 +110,111 @@ async fn create_session(store: &SqliteSessionStore) -> Result<String, HarnessErr
     Ok(id)
 }
 
+async fn list_sessions(config: &Config) -> Result<(), HarnessError> {
+    let store = open_store(config)?;
+    let sessions = store.list().await?;
+
+    if sessions.is_empty() {
+        println!("no sessions yet — `luna chat` creates one");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  TITLE",
+        "ID", "CREATED", "UPDATED", "MSGS", "NAME", "MODEL"
+    );
+    for session in sessions {
+        let name = if session.name.is_empty() {
+            "-"
+        } else {
+            session.name.as_str()
+        };
+        // The pair the session last ran with; a session that has not picked one yet
+        // (and will resume on the config default) shows a placeholder.
+        let model = match &session.model {
+            Some((provider, model)) => format!("{} ({})", model, provider),
+            None => "-".to_string(),
+        };
+        println!(
+            "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  {}",
+            session.id,
+            session.created_at.format("%Y-%m-%d %H:%M:%S"),
+            session.updated_at.format("%Y-%m-%d %H:%M:%S"),
+            session.message_count,
+            name,
+            model,
+            session.title
+        );
+    }
+    Ok(())
+}
+
 /// `luna sessions list`: id, created, updated, live message count, first user line.
+/// Returns `Some(session_id)` when an interactive selection was made.
 pub async fn handle_sessions_command(
     cmd: SessionsCommand,
     config: &Config,
-) -> Result<(), HarnessError> {
+) -> Result<Option<String>, HarnessError> {
     match cmd {
         SessionsCommand::List => {
+            list_sessions(config).await?;
+            Ok(None)
+        }
+        SessionsCommand::Select => {
             let store = open_store(config)?;
             let sessions = store.list().await?;
 
             if sessions.is_empty() {
                 println!("no sessions yet — `luna chat` creates one");
-                return Ok(());
+                return Ok(None);
             }
 
-            println!(
-                "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  TITLE",
-                "ID", "CREATED", "UPDATED", "MSGS", "NAME", "MODEL"
-            );
-            for session in sessions {
-                let name = if session.name.is_empty() {
-                    "-"
-                } else {
-                    session.name.as_str()
-                };
-                // The pair the session last ran with; a session that has not picked one yet
-                // (and will resume on the config default) shows a placeholder.
-                let model = match &session.model {
-                    Some((provider, model)) => format!("{} ({})", model, provider),
-                    None => "-".to_string(),
-                };
-                println!(
-                    "{:<10} {:<19} {:<19} {:>5}  {:<16}  {:<24}  {}",
-                    session.id,
-                    session.created_at.format("%Y-%m-%d %H:%M:%S"),
-                    session.updated_at.format("%Y-%m-%d %H:%M:%S"),
-                    session.message_count,
-                    name,
-                    model,
-                    session.title
-                );
+            if !dialoguer::console::Term::stdout().features().is_attended() {
+                list_sessions(config).await?;
+                return Ok(None);
             }
-            Ok(())
+
+            let items: Vec<String> = sessions
+                .iter()
+                .map(|s| {
+                    let name = if s.name.is_empty() {
+                        "-".to_string()
+                    } else {
+                        format!("\"{}\"", s.name)
+                    };
+                    let title = if s.title.is_empty() {
+                        "untitled"
+                    } else {
+                        s.title.as_str()
+                    };
+                    let model = match &s.model {
+                        Some((_, m)) => m.as_str(),
+                        None => "-",
+                    };
+                    format!(
+                        "{:<9} {:<14} {:>3} msgs  {:<16} {:<16} {}",
+                        s.id,
+                        name,
+                        s.message_count,
+                        s.updated_at.format("%Y-%m-%d %H:%M"),
+                        model,
+                        title
+                    )
+                })
+                .collect();
+
+            let sel = dialoguer::Select::new()
+                .with_prompt("Select a session to resume (↑/↓ to move, Enter to select, Esc to cancel)")
+                .items(&items)
+                .default(0)
+                .interact_opt()
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
+
+            if let Some(idx) = sel {
+                Ok(Some(sessions[idx].id.clone()))
+            } else {
+                Ok(None)
+            }
         }
         SessionsCommand::Fork { session, title } => {
             let store = open_store(config)?;
@@ -171,7 +236,7 @@ pub async fn handle_sessions_command(
                 id.dimmed(),
                 forked_id.cyan().bold()
             );
-            Ok(())
+            Ok(None)
         }
         SessionsCommand::Delete { session } => {
             let store = open_store(config)?;
@@ -196,7 +261,7 @@ pub async fn handle_sessions_command(
                     id
                 );
             }
-            Ok(())
+            Ok(None)
         }
     }
 }
@@ -242,6 +307,13 @@ mod tests {
         )
         .await;
         assert!(err.is_err());
+
+        // Select and List commands run cleanly
+        let list_res = handle_sessions_command(SessionsCommand::List, &config).await;
+        assert!(list_res.is_ok());
+
+        let select_res = handle_sessions_command(SessionsCommand::Select, &config).await;
+        assert!(select_res.is_ok());
 
         let _ = std::fs::remove_file(db_path);
     }

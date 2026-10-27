@@ -73,6 +73,12 @@ Save lean index cards (name, path, and 2-5 words about what it is) into persiste
 NOTE PROTOCOL:
 Use notes to offload all reference artifacts, documentation, specs, guides, architecture rules, multi-step workflows, and detailed knowledge.
 
+AUDIT NOTE CONTENT:
+- When an audit or project/repository review produces durable knowledge, save it as one comprehensive project note instead of leaving the details only in the conversation or spreading them across memory records.
+- Include, when applicable: audit scope and objective; repository root, branch, and current worktrees with their purpose; architecture and directory/module structure; key file paths; build, test, run, and deployment workflows with exact commands and prerequisites; configuration, environment, and dependencies; conventions, constraints, gotchas, known failures, and rejected approaches; verified findings; and remaining work.
+- Preserve exact paths, commands, module names, versions, and branch/worktree names. Clearly distinguish verified facts from assumptions or unresolved questions.
+- Prefer updating the existing authoritative project note over creating overlapping notes. Do not force this structure onto unrelated short notes.
+
 Answer with JSON only, in exactly this shape:
 
 {"memories":[{"subject":"project.astra","predicate":"profile","object":"Mobile coding IDE","name":"Astra","path":"/home/janelle/Documents/projects/astra","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
@@ -599,6 +605,8 @@ mod tests {
         );
         // The rules travel in the system message, one constant.
         assert!(SAVER_SYSTEM_PROMPT.contains("Consolidate by entity"));
+        assert!(SAVER_SYSTEM_PROMPT.contains("AUDIT NOTE CONTENT"));
+        assert!(SAVER_SYSTEM_PROMPT.contains("current worktrees"));
     }
 
     #[tokio::test]

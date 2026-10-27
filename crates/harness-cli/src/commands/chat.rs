@@ -44,7 +44,8 @@ use commands::{
     execute_slash_command, handle_auto_compact_command, handle_compact_command,
     handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
     handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
-    handle_rewind_command, handle_summarize_and_new_command, select_slash_command, SLASH_COMMANDS,
+    handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
+    select_slash_command, SLASH_COMMANDS,
 };
 use keys::AppKey;
 use render::{
@@ -569,6 +570,8 @@ pub async fn run_interactive_chat(
 
     if !is_attended {
         let cancel_token = CancellationToken::new();
+        let mut turns: Vec<TurnRecord> = Vec::new();
+        let mut process_expanded = false;
         loop {
             print!("{}", PROMPT.bold().yellow());
             io::stdout()
@@ -626,6 +629,37 @@ pub async fn run_interactive_chat(
                     arg_opt,
                 )
                 .await?;
+                continue;
+            }
+            if query == "/sessions"
+                || query == "/session"
+                || query.starts_with("/sessions ")
+                || query.starts_with("/session ")
+            {
+                let arg = query
+                    .split_once(' ')
+                    .map(|(_, a)| a.trim())
+                    .filter(|a| !a.is_empty());
+                if let Err(e) = handle_sessions_switch(
+                    None,
+                    &ui,
+                    &config,
+                    &cred_manager,
+                    &discovery,
+                    &agent,
+                    &store,
+                    &mut session_id,
+                    &mut current_provider,
+                    &mut current_model,
+                    &mut turns,
+                    &mut process_expanded,
+                    &todo_scope,
+                    arg,
+                )
+                .await
+                {
+                    eprintln!("{} Failed to switch session: {}", "✖".red().bold(), e);
+                }
                 continue;
             }
             if query == "/" || query.eq_ignore_ascii_case("/help") {

@@ -85,3 +85,12 @@ fn a_fold_holds_everything_back() {
         super::Submission::Queue
     );
 }
+
+#[test]
+fn slash_commands_includes_sessions_picker() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/sessions"),
+        "/sessions command must be registered in SLASH_COMMANDS"
+    );
+}

@@ -159,10 +159,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// List stored chat sessions
+    /// List or interactively select stored chat sessions
     Sessions {
         #[command(subcommand)]
-        subcommand: SessionsCommand,
+        subcommand: Option<SessionsCommand>,
     },
     /// Manage multi-provider credentials and key rotation
     Auth {
@@ -514,7 +514,23 @@ async fn main() -> Result<(), HarnessError> {
             .await?;
         }
         Some(Commands::Sessions { subcommand }) => {
-            handle_sessions_command(subcommand, &config).await?;
+            let cmd = subcommand.unwrap_or_else(|| {
+                if dialoguer::console::Term::stdout().features().is_attended() {
+                    SessionsCommand::Select
+                } else {
+                    SessionsCommand::List
+                }
+            });
+            if let Some(selected_session) = handle_sessions_command(cmd, &config).await? {
+                run_interactive_chat(
+                    config,
+                    cred_manager,
+                    discovery,
+                    SessionSelection::Resume(selected_session),
+                    false,
+                )
+                .await?;
+            }
         }
         Some(Commands::Supervisor { args }) => {
             run_supervisor_loop(args).await?;

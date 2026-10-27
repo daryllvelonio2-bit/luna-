@@ -10,13 +10,13 @@ use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery
 
 use super::clear_on_exit;
 use super::keys::AppKey;
-use super::render::{render_transcript, TurnRecord};
+use super::render::{parse_turns_from_history, render_transcript, TurnRecord};
 use super::todo;
 use super::ui::{get_terminal_width, ChatUi};
 use super::ChatAgent;
 use crate::commands::chat::modal::{paint_centred, ModalScreen};
 use crate::commands::context_window::{context_window, context_window_for};
-use crate::commands::sessions::{resolve_session, SessionSelection};
+use crate::commands::sessions::{find_by_name, resolve_session, SessionSelection};
 
 mod picker;
 use picker::pick_provider_and_model;
@@ -88,6 +88,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/name",
         details: "Set or view session name",
+    },
+    SlashCommand {
+        name: "/sessions",
+        details: "Interactive session picker to switch chat sessions (alias: /session)",
     },
     SlashCommand {
         name: "/new",
@@ -296,6 +300,34 @@ pub(crate) async fn execute_slash_command(
                 ui.input_buf.lock().unwrap().clear();
                 ui.input_buf.lock().unwrap().push_str("/name ");
                 ui.redraw_input_line();
+            }
+            Ok(false)
+        }
+        "/sessions" | "/session" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_sessions_switch(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                agent,
+                store,
+                session_id,
+                current_provider,
+                current_model,
+                turns,
+                process_expanded,
+                todo_scope,
+                arg,
+            )
+            .await
+            {
+                ui.emit_above(&format!(
+                    "{} Failed to switch session: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }
@@ -1196,6 +1228,205 @@ pub(crate) async fn handle_delete_command(
             new_id.cyan()
         );
     }
+
+    Ok(())
+}
+
+/// `/sessions [id|name]`: interactive session picker to switch chat sessions (alias: `/session`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_sessions_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &Arc<SqliteSessionStore>,
+    session_id: &mut String,
+    current_provider: &mut String,
+    current_model: &mut String,
+    turns: &mut Vec<TurnRecord>,
+    process_expanded: &mut bool,
+    todo_scope: &harness_core::tools::TodoScope,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let target_id = if let Some(target) = arg.filter(|s| !s.is_empty()) {
+        if store.get(target).await.is_ok() {
+            target.to_string()
+        } else if let Some(id) = find_by_name(store.as_ref(), target).await? {
+            id
+        } else {
+            return Err(HarnessError::SessionError(format!(
+                "Session '{}' not found",
+                target
+            )));
+        }
+    } else {
+        let sessions = store.list().await?;
+        if sessions.is_empty() {
+            ui.emit_above(&format!("{} No saved sessions found", "•".cyan()));
+            return Ok(());
+        }
+
+        let items: Vec<String> = sessions
+            .iter()
+            .map(|s| {
+                let is_current = s.id == *session_id;
+                let tag = if is_current { " *" } else { "" };
+                let name = if s.name.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!("\"{}\"", s.name)
+                };
+                let title = if s.title.is_empty() {
+                    "(new session)"
+                } else {
+                    s.title.as_str()
+                };
+                let time = s.updated_at.format("%m/%d %H:%M").to_string();
+                format!(
+                    "{:<9} {:<14} {:>3} msgs  {:<11} {}{}",
+                    s.id,
+                    name,
+                    s.message_count,
+                    time,
+                    title,
+                    tag
+                )
+            })
+            .collect();
+
+        let default_idx = sessions
+            .iter()
+            .position(|s| s.id == *session_id)
+            .unwrap_or(0);
+
+        let chosen_idx = if let Some(ref mut rx) = key_rx {
+            while rx.try_recv().is_ok() {}
+            match select_from_rx(
+                rx,
+                ui,
+                "Select Session",
+                &items,
+                default_idx,
+                false,
+                false,
+            )
+            .await
+            {
+                Some(i) => i,
+                None => {
+                    ui.clear_box_on_exit();
+                    ui.draw_initial_box();
+                    return Ok(());
+                }
+            }
+        } else {
+            println!("Available sessions:");
+            for (i, item) in items.iter().enumerate() {
+                println!("  {}. {}", i + 1, item);
+            }
+            return Ok(());
+        };
+
+        sessions[chosen_idx].id.clone()
+    };
+
+    if target_id == *session_id {
+        ui.emit_above(&format!(
+            "{} Already on session {}",
+            "•".cyan(),
+            session_id.cyan()
+        ));
+        return Ok(());
+    }
+
+    *session_id = target_id.clone();
+    agent.lock().await.set_session(SessionBinding {
+        store: store.clone(),
+        session_id: target_id.clone(),
+        resume_max_messages: config.session.resume_max_messages,
+    });
+
+    let record = store.get(&target_id).await?;
+    if let Some((ref prov, ref mdl)) = record.model {
+        if prov != current_provider || mdl != current_model {
+            match GenericProviderClient::new(
+                prov.clone(),
+                mdl.clone(),
+                cred_manager.clone(),
+                discovery.clone(),
+                config.providers.get(prov),
+            ) {
+                Ok(client) => {
+                    agent.lock().await.set_provider(Arc::new(client));
+                    *current_provider = prov.clone();
+                    *current_model = mdl.clone();
+                }
+                Err(e) => {
+                    ui.emit_above(&format!(
+                        "{} Warning: could not restore session model {} ({}): {}",
+                        "⚠".yellow().bold(),
+                        mdl,
+                        prov,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    todo_scope.set_session(&target_id);
+    todo::refresh_panel(ui, todo_scope);
+
+    let replayed = store
+        .replay(&target_id, config.session.resume_max_messages)
+        .await?;
+    *turns = parse_turns_from_history(&replayed.history);
+
+    if ui.is_attended {
+        crate::commands::clear_screen();
+        if replayed.replayed > 0 {
+            if replayed.truncated() {
+                println!(
+                    "{}\n",
+                    format!(
+                        "… {} earlier messages not shown ({} shown)",
+                        replayed.total - replayed.replayed,
+                        replayed.replayed
+                    )
+                    .dimmed()
+                );
+            }
+            draw_transcript(turns, *process_expanded);
+            println!();
+        }
+        ui.draw_initial_box();
+    }
+
+    let context_max = context_window_for(config, current_provider, current_model);
+    let context_used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
+    ui.set_status(current_model, context_used, context_max);
+    ui.set_session_name(&record.name);
+
+    let display_name = if !record.name.is_empty() {
+        format!("'{}' ({})", record.name.cyan(), target_id.dimmed())
+    } else if !record.title.is_empty() {
+        format!("\"{}\" ({})", record.title.cyan(), target_id.dimmed())
+    } else {
+        target_id.cyan().to_string()
+    };
+
+    ui.emit_above(&format!(
+        "{} Switched to session {}",
+        "✔".green().bold(),
+        display_name
+    ));
 
     Ok(())
 }
