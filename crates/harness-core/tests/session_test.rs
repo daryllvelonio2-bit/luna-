@@ -6,6 +6,7 @@
 //! summarising call is a plain `ModelProvider::complete`, so a canned provider pins the boundary
 //! and a failing one proves the non-fatal path.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1176,6 +1177,216 @@ async fn a_small_transcript_with_few_turns_is_left_alone() {
         provider.calls.load(Ordering::SeqCst),
         0,
         "a transcript under the budget needs no summarising call at all"
+    );
+}
+
+/// One stored message with its own row id, so a fold can be checked against it.
+fn numbered(
+    id: i64,
+    role: Role,
+    content: Option<String>,
+    tool_calls: Vec<ToolCall>,
+) -> StoredMessage {
+    StoredMessage {
+        id,
+        seq: id,
+        is_summary: false,
+        message: Message {
+            role,
+            content,
+            reasoning: None,
+            tool_calls,
+            tool_result: None,
+            usage: None,
+        },
+    }
+}
+
+fn call(id: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({ "path": "a.rs" }),
+        signature: None,
+    }
+}
+
+/// A fold may not cut a tool round in half.
+///
+/// The answers of the last call arrive while the summariser is still thinking: the fold is
+/// planned on the transcript as it was when the fold started. Folding that call would leave
+/// its answers in the live tail with nothing to answer, and a provider rejects such a request
+/// outright — NVIDIA answers `HTTP 400 {"message":"Invalid request"}`.
+///
+/// So the call stays with the answers that are still on their way.
+#[tokio::test]
+async fn a_fold_never_folds_a_call_whose_answers_have_not_arrived() {
+    // One huge user turn, and an assistant whose call has not been answered yet.
+    let transcript = vec![
+        numbered(1, Role::User, Some("x".repeat(500_000)), vec![]),
+        numbered(2, Role::Assistant, None, vec![call("call-1")]),
+    ];
+    let provider = RecordingProvider::new("FOLDED");
+
+    let outcome = compact(&provider, "canned-model", &transcript, Some(8))
+        .await
+        .unwrap()
+        .expect("a transcript over budget is foldable");
+
+    assert!(
+        !outcome.folded_ids.contains(&2),
+        "the call stays with the answers that are still on their way, folded: {:?}",
+        outcome.folded_ids
+    );
+    assert_eq!(
+        outcome.kept.len(),
+        1,
+        "the unanswered call is the tail, so its answers have somewhere to land"
+    );
+    assert_eq!(outcome.kept[0].tool_calls.len(), 1);
+}
+
+/// The kept tail may not open on a tool result: the assistant that asked for it would sit in
+/// the folded part, and the provider would reject a tool message that answers no call. The
+/// cut moves back so the call travels with its answers.
+#[tokio::test]
+async fn a_fold_never_leaves_the_kept_tail_opening_on_a_tool_result() {
+    let transcript = vec![
+        numbered(1, Role::User, Some("x".repeat(500_000)), vec![]),
+        numbered(2, Role::Assistant, None, vec![call("call-1")]),
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            is_summary: false,
+            message: Message {
+                role: Role::Tool,
+                content: Some("y".repeat(400_000)),
+                reasoning: None,
+                tool_calls: vec![],
+                tool_result: Some(ToolResult::success("call-1", "y".repeat(400_000))),
+                usage: None,
+            },
+        },
+    ];
+    let provider = RecordingProvider::new("FOLDED");
+
+    let outcome = compact(&provider, "canned-model", &transcript, Some(8))
+        .await
+        .unwrap()
+        .expect("a transcript over budget is foldable");
+
+    assert_eq!(
+        orphan_tool_results(&outcome.kept),
+        0,
+        "the kept tail carries no tool result that answers no call: {:?}",
+        outcome
+            .kept
+            .iter()
+            .map(|message| message.role)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// How many tool results in `messages` answer no call in `messages`.
+///
+/// A provider rejects the whole request over one of them: NVIDIA answers `HTTP 400
+/// {"message":"Invalid request"}`.
+fn orphan_tool_results(messages: &[Message]) -> usize {
+    let mut announced: HashSet<String> = HashSet::new();
+    let mut orphans = 0;
+    for message in messages {
+        if message.role == Role::Assistant {
+            for call in &message.tool_calls {
+                announced.insert(call.id.clone());
+            }
+        } else if message.role == Role::Tool {
+            let call_id = message
+                .tool_result
+                .as_ref()
+                .map(|result| result.call_id.clone())
+                .unwrap_or_default();
+            if !announced.contains(&call_id) {
+                orphans += 1;
+            }
+        }
+    }
+    orphans
+}
+
+/// A tool result whose call was folded away answers nothing, and a provider rejects the whole
+/// request over it — NVIDIA answers `HTTP 400 {"message":"Invalid request"}`. The transcript
+/// the model is given must not carry one, even when the store still holds it: a session that
+/// was folded badly stays folded, and the next turn must still work.
+#[tokio::test]
+async fn a_replayed_transcript_never_carries_a_tool_result_that_answers_no_call() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s_orphan").await.unwrap();
+    store
+        .append("s_orphan", &Message::user("read the file"), false)
+        .await
+        .unwrap();
+    let call_row = store
+        .append(
+            "s_orphan",
+            &Message::assistant_with_tools(vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({ "path": "a.rs" }),
+                signature: None,
+            }]),
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .append(
+            "s_orphan",
+            &Message::tool(ToolResult::success("call-1", "file content")),
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .append("s_orphan", &Message::assistant("done"), false)
+        .await
+        .unwrap();
+    // A fold that cut the round in half: the call went into the summary, its answer stayed live.
+    store
+        .record_compaction("s_orphan", &[call_row], "SUMMARY")
+        .await
+        .unwrap();
+
+    let store = Arc::new(store);
+    let main = Arc::new(RecordingProvider::new("done"));
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s_orphan".to_string(),
+        resume_max_messages: 200,
+    });
+
+    agent
+        .run_turn("next prompt", CancellationToken::new())
+        .await
+        .expect("the turn runs");
+
+    let sent = main.last_request();
+    assert_eq!(
+        orphan_tool_results(&sent),
+        0,
+        "the request carries no tool result that answers no call: {:?}",
+        sent.iter().map(|message| message.role).collect::<Vec<_>>()
+    );
+    assert!(
+        sent.iter()
+            .any(|message| message.content.as_deref() == Some("done")),
+        "the rest of the transcript is still sent"
     );
 }
 

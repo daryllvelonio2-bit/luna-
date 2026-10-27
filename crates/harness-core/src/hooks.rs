@@ -628,6 +628,23 @@ fn clip(text: &str) -> String {
     text.chars().take(HOOK_OUTPUT_MAX_CHARS).collect::<String>() + "… (truncated)"
 }
 
+/// The text a `post_tool_use` hook wants the model to see instead of the tool's own output.
+///
+/// Two shapes are accepted, because both are what a shell one-liner naturally produces:
+/// `{"content":"…"}` (the documented one) and a bare JSON string. Anything else is not a
+/// replacement, so the caller keeps the original output rather than guessing at intent.
+pub fn replacement_text(payload: &serde_json::Value) -> Option<String> {
+    match payload {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(map) => map
+            .get("content")
+            .or_else(|| map.get("output"))
+            .and_then(|value| value.as_str())
+            .map(|text| text.to_string()),
+        _ => None,
+    }
+}
+
 /// `matcher` is a glob over the tool name; absent or `*` matches everything.
 fn matcher_allows(matcher: Option<&str>, tool: Option<&str>) -> bool {
     let Some(pattern) = matcher else {

@@ -15,7 +15,8 @@ use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::permission::{PermissionEngine, RuleVerdict};
 use crate::saver::{transcript_tail, BackgroundSaver, SaverHook};
 use crate::session::{
-    compact, estimate_tokens, heuristic_tokens, CompactionOutcome, SessionStore, StoredMessage,
+    compact, estimate_tokens, heuristic_tokens, last_fold_seq, sendable_messages,
+    CompactionOutcome, SessionStore, StoredMessage,
 };
 use crate::traits::*;
 use crate::types::*;
@@ -1234,7 +1235,7 @@ where
                         debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
                     }
                     if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
-                        match hook_replacement_text(&replacement) {
+                        match crate::hooks::replacement_text(&replacement) {
                             Some(text) => {
                                 debug!(
                                     tool = %tool_call.name,
@@ -1981,57 +1982,4 @@ async fn run_fold(
         .record_compaction(session_id, &outcome.folded_ids, &outcome.summary)
         .await?;
     Ok(Some(outcome))
-}
-
-/// The sequence of the newest fold in `history`, if the session has been folded.
-///
-/// A summary row is written with the highest `seq` in the session at the moment of the fold, so it
-/// is the watermark that separates usage reports made against a transcript that still exists from
-/// reports made against one a later fold has replaced.
-fn last_fold_seq(history: &[StoredMessage]) -> Option<i64> {
-    history
-        .iter()
-        .filter(|stored| stored.is_summary)
-        .map(|stored| stored.seq)
-        .max()
-}
-
-/// The replayed rows as the messages to send, with the size reports a later fold retired dropped.
-///
-/// [`Message::usage`] is not an annotation on a message: it is the size of the *request* the
-/// provider answered, which covers everything up to that reply. Once a fold has written a newer
-/// summary, that request's transcript is gone, so the number describes nothing that will be sent
-/// again — and both the context gauge and [`crate::AgentConfig::compact_at_tokens`] read it as the
-/// size of the session, which makes the readout show history the fold removed and makes the next
-/// turn fold against a transcript that is not there. Dropping it makes the estimate fall back to
-/// the character heuristic over what is actually sent.
-fn sendable_messages(history: &[StoredMessage]) -> Vec<Message> {
-    let fold_seq = last_fold_seq(history);
-    history
-        .iter()
-        .map(|stored| {
-            let mut message = stored.message.clone();
-            if fold_seq.is_some_and(|fold_seq| stored.seq < fold_seq) {
-                message.usage = None;
-            }
-            message
-        })
-        .collect()
-}
-
-/// The text a `post_tool_use` hook wants the model to see instead of the tool's own output.
-///
-/// Two shapes are accepted, because both are what a shell one-liner naturally produces:
-/// `{"content":"…"}` (the documented one) and a bare JSON string. Anything else is not a
-/// replacement, so the caller keeps the original output rather than guessing at intent.
-fn hook_replacement_text(payload: &serde_json::Value) -> Option<String> {
-    match payload {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Object(map) => map
-            .get("content")
-            .or_else(|| map.get("output"))
-            .and_then(|value| value.as_str())
-            .map(|text| text.to_string()),
-        _ => None,
-    }
 }

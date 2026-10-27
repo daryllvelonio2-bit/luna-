@@ -117,6 +117,51 @@ pub fn estimate_tokens(messages: &[Message]) -> Estimate {
     }
 }
 
+/// Move the cut back until it no longer separates a tool call from its results.
+///
+/// The harness sends the transcript verbatim, and a provider rejects a `tool` message that
+/// answers no call: the assistant row that asked for the tools and the rows that carry the
+/// answers have to travel together, on one side of the cut or the other. NVIDIA answers such
+/// a request with `HTTP 400 {"message":"Invalid request"}`.
+///
+/// Two cuts break that. One leaves the first kept row a tool result whose call sits in the
+/// folded part. The other folds an assistant's call while its answers stay in the kept tail —
+/// the cut a stale fold snapshot produces, because the answers arrive while the summariser is
+/// still thinking, and the fold was planned on the transcript as it was before the call.
+fn snap_to_round_boundary(history: &[StoredMessage], boundary: usize) -> usize {
+    let mut boundary = boundary.min(history.len());
+
+    // The kept tail may not open on a tool result: walk back to the assistant that asked for
+    // it, so the call travels with its answers.
+    if boundary < history.len() && history[boundary].message.role == Role::Tool {
+        while boundary > 0 {
+            boundary -= 1;
+            let row = &history[boundary].message;
+            if row.role == Role::Assistant && !row.tool_calls.is_empty() {
+                break;
+            }
+        }
+        if boundary < history.len() && history[boundary].message.role == Role::Tool {
+            // A result with no call above it belongs to no round: the tail cannot open on it
+            // at all, so the cut goes to the start of the transcript.
+            boundary = 0;
+        }
+    }
+
+    // The folded part may not end with a call whose answers are kept: those answers would
+    // arrive with nothing to answer.
+    while boundary > 0 {
+        let row = &history[boundary - 1].message;
+        if row.role == Role::Assistant && !row.tool_calls.is_empty() {
+            boundary -= 1;
+        } else {
+            break;
+        }
+    }
+
+    boundary
+}
+
 /// Index of the first message that must stay verbatim: the start of the `keep_recent_turns`-th user
 /// turn counted from the end. `0` means nothing can be folded (the transcript holds no more turns
 /// than we are keeping).
@@ -144,11 +189,14 @@ pub fn fold_boundary(
             .collect();
 
         if user_indices.len() > keep_recent_turns {
-            return user_indices[user_indices.len() - keep_recent_turns];
+            return snap_to_round_boundary(
+                history,
+                user_indices[user_indices.len() - keep_recent_turns],
+            );
         }
     }
 
-    budget_boundary(history, FALLBACK_KEEP_TOKENS)
+    snap_to_round_boundary(history, budget_boundary(history, FALLBACK_KEEP_TOKENS))
 }
 
 /// Tokens of the transcript kept verbatim when the turn rule has nothing to fold.
@@ -163,8 +211,8 @@ pub const FALLBACK_KEEP_TOKENS: usize = 16_000;
 /// This is the escape hatch for the transcript that is one giant user turn: the turn rule has
 /// nothing older to fold and `budget_boundary`'s backward scan resolves to the turn's own start,
 /// which folds nothing. The walk here runs FORWARD from the oldest message, so the boundary lands
-/// where the tail first fits the budget, and `safe_boundary` then moves it to a row the providers
-/// accept at the head of a kept tail — an assistant tool-call row whose tool results follow it.
+/// where the tail first fits the budget, and the cut is then snapped to a row the providers accept
+/// at the head of a kept tail — an assistant tool-call row whose tool results follow it.
 /// Zero means nothing is foldable: the transcript fits the budget on its own.
 fn oldest_foldable_boundary(history: &[StoredMessage], budget: usize) -> usize {
     if heuristic_tokens(
@@ -204,14 +252,12 @@ fn oldest_foldable_boundary(history: &[StoredMessage], budget: usize) -> usize {
     // backward from the raw boundary to the nearest such row keeps every cut inside whole
     // tool rounds. A snap back over a huge round could exceed the budget, but a round is one
     // call and its result — not the turn.
-    while boundary > 0 {
-        let row = &history[boundary - 1].message;
-        if row.role == Role::Assistant && !row.tool_calls.is_empty() {
-            break;
-        }
-        boundary -= 1;
-    }
-    boundary
+    //
+    // The answers of the last call may not have arrived yet: the fold is planned on the
+    // transcript as it was when the fold started, and the tool results land while the
+    // summariser is still thinking. Folding that call would leave its answers in the live
+    // tail with nothing to answer, and a provider rejects such a request outright.
+    snap_to_round_boundary(history, boundary)
 }
 
 /// The start of the most recent stretch of messages that fits `budget` tokens.
