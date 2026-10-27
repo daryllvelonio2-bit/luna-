@@ -514,15 +514,9 @@ async fn run_agent_with_hooks(
     let notes = Arc::new(StubNotes);
 
     let runner = HookRunner::load(workspace, &settings(true, trust_workspace)).unwrap();
-    let agent = Agent::new(
-        provider,
-        memory,
-        notes,
-        registry,
-        AgentConfig::default(),
-    )
-    .with_approval(Arc::new(AllowAll), ApprovalSettings::default())
-    .with_hooks(Arc::new(runner));
+    let agent = Agent::new(provider, memory, notes, registry, AgentConfig::default())
+        .with_approval(Arc::new(AllowAll), ApprovalSettings::default())
+        .with_hooks(Arc::new(runner));
 
     let outcome = agent
         .run_turn("go", CancellationToken::new())

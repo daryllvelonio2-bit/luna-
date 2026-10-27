@@ -48,9 +48,7 @@ pub use session::{
     SqliteSessionStore, StoredMessage, CHARS_PER_TOKEN, HEURISTIC_TOLERANCE,
 };
 pub use tasks::BackgroundTaskQueue;
-pub use traits::{
-    MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry,
-};
+pub use traits::{MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry};
 pub use types::*;
 pub use usage::{
     GroupBy, ModelPrice, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord,

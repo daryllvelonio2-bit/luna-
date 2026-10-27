@@ -106,14 +106,7 @@ where
     // Phase 2e: where markdown notes are stored.
     let notes_dir = crate::notes_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(
-        layers,
-        persona,
-        memory,
-        &notes_dir,
-        &auto_compact,
-        &gateway,
-    )?;
+    let config_path = store::persist(layers, persona, memory, &notes_dir, &auto_compact, &gateway)?;
 
     let mut writer = Typewriter::new(out, pacer, size);
     confirmation(

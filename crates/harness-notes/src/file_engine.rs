@@ -270,13 +270,8 @@ impl NotesEngine for FileNotesEngine {
 
         let mut scored: Vec<(usize, Note)> = Vec::new();
         for note in self.load_all()? {
-            let haystack = format!(
-                "{}\n{}\n{}",
-                note.title,
-                note.content,
-                note.tags.join(" ")
-            )
-            .to_lowercase();
+            let haystack =
+                format!("{}\n{}\n{}", note.title, note.content, note.tags.join(" ")).to_lowercase();
             let hits = haystack.matches(&needle).count();
             if hits > 0 {
                 scored.push((hits, note));
@@ -393,16 +388,18 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
         body.push('\n');
     }
 
-    std::fs::write(&path, body)
-        .map_err(|e| HarnessError::NotesError(format!("Failed to write '{}': {}", path.display(), e)))?;
+    std::fs::write(&path, body).map_err(|e| {
+        HarnessError::NotesError(format!("Failed to write '{}': {}", path.display(), e))
+    })?;
     Ok(path)
 }
 
 /// Reads a note file back. The front matter is the metadata; everything after the closing fence is
 /// verbatim content, so `content: ---` or `title:` inside a note body is never mistaken for data.
 fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| HarnessError::NotesError(format!("Failed to read '{}': {}", path.display(), e)))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        HarnessError::NotesError(format!("Failed to read '{}': {}", path.display(), e))
+    })?;
 
     let fallback_id = path
         .file_stem()
@@ -470,7 +467,11 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
         .unwrap_or_else(Utc::now);
 
     let note = Note {
-        id: if id.trim().is_empty() { fallback_id } else { id },
+        id: if id.trim().is_empty() {
+            fallback_id
+        } else {
+            id
+        },
         title,
         content,
         summary_pointer: if pointer.trim().is_empty() {
@@ -502,8 +503,7 @@ fn parse_timestamp(raw: &str) -> DateTime<Utc> {
         .map(|d| d.with_timezone(&Utc))
         // SQLite's `CURRENT_TIMESTAMP` form, which the legacy store used.
         .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
-                .map(|d| d.and_utc())
+            chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S").map(|d| d.and_utc())
         })
         .unwrap_or_else(|_| Utc::now())
 }

@@ -307,13 +307,7 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
     let notes = Arc::new(MockNotes);
     let registry = Arc::new(DefaultToolRegistry::new());
 
-    let agent = Agent::new(
-        provider,
-        memory,
-        notes,
-        registry,
-        AgentConfig::default(),
-    );
+    let agent = Agent::new(provider, memory, notes, registry, AgentConfig::default());
 
     let cancel = CancellationToken::new();
     let result = agent.run_task("Hello", cancel).await;

@@ -101,9 +101,6 @@ mod tests {
         assert!(body.contains("One Record Per Topic"), "{body}");
         assert!(body.contains("notes_dir"), "{body}");
         // The old contract — a rich record per entity — is gone.
-        assert!(
-            !body.contains("consolidated memory record"),
-            "{body}"
-        );
+        assert!(!body.contains("consolidated memory record"), "{body}");
     }
 }

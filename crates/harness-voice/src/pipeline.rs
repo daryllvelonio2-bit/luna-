@@ -6,9 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::traits::{SpeechToText, TextToSpeech, WakeWordDetector};
-use harness_core::{
-    Agent, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry,
-};
+use harness_core::{Agent, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry};
 
 pub struct VoicePipelineConfig {
     pub wake_word: String,

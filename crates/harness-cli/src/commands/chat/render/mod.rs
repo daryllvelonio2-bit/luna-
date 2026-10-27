@@ -1104,8 +1104,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
         }
         "read_note" | "update_note" | "delete_note" => {
             if let Some(target) = text("title").or_else(|| text("id")) {
-                let display_title =
-                    lookup_note_title(target).unwrap_or_else(|| target.to_string());
+                let display_title = lookup_note_title(target).unwrap_or_else(|| target.to_string());
                 let action = match name {
                     "update_note" => suffix("(update)".to_string()),
                     "delete_note" => suffix("(delete)".to_string()),

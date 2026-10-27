@@ -54,6 +54,13 @@ pub enum AuthCommand {
         #[arg(short, long)]
         target: String,
     },
+    /// Take the priority flag away from a credential (demote it to a fallback)
+    ClearPriority {
+        #[arg(short, long)]
+        provider: String,
+        #[arg(short, long)]
+        target: String,
+    },
     /// Manage Google Antigravity OAuth credentials
     Antigravity {
         #[command(subcommand)]
@@ -235,6 +242,27 @@ pub async fn handle_auth_command(
                     "  note: the priority key is used first only under the fill_first strategy \
                      (luna auth strategy -p {} -s fill_first)",
                     provider
+                );
+            } else {
+                println!("{} Credential '{}' not found.", "✖".red(), target);
+            }
+        }
+        AuthCommand::ClearPriority { provider, target } => {
+            let updated = cred_manager
+                .clear_priority_credential(&provider, &target)
+                .await?;
+            if updated {
+                println!(
+                    "{} Credential '{}' is no longer the priority key for '{}'",
+                    "✔".green(),
+                    target,
+                    provider
+                );
+                // The flag was the only thing keeping a metered fallback in front of a real key.
+                println!(
+                    "  note: '{}' stays in the pool as a fallback and is handed out when no \
+                     other key is left",
+                    target
                 );
             } else {
                 println!("{} Credential '{}' not found.", "✖".red(), target);

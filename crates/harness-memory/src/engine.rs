@@ -95,8 +95,13 @@ impl SqliteMemoryEngine {
                 }
             }
         }
-        conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl), [])
-            .map_err(|e| HarnessError::MemoryError(format!("Failed to add column {}: {}", column, e)))?;
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl),
+            [],
+        )
+        .map_err(|e| {
+            HarnessError::MemoryError(format!("Failed to add column {}: {}", column, e))
+        })?;
         Ok(())
     }
 

@@ -55,12 +55,8 @@ use render::{
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
 
-pub(crate) type ChatAgent = Agent<
-    GenericProviderClient,
-    SqliteMemoryEngine,
-    FileNotesEngine,
-    DefaultToolRegistry,
->;
+pub(crate) type ChatAgent =
+    Agent<GenericProviderClient, SqliteMemoryEngine, FileNotesEngine, DefaultToolRegistry>;
 
 /// Draw the transcript.
 ///
@@ -365,22 +361,16 @@ pub async fn run_interactive_chat(
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
     agent_config.memory_mode = config.memory.mode;
 
-    let agent = Agent::new(
-        provider,
-        memory,
-        notes,
-        registry,
-        agent_config.clone(),
-    )
-    .with_permissions(harness_core::PermissionEngine::validate(
-        config.tools.permissions.clone(),
-    )?)
-    .with_approval(approver, approval_settings(&config))
-    .with_session(SessionBinding {
-        store: store.clone(),
-        session_id: session_id.clone(),
-        resume_max_messages: config.session.resume_max_messages,
-    });
+    let agent = Agent::new(provider, memory, notes, registry, agent_config.clone())
+        .with_permissions(harness_core::PermissionEngine::validate(
+            config.tools.permissions.clone(),
+        )?)
+        .with_approval(approver, approval_settings(&config))
+        .with_session(SessionBinding {
+            store: store.clone(),
+            session_id: session_id.clone(),
+            resume_max_messages: config.session.resume_max_messages,
+        });
     let mut agent = agent;
     // Attach the independent writer when the config asked for it; `None` leaves the session the
     // only writer, which is the original behaviour.

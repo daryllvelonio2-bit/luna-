@@ -705,14 +705,12 @@ fn parse_turns_from_history_handles_multistep_and_empty_queries() {
 fn parse_turns_from_history_keeps_a_turn_that_has_no_user_line() {
     use harness_core::Message;
 
-    let history = vec![
-        StoredMessage {
-            id: 1,
-            seq: 1,
-            message: Message::assistant("the answer"),
-            is_summary: false,
-        },
-    ];
+    let history = vec![StoredMessage {
+        id: 1,
+        seq: 1,
+        message: Message::assistant("the answer"),
+        is_summary: false,
+    }];
 
     let turns = parse_turns_from_history(&history);
     assert_eq!(turns.len(), 1, "the reply is not thrown away");
