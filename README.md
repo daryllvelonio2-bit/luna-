@@ -18,9 +18,10 @@ A production-grade, extensible **Autonomous AI Agent Harness** implemented in **
    - Automatic contradiction detection and superseding mechanism (`is_active = 0`, `superseded_by`).
 
 3. **Large-Scale Note-Taking & Knowledge Store**:
-   - Durable SQLite note storage with FTS5 (Full-Text Search).
+   - Durable file-backed Markdown storage: one user-readable note per file, with front matter for metadata and the document body preserved verbatim.
+   - Legacy SQLite note databases are imported once and then retired as a backup; new notes are never stored in SQLite.
    - Automated **1–5 word memory pointer distillation** protocol bridge: note saves automatically register a concise 1–5 word pointer in persistent memory so the agent retains awareness without prompt bloat.
-   - Native tools: `save_note`, `search_notes`, `read_note`, `update_note`.
+   - Native tools: `save_note`, `search_notes`, `list_notes`, `read_note`, `update_note`, `delete_note`.
 
 4. **Ecosystem Extensibility**:
    - Model Context Protocol (MCP) client implementation over Stdio and SSE.
@@ -51,7 +52,7 @@ rust-agent-harness/
 │   ├── harness-mcp/             # Model Context Protocol (MCP) client implementation
 │   ├── harness-plugins/         # Sandboxed Wasm plugin runtime & skill loader
 │   ├── harness-memory/          # Model-driven persistent memory engine & memory tools
-│   ├── harness-notes/           # Large document storage, FTS5 indexing, 1-5 word pointer bridge
+│   ├── harness-notes/           # File-backed Markdown notes, 1-5 word pointer bridge
 │   ├── harness-voice/           # Hands-free "Luna" wake word, VAD, STT & streaming TTS
 │   ├── harness-telemetry/       # Structured logging, token tracker, tracing setup
 │   └── harness-cli/             # CLI frontend, `luna auth`, `luna voice`, REPL & supervisor
