@@ -2325,3 +2325,87 @@ async fn auto_compact_never_empties_a_session_that_holds_fewer_turns_than_it_kee
         "the most recent turns are still in the request"
     );
 }
+
+#[tokio::test]
+async fn fold_boundary_percent_respects_target_percentage() {
+    use harness_core::session::fold_boundary_percent;
+
+    let (_dir, _path, store) = seeded_store(10).await;
+    let replay = store.replay("s1", 200).await.unwrap();
+    let history = replay.history;
+    assert_eq!(history.len(), 20); // 10 user, 10 assistant
+
+    // 50% target should cut at a clean user turn around the middle
+    let boundary_50 = fold_boundary_percent(&history, 50);
+    assert!(boundary_50 > 0 && boundary_50 < history.len());
+    assert_eq!(history[boundary_50].message.role, Role::User);
+
+    // 80% target should fold more messages (boundary further to the right)
+    let boundary_80 = fold_boundary_percent(&history, 80);
+    assert!(boundary_80 >= boundary_50);
+    assert_eq!(history[boundary_80].message.role, Role::User);
+
+    // 10% target should fold fewer messages (boundary further to the left)
+    let boundary_10 = fold_boundary_percent(&history, 10);
+    assert!(boundary_10 <= boundary_50);
+    if boundary_10 > 0 {
+        assert_eq!(history[boundary_10].message.role, Role::User);
+    }
+}
+
+#[tokio::test]
+async fn auto_compact_percentage_folds_target_portion_of_transcript() {
+    let (_dir, path, store) = seeded_store(6).await; // 12 messages: 6 turns
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED WITH PERCENT"));
+
+    let mut cfg = agent_config();
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 10;
+    cfg.auto_compact_percent = Some(50); // fold approximately 50%
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
+
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.reply, "done");
+
+    folded.notified().await;
+    assert_eq!(summariser.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(count_rows(&path, "is_summary = 1"), 1);
+
+    // 50% of 12 messages = 6 messages folded
+    assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 6);
+
+    let second = agent
+        .run_turn("second", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second.reply, "done");
+    let sent = main.last_request();
+    assert!(
+        sent.iter()
+            .any(|m| m.content.as_deref() == Some("FOLDED WITH PERCENT")),
+        "carries percentage-based summary"
+    );
+}

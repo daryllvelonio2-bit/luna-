@@ -253,19 +253,19 @@ luna
 luna --provider openai --model gpt-4o
 ```
 
-**Context Auto-Compaction & Trimming:**
-Luna automatically bounds session context tokens before making model requests:
+**Context Auto-Compaction & Percentage Trimming:**
+Luna automatically bounds session context tokens before making model requests and dynamically updates in-flight turns:
 - **Configuration** in `~/.luna/config.yaml`:
   - `auto_compact_enabled: true` (default `true`)
   - `auto_compact_threshold: 150000` (valid range `100_000` to `700_000`, default `150_000`)
-  - `auto_compact_turns: 20` (positive integer, default `20`)
-- **First-run Onboarding**: Prompted during setup to enable/disable auto-compaction, select token threshold between 100k and 700k, and specify the turn count to compact.
+  - `auto_compact_percent: 50` (percentage of context to fold away, range `1` to `90`, default `50`)
+  - `auto_compact_turns: 20` (backwards-compatible turn count fallback)
+- **First-run Onboarding**: Prompted during setup to enable/disable auto-compaction, select token threshold between 100k and 700k, and specify the context percentage to compact (1%-90%).
 - **Interactive Slash Command**:
-  - `/auto-compact` — show current auto-compaction configuration.
-  - `/auto-compact on` | `/auto-compact off` — enable or disable auto-compaction.
-  - `/auto-compact set threshold <value>` — set threshold (e.g. `200000` or `200k`, validated 100k-700k).
-  - `/auto-compact set turns <n>` — set amount of turns to compact (e.g. `15`).
+  - `/auto-compact` — opens the interactive setup box with live feedback (warning if ≤10%, healthy status for balanced ranges, aggressive indicator above 60%).
+  - `/auto-compact on` | `/auto-compact off` — toggle auto-compaction.
   Both the runtime in-memory state and the configuration file are updated immediately.
+- **Mid-Turn Context Re-binding**: When background compaction completes during multi-round tool iterations, active turn messages are immediately rebound to the compacted transcript and the UI context gauge drops dynamically, avoiding repeated re-threshold thrashing.
 
 **The todo list belongs to the session.** `todo_list` keeps one file per conversation in
 `paths.todos_dir` (`~/.luna/todos/<session>.json`), so a new session starts with an empty

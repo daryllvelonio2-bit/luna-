@@ -1636,16 +1636,16 @@ pub(crate) async fn handle_auto_compact_command(
             ag.set_auto_compact_enabled(true);
         }
         let _ = harness_core::config::set_in_file(&layers, "auto_compact_enabled", "true")?;
-        let (threshold, turns) = {
+        let (threshold, percent) = {
             let ag = agent.lock().await;
-            let (_, th, tr) = ag.auto_compact_settings();
-            (th, tr)
+            let (_, th, pct) = ag.auto_compact_settings();
+            (th, pct)
         };
         ui.emit_above(&format!(
-            "{} Auto-compact enabled (threshold: {} tokens, turns: {})",
+            "{} Auto-compact enabled (threshold: {} tokens, compact: {}%)",
             "✓".green().bold(),
             threshold,
-            turns
+            percent
         ));
         return Ok(());
     }
@@ -1663,7 +1663,7 @@ pub(crate) async fn handle_auto_compact_command(
     // No composer to type into: report the settings and the two arguments this host can use,
     // rather than opening a box that would read keys from a channel no one is writing to.
     let Some(key_rx) = key_rx else {
-        let (enabled, threshold, turns) = {
+        let (enabled, threshold, percent) = {
             let ag = agent.lock().await;
             ag.auto_compact_settings()
         };
@@ -1673,8 +1673,8 @@ pub(crate) async fn handle_auto_compact_command(
             "disabled".dimmed()
         };
         ui.emit_above(&format!(
-            "Auto-compact is {} (threshold: {} tokens, turns: {})",
-            status, threshold, turns
+            "Auto-compact is {} (threshold: {} tokens, compact: {}%)",
+            status, threshold, percent
         ));
         ui.emit_above(
             "Usage: /auto-compact opens the setup box in an interactive chat; here it also takes on | off",
@@ -1694,7 +1694,7 @@ pub(crate) async fn handle_auto_compact_command(
         return Ok(());
     }
 
-    let (_, current_threshold, current_turns) = {
+    let (_, current_threshold, current_percent) = {
         let ag = agent.lock().await;
         ag.auto_compact_settings()
     };
@@ -1706,6 +1706,7 @@ pub(crate) async fn handle_auto_compact_command(
         &THRESHOLD_PROMPT,
         current_threshold,
         harness_onboarding::compact_step::parse_threshold,
+        |_text, _val| None,
     )
     .await
     else {
@@ -1713,11 +1714,32 @@ pub(crate) async fn handle_auto_compact_command(
         return Ok(());
     };
 
-    let Some(turns) = prompt_value(
+    let Some(percent) = prompt_value(
         key_rx,
-        &TURNS_PROMPT,
-        current_turns,
-        harness_onboarding::compact_step::parse_turns,
+        &PERCENT_PROMPT,
+        current_percent,
+        harness_onboarding::compact_step::parse_percent,
+        |_text, pct| {
+            if pct <= 10 {
+                Some(format!(
+                    "{} ≤{}%: frees very little context; will quickly hit threshold again",
+                    "⚠".yellow().bold(),
+                    pct
+                ))
+            } else if pct <= 60 {
+                Some(format!(
+                    "{} {}%: good balance of history retention and token headroom",
+                    "✓".green().bold(),
+                    pct
+                ))
+            } else {
+                Some(format!(
+                    "{} {}%: aggressive compaction, clears majority of context",
+                    "⚡".cyan().bold(),
+                    pct
+                ))
+            }
+        },
     )
     .await
     else {
@@ -1728,7 +1750,7 @@ pub(crate) async fn handle_auto_compact_command(
     {
         let mut ag = agent.lock().await;
         ag.set_auto_compact_threshold(threshold);
-        ag.set_auto_compact_turns(turns);
+        ag.set_auto_compact_percent(percent);
         ag.set_auto_compact_enabled(true);
     }
     let _ = harness_core::config::set_in_file(&layers, "auto_compact_enabled", "true")?;
@@ -1737,13 +1759,17 @@ pub(crate) async fn handle_auto_compact_command(
         "auto_compact_threshold",
         &threshold.to_string(),
     )?;
-    let _ = harness_core::config::set_in_file(&layers, "auto_compact_turns", &turns.to_string())?;
+    let _ = harness_core::config::set_in_file(
+        &layers,
+        "auto_compact_percent",
+        &percent.to_string(),
+    )?;
 
     ui.emit_above(&format!(
-        "{} Auto-compact enabled (threshold: {} tokens, turns: {})",
+        "{} Auto-compact enabled (threshold: {} tokens, compact: {}%)",
         "✓".green().bold(),
         threshold,
-        turns
+        percent
     ));
     Ok(())
 }
@@ -1854,10 +1880,10 @@ const THRESHOLD_PROMPT: ValuePrompt = ValuePrompt {
     example: "Example: 150k — or 150000. Range: 100k to 700k.",
 };
 
-const TURNS_PROMPT: ValuePrompt = ValuePrompt {
-    title: "Auto-Compact — Turns",
-    question: "How many of the newest turns each fold keeps verbatim.",
-    example: "Example: 20 — any number of turns, as long as it is more than none.",
+const PERCENT_PROMPT: ValuePrompt = ValuePrompt {
+    title: "Auto-Compact — Percentage",
+    question: "Percentage of the transcript context to fold away into a summary when threshold is reached.",
+    example: "Example: 50 — Range: 1% to 90% (e.g. 50 folds half, keeping half).",
 };
 
 /// Ask for one auto-compact value in a box, re-asking in place while it does not parse.
@@ -1865,14 +1891,16 @@ const TURNS_PROMPT: ValuePrompt = ValuePrompt {
 /// Returns `None` when the user backs out (Esc / Ctrl+C). A blank line is a real answer: the parse
 /// functions read it as the default, and the box says so by showing the current value as the
 /// placeholder the answer falls back to.
-async fn prompt_value<F>(
+async fn prompt_value<F, A>(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     spec: &ValuePrompt,
     current: usize,
     parse: F,
+    advisory: A,
 ) -> Option<usize>
 where
     F: Fn(&str) -> Result<usize, String>,
+    A: Fn(&str, usize) -> Option<String>,
 {
     // Anything typed before the box opened belongs to the composer, not to this question.
     while key_rx.try_recv().is_ok() {}
@@ -1880,6 +1908,12 @@ where
     let placeholder = current.to_string();
     let mut input = String::new();
     let mut error: Option<String> = None;
+
+    let compute_advisory = |text: &str| -> Option<String> {
+        let val_str = if text.is_empty() { placeholder.as_str() } else { text };
+        parse(val_str).ok().and_then(|val| advisory(val_str, val))
+    };
+    let mut adv = compute_advisory(&input);
 
     // The question takes the screen, the way the approval gate and the clarify box do: the whole
     // frame is repainted on every keystroke, so a box that changes height (an error row, a longer
@@ -1890,6 +1924,7 @@ where
         &input,
         &placeholder,
         error.as_deref(),
+        adv.as_deref(),
         get_terminal_width().saturating_sub(2),
     ));
 
@@ -1901,16 +1936,21 @@ where
         match key {
             AppKey::Enter => match parse(&input) {
                 Ok(value) => break Some(value),
-                Err(message) => error = Some(message),
+                Err(message) => {
+                    error = Some(message);
+                    adv = None;
+                }
             },
             AppKey::Backspace => {
                 input.pop();
                 error = None;
+                adv = compute_advisory(&input);
             }
             AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => break None,
             AppKey::Char(c) if !c.is_control() => {
                 input.push(c);
                 error = None;
+                adv = compute_advisory(&input);
             }
             _ => continue,
         }
@@ -1920,6 +1960,7 @@ where
             &input,
             &placeholder,
             error.as_deref(),
+            adv.as_deref(),
             get_terminal_width().saturating_sub(2),
         ));
     };
@@ -1940,6 +1981,7 @@ fn render_value_box(
     input: &str,
     placeholder: &str,
     error: Option<&str>,
+    advisory: Option<&str>,
     width: usize,
 ) -> String {
     let total = width.clamp(32, 76);
@@ -2007,14 +2049,20 @@ fn render_value_box(
 
     lines.push(blank.clone());
     lines.push(row(&format!(" {}", spec.example.dimmed())));
-    match error {
-        Some(message) => lines.push(row(&format!(
+    if let Some(message) = error {
+        lines.push(row(&format!(
             " {} {}",
             "✖".red().bold(),
             cut(message, total.saturating_sub(8)).red()
-        ))),
+        )));
+    } else if let Some(message) = advisory {
+        lines.push(row(&format!(
+            " {}",
+            cut(message, total.saturating_sub(6))
+        )));
+    } else {
         // Kept as an empty row rather than dropped: the height must not depend on the state.
-        None => lines.push(blank.clone()),
+        lines.push(blank.clone());
     }
     lines.push(blank.clone());
     lines.push(row(&format!(
@@ -2070,7 +2118,7 @@ mod value_box_tests {
         for width in [24, 32, 40, 60, 76, 140] {
             for error in [None, Some(long_error)] {
                 for input in ["", "150k", "not a number at all"] {
-                    let text = render_value_box(&THRESHOLD_PROMPT, input, "150000", error, width);
+                    let text = render_value_box(&THRESHOLD_PROMPT, input, "150000", error, None, width);
                     let widths = widths_of(&text);
                     assert!(
                         widths.iter().all(|&w| w == widths[0]),
@@ -2090,7 +2138,7 @@ mod value_box_tests {
     /// on screen while the value is typed.
     #[test]
     fn the_value_box_carries_the_example_and_the_bounds() {
-        let text = render_value_box(&THRESHOLD_PROMPT, "", "150000", None, 76);
+        let text = render_value_box(&THRESHOLD_PROMPT, "", "150000", None, None, 76);
         let plain = dialoguer::console::strip_ansi_codes(&text).to_string();
         assert!(plain.contains("Auto-Compact"));
         assert!(plain.contains("150k"));
@@ -2105,18 +2153,36 @@ mod value_box_tests {
     /// A rejected value is answered inside the box, and the box says why instead of forgetting it.
     #[test]
     fn a_rejected_value_is_shown_in_the_box() {
-        let clean = render_value_box(&TURNS_PROMPT, "0", "20", None, 76);
+        let clean = render_value_box(&PERCENT_PROMPT, "0", "50", None, None, 76);
         let failed = render_value_box(
-            &TURNS_PROMPT,
+            &PERCENT_PROMPT,
             "0",
-            "20",
-            Some("turns must be positive (got 0)"),
+            "50",
+            Some("percentage must be between 1 and 90 (got 0)"),
+            None,
             76,
         );
         let plain = dialoguer::console::strip_ansi_codes(&failed).to_string();
-        assert!(plain.contains("must be positive"));
+        assert!(plain.contains("must be between 1 and 90"));
         // Same height either way, so repainting the frame cannot shift the block on screen.
         assert_eq!(clean.lines().count(), failed.lines().count());
+    }
+
+    /// An advisory message appears cleanly in the box without changing frame height.
+    #[test]
+    fn an_advisory_message_holds_frame_height() {
+        let clean = render_value_box(&PERCENT_PROMPT, "10", "50", None, None, 76);
+        let advised = render_value_box(
+            &PERCENT_PROMPT,
+            "10",
+            "50",
+            None,
+            Some("⚠ Warning: ≤10% frees very little context"),
+            76,
+        );
+        let plain = dialoguer::console::strip_ansi_codes(&advised).to_string();
+        assert!(plain.contains("Warning: ≤10%"));
+        assert_eq!(clean.lines().count(), advised.lines().count());
     }
 
     /// Blank is an answer, not a missing one: the parsers behind the two boxes read it as the
@@ -2126,6 +2192,10 @@ mod value_box_tests {
         assert_eq!(
             harness_onboarding::compact_step::parse_threshold(""),
             Ok(150_000)
+        );
+        assert_eq!(
+            harness_onboarding::compact_step::parse_percent(""),
+            Ok(50)
         );
         assert_eq!(harness_onboarding::compact_step::parse_turns(""), Ok(20));
     }

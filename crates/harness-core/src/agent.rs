@@ -15,7 +15,7 @@ use crate::hooks::{HookContext, HookEvent, HookRunner, HookVerdict};
 use crate::permission::{PermissionEngine, RuleVerdict};
 use crate::saver::{transcript_tail, BackgroundSaver, SaverHook};
 use crate::session::{
-    compact, estimate_tokens, heuristic_tokens, last_fold_seq, sendable_messages,
+    compact, compact_percent, estimate_tokens, heuristic_tokens, last_fold_seq, sendable_messages,
     CompactionOutcome, SessionStore, StoredMessage,
 };
 use crate::traits::*;
@@ -62,11 +62,17 @@ pub struct AgentConfig {
     /// Turns kept verbatim when automatic compaction triggers.
     ///
     /// This is a *retained* count, like [`Self::keep_recent_turns`], not a count of turns to
-    /// throw away: after a fold the transcript is the summary plus this many recent turns. It is
-    /// a floor, not a guarantee about the fold's size — a transcript whose messages are large is
-    /// folded back to a token budget instead, because a turn is not a fixed size.
+    /// Percentage of transcript context to compact into a summary (1% - 90%).
+    /// When set (or default), auto-compaction targets this percentage of context tokens.
+    #[serde(default = "default_auto_compact_percent")]
+    pub auto_compact_percent: Option<usize>,
+    /// Number of newest turns each auto-compaction fold keeps verbatim.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
+}
+
+fn default_auto_compact_percent() -> Option<usize> {
+    Some(50)
 }
 
 fn default_auto_compact_enabled() -> bool {
@@ -116,9 +122,17 @@ impl Default for AgentConfig {
             memory_mode: crate::config::MemoryMode::Session,
             auto_compact_enabled: true,
             auto_compact_threshold: 150_000,
+            auto_compact_percent: None,
             auto_compact_turns: 20,
         }
     }
+}
+
+/// What the fold targets (percentage of tokens or count of turns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldTarget {
+    Percent(usize),
+    Turns(usize),
 }
 
 /// When the transcript gets folded, and how much of it stays verbatim afterwards.
@@ -132,8 +146,8 @@ impl Default for AgentConfig {
 struct FoldPolicy {
     /// Fold once the transcript estimate crosses this many tokens.
     threshold: usize,
-    /// Turns kept verbatim at the end of the folded transcript.
-    keep_recent: usize,
+    /// Target percentage or count of turns.
+    target: FoldTarget,
 }
 
 /// The provider and model that write summaries. A separate provider is what makes a failing
@@ -274,6 +288,8 @@ where
     /// still going. This is what stops that turn from starting a second fold over the same
     /// transcript: one fold at a time, and the next turn reaps the result.
     fold_in_flight: Arc<AtomicBool>,
+    /// Completed fold outcome delivered asynchronously from background compaction task.
+    completed_fold: Arc<Mutex<Option<CompactionOutcome>>>,
 }
 
 /// Closes the turn's checkpoint on every exit path, including `?` and panics.
@@ -289,6 +305,15 @@ struct FoldInFlight(Arc<AtomicBool>);
 impl Drop for FoldInFlight {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Clears in-flight fold outcome when a turn finishes so subsequent turns replay fresh from store.
+struct FoldReaperGuard<'a>(&'a Mutex<Option<CompactionOutcome>>);
+
+impl Drop for FoldReaperGuard<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().take();
     }
 }
 
@@ -343,6 +368,7 @@ where
             saver: None,
             turns_completed: AtomicUsize::new(0),
             fold_in_flight: Arc::new(AtomicBool::new(false)),
+            completed_fold: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -386,12 +412,22 @@ where
         self.config.auto_compact_turns = turns;
     }
 
-    /// Current auto-compaction settings.
+    /// Update the percentage of transcript to compact at runtime.
+    pub fn set_auto_compact_percent(&mut self, percent: usize) {
+        self.config.auto_compact_percent = Some(percent.clamp(
+            crate::config::AUTO_COMPACT_MIN_PERCENT,
+            crate::config::AUTO_COMPACT_MAX_PERCENT,
+        ));
+    }
+
+    /// Current auto-compaction settings (enabled, threshold, percent).
     pub fn auto_compact_settings(&self) -> (bool, usize, usize) {
         (
             self.config.auto_compact_enabled,
             self.config.auto_compact_threshold,
-            self.config.auto_compact_turns,
+            self.config
+                .auto_compact_percent
+                .unwrap_or(crate::config::AUTO_COMPACT_DEFAULT_PERCENT),
         )
     }
 
@@ -402,27 +438,35 @@ where
     /// can never let a conversation grow past what the harness already allowed.
     fn fold_policy(&self) -> FoldPolicy {
         if self.config.auto_compact_enabled {
+            let target = match self.config.auto_compact_percent {
+                Some(pct) => FoldTarget::Percent(pct),
+                None => FoldTarget::Turns(self.config.auto_compact_turns),
+            };
             FoldPolicy {
                 threshold: self
                     .config
                     .auto_compact_threshold
                     .min(self.config.compact_at_tokens),
-                keep_recent: self.config.auto_compact_turns,
+                target,
             }
         } else {
             FoldPolicy {
                 threshold: self.config.compact_at_tokens,
-                keep_recent: self.config.keep_recent_turns,
+                target: FoldTarget::Turns(self.config.keep_recent_turns),
             }
         }
     }
 
     /// The policy a fold the user asked for by hand runs under: the threshold is irrelevant
-    /// (`force` skips the check), and the kept tail is the configured `keep_recent_turns`.
+    /// (`force` skips the check), and the target is the configured percent or `keep_recent_turns`.
     fn explicit_fold_policy(&self) -> FoldPolicy {
+        let target = match self.config.auto_compact_percent {
+            Some(pct) => FoldTarget::Percent(pct),
+            None => FoldTarget::Turns(self.config.keep_recent_turns),
+        };
         FoldPolicy {
             threshold: self.config.compact_at_tokens,
-            keep_recent: self.config.keep_recent_turns,
+            target,
         }
     }
 
@@ -879,6 +923,8 @@ where
         user_input: &str,
         cancel_token: CancellationToken,
     ) -> Result<TurnOutcome, HarnessError> {
+        self.completed_fold.lock().unwrap().take();
+        let _reaper_guard = FoldReaperGuard(&self.completed_fold);
         let system_text = self.system_prompt(user_input).await?;
 
         // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
@@ -889,6 +935,7 @@ where
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::system(system_text.clone()));
         messages.extend(sendable_messages(&history));
+        let mut turn_user_idx = messages.len();
         messages.push(Message::user(user_input));
 
         // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
@@ -946,6 +993,14 @@ where
             if cancel_token.is_cancelled() {
                 warn!("Task loop cancelled cooperatively");
                 return Err(HarnessError::Cancelled);
+            }
+
+            if let Some(outcome) = self.completed_fold.lock().unwrap().take() {
+                debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
+                let turn_messages = messages.split_off(turn_user_idx);
+                messages = outcome.bounded_messages(system_text.clone());
+                turn_user_idx = messages.len();
+                messages.extend(turn_messages);
             }
 
             let current_tokens = estimate_tokens(&messages).tokens;
@@ -1717,8 +1772,9 @@ where
         let provider = setup.provider.clone();
         let model = setup.model.clone();
         let history = history.to_vec();
-        let keep_recent = policy.keep_recent;
+        let target = policy.target;
         let observer = self.observer.clone();
+        let completed_fold = self.completed_fold.clone();
         let guard = FoldInFlight(self.fold_in_flight.clone());
 
         tokio::spawn(async move {
@@ -1729,11 +1785,14 @@ where
                 provider.as_ref(),
                 &model,
                 &history,
-                keep_recent,
+                target,
             )
             .await
             {
                 Ok(Some(outcome)) => {
+                    *completed_fold.lock().unwrap() = Some(outcome.clone());
+                    let new_tokens = estimate_tokens(&outcome.kept).tokens
+                        + estimate_tokens(&[Message::system(outcome.summary.clone())]).tokens;
                     if let Some(observer) = observer {
                         observer(AgentEvent::CompactionFinished {
                             folded: Some(CompactionNotice {
@@ -1742,6 +1801,9 @@ where
                                 messages: outcome.folded_messages,
                             }),
                             error: None,
+                        });
+                        observer(AgentEvent::ContextTokensUpdated {
+                            tokens_used: new_tokens,
                         });
                     }
                 }
@@ -1880,7 +1942,7 @@ where
             setup.provider.as_ref(),
             &setup.model,
             history,
-            policy.keep_recent,
+            policy.target,
         )
         .await
         {
@@ -1973,9 +2035,13 @@ async fn run_fold(
     provider: &dyn ModelProvider,
     model: &str,
     history: &[StoredMessage],
-    keep_recent: usize,
+    target: FoldTarget,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
-    let Some(outcome) = compact(provider, model, history, Some(keep_recent)).await? else {
+    let outcome = match target {
+        FoldTarget::Percent(pct) => compact_percent(provider, model, history, pct).await?,
+        FoldTarget::Turns(turns) => compact(provider, model, history, Some(turns)).await?,
+    };
+    let Some(outcome) = outcome else {
         return Ok(None);
     };
     store

@@ -414,7 +414,7 @@ fn onboarding_disables_auto_compact() {
 
 #[test]
 fn compact_step_parsers() {
-    use harness_onboarding::compact_step::{parse_selection, parse_threshold, parse_turns};
+    use harness_onboarding::compact_step::{parse_percent, parse_selection, parse_threshold, parse_turns};
 
     assert!(parse_selection("1").unwrap().enabled);
     assert!(!parse_selection("2").unwrap().enabled);
@@ -425,6 +425,12 @@ fn compact_step_parsers() {
     assert_eq!(parse_threshold("").unwrap(), 150_000);
     assert!(parse_threshold("50k").is_err()); // below 100k
     assert!(parse_threshold("800k").is_err()); // above 700k
+
+    assert_eq!(parse_percent("50").unwrap(), 50);
+    assert_eq!(parse_percent("50%").unwrap(), 50);
+    assert_eq!(parse_percent("").unwrap(), 50);
+    assert!(parse_percent("0").is_err());
+    assert!(parse_percent("95").is_err());
 
     assert_eq!(parse_turns("20").unwrap(), 20);
     assert_eq!(parse_turns("5").unwrap(), 5);

@@ -199,6 +199,59 @@ pub fn fold_boundary(
     snap_to_round_boundary(history, budget_boundary(history, FALLBACK_KEEP_TOKENS))
 }
 
+/// Choose a fold boundary that compacts approximately `percent`% of the transcript tokens,
+/// keeping whole user turns where possible and falling back to tool-round boundaries
+/// when a single turn dominates the context.
+pub fn fold_boundary_percent(history: &[StoredMessage], percent: usize) -> usize {
+    if history.is_empty() {
+        return 0;
+    }
+    let percent = percent.clamp(1, 90);
+    let total: usize = history
+        .iter()
+        .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+        .sum();
+    if total == 0 {
+        return 0;
+    }
+    let target_fold = (total * percent) / 100;
+    let budget = total.saturating_sub(target_fold);
+
+    let user_indices: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, stored)| stored.message.role == Role::User)
+        .map(|(index, _)| index)
+        .collect();
+
+    // Prefer keeping whole user turns that fit within the budget
+    let mut chosen_user_idx = 0;
+    for &u_idx in user_indices.iter().rev() {
+        let kept_tokens: usize = history[u_idx..]
+            .iter()
+            .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+            .sum();
+        if kept_tokens <= budget {
+            chosen_user_idx = u_idx;
+        } else {
+            break;
+        }
+    }
+
+    if chosen_user_idx > 0 {
+        return snap_to_round_boundary(history, chosen_user_idx);
+    }
+
+    // When the newest user turn alone exceeds the budget or is the only turn,
+    // fold tool rounds inside it.
+    let boundary = snap_to_round_boundary(history, budget_boundary(history, budget));
+    if boundary == 0 && total > budget {
+        oldest_foldable_boundary(history, budget)
+    } else {
+        boundary
+    }
+}
+
 /// Tokens of the transcript kept verbatim when the turn rule has nothing to fold.
 ///
 /// The turn rule keeps *turns*; this keeps *tokens*. It is a cap, not a target: a transcript of
@@ -475,7 +528,38 @@ pub async fn compact(
             return Ok(None);
         }
     }
+    compact_at_boundary(provider, model, history, boundary).await
+}
 
+/// Summarise approximately `percent`% of `history`'s tokens into one model call.
+pub async fn compact_percent(
+    provider: &dyn ModelProvider,
+    model: &str,
+    history: &[StoredMessage],
+    percent: usize,
+) -> Result<Option<CompactionOutcome>, HarnessError> {
+    let mut boundary = fold_boundary_percent(history, percent);
+    if boundary == 0 {
+        let total: usize = history
+            .iter()
+            .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+            .sum();
+        let target_fold = (total * percent.clamp(1, 90)) / 100;
+        let budget = total.saturating_sub(target_fold);
+        boundary = oldest_foldable_boundary(history, budget.max(FALLBACK_KEEP_TOKENS));
+        if boundary == 0 {
+            return Ok(None);
+        }
+    }
+    compact_at_boundary(provider, model, history, boundary).await
+}
+
+async fn compact_at_boundary(
+    provider: &dyn ModelProvider,
+    model: &str,
+    history: &[StoredMessage],
+    boundary: usize,
+) -> Result<Option<CompactionOutcome>, HarnessError> {
     let folded = &history[..boundary];
     let kept = &history[boundary..];
     let transcript = render_transcript(folded);

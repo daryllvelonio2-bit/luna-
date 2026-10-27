@@ -75,6 +75,9 @@ pub struct Config {
     /// Token threshold at which automatic compaction triggers (100k - 700k).
     #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold: usize,
+    /// Percentage of transcript context to compact into a summary (1% - 90%).
+    #[serde(default = "default_auto_compact_percent")]
+    pub auto_compact_percent: Option<usize>,
     /// Number of newest turns each auto-compaction fold keeps verbatim.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
@@ -87,6 +90,9 @@ pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
 pub const AUTO_COMPACT_MAX_THRESHOLD: usize = 700_000;
 pub const AUTO_COMPACT_DEFAULT_THRESHOLD: usize = 150_000;
 pub const AUTO_COMPACT_DEFAULT_TURNS: usize = 20;
+pub const AUTO_COMPACT_DEFAULT_PERCENT: usize = 50;
+pub const AUTO_COMPACT_MIN_PERCENT: usize = 1;
+pub const AUTO_COMPACT_MAX_PERCENT: usize = 90;
 
 fn default_auto_compact_enabled() -> bool {
     true
@@ -94,6 +100,10 @@ fn default_auto_compact_enabled() -> bool {
 
 fn default_auto_compact_threshold() -> usize {
     AUTO_COMPACT_DEFAULT_THRESHOLD
+}
+
+fn default_auto_compact_percent() -> Option<usize> {
+    Some(AUTO_COMPACT_DEFAULT_PERCENT)
 }
 
 fn default_auto_compact_turns() -> usize {
@@ -120,6 +130,7 @@ impl Default for Config {
             first_run: true,
             auto_compact_enabled: true,
             auto_compact_threshold: AUTO_COMPACT_DEFAULT_THRESHOLD,
+            auto_compact_percent: Some(AUTO_COMPACT_DEFAULT_PERCENT),
             auto_compact_turns: AUTO_COMPACT_DEFAULT_TURNS,
             gateway: GatewaySettings::default(),
         }
@@ -137,6 +148,14 @@ impl Config {
                 AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, self.auto_compact_threshold
             )));
         }
+        if let Some(pct) = self.auto_compact_percent {
+            if pct < AUTO_COMPACT_MIN_PERCENT || pct > AUTO_COMPACT_MAX_PERCENT {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "auto_compact_percent must be between {} and {}, got {}",
+                    AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, pct
+                )));
+            }
+        }
         if self.auto_compact_turns == 0 {
             return Err(HarnessError::ConfigurationError(
                 "auto_compact_turns must be positive, got 0".to_string(),
@@ -151,6 +170,14 @@ impl Config {
                 AUTO_COMPACT_MAX_THRESHOLD,
                 self.agent.auto_compact_threshold
             )));
+        }
+        if let Some(pct) = self.agent.auto_compact_percent {
+            if pct < AUTO_COMPACT_MIN_PERCENT || pct > AUTO_COMPACT_MAX_PERCENT {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "agent.auto_compact_percent must be between {} and {}, got {}",
+                    AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, pct
+                )));
+            }
         }
         if self.agent.auto_compact_turns == 0 {
             return Err(HarnessError::ConfigurationError(
@@ -750,6 +777,20 @@ pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
         config.auto_compact_threshold = config.agent.auto_compact_threshold;
     } else {
         config.agent.auto_compact_threshold = config.auto_compact_threshold;
+    }
+
+    if from_flag.contains_key("auto_compact_percent")
+        || from_env.contains_key("auto_compact_percent")
+        || from_file.contains_key("auto_compact_percent")
+    {
+        config.agent.auto_compact_percent = config.auto_compact_percent;
+    } else if from_flag.contains_key("agent.auto_compact_percent")
+        || from_env.contains_key("agent.auto_compact_percent")
+        || from_file.contains_key("agent.auto_compact_percent")
+    {
+        config.auto_compact_percent = config.agent.auto_compact_percent;
+    } else {
+        config.agent.auto_compact_percent = config.auto_compact_percent;
     }
 
     if from_flag.contains_key("auto_compact_turns")

@@ -34,6 +34,8 @@ pub const MEMORY_MODE_KEY: &str = "memory.mode";
 pub const AUTO_COMPACT_ENABLED_KEY: &str = "auto_compact_enabled";
 /// The config key holding auto-compaction threshold.
 pub const AUTO_COMPACT_THRESHOLD_KEY: &str = "auto_compact_threshold";
+/// The config key holding auto-compaction percent.
+pub const AUTO_COMPACT_PERCENT_KEY: &str = "auto_compact_percent";
 /// The config key holding auto-compaction turns.
 pub const AUTO_COMPACT_TURNS_KEY: &str = "auto_compact_turns";
 /// The config key holding whether the messaging gateway is enabled.
@@ -72,6 +74,7 @@ impl Default for GatewaySelection {
 pub struct AutoCompactSelection {
     pub enabled: bool,
     pub threshold: usize,
+    pub percent: usize,
     pub turns: usize,
 }
 
@@ -80,6 +83,7 @@ impl Default for AutoCompactSelection {
         Self {
             enabled: true,
             threshold: harness_core::config::AUTO_COMPACT_DEFAULT_THRESHOLD,
+            percent: harness_core::config::AUTO_COMPACT_DEFAULT_PERCENT,
             turns: harness_core::config::AUTO_COMPACT_DEFAULT_TURNS,
         }
     }
@@ -111,6 +115,11 @@ pub fn persist(
         layers,
         AUTO_COMPACT_THRESHOLD_KEY,
         &auto_compact.threshold.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_PERCENT_KEY,
+        &auto_compact.percent.to_string(),
     )?;
     config::set_in_file(
         layers,

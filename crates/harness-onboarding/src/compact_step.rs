@@ -6,7 +6,8 @@
 use std::io::{BufRead, Write};
 
 use harness_core::config::{
-    AUTO_COMPACT_DEFAULT_THRESHOLD, AUTO_COMPACT_DEFAULT_TURNS, AUTO_COMPACT_MAX_THRESHOLD,
+    AUTO_COMPACT_DEFAULT_PERCENT, AUTO_COMPACT_DEFAULT_THRESHOLD, AUTO_COMPACT_DEFAULT_TURNS,
+    AUTO_COMPACT_MAX_PERCENT, AUTO_COMPACT_MAX_THRESHOLD, AUTO_COMPACT_MIN_PERCENT,
     AUTO_COMPACT_MIN_THRESHOLD,
 };
 use harness_core::error::HarnessError;
@@ -27,6 +28,7 @@ pub const PANEL: Panel = Panel {
 pub const PROMPT: &str = "Select 1-2 ▸ ";
 pub const THRESHOLD_PROMPT: &str = "Threshold (100k-700k, default 150k) ▸ ";
 pub const TURNS_PROMPT: &str = "Recent turns to keep (default 20) ▸ ";
+pub const PERCENT_PROMPT: &str = "Context to compact % (1-90, default 50) ▸ ";
 
 pub const HINT: &str = "Enter 1 to enable auto-compact, 2 to disable — blank keeps enabled (1). Change it later with `/auto-compact`.";
 pub const MAX_ATTEMPTS: usize = 10;
@@ -96,6 +98,23 @@ pub fn parse_threshold(input: &str) -> Result<usize, String> {
     Ok(num)
 }
 
+pub fn parse_percent(input: &str) -> Result<usize, String> {
+    let trimmed = input.trim().trim_end_matches('%').trim();
+    if trimmed.is_empty() {
+        return Ok(AUTO_COMPACT_DEFAULT_PERCENT);
+    }
+    let n: usize = trimmed
+        .parse()
+        .map_err(|_| format!("'{trimmed}' is not a valid number"))?;
+    if n < AUTO_COMPACT_MIN_PERCENT || n > AUTO_COMPACT_MAX_PERCENT {
+        return Err(format!(
+            "percentage must be between {} and {} (got {})",
+            AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, n
+        ));
+    }
+    Ok(n)
+}
+
 pub fn parse_turns(input: &str) -> Result<usize, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -113,9 +132,9 @@ pub fn parse_turns(input: &str) -> Result<usize, String> {
 pub fn summary(selection: &AutoCompactSelection) -> String {
     if selection.enabled {
         format!(
-            "Enabled (threshold: {}k, turns: {})",
+            "Enabled (threshold: {}k, compact: {}%)",
             selection.threshold / 1_000,
-            selection.turns
+            selection.percent
         )
     } else {
         "Disabled".to_string()
@@ -204,6 +223,7 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
         let selection = AutoCompactSelection {
             enabled: false,
             threshold: AUTO_COMPACT_DEFAULT_THRESHOLD,
+            percent: AUTO_COMPACT_DEFAULT_PERCENT,
             turns: AUTO_COMPACT_DEFAULT_TURNS,
         };
         writer.blank()?;
@@ -238,24 +258,26 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
         }
     }
 
-    // Ask for turns
+    // Ask for percent
+    let mut chosen_percent = AUTO_COMPACT_DEFAULT_PERCENT;
     let mut chosen_turns = AUTO_COMPACT_DEFAULT_TURNS;
     for attempt in 1..=MAX_ATTEMPTS {
-        writer.write_prompt_line(&prompt_line(size, TURNS_PROMPT))?;
+        writer.write_prompt_line(&prompt_line(size, PERCENT_PROMPT))?;
         let mut answer = String::new();
         if reader.read_line(&mut answer)? == 0 {
             break;
         }
-        match parse_turns(&answer) {
-            Ok(t) => {
-                chosen_turns = t;
+        match parse_percent(&answer) {
+            Ok(p) => {
+                chosen_percent = p;
+                chosen_turns = p;
                 break;
             }
             Err(error) => {
                 writer.write_centered(&format!("✗ {}", error), Some(ERROR_COLOR))?;
                 if attempt == MAX_ATTEMPTS {
                     return Err(HarnessError::ConfigurationError(format!(
-                        "invalid turns in {MAX_ATTEMPTS} attempts"
+                        "invalid percentage in {MAX_ATTEMPTS} attempts"
                     )));
                 }
             }
@@ -265,6 +287,7 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
     let selection = AutoCompactSelection {
         enabled: true,
         threshold: chosen_threshold,
+        percent: chosen_percent,
         turns: chosen_turns,
     };
     writer.blank()?;

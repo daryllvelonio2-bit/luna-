@@ -425,6 +425,7 @@ fn auto_compact_config_defaults_and_validation() {
     let cfg = Config::default();
     assert!(cfg.auto_compact_enabled);
     assert_eq!(cfg.auto_compact_threshold, 150_000);
+    assert_eq!(cfg.auto_compact_percent, Some(50));
     assert_eq!(cfg.auto_compact_turns, 20);
     assert!(cfg.validate().is_ok());
 
@@ -440,8 +441,17 @@ fn auto_compact_config_defaults_and_validation() {
     bad_turns.auto_compact_turns = 0;
     assert!(bad_turns.validate().is_err());
 
+    let mut bad_percent_low = cfg.clone();
+    bad_percent_low.auto_compact_percent = Some(0);
+    assert!(bad_percent_low.validate().is_err());
+
+    let mut bad_percent_high = cfg.clone();
+    bad_percent_high.auto_compact_percent = Some(91);
+    assert!(bad_percent_high.validate().is_err());
+
     let mut good = cfg.clone();
     good.auto_compact_threshold = 200_000;
+    good.auto_compact_percent = Some(40);
     good.auto_compact_turns = 10;
     assert!(good.validate().is_ok());
 }
@@ -454,16 +464,21 @@ fn set_in_file_validates_auto_compact_bounds() {
 
     set_in_file(&layers, "auto_compact_enabled", "false").unwrap();
     set_in_file(&layers, "auto_compact_threshold", "300000").unwrap();
+    set_in_file(&layers, "auto_compact_percent", "35").unwrap();
     set_in_file(&layers, "auto_compact_turns", "15").unwrap();
 
     let resolved = resolve(&layers).unwrap().into_config();
     assert!(!resolved.auto_compact_enabled);
     assert_eq!(resolved.auto_compact_threshold, 300_000);
+    assert_eq!(resolved.auto_compact_percent, Some(35));
     assert_eq!(resolved.auto_compact_turns, 15);
 
     // Invalid threshold rejected
     assert!(set_in_file(&layers, "auto_compact_threshold", "50000").is_err());
     assert!(set_in_file(&layers, "auto_compact_threshold", "900000").is_err());
+    // Invalid percent rejected
+    assert!(set_in_file(&layers, "auto_compact_percent", "0").is_err());
+    assert!(set_in_file(&layers, "auto_compact_percent", "95").is_err());
     // Invalid turns rejected
     assert!(set_in_file(&layers, "auto_compact_turns", "0").is_err());
 }
