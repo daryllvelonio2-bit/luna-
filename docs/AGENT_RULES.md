@@ -6,7 +6,8 @@ Read this before touching anything. It overrides habit.
 
 `luna` is a Rust autonomous-agent harness: a 10-crate workspace under `crates/`. It is a real
 binary, not a mock — `cargo run --bin luna -- --help`. It talks to live model providers, keeps
-SQLite memory and notes, speaks MCP, runs sandboxed wasm plugins, and can patch its own source.
+SQLite memory records and markdown-file notes under `paths.notes_dir`, speaks MCP, and runs
+sandboxed wasm plugins.
 
 Board: `luna-harness` (`shiina kanban --board luna-harness …`). Owner: Daryll. Every card is
 assigned by the dispatcher; you never pick your own lane.
