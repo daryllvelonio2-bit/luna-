@@ -288,6 +288,8 @@ where
     /// still going. This is what stops that turn from starting a second fold over the same
     /// transcript: one fold at a time, and the next turn reaps the result.
     fold_in_flight: Arc<AtomicBool>,
+    /// Set when compaction in the active turn produces no fold or fails, preventing repeated retries.
+    fold_disabled_this_turn: Arc<AtomicBool>,
     /// Completed fold outcome delivered asynchronously from background compaction task.
     completed_fold: Arc<Mutex<Option<CompactionOutcome>>>,
 }
@@ -368,6 +370,7 @@ where
             saver: None,
             turns_completed: AtomicUsize::new(0),
             fold_in_flight: Arc::new(AtomicBool::new(false)),
+            fold_disabled_this_turn: Arc::new(AtomicBool::new(false)),
             completed_fold: Arc::new(Mutex::new(None)),
         }
     }
@@ -924,6 +927,7 @@ where
         cancel_token: CancellationToken,
     ) -> Result<TurnOutcome, HarnessError> {
         self.completed_fold.lock().unwrap().take();
+        self.fold_disabled_this_turn.store(false, Ordering::SeqCst);
         let _reaper_guard = FoldReaperGuard(&self.completed_fold);
         let system_text = self.system_prompt(user_input).await?;
 
@@ -956,7 +960,7 @@ where
         // The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
         // stored transcript, and the checks below use this to tell "still over the bar" from "over
         // the bar a fold has already answered".
-        let fold_watermark = last_fold_seq(&history);
+        let mut fold_watermark = last_fold_seq(&history);
         self.spawn_fold_if_needed(&messages, &history, fold_policy);
 
         // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
@@ -995,13 +999,12 @@ where
                 return Err(HarnessError::Cancelled);
             }
 
-            if let Some(outcome) = self.completed_fold.lock().unwrap().take() {
-                debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
-                let turn_messages = messages.split_off(turn_user_idx);
-                messages = outcome.bounded_messages(system_text.clone());
-                turn_user_idx = messages.len();
-                messages.extend(turn_messages);
-            }
+            self.try_rebind_completed_fold(
+                &mut messages,
+                &mut turn_user_idx,
+                &mut fold_watermark,
+                &system_text,
+            );
 
             let current_tokens = estimate_tokens(&messages).tokens;
             if let Some(ref observer) = self.observer {
@@ -1010,13 +1013,8 @@ where
                 });
             }
 
-            // The turn's own growth counts against the fold policy too. A tool loop can append its
-            // way past the bar with nobody looking: the check at the top of the turn has already
-            // happened, so without this the fold waits for the user's next message to notice. A
-            // crossing is folded once: the guard inside the spawn covers a fold in flight, and the
-            // watermark covers one that has already landed.
             if current_tokens as usize > fold_policy.threshold {
-                self.spawn_fold_from_stored(fold_policy, fold_watermark)
+                self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
                     .await;
             }
 
@@ -1067,10 +1065,17 @@ where
                 }
             }
 
-            let response = response.ok_or_else(|| HarnessError::ProviderError {
+            let mut response = response.ok_or_else(|| HarnessError::ProviderError {
                 provider: self.provider.provider_id().to_string(),
                 message: "Model request failed after retries".to_string(),
             })?;
+
+            let rebound = self.try_rebind_completed_fold(
+                &mut messages,
+                &mut turn_user_idx,
+                &mut fold_watermark,
+                &system_text,
+            );
 
             if let Some(ref usage) = response.usage {
                 let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
@@ -1084,12 +1089,27 @@ where
                     .prompt_tokens
                     .saturating_add(accumulated.completion_tokens);
 
-                let actual_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                let actual_tokens = if rebound {
+                    estimate_tokens(&messages).tokens
+                } else {
+                    usage.prompt_tokens.saturating_add(usage.completion_tokens)
+                };
                 if let Some(ref observer) = self.observer {
                     observer(AgentEvent::ContextTokensUpdated {
                         tokens_used: actual_tokens,
                     });
                 }
+            } else if rebound {
+                let current_tokens = estimate_tokens(&messages).tokens;
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ContextTokensUpdated {
+                        tokens_used: current_tokens,
+                    });
+                }
+            }
+
+            if rebound {
+                response.usage = None;
             }
 
             if let Some(ref r) = response.reasoning {
@@ -1161,7 +1181,7 @@ where
                 // session that only folded on the *next* prompt reported compaction as something
                 // the user had to come back for.
                 if estimate_tokens(&messages).tokens as usize > fold_policy.threshold {
-                    self.spawn_fold_from_stored(fold_policy, fold_watermark)
+                    self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
                         .await;
                 }
                 return Ok(TurnOutcome {
@@ -1396,6 +1416,13 @@ where
                 let tool_message = Message::tool(execution_result);
                 self.append(&tool_message, false).await?;
                 messages.push(tool_message);
+
+                self.try_rebind_completed_fold(
+                    &mut messages,
+                    &mut turn_user_idx,
+                    &mut fold_watermark,
+                    &system_text,
+                );
 
                 let current_tokens = estimate_tokens(&messages).tokens;
                 if let Some(ref observer) = self.observer {
@@ -1731,7 +1758,10 @@ where
         history: &[StoredMessage],
         policy: FoldPolicy,
     ) {
-        if self.session.is_none() || self.compaction.is_none() {
+        if self.session.is_none()
+            || self.compaction.is_none()
+            || self.fold_disabled_this_turn.load(Ordering::SeqCst)
+        {
             return;
         }
 
@@ -1776,6 +1806,7 @@ where
         let observer = self.observer.clone();
         let completed_fold = self.completed_fold.clone();
         let guard = FoldInFlight(self.fold_in_flight.clone());
+        let fold_disabled = self.fold_disabled_this_turn.clone();
 
         tokio::spawn(async move {
             let _guard = guard;
@@ -1808,6 +1839,7 @@ where
                     }
                 }
                 Ok(None) => {
+                    fold_disabled.store(true, Ordering::SeqCst);
                     debug!(
                         "Nothing to fold: the transcript holds no more turns than the policy keeps \
                          and fits the compaction budget"
@@ -1822,6 +1854,7 @@ where
                 // Non-fatal by design: the transcript is untouched, and the turn this fold was
                 // started for has already run on the full history.
                 Err(failure) => {
+                    fold_disabled.store(true, Ordering::SeqCst);
                     warn!(
                         "Compaction failed, continuing on the full transcript: {}",
                         failure
@@ -1856,8 +1889,55 @@ where
     /// the running turn is still carrying. Without this check the turn's last request looks over the
     /// bar again and the session folds a second time — summarising the summary out of a history that
     /// was just bounded.
-    async fn spawn_fold_from_stored(&self, policy: FoldPolicy, watermark: Option<i64>) {
-        if self.session.is_none() || self.compaction.is_none() {
+    fn try_rebind_completed_fold(
+        &self,
+        messages: &mut Vec<Message>,
+        turn_user_idx: &mut usize,
+        fold_watermark: &mut Option<i64>,
+        system_text: &str,
+    ) -> bool {
+        if let Some(outcome) = self.completed_fold.lock().unwrap().take() {
+            debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
+            let mut turn_messages = messages.split_off(*turn_user_idx);
+            for msg in &mut turn_messages {
+                msg.usage = None;
+            }
+            let user_content = turn_messages.first().and_then(|m| m.content.as_ref());
+            let past_kept = match user_content {
+                Some(content) => {
+                    if let Some(pos) = outcome
+                        .kept
+                        .iter()
+                        .rposition(|m| m.role == Role::User && m.content.as_deref() == Some(content))
+                    {
+                        &outcome.kept[..pos]
+                    } else {
+                        &outcome.kept[..]
+                    }
+                }
+                None => &outcome.kept[..],
+            };
+            let mut new_messages = Vec::with_capacity(past_kept.len() + 2 + turn_messages.len());
+            new_messages.push(Message::system(system_text.to_string()));
+            new_messages.push(Message::system(outcome.summary.clone()));
+            new_messages.extend(past_kept.iter().cloned());
+            *turn_user_idx = new_messages.len();
+            new_messages.extend(turn_messages);
+            *messages = new_messages;
+            if outcome.fold_seq.is_some() {
+                *fold_watermark = outcome.fold_seq;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn spawn_fold_from_stored(&self, policy: FoldPolicy, watermark: &mut Option<i64>) {
+        if self.session.is_none()
+            || self.compaction.is_none()
+            || self.fold_disabled_this_turn.load(Ordering::SeqCst)
+        {
             return;
         }
         // Nothing worth re-reading for: this crossing is already being folded.
@@ -1873,7 +1953,7 @@ where
                 return;
             }
         };
-        if last_fold_seq(&history) != watermark {
+        if last_fold_seq(&history) != *watermark {
             // A fold landed earlier in THIS turn. That fold answered one crossing, not every
             // crossing: a long agentic turn keeps growing after its fold, and pinning the
             // watermark until the next user message would let one unbounded turn pin an unbounded
@@ -1884,6 +1964,7 @@ where
                 "A fold landed during this turn; re-arming the watermark to {:?} for the next crossing",
                 rearmed
             );
+            *watermark = rearmed;
             let mut messages = Vec::with_capacity(history.len() + 1);
             messages.push(Message::system(
                 self.system_prompt("").await.unwrap_or_default(),
@@ -2041,11 +2122,12 @@ async fn run_fold(
         FoldTarget::Percent(pct) => compact_percent(provider, model, history, pct).await?,
         FoldTarget::Turns(turns) => compact(provider, model, history, Some(turns)).await?,
     };
-    let Some(outcome) = outcome else {
+    let Some(mut outcome) = outcome else {
         return Ok(None);
     };
-    store
+    let seq = store
         .record_compaction(session_id, &outcome.folded_ids, &outcome.summary)
         .await?;
+    outcome.fold_seq = Some(seq);
     Ok(Some(outcome))
 }

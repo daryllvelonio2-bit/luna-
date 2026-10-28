@@ -283,3 +283,154 @@ async fn a_long_turn_folds_again_when_it_crosses_the_bar_a_second_time() {
         "a long turn that re-crosses the bar folds again; got {summaries} summary rows"
     );
 }
+
+struct ToolLoopUsageProvider {
+    calls: AtomicUsize,
+    rounds: usize,
+    stale_usage: usize,
+}
+
+#[async_trait]
+impl ModelProvider for ToolLoopUsageProvider {
+    fn provider_id(&self) -> &str {
+        "tool_loop"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["tool-loop-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut message = Message::assistant("ok");
+        let prompt_tokens = if n == 0 {
+            self.stale_usage as u32
+        } else {
+            estimate_tokens(messages).tokens as u32
+        };
+        message.usage = Some(TokenUsage {
+            prompt_tokens,
+            completion_tokens: 10,
+            total_tokens: prompt_tokens + 10,
+        });
+        if n < self.rounds {
+            message.tool_calls = vec![ToolCall {
+                id: format!("call_{n}"),
+                name: "list_files".to_string(),
+                arguments: serde_json::json!({ "path": "." }),
+                signature: None,
+            }];
+        }
+        Ok(message)
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+    let store = Arc::new(SqliteSessionStore::new(Some(path.clone())).expect("open store"));
+    store.ensure_session("s1").await.unwrap();
+
+    // Seed 4 large turns in history so estimated tokens exceed 100k
+    for i in 0..4 {
+        store
+            .append(
+                "s1",
+                &Message::user(format!("prior user query {i} {}", "a".repeat(120_000))),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append("s1", &Message::assistant("short answer"), false)
+            .await
+            .unwrap();
+    }
+
+    let main = Arc::new(ToolLoopUsageProvider {
+        calls: AtomicUsize::new(0),
+        rounds: 3,
+        stale_usage: 150_000,
+    });
+
+    let cfg = AgentConfig {
+        compact_at_tokens: 1_000_000,
+        keep_recent_turns: 1,
+        auto_compact_enabled: true,
+        auto_compact_threshold: 50_000,
+        auto_compact_turns: 1,
+        ..AgentConfig::default()
+    };
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 500,
+    })
+    .with_compaction(CompactionSetup {
+        provider: Arc::new(CannedSummariser {
+            calls: AtomicUsize::new(0),
+        }),
+        model: "canned-model".to_string(),
+    });
+
+    let started_count = Arc::new(AtomicUsize::new(0));
+    let started_watcher = started_count.clone();
+    let token_updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tokens_watcher = token_updates.clone();
+
+    agent.set_observer(Arc::new(move |event| match event {
+        AgentEvent::CompactionStarted { .. } => {
+            started_watcher.fetch_add(1, Ordering::SeqCst);
+        }
+        AgentEvent::ContextTokensUpdated { tokens_used } => {
+            tokens_watcher.lock().unwrap().push(tokens_used);
+        }
+        _ => {}
+    }));
+
+    let outcome = agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "ok");
+    // Main provider executed 4 calls (3 tool calls + final reply)
+    assert_eq!(main.calls.load(Ordering::SeqCst), 4);
+
+    // Compaction should only start ONCE, not repeatedly on every tool round
+    assert_eq!(
+        started_count.load(Ordering::SeqCst),
+        1,
+        "compaction must not re-trigger on subsequent tool calls within the same turn"
+    );
+
+    let summaries = count_summaries(&path);
+    assert_eq!(summaries, 1, "exactly one compaction fold performed");
+
+    let updates = token_updates.lock().unwrap().clone();
+    // The final context token updates must reflect the compacted transcript, not the stale 150k usage
+    let last_update = *updates.last().unwrap();
+    assert!(
+        last_update < 50_000,
+        "context gauge at end of turn must reflect compacted tokens (<50k), got {last_update}"
+    );
+}

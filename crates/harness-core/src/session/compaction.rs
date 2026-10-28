@@ -380,6 +380,8 @@ pub struct CompactionOutcome {
     /// message, a transcript with fewer turns than we keep — is still a fold, and this
     /// is what says so.
     pub folded_messages: usize,
+    /// The database sequence number of the recorded summary row, if recorded.
+    pub fold_seq: Option<i64>,
 }
 
 impl CompactionOutcome {
@@ -619,6 +621,7 @@ async fn compact_at_boundary(
             .filter(|stored| stored.message.role == Role::User)
             .count(),
         folded_messages: folded.len(),
+        fold_seq: None,
     }))
 }
 
