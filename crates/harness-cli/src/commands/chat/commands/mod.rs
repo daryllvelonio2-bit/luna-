@@ -285,6 +285,8 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
+            super::refresh_antigravity_status_if_needed(ui, current_provider, current_model, cred_manager)
+                .await;
             Ok(false)
         }
         "/name" => {

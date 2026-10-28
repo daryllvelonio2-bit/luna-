@@ -24,6 +24,7 @@ use super::ui::ChatUi;
 enum ConnectAction {
     AddKey,
     ListKeys,
+    SetPriority,
     RemoveKey,
     ImportAntigravity,
     ImportOpencode,
@@ -37,6 +38,7 @@ impl ConnectAction {
         match self {
             ConnectAction::AddKey => "Add provider API key",
             ConnectAction::ListKeys => "List connected providers",
+            ConnectAction::SetPriority => "Set priority credential",
             ConnectAction::RemoveKey => "Remove a credential",
             ConnectAction::ImportAntigravity => "Import Antigravity / Google",
             ConnectAction::ImportOpencode => "Import OpenCode / Shiina",
@@ -71,6 +73,7 @@ pub(crate) async fn handle_connect_command(
         let outcome = match action {
             ConnectAction::AddKey => add_key(key_rx, ui, cred_manager).await,
             ConnectAction::ListKeys => list_keys(ui, cred_manager).await,
+            ConnectAction::SetPriority => set_priority(key_rx, ui, cred_manager).await,
             ConnectAction::RemoveKey => remove_key(key_rx, ui, cred_manager).await,
             ConnectAction::ImportAntigravity => import_antigravity(ui, cred_manager).await,
             ConnectAction::ImportOpencode => import_opencode(ui, cred_manager).await,
@@ -102,9 +105,10 @@ async fn pick_action(
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
 ) -> Option<ConnectAction> {
-    const ACTIONS: [ConnectAction; 8] = [
+    const ACTIONS: [ConnectAction; 9] = [
         ConnectAction::AddKey,
         ConnectAction::ListKeys,
+        ConnectAction::SetPriority,
         ConnectAction::RemoveKey,
         ConnectAction::ImportAntigravity,
         ConnectAction::ImportOpencode,
@@ -348,6 +352,123 @@ async fn remove_key(
     Ok(())
 }
 
+/// Choose which credential is used first for a provider.
+async fn set_priority(
+    key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+    cred_manager: &Arc<CredentialManager>,
+) -> Result<(), HarnessError> {
+    let mut connected: Vec<String> = Vec::new();
+    for provider in get_provider_catalog() {
+        if !cred_manager.get_credentials(&provider.id).await.is_empty() {
+            connected.push(provider.id.clone());
+        }
+    }
+
+    if connected.is_empty() {
+        ui.emit_above(&format!(
+            "{} Nothing to prioritize — no providers connected",
+            "•".dimmed()
+        ));
+        return Ok(());
+    }
+
+    let provider = if connected.len() == 1 {
+        connected[0].clone()
+    } else {
+        let Some(index) = super::commands::select_from_rx(
+            key_rx,
+            ui,
+            "Provider to set priority for",
+            &connected,
+            0,
+            false,
+            false,
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        connected[index].clone()
+    };
+
+    let creds = cred_manager.get_credentials(&provider).await;
+    if creds.is_empty() {
+        ui.emit_above(&format!(
+            "{} No credentials found for {}",
+            "•".dimmed(),
+            provider.cyan()
+        ));
+        return Ok(());
+    }
+
+    let mut initial_selection = 0;
+    let items: Vec<String> = creds
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if c.is_priority {
+                initial_selection = i;
+            }
+            let mut tags = Vec::new();
+            if c.is_priority {
+                tags.push("current priority");
+            }
+            if c.is_temporarily_disabled {
+                tags.push("cooldown");
+            }
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tags.join(", "))
+            };
+            format!("{} (used {}){}", c.label, c.usage_count, tag_str)
+        })
+        .collect();
+
+    let Some(cred_index) = super::commands::select_from_rx(
+        key_rx,
+        ui,
+        &format!("Credential of {}", provider),
+        &items,
+        initial_selection,
+        false,
+        false,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+
+    let target = &creds[cred_index];
+    let updated = cred_manager
+        .set_priority_credential(&provider, &target.id)
+        .await?;
+
+    if updated {
+        // Ensure strategy is FillFirst so the priority credential is used first
+        let current_strat = cred_manager.get_rotation_strategy(&provider).await;
+        if current_strat != RotationStrategy::FillFirst {
+            let _ = cred_manager
+                .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
+                .await;
+        }
+
+        ui.emit_above(&format!(
+            "{} Credential '{}' set as priority for {}",
+            "✔".green().bold(),
+            target.label.green(),
+            provider.cyan()
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Failed to set priority credential",
+            "✖".red().bold()
+        ));
+    }
+    Ok(())
+}
+
 /// Copy a local Antigravity login into the credential pool.
 async fn import_antigravity(
     ui: &ChatUi,
@@ -547,9 +668,10 @@ mod tests {
 
     #[test]
     fn every_menu_entry_has_a_label() {
-        const ACTIONS: [ConnectAction; 8] = [
+        const ACTIONS: [ConnectAction; 9] = [
             ConnectAction::AddKey,
             ConnectAction::ListKeys,
+            ConnectAction::SetPriority,
             ConnectAction::RemoveKey,
             ConnectAction::ImportAntigravity,
             ConnectAction::ImportOpencode,
