@@ -834,6 +834,52 @@ async fn model_tolerates_databases_written_before_the_column_existed() {
     );
 }
 
+#[tokio::test]
+async fn compact_model_persistence_and_clearing() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+
+    // Fresh session has no compact model override
+    assert_eq!(store.get("s1").await.unwrap().compact_model, None);
+
+    store
+        .set_compact_model("s1", "nvidia", "meta/llama-3.1-8b-instruct")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get("s1").await.unwrap().compact_model,
+        Some((
+            "nvidia".to_string(),
+            "meta/llama-3.1-8b-instruct".to_string()
+        ))
+    );
+
+    // Clearing reverts to None
+    store.clear_compact_model("s1").await.unwrap();
+    assert_eq!(store.get("s1").await.unwrap().compact_model, None);
+}
+
+#[tokio::test]
+async fn compact_model_persistence_survives_reopening_the_database() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    {
+        let store = SqliteSessionStore::new(Some(path.clone())).unwrap();
+        store.ensure_session("s1").await.unwrap();
+        store
+            .set_compact_model("s1", "anthropic", "claude-3-haiku")
+            .await
+            .unwrap();
+    }
+
+    let reopened = SqliteSessionStore::new(Some(path)).unwrap();
+    assert_eq!(
+        reopened.get("s1").await.unwrap().compact_model,
+        Some(("anthropic".to_string(), "claude-3-haiku".to_string()))
+    );
+}
+
 // ---------------------------------------------------------------- estimator
 
 /// Characters per token for the estimator's fallback. The provider-reported count for

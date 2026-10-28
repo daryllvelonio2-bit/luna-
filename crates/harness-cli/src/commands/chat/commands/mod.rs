@@ -247,6 +247,8 @@ pub(crate) async fn execute_slash_command(
                 cred_manager,
                 discovery,
                 agent,
+                store.as_ref(),
+                session_id,
                 current_provider,
                 current_model,
                 compact_provider,
@@ -318,6 +320,8 @@ pub(crate) async fn execute_slash_command(
                 session_id,
                 current_provider,
                 current_model,
+                compact_provider,
+                compact_model,
                 turns,
                 process_expanded,
                 todo_scope,
@@ -726,6 +730,7 @@ pub(crate) async fn handle_model_switch(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_compact_model_switch(
     mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
@@ -733,6 +738,8 @@ pub(crate) async fn handle_compact_model_switch(
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &SqliteSessionStore,
+    session_id: &str,
     current_provider: &str,
     current_model: &str,
     compact_provider: &mut Option<String>,
@@ -743,6 +750,7 @@ pub(crate) async fn handle_compact_model_switch(
         if a.eq_ignore_ascii_case("reset") || a.eq_ignore_ascii_case("default") {
             *compact_provider = None;
             *compact_model = None;
+            let _ = store.clear_compact_model(session_id).await;
             let comp_client = GenericProviderClient::new(
                 current_provider.to_string(),
                 current_model.to_string(),
@@ -783,7 +791,42 @@ pub(crate) async fn handle_compact_model_switch(
     )
     .await?
     else {
+        ui.clear_box_on_exit();
+        ui.draw_initial_box();
         return Ok(());
+    };
+
+    // Prompt for scope: this session only vs globally
+    let is_global = if let Some(a) = arg {
+        a.eq_ignore_ascii_case("global") || a.eq_ignore_ascii_case("--global")
+    } else if let Some(ref mut rx) = key_rx {
+        let scope_options = [
+            "This session only (remember for this session)".to_string(),
+            "Globally (save as default for all sessions)".to_string(),
+        ];
+        while rx.try_recv().is_ok() {}
+        let sel = select_from_rx(
+            rx,
+            ui,
+            "Compaction Model Scope",
+            &scope_options,
+            0,
+            true,
+            false,
+        )
+        .await;
+        match sel {
+            Some(1) => true,
+            Some(0) => false,
+            None => {
+                ui.clear_box_on_exit();
+                ui.draw_initial_box();
+                return Ok(());
+            }
+            _ => false,
+        }
+    } else {
+        false
     };
 
     let comp_client = GenericProviderClient::new(
@@ -805,12 +848,42 @@ pub(crate) async fn handle_compact_model_switch(
     *compact_provider = Some(chosen_provider.clone());
     *compact_model = Some(chosen_model.clone());
 
-    ui.emit_above(&format!(
-        "{} Compaction model set to {} ({})",
-        "✓".green(),
-        chosen_model,
-        chosen_provider
-    ));
+    if is_global {
+        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+        if let Err(e) = harness_core::config::set_in_file(&layers, "agent.compaction_provider", &chosen_provider) {
+            ui.emit_above(&format!("{} Failed to persist global compaction provider: {}", "⚠".yellow(), e));
+        }
+        if let Err(e) = harness_core::config::set_in_file(&layers, "agent.compaction_model", &chosen_model) {
+            ui.emit_above(&format!("{} Failed to persist global compaction model: {}", "⚠".yellow(), e));
+        }
+        let _ = store.clear_compact_model(session_id).await;
+        ui.emit_above(&format!(
+            "{} Compaction model set globally: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    } else {
+        if let Err(e) = store
+            .set_compact_model(session_id, &chosen_provider, &chosen_model)
+            .await
+        {
+            ui.emit_above(&format!(
+                "{} Compaction model switched in this session, but persisting it failed: {}",
+                "⚠".yellow(),
+                e
+            ));
+        }
+        ui.emit_above(&format!(
+            "{} Compaction model set for this session: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    }
+
+    ui.clear_box_on_exit();
+    ui.draw_initial_box();
 
     Ok(())
 }
@@ -1247,6 +1320,8 @@ pub(crate) async fn handle_sessions_switch(
     session_id: &mut String,
     current_provider: &mut String,
     current_model: &mut String,
+    compact_provider: &mut Option<String>,
+    compact_model: &mut Option<String>,
     turns: &mut Vec<TurnRecord>,
     process_expanded: &mut bool,
     todo_scope: &harness_core::tools::TodoScope,
@@ -1377,6 +1452,51 @@ pub(crate) async fn handle_sessions_switch(
             }
         }
     }
+
+    // Restore target session's compaction model (or fall back to global config / active model)
+    let (target_comp_p, target_comp_m) = match &record.compact_model {
+        Some((p, m)) => (p.clone(), m.clone()),
+        None => {
+            let p = config
+                .agent
+                .compaction_provider
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| current_provider.clone());
+            let m = config
+                .agent
+                .compaction_model
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| current_model.clone());
+            (p, m)
+        }
+    };
+    if let Ok(client) = GenericProviderClient::new(
+        target_comp_p.clone(),
+        target_comp_m.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&target_comp_p),
+    ) {
+        agent
+            .lock()
+            .await
+            .set_compaction(Some(harness_core::CompactionSetup {
+                provider: Arc::new(client),
+                model: target_comp_m.clone(),
+            }));
+    }
+    *compact_provider = record
+        .compact_model
+        .as_ref()
+        .map(|(p, _)| p.clone())
+        .or_else(|| config.agent.compaction_provider.clone().filter(|p| !p.is_empty()));
+    *compact_model = record
+        .compact_model
+        .as_ref()
+        .map(|(_, m)| m.clone())
+        .or_else(|| config.agent.compaction_model.clone().filter(|m| !m.is_empty()));
 
     todo_scope.set_session(&target_id);
     todo::refresh_panel(ui, todo_scope);

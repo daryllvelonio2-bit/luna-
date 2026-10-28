@@ -131,18 +131,25 @@ pub async fn run_interactive_chat(
         config.providers.get(&current_provider),
     )?);
 
-    // The compaction call is a plain model call: one provider, one model, resolved from
-    // `agent.compaction_provider` / `agent.compaction_model` (both default to the session's).
-    let compaction_provider_id = config
-        .agent
-        .compaction_provider
-        .clone()
-        .unwrap_or_else(|| current_provider.clone());
-    let compaction_model = config
-        .agent
-        .compaction_model
-        .clone()
-        .unwrap_or_else(|| current_model.clone());
+    // Compaction model: priority is session-specific override -> config setting -> active model
+    let (compaction_provider_id, compaction_model) = match &record.compact_model {
+        Some((p, m)) => (p.clone(), m.clone()),
+        None => {
+            let p = config
+                .agent
+                .compaction_provider
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| current_provider.clone());
+            let m = config
+                .agent
+                .compaction_model
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| current_model.clone());
+            (p, m)
+        }
+    };
     let compaction = match GenericProviderClient::new(
         compaction_provider_id.clone(),
         compaction_model.clone(),
@@ -565,8 +572,16 @@ pub async fn run_interactive_chat(
         }
     }
 
-    let mut compact_provider: Option<String> = config.agent.compaction_provider.clone();
-    let mut compact_model: Option<String> = config.agent.compaction_model.clone();
+    let mut compact_provider: Option<String> = record
+        .compact_model
+        .as_ref()
+        .map(|(p, _)| p.clone())
+        .or_else(|| config.agent.compaction_provider.clone().filter(|p| !p.is_empty()));
+    let mut compact_model: Option<String> = record
+        .compact_model
+        .as_ref()
+        .map(|(_, m)| m.clone())
+        .or_else(|| config.agent.compaction_model.clone().filter(|m| !m.is_empty()));
 
     if !is_attended {
         let cancel_token = CancellationToken::new();
@@ -622,6 +637,8 @@ pub async fn run_interactive_chat(
                     &cred_manager,
                     &discovery,
                     &agent,
+                    store.as_ref(),
+                    &session_id,
                     &current_provider,
                     &current_model,
                     &mut compact_provider,
@@ -651,6 +668,8 @@ pub async fn run_interactive_chat(
                     &mut session_id,
                     &mut current_provider,
                     &mut current_model,
+                    &mut compact_provider,
+                    &mut compact_model,
                     &mut turns,
                     &mut process_expanded,
                     &todo_scope,

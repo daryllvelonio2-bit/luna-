@@ -262,6 +262,7 @@ Luna automatically bounds session context tokens before making model requests an
   - `/auto-compact` — opens the interactive setup box with live feedback (warning if ≤10%, healthy status for balanced ranges, aggressive indicator above 60%).
   - `/auto-compact on` | `/auto-compact off` — toggle auto-compaction.
   Both the runtime in-memory state and the configuration file are updated immediately.
+  - `/compact-model` — choose a dedicated provider and model for transcript compaction, with interactive scope selection: **This session only** (saved to session SQLite row across restarts) or **Globally** (persisted into `~/.luna/config.yaml`). Reset with `/compact-model reset`.
 - **Mid-Turn Context Re-binding**: When background compaction completes during multi-round tool iterations, active turn messages are immediately rebound to the compacted transcript and the UI context gauge drops dynamically, avoiding repeated re-threshold thrashing.
 
 **The todo list belongs to the session.** `todo_list` keeps one file per conversation in

@@ -32,12 +32,13 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    title       TEXT NOT NULL DEFAULT '',
-    name        TEXT NOT NULL DEFAULT '',
-    model       TEXT NOT NULL DEFAULT ''
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    title         TEXT NOT NULL DEFAULT '',
+    name          TEXT NOT NULL DEFAULT '',
+    model         TEXT NOT NULL DEFAULT '',
+    compact_model TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -153,6 +154,15 @@ impl SqliteSessionStore {
                 [],
             )
             .map_err(|error| session_error("failed to add the session model column", error))?;
+        }
+
+        let has_compact_model = columns.iter().any(|column| column == "compact_model");
+        if !has_compact_model {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN compact_model TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| session_error("failed to add the session compact_model column", error))?;
         }
 
         // Reasoning is part of the conversation: replaying a session without it hands the model
@@ -469,9 +479,16 @@ fn count_ordinary(conn: &Connection, session_id: &str) -> Result<usize, HarnessE
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title, name, model): (String, String, String, String, String) =
-        conn.query_row(
-            "SELECT created_at, updated_at, title, name, model FROM sessions WHERE id = ?1",
+    let (created_at, updated_at, title, name, model, compact_model): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT created_at, updated_at, title, name, model, compact_model FROM sessions WHERE id = ?1",
             params![id],
             |row| {
                 Ok((
@@ -480,6 +497,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
@@ -495,6 +513,10 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         // The column stores `provider\x1Fmodel` when the session has a model of its own and an
         // empty string otherwise; a legacy or never-switched row resumes on the config default.
         model: model
+            .split_once(MODEL_FIELD_SEPARATOR)
+            .filter(|(provider, m)| !provider.is_empty() && !m.is_empty())
+            .map(|(provider, m)| (provider.to_string(), m.to_string())),
+        compact_model: compact_model
             .split_once(MODEL_FIELD_SEPARATOR)
             .filter(|(provider, m)| !provider.is_empty() && !m.is_empty())
             .map(|(provider, m)| (provider.to_string(), m.to_string())),
@@ -546,6 +568,46 @@ impl SessionStore for SqliteSessionStore {
                 params![packed, id],
             )
             .map_err(|error| session_error("failed to set the session model", error))?;
+        if updated == 0 {
+            return Err(HarnessError::SessionError(format!(
+                "session '{}' not found",
+                id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn set_compact_model(
+        &self,
+        id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), HarnessError> {
+        let conn = self.conn.lock().await;
+        let packed = format!("{}{}{}", provider, MODEL_FIELD_SEPARATOR, model);
+        let updated = conn
+            .execute(
+                "UPDATE sessions SET compact_model = ?1 WHERE id = ?2",
+                params![packed, id],
+            )
+            .map_err(|error| session_error("failed to set the session compact model", error))?;
+        if updated == 0 {
+            return Err(HarnessError::SessionError(format!(
+                "session '{}' not found",
+                id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn clear_compact_model(&self, id: &str) -> Result<(), HarnessError> {
+        let conn = self.conn.lock().await;
+        let updated = conn
+            .execute(
+                "UPDATE sessions SET compact_model = '' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|error| session_error("failed to clear the session compact model", error))?;
         if updated == 0 {
             return Err(HarnessError::SessionError(format!(
                 "session '{}' not found",
@@ -801,15 +863,16 @@ impl SessionStore for SqliteSessionStore {
     ) -> Result<String, HarnessError> {
         let conn = self.conn.lock().await;
 
-        let (title, name, model) = conn
+        let (title, name, model, compact_model) = conn
             .query_row(
-                "SELECT title, name, model FROM sessions WHERE id = ?1",
+                "SELECT title, name, model, compact_model FROM sessions WHERE id = ?1",
                 params![source_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -827,9 +890,9 @@ impl SessionStore for SqliteSessionStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO sessions (id, created_at, updated_at, title, name, model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![new_id, now, now, forked_title, name, model],
+            "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![new_id, now, now, forked_title, name, model, compact_model],
         )
         .map_err(|e| session_error("failed to create forked session record", e))?;
 

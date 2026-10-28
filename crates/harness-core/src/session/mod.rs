@@ -52,6 +52,9 @@ pub struct SessionRecord {
     /// its own, so a session that never picked one resumes on the config default instead of
     /// resurrecting a stale id.
     pub model: Option<(String, String)>,
+    /// The provider and model this session uses for compaction (`/compact-model`). `None`
+    /// until a session-specific compaction model is set; defaults to global config or the active model.
+    pub compact_model: Option<(String, String)>,
 }
 
 /// A message as it is stored: the row id and sequence number matter, because compaction marks the
@@ -98,6 +101,17 @@ pub trait SessionStore: Send + Sync {
     /// Record the provider and model this session runs with (`/model`). Both parts are stored
     /// together so a resume restores the exact pair, not a half.
     async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), HarnessError>;
+
+    /// Record the provider and model this session uses for compaction (`/compact-model`).
+    async fn set_compact_model(
+        &self,
+        id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), HarnessError>;
+
+    /// Clear the custom compaction model for this session, reverting to global config or the active model.
+    async fn clear_compact_model(&self, id: &str) -> Result<(), HarnessError>;
 
     /// Append one message, assigning the next `seq` and updating the session's `updated_at`.
     /// Returns the new row id.
