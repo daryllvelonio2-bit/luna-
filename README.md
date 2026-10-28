@@ -76,16 +76,13 @@ cargo run --bin luna -- auth add --provider openai --label my-work-key --priorit
 # Add a backup key
 cargo run --bin luna -- auth add --provider openai --label my-backup-key
 
-# Set rotation strategy to RoundRobin or FillFirst
-cargo run --bin luna -- auth strategy --provider openai --strategy round_robin
+# Set rotation strategy (round_robin, fill_first, least_used, random, never)
+cargo run --bin luna -- auth strategy --provider openai --strategy never
 
 # List registered credentials
 cargo run --bin luna -- auth list
 ```
-`--priority` marks a key as the primary one, but only the `fill_first` strategy consults that flag
-(the other three rotate over every active key); `luna auth priority` prints the same reminder. When
-a provider answers 401/403/429 the offending key is retired for the rest of the session and the next
-call uses another key — the last remaining key is never retired.
+`--priority` marks a key as the primary one: `fill_first` uses it first and falls over to others upon failure, while `never` strictly uses the priority key and disables failover rotation altogether (the other three strategies rotate across all active keys). When a provider answers 401/403/429 under rotating strategies, the offending key is retired for the session and the next call fails over — the last remaining key is never retired. Under `never`, the priority key is kept selected without rotation.
 
 ### 2. Inspecting Available Models
 Dynamically query models from the provider endpoint:

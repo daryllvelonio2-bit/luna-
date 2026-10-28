@@ -40,7 +40,7 @@ pub enum AuthCommand {
         #[arg(short, long)]
         provider: Option<String>,
     },
-    /// Set key rotation strategy (round_robin, fill_first, random, least_used)
+    /// Set key rotation strategy (round_robin, fill_first, random, least_used, never)
     Strategy {
         #[arg(short, long)]
         provider: String,
@@ -210,9 +210,12 @@ pub async fn handle_auth_command(
                 "fill_first" | "fillfirst" => RotationStrategy::FillFirst,
                 "random" => RotationStrategy::Random,
                 "least_used" | "leastused" => RotationStrategy::LeastUsed,
+                "never" | "never_rotate" | "neverrotate" | "no_rotation" | "none" => {
+                    RotationStrategy::Never
+                }
                 _ => {
                     eprintln!(
-                        "Invalid strategy. Choose: round_robin, fill_first, random, least_used"
+                        "Invalid strategy. Choose: round_robin, fill_first, random, least_used, never"
                     );
                     return Ok(());
                 }
@@ -236,11 +239,11 @@ pub async fn handle_auth_command(
                     target,
                     provider
                 );
-                // Honesty check: only fill_first consults is_priority, so say so instead of letting
+                // Honesty check: only fill_first and never consult is_priority, so say so instead of letting
                 // the flag sit there looking effective under round_robin/random/least_used.
                 println!(
-                    "  note: the priority key is used first only under the fill_first strategy \
-                     (luna auth strategy -p {} -s fill_first)",
+                    "  note: the priority key is used under fill_first and never strategies \
+                     (luna auth strategy -p {} -s never)",
                     provider
                 );
             } else {
@@ -856,6 +859,11 @@ async fn interactive_strategy(cred_manager: Arc<CredentialManager>) -> Result<()
             "Random selection across active keys",
             RotationStrategy::Random,
         ),
+        (
+            "never",
+            "Never rotate; strictly use the priority key",
+            RotationStrategy::Never,
+        ),
     ];
 
     let strat_items: Vec<String> = strategies
@@ -874,6 +882,7 @@ async fn interactive_strategy(cred_manager: Arc<CredentialManager>) -> Result<()
             RotationStrategy::FillFirst => 1,
             RotationStrategy::LeastUsed => 2,
             RotationStrategy::Random => 3,
+            RotationStrategy::Never => 4,
         })
         .interact()
         .map_err(|e| HarnessError::Io(e.to_string()))?;

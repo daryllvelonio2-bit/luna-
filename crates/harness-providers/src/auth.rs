@@ -19,6 +19,8 @@ pub enum RotationStrategy {
     FillFirst,
     Random,
     LeastUsed,
+    #[serde(alias = "none", alias = "no_rotation", alias = "never_rotate")]
+    Never,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -553,6 +555,20 @@ impl CredentialManager {
         }
 
         let selected_index = match provider_state.strategy {
+            RotationStrategy::Never => {
+                // Never rotate: strictly pick the priority credential, or the first active one
+                // if none is explicitly marked priority.
+                if let Some(idx) = provider_state
+                    .credentials
+                    .iter()
+                    .position(|c| c.is_priority)
+                {
+                    provider_state.credentials[idx].is_temporarily_disabled = false;
+                    idx
+                } else {
+                    active_credentials[0]
+                }
+            }
             RotationStrategy::FillFirst => {
                 // Priority credential first, otherwise first active credential
                 if let Some(idx) = active_credentials
@@ -626,6 +642,14 @@ impl CredentialManager {
         let Some(p) = state.providers.get_mut(&provider.to_lowercase()) else {
             return false;
         };
+
+        if p.strategy == RotationStrategy::Never {
+            warn!(
+                provider = %provider,
+                "Rotation strategy is Never; keeping priority credential selected instead of rotating"
+            );
+            return false;
+        }
 
         let active_count = p
             .credentials

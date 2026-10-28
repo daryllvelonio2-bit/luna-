@@ -446,9 +446,9 @@ async fn set_priority(
         .await?;
 
     if updated {
-        // Ensure strategy is FillFirst so the priority credential is used first
+        // Ensure strategy is FillFirst or Never so the priority credential is used
         let current_strat = cred_manager.get_rotation_strategy(&provider).await;
-        if current_strat != RotationStrategy::FillFirst {
+        if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never {
             let _ = cred_manager
                 .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
                 .await;
@@ -568,7 +568,7 @@ async fn set_strategy(
     };
     let provider = connected[index].clone();
 
-    const STRATEGIES: [(&str, RotationStrategy); 4] = [
+    const STRATEGIES: [(&str, RotationStrategy); 5] = [
         (
             "round_robin — cycle through keys evenly",
             RotationStrategy::RoundRobin,
@@ -582,6 +582,10 @@ async fn set_strategy(
             RotationStrategy::LeastUsed,
         ),
         ("random — pick a key at random", RotationStrategy::Random),
+        (
+            "never — never rotate, only use priority key",
+            RotationStrategy::Never,
+        ),
     ];
     let items: Vec<String> = STRATEGIES
         .iter()

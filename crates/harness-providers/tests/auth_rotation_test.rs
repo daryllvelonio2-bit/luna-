@@ -38,4 +38,28 @@ async fn test_luna_auth_rotation_strategies() {
     let r3 = manager.acquire_credential("openai").await.unwrap();
     assert_ne!(r1.expose_secret(), r2.expose_secret());
     assert_eq!(r1.expose_secret(), r3.expose_secret());
+
+    // 3. Test Never: strictly uses the priority key and does not failover/rotate
+    manager
+        .set_rotation_strategy("openai", RotationStrategy::Never)
+        .await
+        .unwrap();
+    let n1 = manager.acquire_credential("openai").await.unwrap();
+    let n2 = manager.acquire_credential("openai").await.unwrap();
+    assert_eq!(n1.expose_secret(), "sk-11111");
+    assert_eq!(n2.expose_secret(), "sk-11111");
+
+    // Even if marked failed, Never refuses to rotate to backup
+    let retired = manager.mark_credential_failed("openai", "sk-11111").await;
+    assert!(!retired, "Never strategy must not retire the priority key");
+    let n3 = manager.acquire_credential("openai").await.unwrap();
+    assert_eq!(n3.expose_secret(), "sk-11111");
+
+    // Switching priority updates the key used by Never
+    manager
+        .set_priority_credential("openai", "key-backup")
+        .await
+        .unwrap();
+    let n4 = manager.acquire_credential("openai").await.unwrap();
+    assert_eq!(n4.expose_secret(), "sk-22222");
 }
