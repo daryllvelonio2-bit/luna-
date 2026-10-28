@@ -253,15 +253,44 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             context_windows: ctx_windows(&[
                 ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
                 ("deepseek-ai/deepseek-v4-flash", 1_000_000),
-                ("deepseek-ai/deepseek-v4-pro", 262_144),
-                ("minimaxai/minimax-m3.1-flash", 262_144),
+                ("deepseek-ai/deepseek-v4-pro", 1_000_000),
+                ("minimaxai/minimax-m3.1-flash", 1_000_000),
                 ("z-ai/glm-5.3-flash", 1_000_000),
                 ("z-ai/glm-4-9b-chat", 1_000_000),
                 ("stepfun-ai/step-5-preview", 1_000_000),
+                ("nvidia/nemotron-3-ultra", 1_000_000),
+                ("nvidia/nemotron-3-ultra-550b-a55b", 1_000_000),
+                ("nvidia/nemotron-3.5-lightning-30b-a3b", 1_000_000),
+                ("nvidia/nemotron-3.5-super-vl-120b-a12b", 1_000_000),
+                ("moonshotai/kimi-k2.6", 262_144),
+                ("poolside/laguna-xs-2.1", 262_144),
+                ("google/gemma-4-31b-it", 262_144),
+                ("meta/llama-guard-4-12b", 163_840),
+                ("meta/muse-glimmer-30b", 131_072),
+                ("openai/gpt-oss-20b", 131_072),
+                ("google/gemma-3-12b-it", 131_072),
+                ("google/gemma-3-4b-it", 131_072),
+                ("ibm/granite-3.0-8b-instruct", 131_072),
+                ("ibm/granite-3.0-3b-a800m-instruct", 131_072),
+                ("writer/palmyra-creative-122b", 131_072),
                 ("meta/llama-3.1-70b-instruct", 128_000),
                 ("meta/llama-3.1-8b-instruct", 128_000),
-                ("nvidia/nemotron-3-ultra", 128_000),
+                ("meta/llama-3.2-11b-vision-instruct", 128_000),
+                ("meta/llama-3.2-90b-vision-instruct", 128_000),
+                ("microsoft/phi-3-vision-128k-instruct", 128_000),
+                ("microsoft/phi-3.5-moe-instruct", 128_000),
                 ("mistralai/mistral-large", 128_000),
+                ("mistralai/mistral-large-2-instruct", 128_000),
+                ("mistralai/mixtral-8x22b-v0.1", 128_000),
+                ("nv-mistralai/mistral-nemo-12b-instruct", 128_000),
+                ("writer/palmyra-fin-70b-32k", 32_768),
+                ("writer/palmyra-med-70b-32k", 32_768),
+                ("01-ai/yi-large", 32_768),
+                ("databricks/dbrx-instruct", 32_768),
+                ("bigcode/starcoder2-15b", 16_384),
+                ("deepseek-ai/deepseek-coder-6.7b-instruct", 16_384),
+                ("meta/codellama-70b", 16_384),
+                ("meta/llama2-70b", 4_096),
             ]),
         },
         ProviderDescriptor {
@@ -675,9 +704,6 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
     // DeepSeek family (V4 = 1M, V3/R1 = 128k)
     if leaf.contains("deepseek") {
         if leaf.contains("v4") || leaf.contains("flash") || leaf.contains("chat") {
-            if leaf.contains("deepseek-v4-pro") && provider.eq_ignore_ascii_case("nvidia") {
-                return Some(262_144);
-            }
             return Some(1_000_000);
         }
         return Some(128_000);
@@ -761,8 +787,6 @@ mod tests {
 
     #[test]
     fn minimax_m3_is_a_million_token_model() {
-        // The M3 line is 1M everywhere; nvidia's own deployment of M3.1 is capped at 262k, and the
-        // provider descriptor must win over the family heuristic.
         assert_eq!(
             get_context_window("openrouter", "minimax/minimax-m3"),
             Some(1_000_000)
@@ -773,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             get_context_window("nvidia", "minimaxai/minimax-m3.1-flash"),
-            Some(262_144)
+            Some(1_000_000)
         );
         // The older M2 line stays at its own window.
         assert_eq!(get_context_window("minimax", "minimax-m2.5"), Some(204_800));

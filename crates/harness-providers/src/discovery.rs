@@ -153,6 +153,31 @@ impl ModelDiscovery {
             .filter(|window| *window > 0)
     }
 
+    /// Search across all providers in the discovery cache for a published context window
+    /// matching the given model ID or its trailing leaf name.
+    pub fn cross_provider_context_window(&self, model: &str) -> Option<u32> {
+        let cache = self.load_cache();
+        let leaf = model.rsplit('/').next().unwrap_or(model);
+        let mut best: Option<u32> = None;
+        for entry in cache.providers.values() {
+            if let Some(&window) = entry.context_windows.get(model) {
+                if window > 0 {
+                    best = Some(best.map_or(window, |current| current.max(window)));
+                }
+            }
+            if let Some((_, &window)) = entry
+                .context_windows
+                .iter()
+                .find(|(id, _)| id.rsplit('/').next() == Some(leaf))
+            {
+                if window > 0 {
+                    best = Some(best.map_or(window, |current| current.max(window)));
+                }
+            }
+        }
+        best
+    }
+
     pub async fn get_all_target_providers(&self, cred_manager: &CredentialManager) -> Vec<String> {
         let mut providers = Vec::new();
         for p in cred_manager.get_loaded_providers().await {
@@ -565,5 +590,14 @@ mod tests {
         );
         assert_eq!(discovery.context_window("openrouter", "vendor/other"), None);
         assert_eq!(discovery.context_window("nvidia", "vendor/model-a"), None);
+        assert_eq!(
+            discovery.cross_provider_context_window("vendor/model-a"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            discovery.cross_provider_context_window("model-a"),
+            Some(1_048_576)
+        );
+        assert_eq!(discovery.cross_provider_context_window("unknown"), None);
     }
 }

@@ -32,6 +32,7 @@ pub fn context_window(
                 .get(provider)
                 .and_then(|over| over.context_window)
         })
+        .or_else(|| discovery.cross_provider_context_window(model))
         .or_else(|| get_context_window(provider, model))
         .unwrap_or(DEFAULT_CONTEXT_WINDOW)
 }
@@ -133,6 +134,23 @@ mod tests {
         assert_eq!(
             context_window(&config(), &discovery, "nvidia", "z-ai/glm-5.3-flash"),
             1_000_000
+        );
+        assert_eq!(
+            context_window(&config(), &discovery, "nvidia", "minimaxai/minimax-m3.1-flash"),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn cross_provider_discovery_cache_provides_real_context_window() {
+        let (_dir, discovery) = discovery_with(
+            r#"{"version":1,"providers":{"openrouter":{"models":["minimaxai/minimax-m3.1-flash"],"fetched_at":"2999-01-01T00:00:00Z","context_windows":{"minimaxai/minimax-m3.1-flash":1048576}}}}"#,
+        );
+
+        // Even though nvidia endpoint reports no context window, the real window from discovery cache is used
+        assert_eq!(
+            context_window(&config(), &discovery, "nvidia", "minimaxai/minimax-m3.1-flash"),
+            1_048_576
         );
     }
 
