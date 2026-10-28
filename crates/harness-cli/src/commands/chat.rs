@@ -908,7 +908,7 @@ pub async fn run_interactive_chat(
     // on screen — without it a continuation is indistinguishable from a fresh session until the
     // first reply lands.
     let replayed = store
-        .replay(&session_id, config.session.resume_max_messages)
+        .replay_transcript(&session_id, config.session.resume_max_messages)
         .await?;
     let mut turns: Vec<TurnRecord> = parse_turns_from_history(&replayed.history);
     let mut process_expanded = false;

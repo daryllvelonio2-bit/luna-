@@ -1382,7 +1382,7 @@ pub(crate) async fn handle_sessions_switch(
     todo::refresh_panel(ui, todo_scope);
 
     let replayed = store
-        .replay(&target_id, config.session.resume_max_messages)
+        .replay_transcript(&target_id, config.session.resume_max_messages)
         .await?;
     *turns = parse_turns_from_history(&replayed.history);
 

@@ -952,3 +952,34 @@ fn fit_diff_line_to_width_truncates_long_lines_cleanly() {
     assert!(fitted.contains("0;160;0"), "style preserved");
     assert!(fitted.contains("+"), "prefix preserved");
 }
+
+#[tokio::test]
+async fn resumed_compacted_session_replays_all_prompts_and_replies() {
+    use harness_core::{Message, SessionStore, SqliteSessionStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sessions.db");
+    let store = SqliteSessionStore::new(Some(db_path)).unwrap();
+    store.ensure_session("s_test").await.unwrap();
+
+    // Turn 1
+    store.append("s_test", &Message::user("first question"), false).await.unwrap();
+    store.append("s_test", &Message::assistant("first answer"), false).await.unwrap();
+
+    // Turn 2
+    store.append("s_test", &Message::user("second question"), false).await.unwrap();
+    store.append("s_test", &Message::assistant("second answer"), false).await.unwrap();
+
+    // Compaction folds Turn 1 into a summary
+    store.record_compaction("s_test", &[1, 2], "User asked first question").await.unwrap();
+
+    // Loading via replay_transcript (used by the CLI UI) preserves both turns with agent replies
+    let replayed = store.replay_transcript("s_test", 200).await.unwrap();
+    let turns = parse_turns_from_history(&replayed.history);
+
+    assert_eq!(turns.len(), 2, "both turns are shown on resume");
+    assert_eq!(turns[0].user_query, "first question");
+    assert_eq!(turns[0].reply, "first answer");
+    assert_eq!(turns[1].user_query, "second question");
+    assert_eq!(turns[1].reply, "second answer");
+}

@@ -109,19 +109,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                     }
                 }
             }
-            Role::System if stored.is_summary => {
-                if let Some(ref c) = msg.content {
-                    turns.push(TurnRecord {
-                        user_query: format!("• {}", c),
-                        reasoning: None,
-                        tools: Vec::new(),
-                        tool_items: Vec::new(),
-                        duration: Duration::ZERO,
-                        reply: String::new(),
-                    });
-                }
-            }
-            _ => {}
+            Role::System => {}
         }
     }
 

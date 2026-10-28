@@ -315,14 +315,20 @@ fn query_ordinary_rows(
     conn: &Connection,
     session_id: &str,
     limit: Option<usize>,
+    include_compacted: bool,
 ) -> Result<Vec<StoredMessage>, HarnessError> {
-    let Some(start) = ordinary_window_start(conn, session_id, limit)? else {
+    let Some(start) = ordinary_window_start(conn, session_id, limit, include_compacted)? else {
         return Ok(Vec::new());
+    };
+    let filter = if include_compacted {
+        "is_summary = 0"
+    } else {
+        "is_summary = 0 AND compacted_at IS NULL"
     };
     let mut stored = query_rows(
         conn,
         session_id,
-        "is_summary = 0 AND compacted_at IS NULL",
+        filter,
         Some(start),
     )?;
     // If a limit boundary cuts in the middle of a turn, drop leading messages until
@@ -343,22 +349,30 @@ fn ordinary_window_start(
     conn: &Connection,
     session_id: &str,
     limit: Option<usize>,
+    include_compacted: bool,
 ) -> Result<Option<i64>, HarnessError> {
     let Some(limit) = limit else {
-        return first_live_seq(conn, session_id);
+        return first_seq(conn, session_id, include_compacted);
     };
     if limit == 0 {
         return Ok(None);
     }
     if limit >= i64::MAX as usize {
-        return first_live_seq(conn, session_id);
+        return first_seq(conn, session_id, include_compacted);
     }
     // The seq of the oldest row the bound allows: the window is the newest `limit` rows.
+    let boundary_sql = if include_compacted {
+        "SELECT seq FROM messages
+         WHERE session_id = ?1 AND is_summary = 0
+         ORDER BY seq DESC LIMIT 1 OFFSET ?2"
+    } else {
+        "SELECT seq FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+         ORDER BY seq DESC LIMIT 1 OFFSET ?2"
+    };
     let boundary: Option<i64> = conn
         .query_row(
-            "SELECT seq FROM messages
-             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
-             ORDER BY seq DESC LIMIT 1 OFFSET ?2",
+            boundary_sql,
             params![session_id, (limit - 1) as i64],
             |row| row.get(0),
         )
@@ -366,15 +380,23 @@ fn ordinary_window_start(
         .map_err(|error| session_error("failed to read the session replay window", error))?;
     let Some(boundary) = boundary else {
         // Fewer live rows than the bound allows: the window is the whole transcript.
-        return first_live_seq(conn, session_id);
+        return first_seq(conn, session_id, include_compacted);
     };
     // A window that already holds a user row starts on a turn; there is nothing to pull back.
+    let anchored_sql = if include_compacted {
+        "SELECT 1 FROM messages
+         WHERE session_id = ?1 AND is_summary = 0
+           AND role = 'user' AND seq >= ?2
+         LIMIT 1"
+    } else {
+        "SELECT 1 FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+           AND role = 'user' AND seq >= ?2
+         LIMIT 1"
+    };
     let anchored: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM messages
-             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
-               AND role = 'user' AND seq >= ?2
-             LIMIT 1",
+            anchored_sql,
             params![session_id, boundary],
             |row| row.get(0),
         )
@@ -384,11 +406,18 @@ fn ordinary_window_start(
         return Ok(Some(boundary));
     }
     // The window lies inside one turn: pull it back to the user row that anchors that turn.
+    let anchor_sql = if include_compacted {
+        "SELECT MAX(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0
+           AND role = 'user' AND seq < ?2"
+    } else {
+        "SELECT MAX(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+           AND role = 'user' AND seq < ?2"
+    };
     let anchor: Option<i64> = conn
         .query_row(
-            "SELECT MAX(seq) FROM messages
-             WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
-               AND role = 'user' AND seq < ?2",
+            anchor_sql,
             params![session_id, boundary],
             |row| row.get::<_, Option<i64>>(0),
         )
@@ -396,11 +425,21 @@ fn ordinary_window_start(
     Ok(Some(anchor.unwrap_or(boundary)))
 }
 
-/// The seq of the first live row of a session, if it holds one.
-fn first_live_seq(conn: &Connection, session_id: &str) -> Result<Option<i64>, HarnessError> {
-    conn.query_row(
+/// The seq of the first row of a session, if it holds one.
+fn first_seq(
+    conn: &Connection,
+    session_id: &str,
+    include_compacted: bool,
+) -> Result<Option<i64>, HarnessError> {
+    let sql = if include_compacted {
         "SELECT MIN(seq) FROM messages
-         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL",
+         WHERE session_id = ?1 AND is_summary = 0"
+    } else {
+        "SELECT MIN(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL"
+    };
+    conn.query_row(
+        sql,
         params![session_id],
         |row| row.get::<_, Option<i64>>(0),
     )
@@ -411,6 +450,17 @@ fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND compacted_at IS NULL",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| session_error("failed to count session messages", error))?;
+    Ok(count as usize)
+}
+
+fn count_ordinary(conn: &Connection, session_id: &str) -> Result<usize, HarnessError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND is_summary = 0",
             params![session_id],
             |row| row.get(0),
         )
@@ -605,8 +655,24 @@ impl SessionStore for SqliteSessionStore {
         // Summaries are never dropped by the bound: they are the only trace of the turns they
         // replaced, and there is at most a handful of them.
         let mut history = query_summary_rows(&conn, session_id)?;
-        history.extend(query_ordinary_rows(&conn, session_id, Some(limit))?);
+        history.extend(query_ordinary_rows(&conn, session_id, Some(limit), false)?);
 
+        let replayed = history.len();
+        Ok(ReplayOutcome {
+            history,
+            total,
+            replayed,
+        })
+    }
+
+    async fn replay_transcript(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<ReplayOutcome, HarnessError> {
+        let conn = self.conn.lock().await;
+        let total = count_ordinary(&conn, session_id)?;
+        let history = query_ordinary_rows(&conn, session_id, Some(limit), true)?;
         let replayed = history.len();
         Ok(ReplayOutcome {
             history,

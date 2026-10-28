@@ -112,6 +112,15 @@ pub trait SessionStore: Send + Sync {
     /// and the live count before the bound.
     async fn replay(&self, session_id: &str, limit: usize) -> Result<ReplayOutcome, HarnessError>;
 
+    /// The most recent messages of the conversation for user display, regardless of whether
+    /// past turns have been compacted for the model context. Summary rows are excluded
+    /// because they are internal model-compaction artifacts rather than conversation turns.
+    async fn replay_transcript(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<ReplayOutcome, HarnessError>;
+
     /// Write `summary` as a new summary row and mark `folded` rows `compacted_at`, in one
     /// transaction. Returns the summary's row id.
     async fn record_compaction(

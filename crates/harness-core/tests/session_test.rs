@@ -599,6 +599,21 @@ async fn record_compaction_writes_a_summary_and_keeps_the_folded_rows() {
     assert_eq!(count_rows(&path, "1 = 1"), 5);
     assert_eq!(count_rows(&path, "compacted_at IS NOT NULL"), 2);
     assert_eq!(count_rows(&path, "is_summary = 1"), 1);
+
+    // The human conversation transcript keeps every ordinary message and drops synthetic summaries.
+    let transcript = store.replay_transcript("s1", 200).await.unwrap();
+    assert_eq!(transcript.total, 4, "all four conversation messages are counted");
+    assert_eq!(transcript.replayed, 4, "all four messages are replayed");
+    assert!(
+        transcript.history.iter().all(|s| !s.is_summary),
+        "summary rows are not part of the transcript"
+    );
+    let contents: Vec<&str> = transcript
+        .history
+        .iter()
+        .map(|s| s.message.content.as_deref().unwrap())
+        .collect();
+    assert_eq!(contents, vec!["one", "two", "three", "four"]);
 }
 
 #[tokio::test]
