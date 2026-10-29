@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use harness_core::{
     AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings, Approver, Config,
-    DenyAll, HarnessError,
+    DenyAll, HarnessError, NonInteractive,
 };
 
 /// The three answers the approval popup offers, in focus order.
@@ -255,8 +255,10 @@ pub fn build_approver(config: &Config) -> Arc<dyn Approver> {
         ApprovalMode::Allow => Arc::new(AllowAll),
         ApprovalMode::Deny => Arc::new(DenyAll),
         ApprovalMode::Ask if io::stdin().is_terminal() => Arc::new(TerminalApprover),
-        // Headless / non-terminal: YOLO mode, auto-approve mutating tools
-        ApprovalMode::Ask => Arc::new(AllowAll),
+        // Headless / non-terminal: fail closed — no interactive human to ask.
+        ApprovalMode::Ask => Arc::new(NonInteractive::new(
+            "headless session: stdin is not a terminal (use --yes or tools.approval=allow to override)",
+        )),
     }
 }
 
@@ -272,16 +274,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ask_without_a_terminal_runs_in_yolo_mode() {
+    async fn ask_without_a_terminal_fails_closed() {
         let mut config = Config::default();
         config.tools.approval = ApprovalMode::Ask;
 
         let approver = build_approver(&config);
-        let decision = approver
-            .approve(&ApprovalRequest::default())
-            .await
-            .expect("headless ask runs in yolo mode");
-        assert_eq!(decision, ApprovalDecision::Run);
+        let result = approver.approve(&ApprovalRequest::default()).await;
+        assert!(
+            result.is_err(),
+            "headless ask must fail closed, not auto-approve"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, HarnessError::ApprovalRejected(_)));
     }
 
     #[tokio::test]

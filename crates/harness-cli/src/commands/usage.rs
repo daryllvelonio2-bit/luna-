@@ -106,7 +106,7 @@ pub async fn run_usage(
             for record in &records {
                 println!(
                     "{}",
-                    serde_json::to_string(record).expect("record serializes")
+                    serde_json::to_string(record).unwrap_or_default()
                 );
             }
         } else {
@@ -127,7 +127,7 @@ pub async fn run_usage(
                     "totals": totals,
                     "buckets": buckets,
                 }))
-                .expect("summary serializes")
+                .unwrap_or_default()
             );
         } else {
             print_buckets(by, &buckets, &totals);
@@ -144,7 +144,7 @@ pub async fn run_usage(
                 "totals": totals,
                 "by_model": by_model,
             }))
-            .expect("summary serializes")
+            .unwrap_or_default()
         );
     } else {
         print_totals(&totals);

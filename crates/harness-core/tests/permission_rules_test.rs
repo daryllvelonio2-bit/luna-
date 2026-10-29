@@ -394,7 +394,7 @@ struct NoNotes;
 #[async_trait]
 impl NotesEngine for NoNotes {
     async fn save_note(&self, _t: &str, _c: &str, _tags: &[String]) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn search_notes(&self, _q: &str, _l: usize) -> Result<Vec<Note>, HarnessError> {
         Ok(vec![])
@@ -403,7 +403,7 @@ impl NotesEngine for NoNotes {
         Ok(vec![])
     }
     async fn read_note(&self, _i: &str) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn update_note(
         &self,
@@ -412,10 +412,10 @@ impl NotesEngine for NoNotes {
         _c: Option<&str>,
         _tags: Option<&[String]>,
     ) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn delete_note(&self, _i: &str) -> Result<bool, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
 }
 

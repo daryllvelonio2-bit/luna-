@@ -69,7 +69,7 @@ pub(super) fn launch_turn(
     // provider layer expands them into content parts. Each URL is one paste, oldest first.
     // Image paths typed into the prompt are inlined the same way, so naming a file on disk sends
     // its pixels rather than a path the model would have to OCR through a shell tool.
-    let images = std::mem::take(&mut *pending_images.lock().unwrap());
+    let images = std::mem::take(&mut *pending_images.lock().unwrap_or_else(|e| e.into_inner()));
     let query = crate::commands::prompt_images::inline_image_paths(query);
     let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
         format!(
@@ -109,7 +109,7 @@ pub(super) fn launch_turn(
     let ag_ref = agent.clone();
     *current_query = query.to_string();
     *turn_start = std::time::Instant::now();
-    in_flight_tools.lock().unwrap().clear();
+    in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *active_turn = Some(tokio::spawn(async move {
         let ag = ag_ref.lock().await;
         ag.run_turn(&q_with_images, cancel_child).await
@@ -139,7 +139,7 @@ pub(super) async fn cancel_running_turn(
     ui.set_turn_active(false);
     ui.stop_activity();
     ui.clear_live_state();
-    let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+    let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
 
     let record = TurnRecord {
         user_query: current_query.to_string(),
@@ -298,10 +298,10 @@ pub(super) async fn handle_composer_command(
             // Pushed straight onto the handle the agent drains. Taking the agent lock here would
             // block until the running turn released it, and the guidance would land after the turn
             // it was meant to steer — which is the one thing a steer must never do.
-            steer_handle.lock().unwrap().push_back(text.clone());
+            steer_handle.lock().unwrap_or_else(|e| e.into_inner()).push_back(text.clone());
             if active_turn.is_some() {
                 let line = format!("{} Steered into active turn: {}", "⏩".cyan().bold(), text);
-                in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
                     call_formatted: line.clone(),
                     result_formatted: String::new(),
                     diff_lines: Vec::new(),

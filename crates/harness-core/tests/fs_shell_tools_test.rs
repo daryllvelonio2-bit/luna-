@@ -1385,7 +1385,7 @@ async fn test_delegate_task_tool() {
             _c: &str,
             _tags: &[String],
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn search_notes(
             &self,
@@ -1405,7 +1405,7 @@ async fn test_delegate_task_tool() {
             &self,
             _id: &str,
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn update_note(
             &self,
@@ -1414,10 +1414,10 @@ async fn test_delegate_task_tool() {
             _c: Option<&str>,
             _tags: Option<&[String]>,
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn delete_note(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
     }
 
@@ -1539,7 +1539,7 @@ async fn test_delegate_task_tool_background_dispatch_and_polling() {
             _c: &str,
             _tags: &[String],
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn search_notes(
             &self,
@@ -1559,7 +1559,7 @@ async fn test_delegate_task_tool_background_dispatch_and_polling() {
             &self,
             _id: &str,
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn update_note(
             &self,
@@ -1568,10 +1568,10 @@ async fn test_delegate_task_tool_background_dispatch_and_polling() {
             _c: Option<&str>,
             _tags: Option<&[String]>,
         ) -> Result<harness_core::Note, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
         async fn delete_note(&self, _id: &str) -> Result<bool, harness_core::HarnessError> {
-            unimplemented!()
+            unreachable!("not used by this test")
         }
     }
 

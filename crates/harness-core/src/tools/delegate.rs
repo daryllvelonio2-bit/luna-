@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::{Agent, AgentEvent, SessionBinding};
-use crate::approval::{AllowAll, ApprovalSettings};
+use crate::approval::{ApprovalSettings, NonInteractive};
 use crate::config::Config;
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
@@ -365,12 +365,16 @@ impl DelegateTaskTool {
     }
 
     pub fn with_notifier(self, notifier: SubagentCompletionNotifier) -> Self {
-        *self.notifier.try_write().unwrap() = Some(notifier);
+        if let Ok(mut lock) = self.notifier.try_write() {
+            *lock = Some(notifier);
+        }
         self
     }
 
     pub fn with_steer_handle(self, steer_handle: Arc<Mutex<VecDeque<String>>>) -> Self {
-        *self.steer_handle.try_write().unwrap() = Some(steer_handle);
+        if let Ok(mut lock) = self.steer_handle.try_write() {
+            *lock = Some(steer_handle);
+        }
         self
     }
 
@@ -419,7 +423,6 @@ async fn run_single_subagent(
 
     let mut child_cfg = config.agent.clone();
     child_cfg.max_consecutive_failures = 5;
-    child_cfg.require_hitl_for_mutation = false;
 
     let tracker =
         SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
@@ -437,7 +440,12 @@ async fn run_single_subagent(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
                 .unwrap_or_default(),
         )
-        .with_approval(Arc::new(AllowAll), ApprovalSettings::default())
+        .with_approval(
+            Arc::new(NonInteractive::new(
+                "delegated subagent: interactive approval is unavailable in background execution",
+            )),
+            ApprovalSettings::default(),
+        )
         .with_observer(Arc::new(move |event| match event {
             AgentEvent::ToolExecuting { name, .. } => {
                 observer_tracker.record(SubagentActivity::ToolStarted { name });
@@ -533,6 +541,24 @@ impl Tool for DelegateTaskTool {
                 }
             }
         })
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn is_mutating_call(&self, arguments: &serde_json::Value) -> bool {
+        let action = arguments
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or_else(|| {
+                if arguments.get("tasks").is_some() {
+                    "spawn"
+                } else {
+                    "list"
+                }
+            });
+        matches!(action, "spawn")
     }
 
     async fn execute(
@@ -1002,7 +1028,9 @@ impl Tool for DelegateTaskTool {
                                 "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
                                 id, goal, status_label, output_text
                             );
-                            steer.lock().unwrap().push_back(steer_notice);
+                            if let Ok(mut steer_q) = steer.lock() {
+                                steer_q.push_back(steer_notice);
+                            }
                         }
                     });
                 }

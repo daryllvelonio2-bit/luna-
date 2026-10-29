@@ -263,7 +263,7 @@ impl TurnSnapshot {
         let relative = self.relative_name(&absolute);
 
         {
-            let files = self.files.lock().unwrap();
+            let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
             if files.iter().any(|file| file.path == relative) {
                 return Ok(());
             }
@@ -276,7 +276,7 @@ impl TurnSnapshot {
                     absolute.display()
                 ))
             })?;
-            let mut next = self.next_blob.lock().unwrap();
+            let mut next = self.next_blob.lock().unwrap_or_else(|e| e.into_inner());
             *next += 1;
             let blob = format!("{:04}", *next);
             let blob_dir = self.dir.join("blobs");
@@ -295,7 +295,7 @@ impl TurnSnapshot {
             }
         };
 
-        self.files.lock().unwrap().push(entry);
+        self.files.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
         // Written now, not at the end of the turn: a turn that dies must still be restorable.
         self.persist()
     }
@@ -306,9 +306,9 @@ impl TurnSnapshot {
             session_id: self.session_id.clone(),
             created_at: self.created_at.clone(),
             prompt: self.prompt.clone(),
-            files: self.files.lock().unwrap().clone(),
-            unrecorded: self.unrecorded.lock().unwrap().clone(),
-            scan_note: self.scan_note.lock().unwrap().clone(),
+            files: self.files.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            unrecorded: self.unrecorded.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            scan_note: self.scan_note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }
     }
 
@@ -330,8 +330,8 @@ impl TurnSnapshot {
             .map(|file| file.path.clone())
             .collect();
         let changes = baseline.changes_against(&after, &recorded);
-        *self.unrecorded.lock().unwrap() = changes;
-        *self.scan_note.lock().unwrap() = after.truncated.then(|| {
+        *self.unrecorded.lock().unwrap_or_else(|e| e.into_inner()) = changes;
+        *self.scan_note.lock().unwrap_or_else(|e| e.into_inner()) = after.truncated.then(|| {
             format!(
                 "the workspace walk stopped early (more than {MAX_SCANNED_FILES} files, or an unreadable directory): \
                  changes made by shell commands may be missing from this list"
@@ -406,7 +406,7 @@ impl CheckpointController {
         match self.store.begin(session_id, prompt) {
             Ok(snapshot) => {
                 let snapshot = std::sync::Arc::new(snapshot);
-                *self.current.lock().unwrap() = Some(snapshot.clone());
+                *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
                 Some(snapshot)
             }
             Err(error) => {
@@ -423,14 +423,14 @@ impl CheckpointController {
     /// The snapshot is finished (workspace rescan included) *before* it is dropped, so the manifest
     /// on disk is complete even though the turn's guard is what triggers this.
     pub fn finish(&self) {
-        let current = self.current.lock().unwrap().take();
+        let current = self.current.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(snapshot) = current {
             snapshot.finish();
         }
     }
 
     pub fn current(&self) -> Option<std::sync::Arc<TurnSnapshot>> {
-        self.current.lock().unwrap().clone()
+        self.current.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Capture the file a call is about to write, if it is a path-mutating tool.

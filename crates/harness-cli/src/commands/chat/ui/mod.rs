@@ -338,24 +338,24 @@ impl ChatUi {
     }
 
     pub fn set_transient_error(&self, err: Option<String>) {
-        *self.transient_error.lock().unwrap() = err;
+        *self.transient_error.lock().unwrap_or_else(|e| e.into_inner()) = err;
     }
 
     pub fn transient_error(&self) -> Option<String> {
-        self.transient_error.lock().unwrap().clone()
+        self.transient_error.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn clear_transient_error(&self) {
-        *self.transient_error.lock().unwrap() = None;
+        *self.transient_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn has_status(&self) -> bool {
-        self.status.lock().unwrap().is_some()
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     /// The rows the todo panel is drawn from, empty when the list is.
     pub fn todo_panel_rows(&self, width: usize) -> Vec<String> {
-        let snapshot = self.todo_snapshot.lock().unwrap();
+        let snapshot = self.todo_snapshot.lock().unwrap_or_else(|e| e.into_inner());
         match snapshot.as_ref() {
             Some(snapshot) => super::todo::render_panel(snapshot, self.todo_collapsed(), width),
             None => Vec::new(),
@@ -370,7 +370,7 @@ impl ChatUi {
     /// scrolling up with the conversation.
     pub fn set_todo_panel(&self, snapshot: Option<TodoSnapshot>) {
         let changed = {
-            let mut panel = self.todo_snapshot.lock().unwrap();
+            let mut panel = self.todo_snapshot.lock().unwrap_or_else(|e| e.into_inner());
             if *panel == snapshot {
                 false
             } else {
@@ -395,7 +395,7 @@ impl ChatUi {
 
     /// Whether a todo panel snapshot is active.
     pub fn has_todo_panel(&self) -> bool {
-        self.todo_snapshot.lock().unwrap().is_some()
+        self.todo_snapshot.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     /// Whether the todo panel is folded to a single row.
@@ -486,7 +486,7 @@ impl ChatUi {
     }
 
     pub fn begin_block(&self, kind: OutputBlockKind) {
-        let mut last = self.last_block.lock().unwrap();
+        let mut last = self.last_block.lock().unwrap_or_else(|e| e.into_inner());
         if needs_separator(*last, kind) {
             self.emit_above("");
         }
@@ -494,12 +494,12 @@ impl ChatUi {
     }
 
     pub fn push_reasoning(&self, text: &str) {
-        self.live.lock().unwrap().reasoning.push_str(text);
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).reasoning.push_str(text);
     }
 
     pub fn finish_reasoning(&self) {
         let rows = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             if live.reasoning.is_empty() {
                 return;
             }
@@ -513,7 +513,7 @@ impl ChatUi {
     }
 
     pub fn start_activity(&self, call: &str, name: &str, arguments: &serde_json::Value) {
-        let mut live = self.live.lock().unwrap();
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.activity = Some(Activity {
             call: call.to_string(),
             detail: tool_activity_detail(name, arguments),
@@ -523,7 +523,7 @@ impl ChatUi {
     }
 
     pub fn stop_activity(&self) {
-        self.live.lock().unwrap().activity = None;
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).activity = None;
     }
 
     /// A fold of the oldest turns has started: animate it until [`Self::finish_compaction`].
@@ -532,7 +532,7 @@ impl ChatUi {
     /// and an unattended run says what is happening with the summary line that follows — a static
     /// "compacting…" line with no way to ever update it would be worse than silence.
     pub fn start_compaction(&self, forced: bool) {
-        let mut live = self.live.lock().unwrap();
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.compaction = Some(Compaction {
             forced,
             started: std::time::Instant::now(),
@@ -544,7 +544,7 @@ impl ChatUi {
     /// caller's job, because the same event carries the failure to report.
     pub fn finish_compaction(&self) {
         let had = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             live.compaction.take().is_some()
         };
         if had {
@@ -556,7 +556,7 @@ impl ChatUi {
 
     #[allow(dead_code)]
     pub fn is_compacting(&self) -> bool {
-        self.live.lock().unwrap().compaction.is_some()
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).compaction.is_some()
     }
 
     /// How many submitted messages are waiting to be sent.
@@ -571,7 +571,7 @@ impl ChatUi {
     }
 
     pub fn clear_live_state(&self) {
-        let mut live = self.live.lock().unwrap();
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.reasoning.clear();
         live.rows.clear();
         live.activity = None;
@@ -581,7 +581,7 @@ impl ChatUi {
 
     pub fn show_patch_diff(&self, diff: Vec<String>) {
         {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             live.patch_diff = Some(diff);
         }
         self.animate_tick();
@@ -589,7 +589,7 @@ impl ChatUi {
 
     pub fn clear_patch_diff(&self) {
         let had_diff = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             live.patch_diff.take().is_some()
         };
         if had_diff {
@@ -598,7 +598,7 @@ impl ChatUi {
     }
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
-        let mut status = self.status.lock().unwrap();
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let (yolo, plan_mode, session_name, account_name, quota_display) = match status.as_ref() {
             Some(s) => (
                 s.yolo,
@@ -623,7 +623,7 @@ impl ChatUi {
 
     pub fn set_account_name(&self, account: Option<String>) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.account_name = account;
             }
@@ -633,7 +633,7 @@ impl ChatUi {
 
     pub fn set_quota_display(&self, quota: Option<String>) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.quota_display = quota;
             }
@@ -642,7 +642,7 @@ impl ChatUi {
     }
 
     pub fn set_model(&self, model: &str, context_used: u32, context_max: u32) {
-        let mut status = self.status.lock().unwrap();
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut s) = *status {
             s.model = model.to_string();
             s.context_used = context_used;
@@ -652,7 +652,7 @@ impl ChatUi {
 
     pub fn set_session_name(&self, name: &str) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.session_name = name.to_string();
             }
@@ -662,7 +662,7 @@ impl ChatUi {
 
     pub fn update_status(&self, context_used: u32, context_max: u32) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.context_used = context_used;
                 s.context_max = context_max;
@@ -673,7 +673,7 @@ impl ChatUi {
 
     pub fn update_context_used(&self, context_used: u32) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.context_used = context_used;
             }
@@ -683,7 +683,7 @@ impl ChatUi {
 
     pub fn set_yolo(&self, on: bool) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.yolo = on;
             }
@@ -693,7 +693,7 @@ impl ChatUi {
 
     pub fn set_plan_mode(&self, on: bool) {
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
                 s.plan_mode = on;
             }
@@ -729,7 +729,7 @@ impl ChatUi {
     }
 
     pub fn format_status_line(&self, width: usize) -> Option<String> {
-        let status = self.status.lock().unwrap();
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let s = status.as_ref()?;
 
         let left = if let Some(ref account) = s.account_name {
@@ -854,7 +854,7 @@ impl ChatUi {
         }
         self.box_drawn.store(false, Ordering::SeqCst);
 
-        let metrics_opt = self.drawn_metrics.lock().unwrap().take();
+        let metrics_opt = self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()).take();
         let (rows_below, rows_above) = if let Some(m) = metrics_opt {
             let current_width = get_terminal_width().max(1);
             let bottom_rows = physical_line_count(m.divider_len, current_width);
@@ -922,10 +922,10 @@ impl ChatUi {
             println!("{}", text);
             return;
         }
-        let buf = self.input_buf.lock().unwrap();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         let width = get_terminal_width();
         let previous = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let prev = live.rows.len();
             live.rows.clear();
             prev
@@ -942,10 +942,10 @@ impl ChatUi {
             }
             return;
         }
-        let buf = self.input_buf.lock().unwrap();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         let width = get_terminal_width();
         let previous = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let prev = live.rows.len();
             live.rows = rows.clone();
             prev
@@ -979,13 +979,13 @@ impl ChatUi {
         if !self.box_drawn.load(Ordering::SeqCst) {
             return None;
         }
-        let metrics = self.drawn_metrics.lock().unwrap().clone()?;
+        let metrics = self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
         if metrics.width != width {
             // A resize redraws everything anyway.
             return None;
         }
 
-        let live_rows = self.live.lock().unwrap().rows.clone();
+        let live_rows = self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
         let panel_rows = self.todo_panel_rows(width);
         let delegate_rows = self.delegate_task_rows(width);
         let queued_line = self.format_queue_line(width);
@@ -1065,7 +1065,7 @@ impl ChatUi {
 
         // Keep the measurements honest: the rows changed, the height did not.
         {
-            let mut guard = self.drawn_metrics.lock().unwrap();
+            let mut guard = self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_mut() {
                 m.live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
                 m.panel_rows_lens = panel_rows.iter().map(|r| visible_width(r)).collect();
@@ -1090,7 +1090,7 @@ impl ChatUi {
         let chrome = self.box_row_count() + 2;
 
         let rows = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let mut rows = reasoning_window(&live, width, chrome);
 
             if let Some(activity) = &mut live.activity {
@@ -1134,7 +1134,7 @@ impl ChatUi {
             rows
         };
 
-        if rows.is_empty() && self.live.lock().unwrap().rows.is_empty() {
+        if rows.is_empty() && self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.is_empty() {
             return;
         }
 
@@ -1191,7 +1191,7 @@ impl ChatUi {
         }
         let _ = io::stdout().flush();
 
-        let live_rows = self.live.lock().unwrap().rows.clone();
+        let live_rows = self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
         let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
 
         let panel = self.todo_panel_rows(width);
@@ -1204,7 +1204,7 @@ impl ChatUi {
         let mut block_rows = live_rows.clone();
         block_rows.extend(rows[..rows.len() - 2].iter().cloned());
 
-        *self.drawn_metrics.lock().unwrap() = Some(BoxDrawnMetrics {
+        *self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()) = Some(BoxDrawnMetrics {
             width,
             queued_line_len: queue_line.as_ref().map(|s| visible_width(s)).unwrap_or(0),
             status_line_len: status_str.as_ref().map(|s| visible_width(s)).unwrap_or(0),
@@ -1308,7 +1308,7 @@ impl ChatUi {
             self.handle_resize();
             return;
         }
-        let buf = self.input_buf.lock().unwrap();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         let (row, hint_width) = self.prompt_row_drawn(&buf);
         print!("\r\x1b[K{}", row);
         if hint_width > 0 {
@@ -1324,7 +1324,7 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let buf = self.input_buf.lock().unwrap();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         self.draw_box(width, &buf);
     }
 
@@ -1333,11 +1333,11 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let buf = self.input_buf.lock().unwrap().clone();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let chrome = self.box_row_count() + 2;
 
         let rows = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let mut rows = reasoning_window(&live, width, chrome);
 
             if let Some(activity) = &mut live.activity {
@@ -1354,7 +1354,7 @@ impl ChatUi {
 
         if self.box_drawn.load(Ordering::SeqCst) {
             let previous = {
-                let mut live = self.live.lock().unwrap();
+                let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
                 let prev = live.rows.len();
                 live.rows = rows.clone();
                 prev
@@ -1374,9 +1374,9 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let buf = self.input_buf.lock().unwrap().clone();
+        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let previous = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let prev = live.rows.len();
             live.rows.clear();
             prev
@@ -1404,7 +1404,7 @@ impl ChatUi {
             return;
         }
         let previous = {
-            let mut live = self.live.lock().unwrap();
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let prev = live.rows.len();
             live.rows.clear();
             live.activity = None;

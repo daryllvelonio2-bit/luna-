@@ -220,3 +220,30 @@ async fn a_background_child_reports_start_progress_and_finish() {
     assert!(seen.contains(&"progress".to_string()), "{seen:?}");
     assert!(seen.contains(&"finished".to_string()), "{seen:?}");
 }
+
+#[test]
+fn test_delegate_tool_mutating_calls() {
+    let dummy = DelegateTaskTool::new(
+        Arc::new(EchoProvider),
+        Arc::new(EmptyMemory),
+        Arc::new(EmptyNotes),
+        None,
+        Config::default(),
+    );
+
+    assert!(dummy.is_mutating());
+    assert!(dummy.is_mutating_call(&json!({"action": "spawn", "tasks": [{"goal": "test"}]})));
+    assert!(dummy.is_mutating_call(&json!({"tasks": [{"goal": "test"}]})));
+    assert!(!dummy.is_mutating_call(&json!({"action": "list"})));
+    assert!(!dummy.is_mutating_call(&json!({"action": "poll", "task_id": "sub_1"})));
+    assert!(!dummy.is_mutating_call(&json!({"action": "wait", "timeout_secs": 10})));
+}
+
+#[tokio::test]
+async fn test_subagent_child_approver_fails_closed() {
+    use crate::approval::{ApprovalRequest, Approver};
+    let approver = NonInteractive::new("delegated subagent");
+    let req = ApprovalRequest::default();
+    let err = approver.approve(&req).await.unwrap_err();
+    assert!(matches!(err, HarnessError::ApprovalRejected(_)));
+}
