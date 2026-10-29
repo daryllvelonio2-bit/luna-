@@ -240,6 +240,16 @@ else returns `EPERM` — `curl`, DNS and dependency fetches fail before a packet
 while local IPC keeps working. Kernel enforcement, not a command-string match; fails closed where it
 cannot be enforced. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
+### 2.14 Delegated subagents stay observable
+
+`delegate_task` can run isolated child agents in the background. The chat composer keeps a live
+row for every running child, showing its task id, goal, and current model/tool activity; the row
+is removed when the child finishes. A child fails only after **120 seconds with no model or tool
+activity**. Every streamed response and every tool event resets that inactivity timer, so a long
+task is not killed merely because it ran for a long time. `delegate_task(action: "wait")` waits
+for up to **5 minutes** by default and leaves the child running in the background if that wait
+window expires.
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

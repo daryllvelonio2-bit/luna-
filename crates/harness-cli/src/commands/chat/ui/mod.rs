@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::render::{
     activity_line, compaction_line, fit_diff_line_to_width, needs_separator, reasoning_rows,
-    tool_activity_detail, OutputBlockKind, PROMPT,
+    tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
 };
 
 /// Fewest rows the live region gives the thought block. On a screen with no room left the block
@@ -107,6 +107,27 @@ struct Activity {
     frame: usize,
 }
 
+/// A delegated child that is still running, as far as the composer is concerned.
+#[derive(Clone)]
+struct DelegateTaskView {
+    id: String,
+    goal: String,
+    activity: String,
+}
+
+/// One running child as a single composer row: its id, its goal, and what it is doing now.
+fn format_delegate_task_row(task: &DelegateTaskView, width: usize) -> String {
+    let prefix = "🤖 delegate";
+    let goal = task.goal.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = format!("{} · {} · {}", task.id, task.activity, goal);
+    let budget = width.saturating_sub(visible_width(prefix) + 1);
+    format!(
+        "{} {}",
+        prefix.bold(),
+        truncate_to_cells(&body, budget).dimmed()
+    )
+}
+
 /// A fold of the oldest turns, as far as the animation is concerned.
 ///
 /// Carried in the live region rather than printed once, because the summary call takes seconds and
@@ -157,6 +178,8 @@ struct BoxDrawnMetrics {
     /// Rows of the todo panel drawn above the box. They are erased with the rest of
     /// the region, so the panel does not leave a trail behind it.
     panel_rows_lens: Vec<usize>,
+    /// Rows of running delegated tasks drawn above the composer.
+    delegate_rows_lens: Vec<usize>,
     /// The rows drawn between the transcript and the prompt, top to bottom.
     ///
     /// The repaint compares them with the next frame and rewrites only the rows whose text
@@ -252,6 +275,9 @@ pub struct ChatUi {
     /// Messages the user submitted while the agent could not take them yet, still waiting to be
     /// sent. Only the count lives here: the queue itself belongs to the loop that drains it.
     queue_depth: Arc<AtomicUsize>,
+    /// Delegated children that are still running. These stay visible above the composer after
+    /// the main turn ends, so a background task never disappears without a trace.
+    delegate_tasks: Arc<Mutex<Vec<DelegateTaskView>>>,
     /// Whether a turn is in flight. Only the composer's hint reads it: the empty line says
     /// something different depending on whether Luna is idle or working.
     turn_active: Arc<AtomicBool>,
@@ -303,6 +329,7 @@ impl ChatUi {
             todo_snapshot: Arc::new(Mutex::new(None)),
             todo_collapsed: Arc::new(AtomicBool::new(false)),
             queue_depth: Arc::new(AtomicUsize::new(0)),
+            delegate_tasks: Arc::new(Mutex::new(Vec::new())),
             turn_active: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             drawn_metrics: Arc::new(Mutex::new(None)),
@@ -386,9 +413,76 @@ impl ChatUi {
         folded
     }
 
+    /// Show a delegated child above the composer.
+    pub fn start_delegate_task(&self, id: &str, goal: &str) {
+        let changed = {
+            let mut tasks = self.delegate_tasks.lock().unwrap();
+            if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                let changed = task.goal != goal || task.activity != "starting";
+                task.goal = goal.to_string();
+                task.activity = "starting".to_string();
+                changed
+            } else {
+                tasks.push(DelegateTaskView {
+                    id: id.to_string(),
+                    goal: goal.to_string(),
+                    activity: "starting".to_string(),
+                });
+                true
+            }
+        };
+        if changed {
+            self.redraw_box();
+        }
+    }
+
+    /// Update what a running delegated child is doing.
+    pub fn update_delegate_task(&self, id: &str, activity: &str) {
+        let changed = {
+            let mut tasks = self.delegate_tasks.lock().unwrap();
+            if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                if task.activity == activity {
+                    false
+                } else {
+                    task.activity = activity.to_string();
+                    true
+                }
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.redraw_box();
+        }
+    }
+
+    /// Remove a delegated child after it finishes.
+    pub fn finish_delegate_task(&self, id: &str) {
+        let changed = {
+            let mut tasks = self.delegate_tasks.lock().unwrap();
+            let before = tasks.len();
+            tasks.retain(|task| task.id != id);
+            before != tasks.len()
+        };
+        if changed {
+            self.redraw_box();
+        }
+    }
+
+    /// The rows that announce delegated children still running in the background.
+    pub fn delegate_task_rows(&self, width: usize) -> Vec<String> {
+        self.delegate_tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|task| format_delegate_task_row(task, width))
+            .collect()
+    }
+
     pub fn box_row_count(&self) -> usize {
         4 + if self.queue_depth() > 0 { 1 } else { 0 }
             + self.todo_panel_rows(get_terminal_width()).len()
+            + self.delegate_task_rows(get_terminal_width()).len()
     }
 
     pub fn begin_block(&self, kind: OutputBlockKind) {
@@ -787,6 +881,11 @@ impl ChatUi {
                 .iter()
                 .map(|&len| physical_line_count(len, current_width))
                 .sum();
+            let delegate_rows: usize = m
+                .delegate_rows_lens
+                .iter()
+                .map(|&len| physical_line_count(len, current_width))
+                .sum();
 
             let below = bottom_rows;
             let above = prompt_rows.saturating_sub(1)
@@ -794,7 +893,8 @@ impl ChatUi {
                 + status_rows
                 + queued_rows
                 + live_rows
-                + panel_rows;
+                + panel_rows
+                + delegate_rows;
             (below, above)
         } else {
             let total = previous_live_rows + self.box_row_count();
@@ -887,13 +987,16 @@ impl ChatUi {
 
         let live_rows = self.live.lock().unwrap().rows.clone();
         let panel_rows = self.todo_panel_rows(width);
+        let delegate_rows = self.delegate_task_rows(width);
         let queued_line = self.format_queue_line(width);
         let status_line = self.format_status_line(width);
 
         // The block is everything between the transcript and the prompt, top to bottom.
-        let mut block: Vec<String> = Vec::with_capacity(live_rows.len() + panel_rows.len() + 4);
+        let mut block: Vec<String> =
+            Vec::with_capacity(live_rows.len() + panel_rows.len() + delegate_rows.len() + 4);
         block.extend(live_rows.iter().cloned());
         block.extend(panel_rows.iter().cloned());
+        block.extend(delegate_rows.iter().cloned());
         if let Some(line) = &queued_line {
             block.push(line.clone());
         }
@@ -966,6 +1069,7 @@ impl ChatUi {
             if let Some(m) = guard.as_mut() {
                 m.live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
                 m.panel_rows_lens = panel_rows.iter().map(|r| visible_width(r)).collect();
+                m.delegate_rows_lens = delegate_rows.iter().map(|r| visible_width(r)).collect();
                 m.queued_line_len = queued_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.status_line_len = status_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.prompt_len = visible_width(&prompt);
@@ -1048,6 +1152,9 @@ impl ChatUi {
         // The panel is chrome: it is drawn above the composer, so it stays put while
         // the conversation scrolls under it.
         rows.extend(self.todo_panel_rows(width));
+        // A running child is also chrome: its row stays above the composer after the main turn
+        // ends, so the user can still see which delegated task is running.
+        rows.extend(self.delegate_task_rows(width));
         if let Some(queued) = self.format_queue_line(width) {
             rows.push(queued);
         }
@@ -1088,6 +1195,7 @@ impl ChatUi {
         let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
 
         let panel = self.todo_panel_rows(width);
+        let delegate_rows = self.delegate_task_rows(width);
         let queue_line = self.format_queue_line(width);
         let status_str = self.format_status_line(width);
 
@@ -1104,6 +1212,7 @@ impl ChatUi {
             prompt_len: visible_width(&prompt_str),
             live_rows_lens,
             panel_rows_lens: panel.iter().map(|r| visible_width(r)).collect(),
+            delegate_rows_lens: delegate_rows.iter().map(|r| visible_width(r)).collect(),
             block_rows,
             prompt_drawn: prompt_str.clone(),
         });
