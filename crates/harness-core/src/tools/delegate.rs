@@ -1,18 +1,20 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures_util::stream::BoxStream;
+use futures_util::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::agent::{Agent, SessionBinding};
-use crate::approval::{AllowAll, ApprovalSettings};
+use crate::agent::{Agent, AgentEvent, SessionBinding};
+use crate::approval::{ApprovalSettings, NonInteractive};
 use crate::config::Config;
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
@@ -22,16 +24,64 @@ use crate::types::{
     CompletionOptions, MemoryRecord, Message, Note, StreamEvent, ToolDefinition, ToolResult,
 };
 
+/// A subagent fails only after this long without any model or tool activity.
+///
+/// This is deliberately an inactivity limit, not a task-duration limit: a long task that keeps
+/// reporting progress must be allowed to finish.
+const SUBAGENT_IDLE_TIMEOUT_SECS: u64 = 180;
+
+/// How long an explicit `delegate_task(action: "wait")` waits before returning control to the
+/// caller. The background task keeps running after this window.
+const SUBAGENT_WAIT_TIMEOUT_SECS: u64 = 300;
+
+/// How often the inactivity watchdog checks the last activity timestamp.
+const SUBAGENT_IDLE_CHECK_INTERVAL_SECS: u64 = 1;
+
+/// What a delegated child is doing right now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubagentActivity {
+    /// The model is producing a response.
+    ModelStreaming,
+    /// The child started a tool call.
+    ToolStarted { name: String },
+    /// The child's tool call finished.
+    ToolFinished { name: String, is_error: bool },
+}
+
+/// A lifecycle or progress event from a delegated child.
+#[derive(Debug, Clone)]
+pub enum SubagentTaskEvent {
+    Started {
+        id: String,
+        goal: String,
+    },
+    Progress {
+        id: String,
+        goal: String,
+        activity: SubagentActivity,
+    },
+    Finished {
+        record: SubagentTaskRecord,
+    },
+}
+
+pub type SubagentTaskEventNotifier = Arc<dyn Fn(SubagentTaskEvent) + Send + Sync>;
+type SubagentActivityNotifier = Arc<dyn Fn(SubagentActivity) + Send + Sync>;
+
 #[derive(Clone)]
-struct DynProvider(Arc<dyn ModelProvider>);
+struct DynProvider {
+    inner: Arc<dyn ModelProvider>,
+    activity: Option<SubagentActivityNotifier>,
+}
 
 #[async_trait]
 impl ModelProvider for DynProvider {
     fn provider_id(&self) -> &str {
-        self.0.provider_id()
+        self.inner.provider_id()
     }
     async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
-        self.0.fetch_models().await
+        self.inner.fetch_models().await
     }
     async fn complete(
         &self,
@@ -39,7 +89,14 @@ impl ModelProvider for DynProvider {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
-        self.0.complete(messages, tools, options).await
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
+        let res = self.inner.complete(messages, tools, options).await;
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
+        res
     }
     async fn stream(
         &self,
@@ -47,10 +104,31 @@ impl ModelProvider for DynProvider {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        self.0.stream(messages, tools, options).await
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
+        let stream = self.inner.stream(messages, tools, options).await?;
+        let Some(activity) = self.activity.clone() else {
+            return Ok(stream);
+        };
+        Ok(stream
+            .map(move |event| {
+                if let Ok(event) = &event {
+                    match event {
+                        StreamEvent::ReasoningDelta(_)
+                        | StreamEvent::ContentDelta(_)
+                        | StreamEvent::ToolCallDelta { .. } => {
+                            activity(SubagentActivity::ModelStreaming);
+                        }
+                        StreamEvent::Completed { .. } => {}
+                    }
+                }
+                event
+            })
+            .boxed())
     }
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
-        self.0.embed(texts).await
+        self.inner.embed(texts).await
     }
 }
 
@@ -148,6 +226,123 @@ pub struct SubagentTaskSpec {
     pub context: Option<String>,
 }
 
+/// Monotonic milliseconds used by the inactivity watchdog.
+fn monotonic_millis() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Tracks whether a delegated child is still making progress.
+#[derive(Clone)]
+struct SubagentActivityTracker {
+    id: String,
+    goal: String,
+    last_activity_ms: Arc<AtomicU64>,
+    active_tools: Arc<std::sync::atomic::AtomicUsize>,
+    notifier: Option<SubagentTaskEventNotifier>,
+}
+
+impl SubagentActivityTracker {
+    fn new(id: String, goal: String, notifier: Option<SubagentTaskEventNotifier>) -> Self {
+        Self {
+            id,
+            goal,
+            last_activity_ms: Arc::new(AtomicU64::new(monotonic_millis())),
+            active_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            notifier,
+        }
+    }
+
+    fn touch(&self) {
+        self.last_activity_ms
+            .store(monotonic_millis(), Ordering::Relaxed);
+    }
+
+    fn record(&self, activity: SubagentActivity) {
+        match &activity {
+            SubagentActivity::ToolStarted { .. } => {
+                self.active_tools.fetch_add(1, Ordering::SeqCst);
+            }
+            SubagentActivity::ToolFinished { .. } => {
+                let _ = self
+                    .active_tools
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                        Some(n.saturating_sub(1))
+                    });
+            }
+            _ => {}
+        }
+        self.touch();
+        if let Some(notifier) = &self.notifier {
+            notifier(SubagentTaskEvent::Progress {
+                id: self.id.clone(),
+                goal: self.goal.clone(),
+                activity,
+            });
+        }
+    }
+}
+
+fn notify_subagent_event(notifier: Option<&SubagentTaskEventNotifier>, event: SubagentTaskEvent) {
+    if let Some(notifier) = notifier {
+        notifier(event);
+    }
+}
+
+fn current_event_notifier(
+    slot: &Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
+) -> Option<SubagentTaskEventNotifier> {
+    slot.try_read().ok().and_then(|guard| guard.clone())
+}
+
+/// Await a child turn until it finishes or stops making progress.
+///
+/// The old implementation put a wall-clock timeout around the whole turn, so a healthy child
+/// that kept working was killed merely because it ran for too long. This watchdog measures the
+/// gap between progress events instead: every streamed model response or tool event resets it.
+async fn await_subagent_with_inactivity_timeout<F>(
+    future: F,
+    tracker: &SubagentActivityTracker,
+    idle_timeout: Duration,
+    cancel_token: &CancellationToken,
+) -> Result<F::Output, String>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+    let check_interval = idle_timeout
+        .min(Duration::from_secs(SUBAGENT_IDLE_CHECK_INTERVAL_SECS))
+        .max(Duration::from_millis(10));
+    let mut ticker = tokio::time::interval(check_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            output = &mut future => return Ok(output),
+            _ = cancel_token.cancelled() => return Err("subagent cancelled".to_string()),
+            _ = ticker.tick() => {
+                if tracker.active_tools.load(Ordering::SeqCst) > 0 {
+                    tracker.touch();
+                    continue;
+                }
+                let idle_limit_ms = u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX);
+                let idle_ms = monotonic_millis().saturating_sub(
+                    tracker.last_activity_ms.load(Ordering::Relaxed),
+                );
+                if idle_ms >= idle_limit_ms {
+                    cancel_token.cancel();
+                    return Err(format!(
+                        "subagent made no progress for {} seconds",
+                        idle_timeout.as_secs()
+                    ));
+                }
+            }
+        }
+    }
+}
+
 pub struct DelegateTaskTool {
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,
@@ -157,6 +352,7 @@ pub struct DelegateTaskTool {
     max_concurrent: usize,
     tasks_state: Arc<RwLock<HashMap<String, SubagentTaskRecord>>>,
     notifier: Arc<RwLock<Option<SubagentCompletionNotifier>>>,
+    event_notifier: Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
     steer_handle: Arc<RwLock<Option<Arc<Mutex<VecDeque<String>>>>>>,
 }
 
@@ -177,12 +373,20 @@ impl DelegateTaskTool {
             max_concurrent: 4,
             tasks_state: Arc::new(RwLock::new(HashMap::new())),
             notifier: Arc::new(RwLock::new(None)),
+            event_notifier: Arc::new(RwLock::new(None)),
             steer_handle: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn set_notifier(&self, notifier: SubagentCompletionNotifier) {
         if let Ok(mut lock) = self.notifier.try_write() {
+            *lock = Some(notifier);
+        }
+    }
+
+    /// Register a listener for child lifecycle and progress events.
+    pub fn set_event_notifier(&self, notifier: SubagentTaskEventNotifier) {
+        if let Ok(mut lock) = self.event_notifier.try_write() {
             *lock = Some(notifier);
         }
     }
@@ -194,12 +398,16 @@ impl DelegateTaskTool {
     }
 
     pub fn with_notifier(self, notifier: SubagentCompletionNotifier) -> Self {
-        *self.notifier.try_write().unwrap() = Some(notifier);
+        if let Ok(mut lock) = self.notifier.try_write() {
+            *lock = Some(notifier);
+        }
         self
     }
 
     pub fn with_steer_handle(self, steer_handle: Arc<Mutex<VecDeque<String>>>) -> Self {
-        *self.steer_handle.try_write().unwrap() = Some(steer_handle);
+        if let Ok(mut lock) = self.steer_handle.try_write() {
+            *lock = Some(steer_handle);
+        }
         self
     }
 
@@ -217,6 +425,7 @@ async fn run_single_subagent(
     child_session_id: String,
     task: SubagentTaskSpec,
     sub_cancel: CancellationToken,
+    event_notifier: Option<SubagentTaskEventNotifier>,
 ) -> (String, String, Result<String, String>) {
     let child_registry = Arc::new(DefaultToolRegistry::new());
     let read_cache = crate::tools::ReadCache::new();
@@ -249,16 +458,39 @@ async fn run_single_subagent(
     child_cfg.max_consecutive_failures = 5;
     child_cfg.require_hitl_for_mutation = false;
 
-    let provider = Arc::new(DynProvider(provider));
+    let tracker =
+        SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
+    let activity_tracker = tracker.clone();
+    let provider = Arc::new(DynProvider {
+        inner: provider,
+        activity: Some(Arc::new(move |activity| activity_tracker.record(activity))),
+    });
     let memory = Arc::new(DynMemory(memory));
     let notes = Arc::new(DynNotes(notes));
 
+    let observer_tracker = tracker.clone();
     let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
         .with_permissions(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
                 .unwrap_or_default(),
         )
-        .with_approval(Arc::new(AllowAll), ApprovalSettings::default());
+        .with_approval(
+            Arc::new(NonInteractive::new(
+                "delegated subagent: interactive approval is unavailable in background execution",
+            )),
+            ApprovalSettings::default(),
+        )
+        .with_observer(Arc::new(move |event| match event {
+            AgentEvent::ToolExecuting { name, .. } => {
+                observer_tracker.record(SubagentActivity::ToolStarted { name });
+            }
+            AgentEvent::ToolExecuted { name, is_error, .. } => {
+                observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
+            }
+            _ => {
+                observer_tracker.touch();
+            }
+        }));
 
     if let Some(s) = store {
         let _ = s.ensure_session(&child_session_id).await;
@@ -274,11 +506,18 @@ async fn run_single_subagent(
         None => format!("GOAL: {}", task.goal),
     };
 
-    let run_future = agent.run_turn(&prompt, sub_cancel);
-    let outcome = match tokio::time::timeout(Duration::from_secs(180), run_future).await {
+    let run_future = agent.run_turn(&prompt, sub_cancel.clone());
+    let outcome = match await_subagent_with_inactivity_timeout(
+        run_future,
+        &tracker,
+        Duration::from_secs(SUBAGENT_IDLE_TIMEOUT_SECS),
+        &sub_cancel,
+    )
+    .await
+    {
         Ok(Ok(outcome)) => Ok(outcome.reply),
         Ok(Err(e)) => Err(format!("agent turn error: {e}")),
-        Err(_) => Err("subagent timed out after 180 seconds".to_string()),
+        Err(e) => Err(e),
     };
 
     (child_session_id, task.goal, outcome)
@@ -291,7 +530,7 @@ impl Tool for DelegateTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn isolated child subagents to execute tasks in parallel without polluting the main conversation. Subagents run asynchronously in the background so you can continue replying and working immediately."
+        "Spawn isolated child subagents to execute tasks in parallel without polluting the main conversation. Subagents run asynchronously in the background so you can continue replying and working immediately. A child is stopped only after it makes no model or tool progress for the inactivity timeout; every response or tool event resets that timer."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -331,10 +570,31 @@ impl Tool for DelegateTaskTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds when using action: 'wait' (default: 180)."
+                    "description": format!(
+                        "Optional timeout in seconds when using action: 'wait' (default: {}). The delegated task keeps running after this wait expires.",
+                        SUBAGENT_WAIT_TIMEOUT_SECS
+                    )
                 }
             }
         })
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn is_mutating_call(&self, arguments: &serde_json::Value) -> bool {
+        let action = arguments
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or_else(|| {
+                if arguments.get("tasks").is_some() {
+                    "spawn"
+                } else {
+                    "list"
+                }
+            });
+        matches!(action, "spawn")
     }
 
     async fn execute(
@@ -482,7 +742,7 @@ impl Tool for DelegateTaskTool {
                 let timeout_secs = arguments
                     .get("timeout_secs")
                     .and_then(|t| t.as_u64())
-                    .unwrap_or(180);
+                    .unwrap_or(SUBAGENT_WAIT_TIMEOUT_SECS);
                 let start_wait = std::time::Instant::now();
                 let mut interval = tokio::time::interval(Duration::from_millis(150));
 
@@ -580,6 +840,7 @@ impl Tool for DelegateTaskTool {
                     .get("background")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(true);
+                let event_notifier = current_event_notifier(&self.event_notifier);
 
                 let tasks_to_run: Vec<SubagentTaskSpec> =
                     tasks.into_iter().take(self.max_concurrent).collect();
@@ -593,15 +854,27 @@ impl Tool for DelegateTaskTool {
                     // Synchronous blocking mode
                     let mut join_set = JoinSet::new();
                     for (idx, task) in tasks_to_run.into_iter().enumerate() {
-                        let provider = Arc::new(DynProvider(self.provider.clone()));
-                        let memory = Arc::new(DynMemory(self.memory.clone()));
-                        let notes = Arc::new(DynNotes(self.notes.clone()));
+                        let provider = self.provider.clone();
+                        let memory = self.memory.clone();
+                        let notes = self.notes.clone();
                         let store = self.store.clone();
                         let config = self.config.clone();
                         let sub_cancel = cancel_token.child_token();
                         let sub_idx = idx + 1;
+                        let started_at = Utc::now();
                         let child_session_id =
-                            format!("sub_{}_{}", Utc::now().format("%Y%m%d_%H%M%S"), sub_idx);
+                            format!("sub_{}_{}", started_at.format("%Y%m%d_%H%M%S"), sub_idx);
+                        let goal = task.goal.clone();
+                        let context = task.context.clone();
+                        let child_event_notifier = event_notifier.clone();
+
+                        notify_subagent_event(
+                            child_event_notifier.as_ref(),
+                            SubagentTaskEvent::Started {
+                                id: child_session_id.clone(),
+                                goal: goal.clone(),
+                            },
+                        );
 
                         join_set.spawn(async move {
                             let (id, goal, res) = run_single_subagent(
@@ -613,16 +886,17 @@ impl Tool for DelegateTaskTool {
                                 child_session_id,
                                 task,
                                 sub_cancel,
+                                child_event_notifier,
                             )
                             .await;
-                            (sub_idx, id, goal, res)
+                            (sub_idx, id, goal, res, started_at, context)
                         });
                     }
 
                     let mut results = Vec::new();
                     while let Some(res) = join_set.join_next().await {
                         match res {
-                            Ok((idx, id, goal, outcome)) => {
+                            Ok((idx, id, goal, outcome, started_at, context)) => {
                                 let finished_at = Utc::now();
                                 let status = match &outcome {
                                     Ok(reply) => SubagentStatus::Completed {
@@ -634,15 +908,20 @@ impl Tool for DelegateTaskTool {
                                         finished_at,
                                     },
                                 };
-                                self.tasks_state.write().await.insert(
-                                    id.clone(),
-                                    SubagentTaskRecord {
-                                        id,
-                                        goal: goal.clone(),
-                                        context: None,
-                                        status,
-                                        started_at: Utc::now(),
-                                    },
+                                let record = SubagentTaskRecord {
+                                    id: id.clone(),
+                                    goal: goal.clone(),
+                                    context,
+                                    status,
+                                    started_at,
+                                };
+                                self.tasks_state
+                                    .write()
+                                    .await
+                                    .insert(id.clone(), record.clone());
+                                notify_subagent_event(
+                                    event_notifier.as_ref(),
+                                    SubagentTaskEvent::Finished { record },
                                 );
                                 results.push((idx, goal, outcome));
                             }
@@ -700,20 +979,29 @@ impl Tool for DelegateTaskTool {
                         .await
                         .insert(child_session_id.clone(), record);
 
+                    notify_subagent_event(
+                        event_notifier.as_ref(),
+                        SubagentTaskEvent::Started {
+                            id: child_session_id.clone(),
+                            goal: task.goal.clone(),
+                        },
+                    );
                     dispatched.push((child_session_id.clone(), task.goal.clone()));
 
-                    let provider = Arc::new(DynProvider(self.provider.clone()));
-                    let memory = Arc::new(DynMemory(self.memory.clone()));
-                    let notes = Arc::new(DynNotes(self.notes.clone()));
+                    let provider = self.provider.clone();
+                    let memory = self.memory.clone();
+                    let notes = self.notes.clone();
                     let store = self.store.clone();
                     let config = self.config.clone();
-                    let sub_cancel = cancel_token.child_token();
+                    let sub_cancel = CancellationToken::new();
                     let tasks_state = self.tasks_state.clone();
                     let notifier = self.notifier.clone();
                     let steer_handle = self.steer_handle.clone();
                     let cid = child_session_id.clone();
                     let goal_str = task.goal.clone();
                     let ctx_opt = task.context.clone();
+                    let child_event_notifier = event_notifier.clone();
+                    let finish_event_notifier = child_event_notifier.clone();
 
                     tokio::spawn(async move {
                         let (id, goal, res) = run_single_subagent(
@@ -728,6 +1016,7 @@ impl Tool for DelegateTaskTool {
                                 context: ctx_opt.clone(),
                             },
                             sub_cancel,
+                            child_event_notifier,
                         )
                         .await;
 
@@ -750,6 +1039,13 @@ impl Tool for DelegateTaskTool {
                             .await
                             .insert(id.clone(), finished_record.clone());
 
+                        notify_subagent_event(
+                            finish_event_notifier.as_ref(),
+                            SubagentTaskEvent::Finished {
+                                record: finished_record.clone(),
+                            },
+                        );
+
                         // Invoke notifier callback if registered
                         if let Some(ref cb) = *notifier.read().await {
                             cb(&finished_record);
@@ -768,7 +1064,9 @@ impl Tool for DelegateTaskTool {
                                 "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
                                 id, goal, status_label, output_text
                             );
-                            steer.lock().unwrap().push_back(steer_notice);
+                            if let Ok(mut steer_q) = steer.lock() {
+                                steer_q.push_back(steer_notice);
+                            }
                         }
                     });
                 }
@@ -794,3 +1092,6 @@ impl Tool for DelegateTaskTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
