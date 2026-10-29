@@ -30,3 +30,4 @@
 - **Verification gate:** Always verify with `cargo check` and `cargo test` on touched crates before completing changes.
 - **Worktree isolation:** Execute edits only within the assigned workspace or worktree; never contaminate other worktrees or shared checkouts.
 - **Commit authorship:** Commits must be authored and committed as `Daryll <daryllvelonio2@gmail.com>`.
+- **Push verified work:** After the verification gate passes, commit the completed change and push it to the remote tracking branch (`git push origin <branch>`) unless the user explicitly asks not to. Never push unverified or half-finished work.
