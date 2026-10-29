@@ -31,7 +31,7 @@ use crate::types::Message;
 pub use compaction::{
     compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
     heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
-    CHARS_PER_TOKEN, HEURISTIC_TOLERANCE,
+    CHARS_PER_TOKEN, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use transcript::{last_fold_seq, sendable_messages};
 

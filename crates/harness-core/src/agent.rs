@@ -1090,11 +1090,7 @@ where
                     .saturating_add(accumulated.completion_tokens);
             }
 
-            let fold_active = rebound
-                || self.fold_in_flight.load(Ordering::SeqCst)
-                || self.completed_fold.lock().unwrap().is_some();
-
-            if fold_active {
+            if rebound {
                 response.usage = None;
             }
 

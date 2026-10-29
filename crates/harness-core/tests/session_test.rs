@@ -931,6 +931,56 @@ async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
     assert_eq!(heuristic_only.source, EstimateSource::Heuristic);
     assert_eq!(heuristic_only.tokens, 100);
     assert_eq!(estimate_tokens(&[]).tokens, 0);
+
+    // An inline base64 image data URL must not be counted as hundreds of thousands of prose characters.
+    let image_payload = format!(
+        "inspect this header\n\ndata:image/png;base64,{}\n\nthanks",
+        "A".repeat(600_000)
+    );
+    let image_estimate = estimate_tokens(&[Message::user(image_payload)]);
+    assert_eq!(image_estimate.source, EstimateSource::Heuristic);
+    assert!(
+        image_estimate.tokens < 1_000,
+        "inline image tokens must be estimated reasonably (~250 tokens), got {}",
+        image_estimate.tokens
+    );
+}
+
+#[tokio::test]
+async fn compact_does_not_fold_when_only_summaries_would_be_folded() {
+    let mut history = Vec::new();
+    // Prior summary row
+    history.push(StoredMessage {
+        id: 1,
+        seq: 1,
+        message: Message::system("prior summary of old turns"),
+        is_summary: true,
+    });
+    // One active user turn with a large content that exceeds keep budget
+    history.push(StoredMessage {
+        id: 2,
+        seq: 2,
+        message: Message::user("current active user prompt"),
+        is_summary: false,
+    });
+
+    let provider = CannedProvider::new("new summary");
+    let outcome = compact(&provider, "canned-model", &history, Some(1))
+        .await
+        .unwrap();
+    assert!(
+        outcome.is_none(),
+        "must return None when only summary rows precede the kept turn"
+    );
+
+    let percent_outcome = compact_percent(&provider, "canned-model", &history, 50)
+        .await
+        .unwrap();
+    assert!(
+        percent_outcome.is_none(),
+        "compact_percent must return None when only summary rows precede the kept turn"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 // ---------------------------------------------------------------- compaction
