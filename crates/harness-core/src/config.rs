@@ -715,7 +715,7 @@ pub fn env_var_name(key: &str) -> String {
 /// the catalog overlay the caller puts in `defaults`, which is why the CLI injects it before
 /// resolving: that is what makes `LUNA_PROVIDERS_NVIDIA_BASE_URL` work.
 pub fn env_overrides(defaults: &Config) -> Result<BTreeMap<String, String>, HarnessError> {
-    let known = flatten(&to_value(defaults)?);
+    let known = flatten_schema(&to_value(defaults)?);
     let mut out = BTreeMap::new();
     for key in known.keys() {
         if let Ok(value) = std::env::var(env_var_name(key)) {
@@ -728,7 +728,7 @@ pub fn env_overrides(defaults: &Config) -> Result<BTreeMap<String, String>, Harn
 /// Apply the precedence order and report both values and sources.
 pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
     let defaults = to_value(&layers.defaults)?;
-    let known = flatten(&defaults);
+    let known = flatten_schema(&defaults);
     let empty = || Value::Mapping(Mapping::new());
 
     let file = match layers.file.as_deref() {
@@ -858,7 +858,13 @@ impl Resolved {
     pub fn get(&self, key: &str) -> Result<&str, HarnessError> {
         match self.values.get(key) {
             Some(value) => Ok(value.as_str()),
-            None => Err(self.unknown_key(key)),
+            None => {
+                if is_known_key(key, &self.known) {
+                    Ok("")
+                } else {
+                    Err(self.unknown_key(key))
+                }
+            }
         }
     }
 
@@ -866,7 +872,13 @@ impl Resolved {
     pub fn source(&self, key: &str) -> Result<Source, HarnessError> {
         match self.sources.get(key) {
             Some(source) => Ok(*source),
-            None => Err(self.unknown_key(key)),
+            None => {
+                if is_known_key(key, &self.known) {
+                    Ok(Source::Default)
+                } else {
+                    Err(self.unknown_key(key))
+                }
+            }
         }
     }
 
@@ -899,7 +911,7 @@ impl Resolved {
 /// written, so a `set` can never leave behind a file that `resolve` would reject.
 /// Returns the path written.
 pub fn set_in_file(layers: &Layers, key: &str, raw: &str) -> Result<PathBuf, HarnessError> {
-    let known = flatten(&to_value(&layers.defaults)?);
+    let known = flatten_schema(&to_value(&layers.defaults)?);
     if !is_known_key(key, &known) {
         let candidates: Vec<&str> = known.keys().map(String::as_str).collect();
         return Err(nearest_key_error(key, &candidates));
@@ -1152,11 +1164,24 @@ fn deep_merge(base: &mut Value, overlay: Value) {
 /// unset `Option` never shows up as a key.
 fn flatten(value: &Value) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
-    flatten_into(value, String::new(), &mut out);
+    flatten_into(value, String::new(), &mut out, false);
     out
 }
 
-fn flatten_into(value: &Value, prefix: String, out: &mut BTreeMap<String, Value>) {
+/// Flatten a schema tree into `dotted.key -> default_value`. Includes `null` leaves so that
+/// valid `Option<T>` fields with `None` default are recognized as known schema keys.
+fn flatten_schema(value: &Value) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    flatten_into(value, String::new(), &mut out, true);
+    out
+}
+
+fn flatten_into(
+    value: &Value,
+    prefix: String,
+    out: &mut BTreeMap<String, Value>,
+    include_nulls: bool,
+) {
     match value {
         Value::Mapping(mapping) => {
             for (key, child) in mapping {
@@ -1168,10 +1193,14 @@ fn flatten_into(value: &Value, prefix: String, out: &mut BTreeMap<String, Value>
                 } else {
                     format!("{prefix}.{key}")
                 };
-                flatten_into(child, dotted, out);
+                flatten_into(child, dotted, out, include_nulls);
             }
         }
-        Value::Null => {}
+        Value::Null => {
+            if include_nulls && !prefix.is_empty() {
+                out.insert(prefix, Value::Null);
+            }
+        }
         scalar => {
             if !prefix.is_empty() {
                 out.insert(prefix, scalar.clone());

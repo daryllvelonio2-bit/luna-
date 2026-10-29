@@ -482,3 +482,27 @@ fn set_in_file_validates_auto_compact_bounds() {
     // Invalid turns rejected
     assert!(set_in_file(&layers, "auto_compact_turns", "0").is_err());
 }
+
+#[test]
+fn set_in_file_persists_compaction_model_and_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(Some(file));
+
+    set_in_file(&layers, "agent.compaction_provider", "gemini").unwrap();
+    set_in_file(&layers, "agent.compaction_model", "gemini-3.5-flash-lite").unwrap();
+
+    let resolved = resolve(&layers).unwrap();
+    assert_eq!(resolved.get("agent.compaction_provider").unwrap(), "gemini");
+    assert_eq!(
+        resolved.get("agent.compaction_model").unwrap(),
+        "gemini-3.5-flash-lite"
+    );
+
+    let cfg = resolved.into_config();
+    assert_eq!(cfg.agent.compaction_provider.as_deref(), Some("gemini"));
+    assert_eq!(
+        cfg.agent.compaction_model.as_deref(),
+        Some("gemini-3.5-flash-lite")
+    );
+}
