@@ -237,7 +237,10 @@ impl TodoListTool {
     fn store(&self, file: &TodoFile) -> Result<(), HarnessError> {
         let path = self.scope.path();
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| HarnessError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("cannot create directory {}: {}", parent.display(), e),
+            })?;
         }
         let tmp = path.with_extension("json.tmp");
         let raw =

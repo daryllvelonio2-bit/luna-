@@ -9,30 +9,50 @@
 //! Path matching is a different problem with its own rules (see `tools::fs`); this is deliberately
 //! not shared with it.
 
-/// Whether `pattern` matches `text` in full.
+/// Whether `pattern` matches `text` in full. ASCII input — tool names, rule arguments, hook
+/// matchers — matches over bytes with no allocation; only non-ASCII falls back to a char vector.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
+    if pattern.is_ascii() && text.is_ascii() {
+        glob_match_slice(pattern.as_bytes(), text.as_bytes(), b'*', b'?')
+    } else {
+        glob_match_slice(
+            &pattern.chars().collect::<Vec<_>>(),
+            &text.chars().collect::<Vec<_>>(),
+            '*',
+            '?',
+        )
+    }
+}
+
+/// Two-pointer matcher with a single backtrack anchor for the last `*` (`*` matches any run of
+/// items, including none; `?` matches exactly one). No recursion, so a pattern of many stars
+/// cannot blow the stack; generic over the item type so the ASCII path needs no allocation.
+fn glob_match_slice<T: PartialEq + Copy>(
+    pattern: &[T],
+    text: &[T],
+    star: T,
+    any: T,
+) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
-    let (mut star, mut resume) = (None::<usize>, 0usize);
+    let (mut star_p, mut resume): (Option<usize>, usize) = (None, 0);
 
     while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+        if p < pattern.len() && (pattern[p] == any || pattern[p] == text[t]) {
             p += 1;
             t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some(p);
+        } else if p < pattern.len() && pattern[p] == star {
+            star_p = Some(p);
             resume = t;
             p += 1;
-        } else if let Some(star_index) = star {
-            p = star_index + 1;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
             resume += 1;
             t = resume;
         } else {
             return false;
         }
     }
-    while p < pattern.len() && pattern[p] == '*' {
+    while p < pattern.len() && pattern[p] == star {
         p += 1;
     }
     p == pattern.len()

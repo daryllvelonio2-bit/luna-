@@ -522,7 +522,11 @@ impl CredentialManager {
         // credential since this process last looked, and the key it hands out must be the one
         // the user last arranged. A stale in-memory view is how a deleted key kept coming back
         // and a promoted key kept losing its place.
-        let _ = self.absorb_disk_state().await;
+        if let Err(error) = self.absorb_disk_state().await {
+            // Fall back to the in-memory view rather than failing the acquire: the credential
+            // may still be valid, and the error is logged so the cause is not invisible.
+            tracing::warn!("could not absorb credential disk state: {error}");
+        }
         let mut state = self.state.write().await;
         let provider_state = state.providers.get_mut(&p_lower).ok_or_else(|| {
             HarnessError::AuthenticationFailed {

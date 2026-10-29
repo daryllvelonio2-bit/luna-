@@ -561,6 +561,8 @@ impl Tool for TerminalTool {
 
         if let Some(ref data) = sudo_stdin {
             if let Some(mut stdin) = child.stdin.take() {
+                // The child may exit before reading all of sudo's password prompt; EPIPE on
+                // stdin is then expected and not an error.
                 let _ = stdin.write_all(data.as_bytes()).await;
                 let _ = stdin.flush().await;
             }

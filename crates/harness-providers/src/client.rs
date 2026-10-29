@@ -432,11 +432,20 @@ impl ModelProvider for GenericProviderClient {
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            let _ = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await;
+            if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
+            {
+                // Not fatal here: the request below will fail with the real auth error if the
+                // sync was actually needed, but log it so the cause is not invisible.
+                tracing::warn!("kiro credential sync failed before complete: {error}");
+            }
         }
 
         if self.provider_id == "supercode" {
-            let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
+            if let Err(error) =
+                crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await
+            {
+                tracing::warn!("supercode credential sync failed before complete: {error}");
+            }
         }
         let model = options
             .model
@@ -861,11 +870,20 @@ impl ModelProvider for GenericProviderClient {
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            let _ = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await;
+            if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
+            {
+                // Not fatal here: the request below fails with the real auth error if the sync
+                // was needed; log it so the underlying cause is not invisible.
+                tracing::warn!("kiro credential sync failed before stream: {error}");
+            }
         }
 
         if self.provider_id == "supercode" {
-            let _ = crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await;
+            if let Err(error) =
+                crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await
+            {
+                tracing::warn!("supercode credential sync failed before stream: {error}");
+            }
         }
 
         let model = options
@@ -1155,7 +1173,8 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
     for line in text.split_inclusive('\n') {
         // A data URL is lifted wherever it sits in the line — as its own line (the clipboard
         // paste appends one) or mid-sentence (an inlined file path replaces its own token).
-        // Everything around it stays prose, in order.
+        // Everything around it stays prose, in order, and scanning continues after each URL
+        // so several images on one line are all lifted, not just the first.
         let mut rest = line;
         while let Some(start) = find_data_url(rest) {
             let (before, url_and_rest) = rest.split_at(start);
@@ -1174,10 +1193,7 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
                 "type": "image_url",
                 "image_url": { "url": url }
             }));
-            // Whitespace between the prose and the URL (and after it) does not survive into the
-            // next prose chunk; a following sentence starts fresh.
-            prose.push_str(after.trim_start_matches(['\n']));
-            rest = "";
+            rest = after;
         }
         prose.push_str(rest);
     }
@@ -1312,6 +1328,27 @@ mod tests {
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["text", "image_url"]);
         assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    /// Several data URLs on one line are all lifted — the scan resumes after each URL instead
+    /// of stopping at the first.
+    #[test]
+    fn multiple_data_urls_on_one_line_are_all_lifted() {
+        let content = serialize_content_with_images(
+            "user",
+            "two shots data:image/png;base64,AAAA and data:image/jpeg;base64,BBBB done",
+        );
+        let parts = content.as_array().expect("multimodal array");
+        let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            vec!["text", "image_url", "text", "image_url", "text"]
+        );
+        assert_eq!(parts[0]["text"], "two shots");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(parts[2]["text"], "and");
+        assert_eq!(parts[3]["image_url"]["url"], "data:image/jpeg;base64,BBBB");
+        assert_eq!(parts[4]["text"], "done");
     }
 
     #[test]

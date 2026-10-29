@@ -830,20 +830,40 @@ fn glob_matches(glob: &str, fname: &str, path: &Path, workspace_root: &Path) -> 
     glob_match(glob, fname)
 }
 
-/// Iterative wildcard matcher over chars: `*` (any run, including separators) and `?` (exactly
-/// one). No recursion, so a pattern of many stars cannot blow the stack, and no allocation.
+/// Iterative wildcard matcher: `*` (any run, including separators) and `?` (exactly one). No
+/// recursion, so a pattern of many stars cannot blow the stack. ASCII input — tool names, rule
+/// arguments, paths — matches over bytes with no allocation; only non-ASCII falls back to a
+/// char vector.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
+    if pattern.is_ascii() && text.is_ascii() {
+        glob_match_slice(pattern.as_bytes(), text.as_bytes(), b'*', b'?')
+    } else {
+        glob_match_slice(
+            &pattern.chars().collect::<Vec<_>>(),
+            &text.chars().collect::<Vec<_>>(),
+            '*',
+            '?',
+        )
+    }
+}
+
+/// Two-pointer matcher with a single backtrack anchor for the last `*`, generic over the item
+/// type so the ASCII path works on bytes without allocating.
+fn glob_match_slice<T: PartialEq + Copy>(
+    pattern: &[T],
+    text: &[T],
+    star: T,
+    any: T,
+) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     // Backtrack anchors: where a failed `*` resumes in the pattern, and in the text.
     let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
 
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+    while ti < text.len() {
+        if pi < pattern.len() && (pattern[pi] == any || pattern[pi] == text[ti]) {
             pi += 1;
             ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
+        } else if pi < pattern.len() && pattern[pi] == star {
             star_p = Some(pi);
             star_t = ti;
             pi += 1;
@@ -857,7 +877,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         }
     }
     // Remaining pattern must be all stars.
-    p[pi..].iter().all(|c| *c == '*')
+    pattern[pi..].iter().all(|c| *c == star)
 }
 
 /// Walk `resolved` and match `pattern` against every text file, bailing out on cancellation,
@@ -926,7 +946,13 @@ fn scan_files(
             }
         }
 
-        if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_SCANNED_FILE_BYTES {
+        // A file whose metadata cannot be read is treated as off-limits, not as zero bytes:
+        // failing closed keeps an unreadable huge file from being slurped into memory.
+        let size = match entry.metadata() {
+            Ok(meta) => meta.len(),
+            Err(_) => continue,
+        };
+        if size > MAX_SCANNED_FILE_BYTES {
             continue;
         }
 

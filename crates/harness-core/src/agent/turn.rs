@@ -1,0 +1,767 @@
+//! The turn loop: replay, model calls with retry, tool dispatch through the gate, steering, and
+//! the streaming-to-message assembly.
+
+use futures_util::StreamExt;
+use serde_json::json;
+use std::sync::atomic::Ordering;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, warn};
+
+use super::gate::GateOutcome;
+use super::{retry_delay_secs, Agent, AgentEvent, TurnOutcome, TurnToolCall};
+use crate::error::HarnessError;
+use crate::hooks::{HookContext, HookEvent, HookVerdict};
+use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
+use crate::traits::*;
+use crate::types::*;
+
+impl<P, M, N, R> Agent<P, M, N, R>
+where
+    P: ModelProvider + 'static,
+    M: MemoryEngine + 'static,
+    N: NotesEngine + 'static,
+    R: ToolRegistry + 'static,
+{
+    /// The turn's reply only. Kept for callers with no console to report to (the voice pipeline);
+    /// [`Agent::run_turn`] is the same run with the compaction and replay facts attached.
+    pub async fn run_task(
+        &self,
+        user_input: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<String, HarnessError> {
+        self.run_turn(user_input, cancel_token)
+            .await
+            .map(|outcome| outcome.reply)
+    }
+
+    /// Run one turn: replay the session, bound the context, call the model until it stops asking
+    /// for tools, and append everything to the session store as it happens.
+    pub async fn run_turn(
+        &self,
+        user_input: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<TurnOutcome, HarnessError> {
+        self.completed_fold.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.fold_disabled_this_turn.store(false, Ordering::SeqCst);
+        let _reaper_guard = super::FoldReaperGuard(&self.completed_fold);
+        let system_text = self.system_prompt(user_input).await?;
+
+        // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
+        //    Size reports a fold has retired are dropped here: they measure a prompt that is no
+        //    longer sent, and every estimate taken from this vector — the gauge, the compaction
+        //    threshold — would otherwise be the size of the folded transcript.
+        let (history, replay_notice) = self.load_history().await?;
+        let mut messages = Vec::with_capacity(history.len() + 3);
+        messages.push(Message::system(system_text.clone()));
+        messages.extend(sendable_messages(&history));
+        let mut turn_user_idx = messages.len();
+        messages.push(Message::user(user_input));
+
+        // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
+        self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
+            .await?;
+
+        // 2. Bound the context — without holding the turn. An automatic fold is started here and
+        //    waited for by nobody: this turn runs on the transcript it has, and the folded
+        //    transcript is what the next turn replays. The fold is a bound on the *next* request,
+        //    so making the user wait out a summariser before their own prompt is even sent buys
+        //    nothing.
+        //
+        // `fold_policy` is the only place the bar is decided (the auto-compact settings when they
+        // are on, else `compact_at_tokens`), and `run_fold` is the only place a fold is written —
+        // a fold that marked rows without writing a summary would replace the turns it removed
+        // with nothing, which reads as the agent losing the conversation.
+        let fold_policy = self.fold_policy();
+        // The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
+        // stored transcript, and the checks below use this to tell "still over the bar" from "over
+        // the bar a fold has already answered".
+        let mut fold_watermark = last_fold_seq(&history);
+        self.spawn_fold_if_needed(&messages, &history, fold_policy);
+
+        // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
+        //    ones, so a later turn cannot silently capture into the wrong checkpoint.
+        if let Some(controller) = self.checkpoints.as_ref() {
+            controller.begin(
+                self.session
+                    .as_ref()
+                    .map(|binding| binding.session_id.as_str())
+                    .unwrap_or("unbound"),
+                Some(user_input),
+            );
+        }
+        let _checkpoint_guard = super::CheckpointGuard {
+            controller: self.checkpoints.as_deref(),
+        };
+
+        let user_message = Message::user(user_input);
+        let mut user_appended = false;
+
+        let mut consecutive_failures = 0;
+        let mut executed_tools = Vec::new();
+        let mut last_reasoning = None;
+        // A turn can be several model calls (tool loop, retries); the ledger wants the turn's
+        // total, so every reported usage is folded in here rather than kept per call.
+        let turn_started = std::time::Instant::now();
+        let mut turn_usage: Option<TokenUsage> = None;
+        let tools = self.registry.list_tools().await?;
+
+        debug!("Starting agent task loop for query: '{}'", user_input);
+
+        // Unbounded task loop: runs as long as productive progress is made
+        loop {
+            if cancel_token.is_cancelled() {
+                warn!("Task loop cancelled cooperatively");
+                return Err(HarnessError::Cancelled);
+            }
+
+            self.try_rebind_completed_fold(
+                &mut messages,
+                &mut turn_user_idx,
+                &mut fold_watermark,
+                &system_text,
+            );
+
+            let current_tokens = estimate_tokens(&messages).tokens;
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::ContextTokensUpdated {
+                    tokens_used: current_tokens,
+                });
+            }
+
+            if current_tokens as usize > fold_policy.threshold {
+                self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
+                    .await;
+            }
+
+            debug!(
+                "Invoking model completion with {} messages and {} tools",
+                messages.len(),
+                tools.len()
+            );
+            let mut options = CompletionOptions::default();
+            options.reasoning_effort = self.reasoning_effort;
+
+            // Retrying on transient / overloaded errors with backoff
+            let max_retries = 3;
+            let mut response = None;
+            for attempt in 0..=max_retries {
+                match self
+                    .stream_completion(&messages, &tools, &options, &cancel_token)
+                    .await
+                {
+                    Ok(res) => {
+                        response = Some(res);
+                        break;
+                    }
+                    Err(e) if e.is_retryable() && attempt < max_retries => {
+                        let delay_secs = retry_delay_secs(&e, attempt);
+                        warn!(
+                            "Model request failed ({}), retrying attempt {}/{} in {}s...",
+                            e,
+                            attempt + 1,
+                            max_retries,
+                            delay_secs
+                        );
+                        if let Some(ref observer) = self.observer {
+                            observer(AgentEvent::ReasoningDelta(format!(
+                                "\n[Model busy/overloaded: {}. Retrying in {}s (attempt {}/{})]…\n",
+                                e,
+                                delay_secs,
+                                attempt + 1,
+                                max_retries
+                            )));
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)) => {},
+                            _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let mut response = response.ok_or_else(|| HarnessError::ProviderError {
+                provider: self.provider.provider_id().to_string(),
+                message: "Model request failed after retries".to_string(),
+            })?;
+
+            let rebound = self.try_rebind_completed_fold(
+                &mut messages,
+                &mut turn_user_idx,
+                &mut fold_watermark,
+                &system_text,
+            );
+
+            if let Some(ref usage) = response.usage {
+                let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
+                accumulated.prompt_tokens = accumulated
+                    .prompt_tokens
+                    .saturating_add(usage.prompt_tokens);
+                accumulated.completion_tokens = accumulated
+                    .completion_tokens
+                    .saturating_add(usage.completion_tokens);
+                accumulated.total_tokens = accumulated
+                    .prompt_tokens
+                    .saturating_add(accumulated.completion_tokens);
+            }
+
+            if rebound {
+                response.usage = None;
+            }
+
+            let actual_tokens = match &response.usage {
+                Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                None => estimate_tokens(&messages).tokens,
+            };
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::ContextTokensUpdated {
+                    tokens_used: actual_tokens,
+                });
+            }
+
+            if let Some(ref r) = response.reasoning {
+                last_reasoning = Some(r.clone());
+            }
+
+            // If no tools requested, assistant concluded task
+            if response.tool_calls.is_empty() {
+                let pending_steers: Vec<String> = {
+                    let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
+                    sq.drain(..).collect()
+                };
+                if !pending_steers.is_empty() {
+                    let joined_steer = pending_steers.join("\n\n");
+                    let steer_prompt = format!(
+                        "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
+                        joined_steer
+                    );
+                    let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                    if !reply_text.is_empty() {
+                        let mut interim_resp = response.clone();
+                        interim_resp.content = Some(reply_text);
+                        self.append(&interim_resp, false).await?;
+                        messages.push(interim_resp);
+                    }
+                    if !user_appended {
+                        self.append(&user_message, false).await?;
+                        user_appended = true;
+                    }
+                    let steer_msg = Message::user(steer_prompt);
+                    self.append(&steer_msg, false).await?;
+                    messages.push(steer_msg);
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::Steered { text: joined_steer });
+                    }
+                    continue;
+                }
+
+                debug!("Task successfully completed without further tool calls");
+                let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                if reply_text.is_empty() && last_reasoning.is_none() {
+                    return Err(HarnessError::ProviderError {
+                        provider: self.provider.provider_id().to_string(),
+                        message: "Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string(),
+                    });
+                }
+                let final_reply = if reply_text.is_empty() {
+                    "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
+                } else {
+                    reply_text
+                };
+
+                if !user_appended {
+                    self.append(&user_message, false).await?;
+                }
+
+                let mut final_response = response.clone();
+                final_response.content = Some(final_reply.clone());
+                self.append(&final_response, false).await?;
+                self.emit_hook_event(HookEvent::Stop, Some(&final_reply))
+                    .await?;
+                // The saver reads the turn as the user saw it, reply included. The transcript is
+                // dropped when this function returns, so appending the final message here changes
+                // nothing for the next turn (which replays from the session store).
+                messages.push(final_response);
+                // The reply is final: anything the saver does now is off the critical path.
+                self.spawn_background_saver(&messages);
+                // The turn just grew the transcript, so look at the fold bar before returning: a
+                // session that only folded on the *next* prompt reported compaction as something
+                // the user had to come back for.
+                if estimate_tokens(&messages).tokens as usize > fold_policy.threshold {
+                    self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
+                        .await;
+                }
+                return Ok(TurnOutcome {
+                    reply: final_reply,
+                    reasoning: last_reasoning,
+                    tool_calls: executed_tools,
+                    replayed: replay_notice,
+                    usage: turn_usage,
+                    duration_ms: turn_started.elapsed().as_millis() as u64,
+                });
+            }
+
+            if !user_appended {
+                self.append(&user_message, false).await?;
+                user_appended = true;
+            }
+
+            // Append assistant response with tool calls to conversation history
+            self.append(&response, false).await?;
+            messages.push(response.clone());
+
+            // Execute each requested tool call
+            for tool_call in response.tool_calls {
+                if cancel_token.is_cancelled() {
+                    return Err(HarnessError::Cancelled);
+                }
+
+                debug!(
+                    "Dispatching tool call: '{}' (call id: {})",
+                    tool_call.name, tool_call.id
+                );
+
+                // Hooks run before the human gate and can only narrow the call: a denial replaces
+                // its result, an argument rewrite is what the gate and the tool then see. A hook
+                // can never approve what the gate would refuse, so the two cannot disagree.
+                let mut effective_arguments = tool_call.arguments.clone();
+                let mut hook_denial: Option<String> = None;
+                if let Some(hooks) = self.hooks.as_ref() {
+                    let context = HookContext {
+                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
+                        tool: Some(tool_call.name.as_str()),
+                        arguments: Some(&tool_call.arguments),
+                        ..HookContext::default()
+                    };
+                    let hook_outcome = hooks.run(HookEvent::PreToolUse, &context).await;
+                    for note in &hook_outcome.notes {
+                        debug!(tool = %tool_call.name, "pre_tool_use hook: {}", note);
+                    }
+                    match hook_outcome.verdict {
+                        HookVerdict::Deny(reason) => {
+                            warn!(tool = %tool_call.name, "pre_tool_use hook denied the call: {}", reason);
+                            hook_denial = Some(reason);
+                        }
+                        HookVerdict::ProceedWith(arguments) => {
+                            debug!(tool = %tool_call.name, "pre_tool_use hook rewrote the arguments");
+                            effective_arguments = arguments;
+                        }
+                        HookVerdict::Proceed => {}
+                    }
+                }
+
+                // The gate next: a mutating call is put to the human before it runs, and a
+                // denial comes back as an ordinary tool result the model can react to.
+                let gate_outcome = match hook_denial {
+                    Some(ref reason) => GateOutcome::Denied(format!("hook: {reason}")),
+                    None => {
+                        let gated = ToolCall {
+                            arguments: effective_arguments.clone(),
+                            ..tool_call.clone()
+                        };
+                        self.gate_decision(&gated).await
+                    }
+                };
+                let is_denial = matches!(gate_outcome, GateOutcome::Denied(_));
+                let outcome: Result<ToolResult, HarnessError> = match gate_outcome {
+                    GateOutcome::Denied(reason) => {
+                        warn!(tool = %tool_call.name, "approval denied: {}", reason);
+                        Ok(ToolResult::error(
+                            &tool_call.id,
+                            format!("approval denied: {reason}"),
+                        ))
+                    }
+                    GateOutcome::Run(edited) => {
+                        if let Some(ref observer) = self.observer {
+                            observer(AgentEvent::ToolExecuting {
+                                name: tool_call.name.clone(),
+                                arguments: tool_call.arguments.clone(),
+                            });
+                        }
+                        let call = ToolCall {
+                            arguments: edited.unwrap_or_else(|| effective_arguments.clone()),
+                            ..tool_call.clone()
+                        };
+                        self.registry.execute(&call, &cancel_token).await
+                    }
+                };
+                let execution_result = match outcome {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!("Tool execution error for '{}': {}", tool_call.name, e);
+                        ToolResult::error(&tool_call.id, e.to_string())
+                    }
+                };
+
+                // `post_tool_use` can replace what the model reads without changing what the tool
+                // did: a redaction or truncation hook whose output was discarded would be a
+                // guardrail that silently guards nothing, which is worse than no hook at all.
+                let mut execution_result = execution_result;
+                if let Some(hooks) = self.hooks.as_ref() {
+                    let event = if execution_result.is_error {
+                        HookEvent::PostToolUseFailure
+                    } else {
+                        HookEvent::PostToolUse
+                    };
+                    let context = HookContext {
+                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
+                        tool: Some(tool_call.name.as_str()),
+                        arguments: Some(&effective_arguments),
+                        message: Some(execution_result.content.as_str()),
+                        reason: execution_result
+                            .is_error
+                            .then_some(execution_result.content.as_str()),
+                    };
+                    let hook_outcome = hooks.run(event, &context).await;
+                    for note in &hook_outcome.notes {
+                        debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
+                    }
+                    if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
+                        match crate::hooks::replacement_text(&replacement) {
+                            Some(text) => {
+                                debug!(
+                                    tool = %tool_call.name,
+                                    "{} hook replaced the result the model sees ({} -> {} chars)",
+                                    event.as_str(),
+                                    execution_result.content.chars().count(),
+                                    text.chars().count()
+                                );
+                                execution_result.content = text;
+                            }
+                            None => warn!(
+                                tool = %tool_call.name,
+                                "{} hook returned a payload with no \"content\"; ignoring it",
+                                event.as_str()
+                            ),
+                        }
+                    }
+                }
+
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ToolExecuted {
+                        name: tool_call.name.clone(),
+                        output: execution_result.content.clone(),
+                        is_error: execution_result.is_error,
+                    });
+                }
+
+                executed_tools.push(TurnToolCall {
+                    name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                    output: execution_result.content.clone(),
+                    is_error: execution_result.is_error,
+                    denied: is_denial,
+                });
+
+                // Track consecutive non-working calls (failure thrashing guardrail).
+                // Human/policy denials are intentional choices, not malfunctioning tool thrashing.
+                if execution_result.is_error && !is_denial {
+                    consecutive_failures += 1;
+                    warn!(
+                        "Tool '{}' failed (consecutive failures: {}/{})",
+                        tool_call.name, consecutive_failures, self.config.max_consecutive_failures
+                    );
+
+                    if consecutive_failures >= self.config.max_consecutive_failures {
+                        error!(
+                            "Halt triggered: {} consecutive tool failures exceeded threshold",
+                            consecutive_failures
+                        );
+                        return Err(HarnessError::ConsecutiveFailuresExceeded {
+                            failures: consecutive_failures,
+                            last_tool: tool_call.name.clone(),
+                        });
+                    }
+                } else {
+                    // Reset consecutive failures on successful execution
+                    if consecutive_failures > 0 {
+                        debug!(
+                            "Resetting consecutive failures counter from {} to 0",
+                            consecutive_failures
+                        );
+                    }
+                    consecutive_failures = 0;
+                }
+
+                // If a note was saved successfully, ensure memory pointer bridge is updated
+                if tool_call.name == "save_note" && !execution_result.is_error {
+                    if let Ok(note) = serde_json::from_str::<Note>(&execution_result.content) {
+                        debug!(
+                            "Registering 1-5 word note pointer: '{}' -> '{}'",
+                            note.id, note.summary_pointer
+                        );
+                        if let Err(e) = self
+                            .memory
+                            .add_note_pointer(&note.id, &note.summary_pointer)
+                            .await
+                        {
+                            warn!("Failed to add note pointer to memory: {}", e);
+                        }
+                    }
+                }
+
+                // ...and if a note was deleted, drop its pointer so memory holds no dangling
+                // reference to a document that no longer exists.
+                if tool_call.name == "delete_note" && !execution_result.is_error {
+                    if let Ok(removed) =
+                        serde_json::from_str::<serde_json::Value>(&execution_result.content)
+                    {
+                        let deleted =
+                            removed.get("status").and_then(|s| s.as_str()) == Some("deleted");
+                        if deleted {
+                            if let Some(note_id) = removed.get("note_id").and_then(|n| n.as_str()) {
+                                debug!("Removing note pointer for deleted note '{}'", note_id);
+                                if let Err(e) = self.memory.remove_note_pointer(note_id).await {
+                                    warn!("Failed to remove note pointer from memory: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add tool result to conversation history
+                let tool_message = Message::tool(execution_result);
+                self.append(&tool_message, false).await?;
+                messages.push(tool_message);
+
+                self.try_rebind_completed_fold(
+                    &mut messages,
+                    &mut turn_user_idx,
+                    &mut fold_watermark,
+                    &system_text,
+                );
+
+                let current_tokens = estimate_tokens(&messages).tokens;
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::ContextTokensUpdated {
+                        tokens_used: current_tokens,
+                    });
+                }
+            }
+
+            // Check for mid-turn steering queued while tools were executing
+            let pending_steers: Vec<String> = {
+                let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
+                sq.drain(..).collect()
+            };
+            if !pending_steers.is_empty() {
+                let joined_steer = pending_steers.join("\n\n");
+                let steer_prompt = format!(
+                    "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
+                    joined_steer
+                );
+                let steer_msg = Message::user(steer_prompt);
+                self.append(&steer_msg, false).await?;
+                messages.push(steer_msg);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::Steered { text: joined_steer });
+                }
+            }
+        }
+    }
+
+    /// One model call, taken through the provider's streaming API so reasoning reaches the
+    /// observer while the model is still producing it. The stream is assembled into the same
+    /// `Message` the buffered call returns, so tool execution and persistence are unchanged.
+    ///
+    /// A provider that cannot stream (or fails before producing anything) falls back to the
+    /// buffered call — the turn is worth more than the live view of it.
+    async fn stream_completion(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+        cancel_token: &CancellationToken,
+    ) -> Result<Message, HarnessError> {
+        let mut stream = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+            res = self.provider.stream(messages, tools, options) => match res {
+                Ok(stream) => stream,
+                Err(error) => {
+                    debug!("Provider stream unavailable ({}), falling back to a buffered call", error);
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                        buffered = self.provider.complete(messages, tools, options) => return buffered,
+                    }
+                }
+            }
+        };
+
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage = None;
+        // Tool-call fragments arrive keyed by the index the provider assigned them.
+        let mut calls: Vec<(usize, ToolCall)> = Vec::new();
+
+        loop {
+            let event = tokio::select! {
+                _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                ev = stream.next() => match ev {
+                    Some(event) => event,
+                    None => break,
+                }
+            };
+
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    // Nothing arrived, or only reasoning arrived without content/tools:
+                    // the buffered path or a clean retry can recover without failing the turn.
+                    if content.is_empty() && calls.is_empty() {
+                        debug!(
+                            "Stream failed before any content/tool output ({}), retrying buffered",
+                            error
+                        );
+                        return self.provider.complete(messages, tools, options).await;
+                    }
+                    return Err(error);
+                }
+            };
+
+            match event {
+                StreamEvent::ReasoningDelta(text) => {
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ReasoningDelta(text.clone()));
+                    }
+                    reasoning.push_str(&text);
+                }
+                StreamEvent::ContentDelta(text) => content.push_str(&text),
+                StreamEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                    signature,
+                } => {
+                    let slot = match calls.iter_mut().find(|(i, _)| *i == index) {
+                        Some((_, call)) => call,
+                        None => {
+                            calls.push((
+                                index,
+                                ToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: serde_json::Value::Null,
+                                    signature: None,
+                                },
+                            ));
+                            let last_idx = calls.len() - 1;
+                            &mut calls[last_idx].1
+                        }
+                    };
+                    if let Some(id) = id {
+                        slot.id = id;
+                    }
+                    if let Some(name) = name {
+                        slot.name = name;
+                    }
+                    if let Some(signature) = signature {
+                        slot.signature = Some(signature);
+                    }
+                    if let Some(fragment) = arguments_delta {
+                        // Arguments stream as JSON text, so each fragment is stitched onto the raw
+                        // string and parsed once at the end.
+                        let mut raw = match slot.arguments.take() {
+                            serde_json::Value::String(raw) => raw,
+                            _ => String::new(),
+                        };
+                        raw.push_str(&fragment);
+                        slot.arguments = serde_json::Value::String(raw);
+                    }
+                }
+                StreamEvent::Completed {
+                    usage: event_usage, ..
+                } => {
+                    if event_usage.is_some() {
+                        usage = event_usage;
+                    }
+                }
+            }
+        }
+
+        calls.sort_by_key(|(index, _)| *index);
+        let tool_calls: Vec<ToolCall> = calls
+            .into_iter()
+            .enumerate()
+            .map(|(position, (_, mut call))| {
+                call.arguments = match call.arguments {
+                    serde_json::Value::String(raw) => {
+                        serde_json::from_str(&raw).unwrap_or(json!({}))
+                    }
+                    value => value,
+                };
+                if call.id.is_empty() {
+                    call.id = format!("call_{}", position);
+                }
+                call
+            })
+            .collect();
+
+        if content.trim().is_empty() && tool_calls.is_empty() {
+            debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
+            let buffered = self.provider.complete(messages, tools, options).await?;
+            if buffered.content.as_deref().unwrap_or("").trim().is_empty()
+                && buffered.tool_calls.is_empty()
+            {
+                if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                }) {
+                    return Ok(Message {
+                        role: Role::Assistant,
+                        content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
+                        reasoning: Some(r),
+                        tool_calls: Vec::new(),
+                        tool_result: None,
+                        usage,
+                    });
+                }
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider.provider_id().to_string(),
+                    message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
+                });
+            }
+            return Ok(buffered);
+        }
+
+        if reasoning.is_empty() {
+            for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+                if let Some(start) = content.find(open_tag) {
+                    if let Some(end) = content.find(close_tag) {
+                        let think_text = content[start + open_tag.len()..end].trim().to_string();
+                        let rest =
+                            format!("{}{}", &content[..start], &content[end + close_tag.len()..])
+                                .trim()
+                                .to_string();
+                        if !think_text.is_empty() {
+                            reasoning = think_text;
+                        }
+                        content = rest;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // A gateway can echo DeepSeek's DSML scaffolding into the text channel *next to* a perfectly
+        // good tool call. That is protocol noise rather than the model speaking, so it must not be
+        // stored: otherwise a resumed session replays pages of `…DSML… calls>` that never showed
+        // up during the live turn.
+        content = crate::text::strip_dsml_artifacts(&content);
+
+        let mut response = Message::assistant(content);
+        if response.content.as_deref().unwrap_or("").trim().is_empty() {
+            // Nothing but scaffolding (or nothing at all): the turn has no text, only calls.
+            response.content = None;
+        }
+        response.reasoning = if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        };
+        response.tool_calls = tool_calls;
+        response.usage = usage;
+        Ok(response)
+    }
+}

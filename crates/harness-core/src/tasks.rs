@@ -55,7 +55,10 @@ pub struct BackgroundTaskQueue {
 
 impl BackgroundTaskQueue {
     pub fn new(jobs_dir: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&jobs_dir);
+        if let Err(error) = std::fs::create_dir_all(&jobs_dir) {
+            // Constructor cannot fail; the spawn path re-checks and reports with full context.
+            tracing::warn!("cannot create jobs dir '{}': {error}", jobs_dir.display());
+        }
         Self {
             jobs_dir,
             jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -74,7 +77,13 @@ impl BackgroundTaskQueue {
         let id = format!("job_{:06x}", num);
         let log_path = self.jobs_dir.join(format!("{}.log", id));
 
-        let _ = std::fs::create_dir_all(&self.jobs_dir);
+        if let Err(error) = std::fs::create_dir_all(&self.jobs_dir) {
+            return Err(HarnessError::Io(format!(
+                "Failed to create jobs directory '{}': {}",
+                self.jobs_dir.display(),
+                error
+            )));
+        }
         let log_file = File::create(&log_path).map_err(|e| {
             HarnessError::Io(format!(
                 "Failed to create background log file '{}': {}",

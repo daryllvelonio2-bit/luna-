@@ -85,11 +85,27 @@ impl ModelDiscovery {
     }
 
     fn save_cache(&self, cache: &ModelsCache) {
+        // The cache is best-effort: a failed write just means the next lookup hits the network,
+        // but say so instead of dropping the error silently.
         if let Some(parent) = self.cache_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            if let Err(error) = fs::create_dir_all(parent) {
+                tracing::warn!(
+                    "cannot create model cache dir '{}': {error}",
+                    parent.display()
+                );
+                return;
+            }
         }
-        if let Ok(data) = serde_json::to_string_pretty(cache) {
-            let _ = fs::write(&self.cache_path, data);
+        match serde_json::to_string_pretty(cache) {
+            Ok(data) => {
+                if let Err(error) = fs::write(&self.cache_path, data) {
+                    tracing::warn!(
+                        "cannot write model cache '{}': {error}",
+                        self.cache_path.display()
+                    );
+                }
+            }
+            Err(error) => tracing::warn!("cannot serialize model cache: {error}"),
         }
     }
 
