@@ -527,6 +527,28 @@ pub async fn run_interactive_chat(
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     delegate_tool.set_steer_handle(steer_handle.clone());
+    let ui_delegate_events = ui.clone();
+    delegate_tool.set_event_notifier(Arc::new(move |event| {
+        use harness_core::tools::delegate::{SubagentActivity, SubagentTaskEvent};
+        match event {
+            SubagentTaskEvent::Started { id, goal } => {
+                ui_delegate_events.start_delegate_task(&id, &goal);
+            }
+            SubagentTaskEvent::Progress { id, activity, .. } => {
+                let label = match activity {
+                    SubagentActivity::ModelStreaming => "streaming".to_string(),
+                    SubagentActivity::ToolStarted { name } => format!("{} running", name),
+                    SubagentActivity::ToolFinished { name, is_error } => {
+                        format!("{} {}", name, if is_error { "failed" } else { "done" })
+                    }
+                };
+                ui_delegate_events.update_delegate_task(&id, &label);
+            }
+            SubagentTaskEvent::Finished { record } => {
+                ui_delegate_events.finish_delegate_task(&record.id);
+            }
+        }
+    }));
     let ui_delegate = ui.clone();
     let store_delegate = store.clone();
     let session_id_delegate = session_id.clone();
