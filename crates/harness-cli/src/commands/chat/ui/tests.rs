@@ -107,6 +107,54 @@ fn queued_messages_get_a_line_and_lose_it_when_the_queue_drains() {
     assert_eq!(ui.box_row_count(), with_line - 1);
 }
 
+#[test]
+fn delegated_children_stay_visible_and_report_progress() {
+    let ui = ChatUi::new(true);
+    ui.start_delegate_task("sub_20261029_175052_1", "Audit the delegate timeout");
+
+    let rows = ui.delegate_task_rows(80);
+    assert_eq!(rows.len(), 1, "the running child is visible");
+    let plain = dialoguer::console::strip_ansi_codes(&rows[0]).to_string();
+    assert!(plain.contains("sub_20261029_175052_1"), "{plain}");
+    assert!(plain.contains("Audit the delegate timeout"), "{plain}");
+    assert!(plain.contains("starting"), "{plain}");
+    assert!(visible_width(&rows[0]) <= 80, "{plain}");
+
+    ui.update_delegate_task("sub_20261029_175052_1", "read_file running");
+    let updated = dialoguer::console::strip_ansi_codes(&ui.delegate_task_rows(80)[0]).to_string();
+    assert!(updated.contains("read_file running"), "{updated}");
+    assert_eq!(ui.box_row_count(), 5, "the child adds one composer row");
+
+    let composer = ui.composer_rows(80, "");
+    assert!(
+        composer
+            .iter()
+            .any(|row| row.contains("sub_20261029_175052_1")),
+        "the child is drawn above the prompt: {composer:?}"
+    );
+
+    let boxed = ui.clone();
+    capture_stdout(move || boxed.draw_box(80, ""));
+    let metrics = ui.drawn_metrics.lock().unwrap();
+    let drawn = metrics.as_ref().expect("the box was drawn");
+    assert_eq!(drawn.delegate_rows_lens.len(), 1);
+    drop(metrics);
+
+    ui.clear_live_state();
+    assert_eq!(
+        ui.delegate_task_rows(80).len(),
+        1,
+        "a background child survives the end of the main turn"
+    );
+
+    ui.finish_delegate_task("sub_20261029_175052_1");
+    assert!(
+        ui.delegate_task_rows(80).is_empty(),
+        "the row leaves on finish"
+    );
+    assert_eq!(ui.box_row_count(), 4);
+}
+
 /// A queued line sits in the composer like the background-task line it imitates, and the erase
 /// metrics record it: a row the erase does not know about is left behind on the next redraw.
 #[test]
@@ -211,6 +259,7 @@ fn demo_the_in_place_repaint() {
             prompt_len: visible_width(&prompt),
             live_rows_lens: vec![visible_width("⠋ reading")],
             panel_rows_lens: Vec::new(),
+            delegate_rows_lens: Vec::new(),
             block_rows: vec!["⠋ reading".to_string(), status.clone(), divider.clone()],
             prompt_drawn: prompt.clone(),
         });
@@ -263,6 +312,7 @@ fn the_live_region_refreshes_in_place_instead_of_blanking_the_screen() {
             prompt_len: visible_width(&ui.prompt_row_drawn("").0),
             live_rows_lens: Vec::new(),
             panel_rows_lens: Vec::new(),
+            delegate_rows_lens: Vec::new(),
             block_rows: vec![status.clone(), divider.clone()],
             prompt_drawn: ui.prompt_row_drawn("").0,
         });
@@ -331,6 +381,7 @@ fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
                 visible_width("thinking row 2"),
             ],
             panel_rows_lens: Vec::new(),
+            delegate_rows_lens: Vec::new(),
             block_rows: vec![
                 "thinking row 1".to_string(),
                 "thinking row 2".to_string(),
@@ -698,4 +749,14 @@ fn finishing_a_thought_block_hands_it_to_the_transcript() {
 
 fn strip(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
+}
+
+#[test]
+fn delegate_task_notification_format_contains_title_tool_and_running_time() {
+    let title = crate::commands::chat::render::format_delegate_title("Extract all role credentials");
+    let dur = crate::commands::chat::render::format_delegate_duration(std::time::Duration::from_secs(14));
+    let notification = crate::commands::chat::render::format_delegate_notification("🤖", &title, "read_file", &dur);
+    assert!(notification.contains("delegate:"), "{notification}");
+    assert!(notification.contains("Extract all role credentials"), "{notification}");
+    assert!(notification.contains("> read_file (14s)"), "{notification}");
 }

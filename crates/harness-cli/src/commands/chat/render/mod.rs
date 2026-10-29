@@ -605,6 +605,43 @@ pub fn compaction_report(notice: &harness_core::CompactionNotice) -> String {
     format!("{} Compacted {} into 1 summary", "✔".green().bold(), folded)
 }
 
+/// Format a clean single-line title from a subagent goal.
+pub fn format_delegate_title(goal: &str) -> String {
+    let first = goal
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(goal)
+        .trim();
+    if first.chars().count() > 50 {
+        format!("{}…", &first.chars().take(49).collect::<String>())
+    } else {
+        first.to_string()
+    }
+}
+
+/// Format duration into compact human-readable string (e.g. "4s", "1m 12s").
+pub fn format_delegate_duration(dur: std::time::Duration) -> String {
+    let secs = dur.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Render a delegated task notification line:
+/// "delegate: title > last tool call (total running time)"
+pub fn format_delegate_notification(
+    glyph: &str,
+    title: &str,
+    last_tool: &str,
+    running_time: &str,
+) -> String {
+    format!("{glyph} delegate: {title} > {last_tool} ({running_time})")
+}
+
 /// What the activity line can say about a call beyond "still running": the size of the edit a
 /// mutating tool is about to make, so a patch shows its shape while it is applied.
 pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option<String> {

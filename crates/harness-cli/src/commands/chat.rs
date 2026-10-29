@@ -49,7 +49,8 @@ use commands::{
 };
 use keys::AppKey;
 use render::{
-    compaction_report, format_approval_verdict, format_patch_diff, format_tool_call,
+    compaction_report, format_approval_verdict, format_delegate_duration,
+    format_delegate_notification, format_delegate_title, format_patch_diff, format_tool_call,
     format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
     OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
@@ -445,7 +446,7 @@ pub async fn run_interactive_chat(
                     // visible while it runs; `ToolExecuted` below finalizes the same line into the
                     // transcript with its verdict.
                     ui_obs.start_activity(&call_fmt, &name, &arguments);
-                    in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                    in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
                         call_formatted: call_fmt,
                         result_formatted: String::new(),
                         diff_lines,
@@ -474,7 +475,7 @@ pub async fn run_interactive_chat(
                     " (success)".green().to_string()
                 };
                 let (line, diff_to_show) = {
-                    let mut tools = in_flight_tools_obs.lock().unwrap();
+                    let mut tools = in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(last) = tools.last_mut() {
                         last.call_formatted.push_str(&status);
                         last.result_formatted.clear();
@@ -497,7 +498,7 @@ pub async fn run_interactive_chat(
                 ui_obs.clear_patch_diff();
                 ui_obs.finish_reasoning();
                 let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
-                in_flight_tools_obs.lock().unwrap().push(TurnProcessItem {
+                in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
                     call_formatted: line.clone(),
                     result_formatted: String::new(),
                     diff_lines: Vec::new(),
@@ -527,6 +528,76 @@ pub async fn run_interactive_chat(
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     delegate_tool.set_steer_handle(steer_handle.clone());
+    let delegate_trackers: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let trackers_events = delegate_trackers.clone();
+    let ui_delegate_events = ui.clone();
+    delegate_tool.set_event_notifier(Arc::new(move |event| {
+        use harness_core::tools::delegate::{SubagentActivity, SubagentTaskEvent};
+        match event {
+            SubagentTaskEvent::Started { id, goal } => {
+                let title = format_delegate_title(&goal);
+                trackers_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), (std::time::Instant::now(), "starting".to_string()));
+                let notice = format_delegate_notification(&"🤖".cyan().bold().to_string(), &title, "starting", "0s");
+                ui_delegate_events.emit_above(&notice);
+                ui_delegate_events.start_delegate_task(&id, &goal);
+            }
+            SubagentTaskEvent::Progress { id, goal, activity } => {
+                let title = format_delegate_title(&goal);
+                let (time_str, should_notify, tool_desc) = {
+                    let mut trackers = trackers_events.lock().unwrap_or_else(|e| e.into_inner());
+                    let entry = trackers
+                        .entry(id.clone())
+                        .or_insert_with(|| (std::time::Instant::now(), "starting".to_string()));
+                    let time_str = format_delegate_duration(entry.0.elapsed());
+                    match &activity {
+                        SubagentActivity::ToolStarted { name } => {
+                            entry.1 = name.clone();
+                            (time_str, true, name.clone())
+                        }
+                        SubagentActivity::ToolFinished { name, is_error } if *is_error => {
+                            let desc = format!("{} (failed)", name);
+                            entry.1 = desc.clone();
+                            (time_str, true, desc)
+                        }
+                        SubagentActivity::ToolFinished { name, .. } => {
+                            entry.1 = name.clone();
+                            (time_str, false, name.clone())
+                        }
+                        SubagentActivity::ModelStreaming => {
+                            (time_str, false, "streaming".to_string())
+                        }
+                    }
+                };
+
+                let label = match &activity {
+                    SubagentActivity::ModelStreaming => "streaming".to_string(),
+                    SubagentActivity::ToolStarted { name } => format!("{} running", name),
+                    SubagentActivity::ToolFinished { name, is_error } => {
+                        format!("{} {}", name, if *is_error { "failed" } else { "done" })
+                    }
+                };
+                ui_delegate_events.update_delegate_task(&id, &label);
+
+                if should_notify {
+                    let notice = format_delegate_notification(
+                        &"🤖".cyan().bold().to_string(),
+                        &title,
+                        &tool_desc,
+                        &time_str,
+                    );
+                    ui_delegate_events.emit_above(&notice);
+                }
+            }
+            SubagentTaskEvent::Finished { record } => {
+                ui_delegate_events.finish_delegate_task(&record.id);
+            }
+        }
+    }));
+    let trackers_finish = delegate_trackers.clone();
     let ui_delegate = ui.clone();
     let store_delegate = store.clone();
     let session_id_delegate = session_id.clone();
@@ -542,17 +613,24 @@ pub async fn run_interactive_chat(
             harness_core::tools::delegate::SubagentStatus::Failed { error, .. } => error.clone(),
             _ => "finished".to_string(),
         };
-        let notice = format!(
-            "{} Subagent task [{}] finished: {}",
-            if is_ok {
-                "✔".green().bold()
-            } else {
-                "✖".red().bold()
-            },
-            record.id.cyan(),
-            summary
-        );
+        let (started_at, _last_tool) = trackers_finish
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&record.id)
+            .unwrap_or_else(|| (std::time::Instant::now(), "done".to_string()));
+        let total_time = format_delegate_duration(started_at.elapsed());
+        let title = format_delegate_title(&record.goal);
+        let glyph = if is_ok {
+            "✔".green().bold().to_string()
+        } else {
+            "✖".red().bold().to_string()
+        };
+        let status = if is_ok { "finished" } else { "failed" };
+        let notice = format_delegate_notification(&glyph, &title, status, &total_time);
         ui_delegate.emit_above(&notice);
+        if !summary.is_empty() && summary != "completed" {
+            ui_delegate.emit_above(&format!("   {}", summary.dimmed()));
+        }
         let s_id = session_id_delegate.clone();
         let s_store = store_delegate.clone();
         tokio::spawn(async move {
@@ -1107,7 +1185,7 @@ pub async fn run_interactive_chat(
                             right_aligned_user_message(&current_query, get_terminal_width())
                         );
                     }
-                    let tools = in_flight_tools.lock().unwrap().clone();
+                    let tools = in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     for item in &tools {
                         println!("{}", item.call_formatted);
                         for diff in &item.diff_lines {
@@ -1166,7 +1244,7 @@ pub async fn run_interactive_chat(
                 if !is_run {
                     let verdict_str = format_approval_verdict(false, &request);
                     ui.emit_above(&verdict_str);
-                    in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                    in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
                         call_formatted: verdict_str,
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
@@ -1256,14 +1334,14 @@ pub async fn run_interactive_chat(
                                 let data_url = img.data_url();
                                 let marker = format!("[image: {}x{}]", img.width, img.height);
                                 {
-                                    let mut b = ui.input_buf.lock().unwrap();
+                                    let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                                     if !b.is_empty() && !b.ends_with(' ') {
                                         b.push(' ');
                                     }
                                     b.push_str(&marker);
                                     b.push(' ');
                                 }
-                                let mut attachments = pending_images.lock().unwrap();
+                                let mut attachments = pending_images.lock().unwrap_or_else(|e| e.into_inner());
                                 attachments.push(data_url);
                                 ui.redraw_input_line();
                                 ui.emit_above(&format!(
@@ -1310,11 +1388,11 @@ pub async fn run_interactive_chat(
                         ui.set_yolo(true);
                         continue;
                     }
-                    AppKey::Char('/') if ui.input_buf.lock().unwrap().is_empty() => {
-                        ui.input_buf.lock().unwrap().push('/');
+                    AppKey::Char('/') if ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).is_empty() => {
+                        ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).push('/');
                         ui.redraw_input_line();
                         if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
-                            ui.input_buf.lock().unwrap().clear();
+                            ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                             ui.redraw_input_line();
                             // The menu can name a composer command too — picking `/interrupt`
                             // while Luna is thinking has to interrupt — so it goes through the
@@ -1372,14 +1450,14 @@ pub async fn run_interactive_chat(
                         if !prompt_history.is_empty() {
                             let next_idx = match history_cursor {
                                 None => {
-                                    draft_input = ui.input_buf.lock().unwrap().clone();
+                                    draft_input = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                     prompt_history.len().saturating_sub(1)
                                 }
                                 Some(idx) => idx.saturating_sub(1),
                             };
                             history_cursor = Some(next_idx);
                             if let Some(prompt) = prompt_history.get(next_idx) {
-                                *ui.input_buf.lock().unwrap() = prompt.clone();
+                                *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = prompt.clone();
                                 ui.redraw_input_line();
                             }
                         }
@@ -1391,30 +1469,30 @@ pub async fn run_interactive_chat(
                                 let next_idx = idx + 1;
                                 history_cursor = Some(next_idx);
                                 if let Some(prompt) = prompt_history.get(next_idx) {
-                                    *ui.input_buf.lock().unwrap() = prompt.clone();
+                                    *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = prompt.clone();
                                     ui.redraw_input_line();
                                 }
                             } else {
                                 history_cursor = None;
-                                *ui.input_buf.lock().unwrap() = draft_input.clone();
+                                *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = draft_input.clone();
                                 ui.redraw_input_line();
                             }
                         }
                         continue;
                     }
                     AppKey::Char(c) => {
-                        ui.input_buf.lock().unwrap().push(c);
+                        ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).push(c);
                         ui.redraw_input_line();
                     }
                     AppKey::Backspace => {
-                        ui.input_buf.lock().unwrap().pop();
+                        ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).pop();
                         ui.redraw_input_line();
                     }
                     AppKey::Enter => {
                         history_cursor = None;
                         draft_input.clear();
                         let query = {
-                            let mut b = ui.input_buf.lock().unwrap();
+                            let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                             let s = b.trim().to_string();
                             b.clear();
                             s
@@ -1432,7 +1510,7 @@ pub async fn run_interactive_chat(
 
                         if query == "/" || query.eq_ignore_ascii_case("/help") {
                             if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
-                                ui.input_buf.lock().unwrap().clear();
+                                ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                                 ui.redraw_input_line();
                                 if handle_composer_command(
                                     &cmd,
@@ -1559,13 +1637,13 @@ pub async fn run_interactive_chat(
                                 continue;
                             }
                             Submission::Steer => {
-                                steer_handle.lock().unwrap().push_back(query.clone());
+                                steer_handle.lock().unwrap_or_else(|e| e.into_inner()).push_back(query.clone());
                                 let line = format!(
                                     "{} Steered into active turn: {}",
                                     "⏩".cyan().bold(),
                                     query
                                 );
-                                in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                                in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
                                     call_formatted: line.clone(),
                                     result_formatted: String::new(),
                                     diff_lines: Vec::new(),
@@ -1684,7 +1762,7 @@ pub async fn run_interactive_chat(
                         usage
                             .record_chat(&current_provider, &current_model, Some(&session_id), &outcome)
                             .await;
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
                         let turn_dur = turn_start.elapsed();
 
                         let record = TurnRecord {
@@ -1717,7 +1795,7 @@ pub async fn run_interactive_chat(
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
                         let turn_dur = turn_start.elapsed();
 
                         let record = TurnRecord {
@@ -1747,7 +1825,7 @@ pub async fn run_interactive_chat(
                     Ok(Err(e)) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
                         let turn_dur = turn_start.elapsed();
                         let had_tools = !current_tools.is_empty();
 
@@ -1761,7 +1839,7 @@ pub async fn run_interactive_chat(
                                 reply: format!("✖ Error: {}", e),
                             };
                             turns.push(record);
-                            *ui.input_buf.lock().unwrap() = "continue".to_string();
+                            *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = "continue".to_string();
 
                             if ui.is_attended {
                                 todo::refresh_panel(&ui, &todo_scope);
@@ -1773,7 +1851,7 @@ pub async fn run_interactive_chat(
                             }
                         } else {
                             if !current_query.is_empty() {
-                                *ui.input_buf.lock().unwrap() = current_query.clone();
+                                *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = current_query.clone();
                             }
 
                             let err_msg = format!("{} Error: {}", "✖".red().bold(), e);
@@ -1798,7 +1876,7 @@ pub async fn run_interactive_chat(
                     Err(join_err) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap());
+                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
                         let turn_dur = turn_start.elapsed();
                         let had_tools = !current_tools.is_empty();
 
@@ -1812,7 +1890,7 @@ pub async fn run_interactive_chat(
                                 reply: format!("✖ Task join error: {}", join_err),
                             };
                             turns.push(record);
-                            *ui.input_buf.lock().unwrap() = "continue".to_string();
+                            *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = "continue".to_string();
 
                             if ui.is_attended {
                                 todo::refresh_panel(&ui, &todo_scope);
@@ -1824,7 +1902,7 @@ pub async fn run_interactive_chat(
                             }
                         } else {
                             if !current_query.is_empty() {
-                                *ui.input_buf.lock().unwrap() = current_query.clone();
+                                *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = current_query.clone();
                             }
 
                             let err_msg = format!("{} Task join error: {}", "✖".red().bold(), join_err);
