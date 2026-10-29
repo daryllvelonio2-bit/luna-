@@ -50,8 +50,8 @@ use commands::{
 use keys::AppKey;
 use render::{
     compaction_report, format_approval_verdict, format_patch_diff, format_tool_call,
-    format_tool_result, parse_turns_from_history, render_transcript, OutputBlockKind,
-    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
+    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -1099,6 +1099,22 @@ pub async fn run_interactive_chat(
                 // whole screen so old messages reflow to the new width.
                 crate::commands::clear_screen();
                 redraw_transcript(&turns, process_expanded);
+                if active_turn.is_some() {
+                    if !current_query.trim().is_empty() {
+                        println!();
+                        println!(
+                            "{}",
+                            right_aligned_user_message(&current_query, get_terminal_width())
+                        );
+                    }
+                    let tools = in_flight_tools.lock().unwrap().clone();
+                    for item in &tools {
+                        println!("{}", item.call_formatted);
+                        for diff in &item.diff_lines {
+                            println!("{}", diff);
+                        }
+                    }
+                }
                 ui.handle_resize();
             }
 
@@ -1540,6 +1556,24 @@ pub async fn run_interactive_chat(
                                     "{} Queued — sent when the agent is free",
                                     "⏸".yellow().bold()
                                 ));
+                                continue;
+                            }
+                            Submission::Steer => {
+                                steer_handle.lock().unwrap().push_back(query.clone());
+                                let line = format!(
+                                    "{} Steered into active turn: {}",
+                                    "⏩".cyan().bold(),
+                                    query
+                                );
+                                in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                                    call_formatted: line.clone(),
+                                    result_formatted: String::new(),
+                                    diff_lines: Vec::new(),
+                                });
+                                ui.emit_above(&line);
+                                if ui.is_attended {
+                                    ui.draw_initial_box();
+                                }
                                 continue;
                             }
                             Submission::Interrupt => {

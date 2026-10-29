@@ -59,18 +59,17 @@ fn interrupt_ignores_anything_after_it() {
     );
 }
 
-/// The three states a submit can meet, and the one rule that must not wobble: while the
-/// transcript is being folded, nothing starts a turn — not even an interrupting message,
-/// because the history it would be built on is being rewritten underneath it.
+/// The three states a submit can meet: idle takes the message, active steers it mid-run,
+/// and while the transcript is being folded, everything waits in the queue.
 #[test]
-fn a_free_agent_takes_the_message_and_a_busy_one_replaces_the_turn() {
+fn a_free_agent_takes_the_message_and_a_busy_one_steers_the_turn() {
     assert_eq!(
         submission("run the tests", false, false),
         super::Submission::Turn
     );
     assert_eq!(
         submission("run the tests", true, false),
-        super::Submission::Interrupt
+        super::Submission::Steer
     );
 }
 

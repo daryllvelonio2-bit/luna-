@@ -18,16 +18,18 @@ use harness_core::{HarnessError, TurnOutcome};
 
 /// What a submitted line does when the agent may not be free to take it.
 ///
-/// The rule a user can hold onto: a plain message *replaces* what is running, `/steer` *adds* to
-/// it, and a message typed while the transcript is being folded waits — a turn started mid-fold
-/// would be built on a history that is about to be rewritten. (`/steer` never reaches here: it is
-/// a slash command, and the queue it feeds is pushed without taking the agent lock the running
-/// turn holds.)
+/// The rule a user can hold onto: a plain message mid-turn steers what is running, and a message
+/// typed while the transcript is being folded waits — a turn started mid-fold would be built on
+/// a history that is about to be rewritten. (`/interrupt`, `Ctrl+C` or `Escape` explicitly cancel
+/// the active turn.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Submission {
     /// Nothing is in flight: start a turn.
     Turn,
+    /// Steer the running turn with this line.
+    Steer,
     /// Stop the running turn and start a new one with this line.
+    #[allow(dead_code)]
     Interrupt,
     /// Hold the line until the fold finishes; the queue pump sends it in order.
     Queue,
@@ -38,7 +40,7 @@ pub(super) fn submission(_line: &str, turn_active: bool, compacting: bool) -> Su
         return Submission::Queue;
     }
     if turn_active {
-        return Submission::Interrupt;
+        return Submission::Steer;
     }
     Submission::Turn
 }
@@ -297,17 +299,24 @@ pub(super) async fn handle_composer_command(
             // block until the running turn released it, and the guidance would land after the turn
             // it was meant to steer — which is the one thing a steer must never do.
             steer_handle.lock().unwrap().push_back(text.clone());
-            let when = if active_turn.is_some() {
-                "right after the running turn's next model call"
+            if active_turn.is_some() {
+                let line = format!("{} Steered into active turn: {}", "⏩".cyan().bold(), text);
+                in_flight_tools.lock().unwrap().push(TurnProcessItem {
+                    call_formatted: line.clone(),
+                    result_formatted: String::new(),
+                    diff_lines: Vec::new(),
+                });
+                ui.emit_above(&line);
+                if ui.is_attended {
+                    ui.draw_initial_box();
+                }
             } else {
-                "right after the next turn's first model call"
-            };
-            ui.emit_above(&format!(
-                "{} Steer queued — delivered {}: {}",
-                "⏩".cyan().bold(),
-                when,
-                text.dimmed()
-            ));
+                ui.emit_above(&format!(
+                    "{} Steer queued — delivered right after the next turn's first model call: {}",
+                    "⏩".cyan().bold(),
+                    text.dimmed()
+                ));
+            }
         }
         ComposerCommand::Interrupt => {
             let cancelled = cancel_running_turn(

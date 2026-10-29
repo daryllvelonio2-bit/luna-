@@ -718,6 +718,108 @@ fn parse_turns_from_history_keeps_a_turn_that_has_no_user_line() {
     assert_eq!(turns[0].reply, "the answer");
 }
 
+#[test]
+fn parse_turns_from_history_preserves_steered_messages_without_turn_fragmentation() {
+    use harness_core::{Message, Role, ToolCall};
+    use serde_json::json;
+
+    let steer_envelope = "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\nswitch to alternate plan\n[/OUT-OF-BAND USER MESSAGE]";
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("solve the bug"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("analyzing code".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "src/main.rs" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::tool(harness_core::ToolResult::success("c1", "fn main() {}")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message::user(steer_envelope),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 5,
+            seq: 5,
+            message: Message::assistant("switched plan and resolved"),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1, "steered message must not fragment turn into phantom turns");
+    assert_eq!(turns[0].user_query, "solve the bug");
+    assert_eq!(turns[0].reply, "switched plan and resolved");
+    assert_eq!(turns[0].tool_items.len(), 2, "must include tool call and steer item");
+    assert!(
+        plain(&turns[0].tool_items[0].call_formatted).contains("src/main.rs"),
+        "first item should be tool call: {}",
+        turns[0].tool_items[0].call_formatted
+    );
+    assert!(
+        plain(&turns[0].tool_items[1].call_formatted).contains("Steered into active turn: switch to alternate plan"),
+        "second item should be steer process item: {}",
+        turns[0].tool_items[1].call_formatted
+    );
+}
+
+#[test]
+fn steer_process_items_are_not_counted_as_tools_in_header() {
+    use harness_core::Message;
+
+    let steer_envelope = "[OUT-OF-BAND USER MESSAGE]\nredirect focus\n[/OUT-OF-BAND USER MESSAGE]";
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("solve it"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::user(steer_envelope),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::assistant("done"),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].tools.len(), 0);
+    assert_eq!(turns[0].tool_items.len(), 1);
+    assert!(plain(&turns[0].tool_items[0].call_formatted).contains("Steered into active turn: redirect focus"));
+}
+
 /// `colored` decides on escapes by whether stdout is a tty, which it never is under
 /// `cargo test`, so colour has to be forced. The override is process-global and these tests
 /// run in parallel — hence unset in a guard, and hence the geometry tests below reading

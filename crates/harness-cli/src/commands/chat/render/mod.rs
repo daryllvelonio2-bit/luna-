@@ -28,6 +28,31 @@ pub struct TurnRecord {
     pub reply: String,
 }
 
+/// Extract user guidance from an out-of-band user message envelope.
+fn extract_out_of_band_steer(content: &str) -> Option<String> {
+    const START_TAG: &str = "[OUT-OF-BAND USER MESSAGE";
+    const END_TAG: &str = "[/OUT-OF-BAND USER MESSAGE]";
+    let start_pos = content.find(START_TAG)?;
+    let after_start = &content[start_pos..];
+    let body_start = if let Some(newline_pos) = after_start.find('\n') {
+        start_pos + newline_pos + 1
+    } else if let Some(bracket_pos) = after_start.find(']') {
+        start_pos + bracket_pos + 1
+    } else {
+        start_pos + START_TAG.len()
+    };
+    let body = if let Some(end_pos) = content.find(END_TAG) {
+        if end_pos >= body_start {
+            &content[body_start..end_pos]
+        } else {
+            &content[body_start..]
+        }
+    } else {
+        &content[body_start..]
+    };
+    Some(body.trim().to_string())
+}
+
 /// Parse historical stored messages into structured `TurnRecord`s for collapsible rendering.
 pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
     let mut turns = Vec::new();
@@ -40,6 +65,20 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
         let msg = &stored.message;
         match msg.role {
             Role::User => {
+                if let Some(ref content) = msg.content {
+                    if let Some(steer_text) = extract_out_of_band_steer(content) {
+                        current_tools.push(TurnProcessItem {
+                            call_formatted: format!(
+                                "{} Steered into active turn: {}",
+                                "⏩".cyan().bold(),
+                                steer_text
+                            ),
+                            result_formatted: String::new(),
+                            diff_lines: Vec::new(),
+                        });
+                        continue;
+                    }
+                }
                 if let Some(q) = current_query.take() {
                     turns.push(TurnRecord {
                         user_query: q,
@@ -163,14 +202,26 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                 turn.tool_items
                     .iter()
                     .filter_map(|it| {
-                        it.call_formatted
-                            .split_whitespace()
-                            .nth(1)
-                            .map(|s| s.to_string())
+                        let plain = dialoguer::console::strip_ansi_codes(&it.call_formatted);
+                        if plain.starts_with('⏩')
+                            || plain.starts_with('✖')
+                            || plain.starts_with('✔')
+                        {
+                            None
+                        } else {
+                            plain
+                                .split_whitespace()
+                                .nth(1)
+                                .map(|s| s.to_string())
+                        }
                     })
                     .collect()
             };
-            let tools_count = turn.tools.len().max(turn.tool_items.len());
+            let tools_count = if !turn.tools.is_empty() {
+                turn.tools.len()
+            } else {
+                tool_names.len()
+            };
 
             println!(
                 "{}",
@@ -194,7 +245,11 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                 for item in &turn.tool_items {
                     if !item.call_formatted.is_empty() {
                         let mut call = item.call_formatted.clone();
-                        if !has_verdict(&call) {
+                        let plain = dialoguer::console::strip_ansi_codes(&call);
+                        let is_non_tool_event = plain.starts_with('⏩')
+                            || plain.starts_with('✖')
+                            || plain.starts_with('✔');
+                        if !has_verdict(&call) && !is_non_tool_event {
                             let is_err = item.result_formatted.contains('✖');
                             let status = if is_err {
                                 " (failed)".red().to_string()
