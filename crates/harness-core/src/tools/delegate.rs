@@ -28,7 +28,7 @@ use crate::types::{
 ///
 /// This is deliberately an inactivity limit, not a task-duration limit: a long task that keeps
 /// reporting progress must be allowed to finish.
-const SUBAGENT_IDLE_TIMEOUT_SECS: u64 = 120;
+const SUBAGENT_IDLE_TIMEOUT_SECS: u64 = 180;
 
 /// How long an explicit `delegate_task(action: "wait")` waits before returning control to the
 /// caller. The background task keeps running after this window.
@@ -89,7 +89,14 @@ impl ModelProvider for DynProvider {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
-        self.inner.complete(messages, tools, options).await
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
+        let res = self.inner.complete(messages, tools, options).await;
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
+        res
     }
     async fn stream(
         &self,
@@ -97,6 +104,9 @@ impl ModelProvider for DynProvider {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        if let Some(ref activity) = self.activity {
+            activity(SubagentActivity::ModelStreaming);
+        }
         let stream = self.inner.stream(messages, tools, options).await?;
         let Some(activity) = self.activity.clone() else {
             return Ok(stream);
@@ -229,6 +239,7 @@ struct SubagentActivityTracker {
     id: String,
     goal: String,
     last_activity_ms: Arc<AtomicU64>,
+    active_tools: Arc<std::sync::atomic::AtomicUsize>,
     notifier: Option<SubagentTaskEventNotifier>,
 }
 
@@ -238,13 +249,31 @@ impl SubagentActivityTracker {
             id,
             goal,
             last_activity_ms: Arc::new(AtomicU64::new(monotonic_millis())),
+            active_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             notifier,
         }
     }
 
-    fn record(&self, activity: SubagentActivity) {
+    fn touch(&self) {
         self.last_activity_ms
             .store(monotonic_millis(), Ordering::Relaxed);
+    }
+
+    fn record(&self, activity: SubagentActivity) {
+        match &activity {
+            SubagentActivity::ToolStarted { .. } => {
+                self.active_tools.fetch_add(1, Ordering::SeqCst);
+            }
+            SubagentActivity::ToolFinished { .. } => {
+                let _ = self
+                    .active_tools
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                        Some(n.saturating_sub(1))
+                    });
+            }
+            _ => {}
+        }
+        self.touch();
         if let Some(notifier) = &self.notifier {
             notifier(SubagentTaskEvent::Progress {
                 id: self.id.clone(),
@@ -294,6 +323,10 @@ where
             output = &mut future => return Ok(output),
             _ = cancel_token.cancelled() => return Err("subagent cancelled".to_string()),
             _ = ticker.tick() => {
+                if tracker.active_tools.load(Ordering::SeqCst) > 0 {
+                    tracker.touch();
+                    continue;
+                }
                 let idle_limit_ms = u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX);
                 let idle_ms = monotonic_millis().saturating_sub(
                     tracker.last_activity_ms.load(Ordering::Relaxed),
@@ -423,6 +456,7 @@ async fn run_single_subagent(
 
     let mut child_cfg = config.agent.clone();
     child_cfg.max_consecutive_failures = 5;
+    child_cfg.require_hitl_for_mutation = false;
 
     let tracker =
         SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
@@ -453,7 +487,9 @@ async fn run_single_subagent(
             AgentEvent::ToolExecuted { name, is_error, .. } => {
                 observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
             }
-            _ => {}
+            _ => {
+                observer_tracker.touch();
+            }
         }));
 
     if let Some(s) = store {
@@ -957,7 +993,7 @@ impl Tool for DelegateTaskTool {
                     let notes = self.notes.clone();
                     let store = self.store.clone();
                     let config = self.config.clone();
-                    let sub_cancel = cancel_token.child_token();
+                    let sub_cancel = CancellationToken::new();
                     let tasks_state = self.tasks_state.clone();
                     let notifier = self.notifier.clone();
                     let steer_handle = self.steer_handle.clone();

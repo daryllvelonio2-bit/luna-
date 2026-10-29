@@ -247,3 +247,32 @@ async fn test_subagent_child_approver_fails_closed() {
     let err = approver.approve(&req).await.unwrap_err();
     assert!(matches!(err, HarnessError::ApprovalRejected(_)));
 }
+
+#[tokio::test]
+async fn test_watchdog_does_not_timeout_while_tool_is_running() {
+    let tracker = SubagentActivityTracker::new("sub_tool_busy".to_string(), "tool".to_string(), None);
+    let cancel = CancellationToken::new();
+
+    // Tool starts: active_tools becomes 1
+    tracker.record(SubagentActivity::ToolStarted {
+        name: "long_running_tool".to_string(),
+    });
+
+    let work = async {
+        // Sleep longer than the idle timeout
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        "success"
+    };
+
+    let result = await_subagent_with_inactivity_timeout(
+        work,
+        &tracker,
+        Duration::from_millis(30),
+        &cancel,
+    )
+    .await;
+
+    assert!(result.is_ok(), "active tool must prevent idle timeout");
+    assert_eq!(result.unwrap(), "success");
+    assert!(!cancel.is_cancelled());
+}
