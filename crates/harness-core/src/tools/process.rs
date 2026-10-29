@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::HarnessError;
 use crate::tasks::BackgroundTaskQueue;
+use crate::approval::ToolPreview;
 use crate::traits::Tool;
 use crate::types::ToolResult;
 
@@ -48,6 +49,28 @@ impl Tool for ProcessTool {
             },
             "required": ["action"]
         })
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn is_mutating_call(&self, args: &serde_json::Value) -> bool {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        action == "kill"
+    }
+
+    async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
+        let action = args.get("action").and_then(|a| a.as_str())?;
+        if action == "kill" {
+            let job_id = args.get("job_id").and_then(|j| j.as_str())?;
+            Some(ToolPreview {
+                target: Some(format!("kill background task {job_id}")),
+                diff: None,
+            })
+        } else {
+            None
+        }
     }
 
     async fn execute(
@@ -124,5 +147,34 @@ impl Tool for ProcessTool {
                 ),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_process_tool_mutation_and_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = Arc::new(BackgroundTaskQueue::new(temp.path().to_path_buf()));
+        let tool = ProcessTool::new(queue);
+
+        assert!(tool.is_mutating());
+        assert!(!tool.is_mutating_call(&json!({"action": "list"})));
+        assert!(!tool.is_mutating_call(&json!({"action": "poll", "job_id": "job_123"})));
+        assert!(tool.is_mutating_call(&json!({"action": "kill", "job_id": "job_123"})));
+
+        let preview = tool
+            .preview(&json!({"action": "kill", "job_id": "job_123"}))
+            .await;
+        assert!(preview.is_some());
+        assert_eq!(
+            preview.unwrap().target,
+            Some("kill background task job_123".to_string())
+        );
+
+        let preview_list = tool.preview(&json!({"action": "list"})).await;
+        assert!(preview_list.is_none());
     }
 }

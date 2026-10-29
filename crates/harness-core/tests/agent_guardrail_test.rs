@@ -115,7 +115,7 @@ impl NotesEngine for MockNotes {
         _content: &str,
         _tags: &[String],
     ) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
         Ok(vec![])
@@ -124,7 +124,7 @@ impl NotesEngine for MockNotes {
         Ok(vec![])
     }
     async fn read_note(&self, _id: &str) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn update_note(
         &self,
@@ -133,10 +133,10 @@ impl NotesEngine for MockNotes {
         _c: Option<&str>,
         _tags: Option<&[String]>,
     ) -> Result<Note, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
     async fn delete_note(&self, _id: &str) -> Result<bool, HarnessError> {
-        unimplemented!()
+        unreachable!("not used by this test")
     }
 }
 

@@ -215,9 +215,9 @@ impl UsageFilter {
         if let Ok(instant) = DateTime::parse_from_rfc3339(text) {
             return Ok(instant.with_timezone(&Utc));
         }
-        Ok(Self::since_text(text)?
+        Self::since_text(text)?
             .since
-            .expect("since_text always sets a timestamp"))
+            .ok_or_else(|| HarnessError::ConfigurationError("invalid --since value".to_string()))
     }
 
     fn sql(&self) -> (String, Vec<Value>) {

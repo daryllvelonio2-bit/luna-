@@ -288,17 +288,21 @@ pub fn is_sudo_auth_failure(output: &str) -> bool {
 }
 
 pub async fn check_sudo_nopasswd(workdir: &Path) -> bool {
-    let res = tokio::time::timeout(
-        Duration::from_millis(500),
-        tokio::process::Command::new("sudo")
-            .arg("-n")
-            .arg("true")
-            .current_dir(workdir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await;
+    check_sudo_nopasswd_with_env(workdir, &std::collections::HashMap::new()).await
+}
+
+pub async fn check_sudo_nopasswd_with_env(
+    workdir: &Path,
+    env_overrides: &std::collections::HashMap<String, String>,
+) -> bool {
+    let mut cmd = tokio::process::Command::new("sudo");
+    cmd.arg("-n")
+        .arg("true")
+        .current_dir(workdir)
+        .envs(env_overrides)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let res = tokio::time::timeout(Duration::from_millis(500), cmd.status()).await;
     match res {
         Ok(Ok(status)) => status.success(),
         _ => false,
@@ -388,8 +392,9 @@ impl Tool for TerminalTool {
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         let cmd = args.get("command").and_then(|c| c.as_str())?;
         let effective = self.resolve_command(cmd).await;
+        let (rewritten, _) = rewrite_sudo_command(&effective);
         Some(ToolPreview {
-            target: Some(effective),
+            target: Some(rewritten),
             diff: None,
         })
     }
@@ -461,17 +466,17 @@ impl Tool for TerminalTool {
         let (exec_command, sudo_stdin) = {
             let (rewritten, sudo_count) = rewrite_sudo_command(&effective_command);
             if sudo_count > 0 {
-                if check_sudo_nopasswd(&resolved_workdir).await {
+                if check_sudo_nopasswd_with_env(&resolved_workdir, &self.env_vars).await {
                     (effective_command.clone(), None)
                 } else {
-                    let cached_opt = self.sudo_cache.lock().unwrap().clone();
+                    let cached_opt = self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let password_opt = match cached_opt {
                         Some(p) => Some(p),
                         None => {
                             if let Some(ref prompter) = self.sudo_prompter {
                                 match prompter.prompt_sudo_password(&effective_command).await {
                                     Ok(Some(pwd)) if !pwd.is_empty() => {
-                                        *self.sudo_cache.lock().unwrap() = Some(pwd.clone());
+                                        *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(pwd.clone());
                                         Some(pwd)
                                     }
                                     _ => None,
@@ -525,6 +530,8 @@ impl Tool for TerminalTool {
         for (k, v) in &self.env_vars {
             cmd.env(k, v);
         }
+        // Never leak the sudo password env var into child processes.
+        cmd.env_remove("SUDO_PASSWORD");
 
         // The network policy is installed in the child between fork and exec, so `sh` and everything
         // it starts inherit it. A failure here is reported instead of running unconfined.
@@ -585,7 +592,7 @@ impl Tool for TerminalTool {
                             Ok(ToolResult::success(call_id, stdout))
                         } else {
                             if is_sudo_auth_failure(&stdout) {
-                                *self.sudo_cache.lock().unwrap() = None;
+                                *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             }
                             let code = output.status.code().unwrap_or(-1);
                             if is_benign_exit(&final_exec_command, code) {

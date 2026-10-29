@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::{Agent, SessionBinding};
-use crate::approval::{AllowAll, ApprovalSettings};
+use crate::approval::{ApprovalSettings, NonInteractive};
 use crate::config::Config;
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
@@ -247,7 +247,6 @@ async fn run_single_subagent(
 
     let mut child_cfg = config.agent.clone();
     child_cfg.max_consecutive_failures = 5;
-    child_cfg.require_hitl_for_mutation = false;
 
     let provider = Arc::new(DynProvider(provider));
     let memory = Arc::new(DynMemory(memory));
@@ -258,7 +257,12 @@ async fn run_single_subagent(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
                 .unwrap_or_default(),
         )
-        .with_approval(Arc::new(AllowAll), ApprovalSettings::default());
+        .with_approval(
+            Arc::new(NonInteractive::new(
+                "delegated subagent: interactive approval is unavailable in background execution",
+            )),
+            ApprovalSettings::default(),
+        );
 
     if let Some(s) = store {
         let _ = s.ensure_session(&child_session_id).await;
@@ -335,6 +339,24 @@ impl Tool for DelegateTaskTool {
                 }
             }
         })
+    }
+
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
+    fn is_mutating_call(&self, arguments: &serde_json::Value) -> bool {
+        let action = arguments
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or_else(|| {
+                if arguments.get("tasks").is_some() {
+                    "spawn"
+                } else {
+                    "list"
+                }
+            });
+        matches!(action, "spawn")
     }
 
     async fn execute(
@@ -768,7 +790,9 @@ impl Tool for DelegateTaskTool {
                                 "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
                                 id, goal, status_label, output_text
                             );
-                            steer.lock().unwrap().push_back(steer_notice);
+                            if let Ok(mut steer_q) = steer.lock() {
+                                steer_q.push_back(steer_notice);
+                            }
                         }
                     });
                 }
@@ -792,5 +816,111 @@ impl Tool for DelegateTaskTool {
                 format!("unknown action '{}': use spawn, list, poll, or wait", other),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::{ApprovalRequest, Approver};
+
+    struct DummyProvider;
+    #[async_trait]
+    impl ModelProvider for DummyProvider {
+        fn provider_id(&self) -> &str {
+            "dummy"
+        }
+        async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &CompletionOptions,
+        ) -> Result<Message, HarnessError> {
+            unreachable!()
+        }
+        async fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+            unreachable!()
+        }
+    }
+
+    struct DummyMemory;
+    #[async_trait]
+    impl MemoryEngine for DummyMemory {
+        async fn retrieve(&self, _: &str, _: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+            unreachable!()
+        }
+        async fn save(&self, _: &MemoryRecord) -> Result<(), HarnessError> {
+            unreachable!()
+        }
+        async fn update(&self, _: &str, _: &MemoryRecord) -> Result<(), HarnessError> {
+            unreachable!()
+        }
+        async fn forget(&self, _: &str) -> Result<(), HarnessError> {
+            unreachable!()
+        }
+        async fn add_note_pointer(&self, _: &str, _: &str) -> Result<(), HarnessError> {
+            unreachable!()
+        }
+        fn format_as_system_prompt(&self, _: &[MemoryRecord]) -> String {
+            String::new()
+        }
+    }
+
+    struct DummyNotes;
+    #[async_trait]
+    impl NotesEngine for DummyNotes {
+        async fn save_note(&self, _: &str, _: &str, _: &[String]) -> Result<Note, HarnessError> {
+            unreachable!()
+        }
+        async fn search_notes(&self, _: &str, _: usize) -> Result<Vec<Note>, HarnessError> {
+            unreachable!()
+        }
+        async fn list_notes(&self, _: usize, _: usize) -> Result<Vec<Note>, HarnessError> {
+            unreachable!()
+        }
+        async fn read_note(&self, _: &str) -> Result<Note, HarnessError> {
+            unreachable!()
+        }
+        async fn update_note(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&[String]>,
+        ) -> Result<Note, HarnessError> {
+            unreachable!()
+        }
+        async fn delete_note(&self, _: &str) -> Result<bool, HarnessError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn test_delegate_tool_mutating_calls() {
+        let dummy = DelegateTaskTool::new(
+            Arc::new(DummyProvider),
+            Arc::new(DummyMemory),
+            Arc::new(DummyNotes),
+            None,
+            Config::default(),
+        );
+
+        assert!(dummy.is_mutating());
+        assert!(dummy.is_mutating_call(&json!({"action": "spawn", "tasks": [{"goal": "test"}]})));
+        assert!(dummy.is_mutating_call(&json!({"tasks": [{"goal": "test"}]})));
+        assert!(!dummy.is_mutating_call(&json!({"action": "list"})));
+        assert!(!dummy.is_mutating_call(&json!({"action": "poll", "task_id": "sub_1"})));
+        assert!(!dummy.is_mutating_call(&json!({"action": "wait", "timeout_secs": 10})));
+    }
+
+    #[tokio::test]
+    async fn test_subagent_child_approver_fails_closed() {
+        let approver = NonInteractive::new("delegated subagent");
+        let req = ApprovalRequest::default();
+        let err = approver.approve(&req).await.unwrap_err();
+        assert!(matches!(err, HarnessError::ApprovalRejected(_)));
     }
 }

@@ -50,7 +50,7 @@ pub fn run_hooks(config: harness_core::Config, options: HooksOptions) -> Result<
                 "project_file_exists": project_file.is_file(),
                 "hooks": hooks,
             }))
-            .expect("hooks report serializes")
+            .unwrap_or_default()
         );
         return Ok(());
     }

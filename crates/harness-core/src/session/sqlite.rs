@@ -311,7 +311,7 @@ fn query_summary_rows(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<StoredMessage>, HarnessError> {
-    query_rows(conn, session_id, "is_summary = 1", None)
+    query_rows(conn, session_id, "is_summary = 1 AND compacted_at IS NULL", None)
 }
 
 /// The live transcript, bounded by `limit` rows.

@@ -15,6 +15,11 @@ use crate::types::{CompletionOptions, Message, Role};
 /// compares a guess against a fact.
 pub const CHARS_PER_TOKEN: usize = 4;
 
+/// Characters attributed to an inline image data URL in heuristic token estimation.
+/// At [`CHARS_PER_TOKEN`] = 4, this approximates ~250 tokens per image (Gemini: ~258 tokens,
+/// OpenAI/Anthropic vision tiles: ~250-768 tokens).
+pub const HEURISTIC_IMAGE_CHARS: usize = 1_000;
+
 /// Documented relative tolerance between the character heuristic and a provider-reported count on
 /// prose. Asserted by the estimator test.
 pub const HEURISTIC_TOLERANCE: f64 = 0.25;
@@ -63,12 +68,37 @@ pub struct Estimate {
     pub source: EstimateSource,
 }
 
+/// Count effective characters of text for token estimation, substituting a fixed character count
+/// for base64 data URLs rather than counting hundreds of thousands of raw base64 bytes as prose tokens.
+pub fn text_content_chars(text: &str) -> usize {
+    if !text.contains("data:image/") {
+        return text.len();
+    }
+    let mut chars = 0;
+    let mut rest = text;
+    while let Some(start) = rest.find("data:image/") {
+        chars += rest[..start].len();
+        let after_start = &rest[start..];
+        let end = after_start
+            .find(char::is_whitespace)
+            .unwrap_or(after_start.len());
+        if after_start[..end].contains(";base64,") {
+            chars += HEURISTIC_IMAGE_CHARS;
+        } else {
+            chars += end;
+        }
+        rest = &after_start[end..];
+    }
+    chars += rest.len();
+    chars
+}
+
 /// Characters that will be sent for one message: content, tool call names and arguments, tool
 /// result.
 fn message_chars(message: &Message) -> usize {
-    let mut chars = message.content.as_ref().map_or(0, String::len);
+    let mut chars = message.content.as_ref().map_or(0, |s| text_content_chars(s));
     if let Some(result) = &message.tool_result {
-        chars += result.content.len();
+        chars += text_content_chars(&result.content);
     }
     for call in &message.tool_calls {
         chars += call.name.len() + call.arguments.to_string().len();
@@ -189,14 +219,22 @@ pub fn fold_boundary(
             .collect();
 
         if user_indices.len() > keep_recent_turns {
-            return snap_to_round_boundary(
+            let b = snap_to_round_boundary(
                 history,
                 user_indices[user_indices.len() - keep_recent_turns],
             );
+            if !history[..b].iter().all(|s| s.is_summary) {
+                return b;
+            }
         }
     }
 
-    snap_to_round_boundary(history, budget_boundary(history, FALLBACK_KEEP_TOKENS))
+    let b = snap_to_round_boundary(history, budget_boundary(history, FALLBACK_KEEP_TOKENS));
+    if b > 0 && !history[..b].iter().all(|s| s.is_summary) {
+        b
+    } else {
+        oldest_foldable_boundary(history, FALLBACK_KEEP_TOKENS)
+    }
 }
 
 /// Choose a fold boundary that compacts approximately `percent`% of the transcript tokens,
@@ -225,27 +263,31 @@ pub fn fold_boundary_percent(history: &[StoredMessage], percent: usize) -> usize
         .collect();
 
     // Prefer keeping whole user turns that fit within the budget
-    let mut chosen_user_idx = 0;
+    let mut chosen_user_idx = None;
     for &u_idx in user_indices.iter().rev() {
         let kept_tokens: usize = history[u_idx..]
             .iter()
             .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
             .sum();
         if kept_tokens <= budget {
-            chosen_user_idx = u_idx;
+            chosen_user_idx = Some(u_idx);
         } else {
             break;
         }
     }
 
-    if chosen_user_idx > 0 {
-        return snap_to_round_boundary(history, chosen_user_idx);
+    if let Some(idx) = chosen_user_idx {
+        let b = snap_to_round_boundary(history, idx);
+        if !history[..b].iter().all(|s| s.is_summary) {
+            return b;
+        }
     }
 
     // When the newest user turn alone exceeds the budget or is the only turn,
     // fold tool rounds inside it.
     let boundary = snap_to_round_boundary(history, budget_boundary(history, budget));
-    if boundary == 0 && total > budget {
+    let boundary_folds_content = boundary > 0 && !history[..boundary].iter().all(|s| s.is_summary);
+    if !boundary_folds_content && total > budget {
         oldest_foldable_boundary(history, budget)
     } else {
         boundary
@@ -514,7 +556,7 @@ pub async fn compact(
     keep_recent_turns: Option<usize>,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
     let mut boundary = fold_boundary(history, keep_recent_turns);
-    if boundary == 0 {
+    if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
         // The whole transcript is one user turn — an agentic turn that has been running tool
         // rounds for hours. The turn rule has nothing older to fold, and `safe_boundary`'s
         // backward scan resolved the budget boundary to the turn's own start, because a kept tail
@@ -526,7 +568,7 @@ pub async fn compact(
         // `safe_boundary` clean the cut. The kept tail still opens on an assistant tool-call row
         // whose result it carries — a call and its answer stay together.
         boundary = oldest_foldable_boundary(history, FALLBACK_KEEP_TOKENS);
-        if boundary == 0 {
+        if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
             return Ok(None);
         }
     }
@@ -541,7 +583,7 @@ pub async fn compact_percent(
     percent: usize,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
     let mut boundary = fold_boundary_percent(history, percent);
-    if boundary == 0 {
+    if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
         let total: usize = history
             .iter()
             .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
@@ -549,7 +591,7 @@ pub async fn compact_percent(
         let target_fold = (total * percent.clamp(1, 90)) / 100;
         let budget = total.saturating_sub(target_fold);
         boundary = oldest_foldable_boundary(history, budget.max(FALLBACK_KEEP_TOKENS));
-        if boundary == 0 {
+        if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
             return Ok(None);
         }
     }
@@ -562,6 +604,9 @@ async fn compact_at_boundary(
     history: &[StoredMessage],
     boundary: usize,
 ) -> Result<Option<CompactionOutcome>, HarnessError> {
+    if boundary == 0 || history[..boundary].iter().all(|stored| stored.is_summary) {
+        return Ok(None);
+    }
     let folded = &history[..boundary];
     let kept = &history[boundary..];
     let transcript = render_transcript(folded);

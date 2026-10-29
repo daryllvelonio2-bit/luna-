@@ -153,7 +153,7 @@ pub(crate) async fn select_slash_command(
     };
 
     // Ensure space below: scroll terminal if needed to provide canvas
-    let buf = ui.input_buf.lock().unwrap().clone();
+    let buf = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     print!("\x1b[2B\r");
     for _ in 0..BOX_ROWS {
         println!();
@@ -187,7 +187,7 @@ pub(crate) async fn select_slash_command(
     };
 
     let cur_filter = {
-        let b = ui.input_buf.lock().unwrap();
+        let b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         b.clone()
     };
     draw_menu(selected, &cur_filter, &cur_filter);
@@ -195,7 +195,7 @@ pub(crate) async fn select_slash_command(
     let mut result = None;
 
     while let Some(key) = key_rx.recv().await {
-        let filter_str = ui.input_buf.lock().unwrap().clone();
+        let filter_str = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let filtered = get_filtered(&filter_str);
 
         match key {
@@ -228,7 +228,7 @@ pub(crate) async fn select_slash_command(
             AppKey::Tab => {
                 if !filtered.is_empty() && selected < filtered.len() {
                     let cmd = filtered[selected].1.name;
-                    let mut b = ui.input_buf.lock().unwrap();
+                    let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                     b.clear();
                     b.push_str(cmd);
                     b.push(' ');
@@ -237,11 +237,11 @@ pub(crate) async fn select_slash_command(
                 }
             }
             AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
-                ui.input_buf.lock().unwrap().clear();
+                ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 break;
             }
             AppKey::Backspace => {
-                let mut b = ui.input_buf.lock().unwrap();
+                let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                 b.pop();
                 let is_empty = b.is_empty();
                 let new_buf = b.clone();
@@ -256,7 +256,7 @@ pub(crate) async fn select_slash_command(
                 }
             }
             AppKey::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
-                let mut b = ui.input_buf.lock().unwrap();
+                let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                 b.push(c);
                 let new_buf = b.clone();
                 drop(b);
@@ -268,7 +268,7 @@ pub(crate) async fn select_slash_command(
         }
     }
 
-    let final_buf = ui.input_buf.lock().unwrap().clone();
+    let final_buf = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     erase_menu(&final_buf);
     result
 }

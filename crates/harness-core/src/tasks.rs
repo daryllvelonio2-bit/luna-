@@ -105,7 +105,7 @@ impl BackgroundTaskQueue {
                 .stderr(std_file);
 
             if let Err(error) = crate::tools::netguard::apply(&mut cmd, network) {
-                let mut st = status_clone.lock().unwrap();
+                let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                 *st = format!(
                     "failed to spawn: cannot enforce tools.network = {}: {error}",
                     network.as_str()
@@ -116,7 +116,7 @@ impl BackgroundTaskQueue {
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
-                    let mut st = status_clone.lock().unwrap();
+                    let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                     *st = format!("failed to spawn: {}", e);
                     return;
                 }
@@ -125,11 +125,11 @@ impl BackgroundTaskQueue {
             tokio::select! {
                 _ = kill_rx => {
                     let _ = child.kill().await;
-                    let mut st = status_clone.lock().unwrap();
+                    let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                     *st = "killed".to_string();
                 }
                 res = child.wait() => {
-                    let mut st = status_clone.lock().unwrap();
+                    let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                     match res {
                         Ok(status) => {
                             if status.success() {
@@ -158,19 +158,19 @@ impl BackgroundTaskQueue {
             kill_tx: Some(kill_tx),
         };
 
-        self.jobs.lock().unwrap().insert(id.clone(), internal);
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), internal);
         Ok(id)
     }
 
     pub fn list(&self) -> Vec<JobSummary> {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut list: Vec<JobSummary> = jobs
             .values()
             .map(|j| JobSummary {
                 id: j.id.clone(),
                 command: j.command.clone(),
                 workdir: j.workdir.to_string_lossy().to_string(),
-                status: j.status.lock().unwrap().clone(),
+                status: j.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                 elapsed_secs: j.started_at.elapsed().as_secs(),
                 log_path: j.log_path.to_string_lossy().to_string(),
             })
@@ -182,7 +182,7 @@ impl BackgroundTaskQueue {
 
     pub fn poll(&self, id: &str, tail_lines: usize) -> Result<JobPollResult, HarnessError> {
         let (command, status, started_at, log_path) = {
-            let jobs = self.jobs.lock().unwrap();
+            let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             let job = jobs
                 .get(id)
                 .ok_or_else(|| HarnessError::ToolExecutionFailed {
@@ -190,7 +190,7 @@ impl BackgroundTaskQueue {
                     reason: format!("Background job '{}' not found", id),
                 })?;
 
-            let status = job.status.lock().unwrap().clone();
+            let status = job.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (
                 job.command.clone(),
                 status,
@@ -212,11 +212,11 @@ impl BackgroundTaskQueue {
     }
 
     pub fn kill(&self, id: &str) -> Result<bool, HarnessError> {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.get_mut(id) {
             if let Some(tx) = job.kill_tx.take() {
                 let _ = tx.send(());
-                *job.status.lock().unwrap() = "killed".to_string();
+                *job.status.lock().unwrap_or_else(|e| e.into_inner()) = "killed".to_string();
                 return Ok(true);
             }
         }

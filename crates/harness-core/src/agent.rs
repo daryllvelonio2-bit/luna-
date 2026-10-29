@@ -315,7 +315,7 @@ struct FoldReaperGuard<'a>(&'a Mutex<Option<CompactionOutcome>>);
 
 impl Drop for FoldReaperGuard<'_> {
     fn drop(&mut self) {
-        self.0.lock().unwrap().take();
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 
@@ -926,7 +926,7 @@ where
         user_input: &str,
         cancel_token: CancellationToken,
     ) -> Result<TurnOutcome, HarnessError> {
-        self.completed_fold.lock().unwrap().take();
+        self.completed_fold.lock().unwrap_or_else(|e| e.into_inner()).take();
         self.fold_disabled_this_turn.store(false, Ordering::SeqCst);
         let _reaper_guard = FoldReaperGuard(&self.completed_fold);
         let system_text = self.system_prompt(user_input).await?;
@@ -1090,11 +1090,7 @@ where
                     .saturating_add(accumulated.completion_tokens);
             }
 
-            let fold_active = rebound
-                || self.fold_in_flight.load(Ordering::SeqCst)
-                || self.completed_fold.lock().unwrap().is_some();
-
-            if fold_active {
+            if rebound {
                 response.usage = None;
             }
 
@@ -1115,7 +1111,7 @@ where
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
                 let pending_steers: Vec<String> = {
-                    let mut sq = self.steer_queue.lock().unwrap();
+                    let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
                     sq.drain(..).collect()
                 };
                 if !pending_steers.is_empty() {
@@ -1430,7 +1426,7 @@ where
 
             // Check for mid-turn steering queued while tools were executing
             let pending_steers: Vec<String> = {
-                let mut sq = self.steer_queue.lock().unwrap();
+                let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
                 sq.drain(..).collect()
             };
             if !pending_steers.is_empty() {
@@ -1534,7 +1530,8 @@ where
                                     signature: None,
                                 },
                             ));
-                            &mut calls.last_mut().expect("just pushed").1
+                            let last_idx = calls.len() - 1;
+                            &mut calls[last_idx].1
                         }
                     };
                     if let Some(id) = id {
@@ -1817,7 +1814,7 @@ where
             .await
             {
                 Ok(Some(outcome)) => {
-                    *completed_fold.lock().unwrap() = Some(outcome.clone());
+                    *completed_fold.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome.clone());
                     let new_tokens = estimate_tokens(&outcome.kept).tokens
                         + estimate_tokens(&[Message::system(outcome.summary.clone())]).tokens;
                     if let Some(observer) = observer {
@@ -1892,7 +1889,7 @@ where
         fold_watermark: &mut Option<i64>,
         system_text: &str,
     ) -> bool {
-        if let Some(outcome) = self.completed_fold.lock().unwrap().take() {
+        if let Some(outcome) = self.completed_fold.lock().unwrap_or_else(|e| e.into_inner()).take() {
             debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
             let mut turn_messages = messages.split_off(*turn_user_idx);
             for msg in &mut turn_messages {

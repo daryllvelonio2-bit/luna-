@@ -301,8 +301,10 @@ pub(crate) async fn execute_slash_command(
                     ));
                 }
             } else {
-                ui.input_buf.lock().unwrap().clear();
-                ui.input_buf.lock().unwrap().push_str("/name ");
+                if let Ok(mut buf) = ui.input_buf.lock() {
+                    buf.clear();
+                    buf.push_str("/name ");
+                }
                 ui.redraw_input_line();
             }
             Ok(false)
