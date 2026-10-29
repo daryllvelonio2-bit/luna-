@@ -1088,28 +1088,24 @@ where
                 accumulated.total_tokens = accumulated
                     .prompt_tokens
                     .saturating_add(accumulated.completion_tokens);
-
-                let actual_tokens = if rebound {
-                    estimate_tokens(&messages).tokens
-                } else {
-                    usage.prompt_tokens.saturating_add(usage.completion_tokens)
-                };
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::ContextTokensUpdated {
-                        tokens_used: actual_tokens,
-                    });
-                }
-            } else if rebound {
-                let current_tokens = estimate_tokens(&messages).tokens;
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::ContextTokensUpdated {
-                        tokens_used: current_tokens,
-                    });
-                }
             }
 
-            if rebound {
+            let fold_active = rebound
+                || self.fold_in_flight.load(Ordering::SeqCst)
+                || self.completed_fold.lock().unwrap().is_some();
+
+            if fold_active {
                 response.usage = None;
+            }
+
+            let actual_tokens = match &response.usage {
+                Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                None => estimate_tokens(&messages).tokens,
+            };
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::ContextTokensUpdated {
+                    tokens_used: actual_tokens,
+                });
             }
 
             if let Some(ref r) = response.reasoning {
@@ -1920,7 +1916,10 @@ where
             let mut new_messages = Vec::with_capacity(past_kept.len() + 2 + turn_messages.len());
             new_messages.push(Message::system(system_text.to_string()));
             new_messages.push(Message::system(outcome.summary.clone()));
-            new_messages.extend(past_kept.iter().cloned());
+            for mut msg in past_kept.iter().cloned() {
+                msg.usage = None;
+                new_messages.push(msg);
+            }
             *turn_user_idx = new_messages.len();
             new_messages.extend(turn_messages);
             *messages = new_messages;

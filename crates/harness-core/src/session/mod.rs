@@ -136,7 +136,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<ReplayOutcome, HarnessError>;
 
     /// Write `summary` as a new summary row and mark `folded` rows `compacted_at`, in one
-    /// transaction. Returns the summary's row id.
+    /// transaction. Returns the summary's sequence number.
     async fn record_compaction(
         &self,
         session_id: &str,

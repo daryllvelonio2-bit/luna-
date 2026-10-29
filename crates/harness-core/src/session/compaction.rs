@@ -612,9 +612,14 @@ async fn compact_at_boundary(
         }
     };
 
+    let mut kept_messages: Vec<Message> = kept.iter().map(|stored| stored.message.clone()).collect();
+    for msg in &mut kept_messages {
+        msg.usage = None;
+    }
+
     Ok(Some(CompactionOutcome {
         summary,
-        kept: kept.iter().map(|stored| stored.message.clone()).collect(),
+        kept: kept_messages,
         folded_ids: folded.iter().map(|stored| stored.id).collect(),
         folded_turns: folded
             .iter()

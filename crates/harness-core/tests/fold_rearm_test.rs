@@ -307,6 +307,13 @@ impl ModelProvider for ToolLoopUsageProvider {
         _options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n > 0 {
+            let input_tokens = estimate_tokens(messages).tokens;
+            assert!(
+                input_tokens < 50_000,
+                "round {n} prompt must be rebound to compacted messages (<50k), got {input_tokens}"
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut message = Message::assistant("ok");
         let prompt_tokens = if n == 0 {
@@ -352,10 +359,13 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
             )
             .await
             .unwrap();
-        store
-            .append("s1", &Message::assistant("short answer"), false)
-            .await
-            .unwrap();
+        let mut asst = Message::assistant("short answer");
+        asst.usage = Some(TokenUsage {
+            prompt_tokens: 120_000,
+            completion_tokens: 10,
+            total_tokens: 120_010,
+        });
+        store.append("s1", &asst, false).await.unwrap();
     }
 
     let main = Arc::new(ToolLoopUsageProvider {

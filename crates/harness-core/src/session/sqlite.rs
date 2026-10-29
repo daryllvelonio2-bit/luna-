@@ -771,7 +771,7 @@ impl SessionStore for SqliteSessionStore {
                 params![session_id, seq, summary, timestamp],
             )
             .map_err(|error| session_error("failed to write the summary row", error))?;
-        let summary_id = transaction.last_insert_rowid();
+        let _summary_id = transaction.last_insert_rowid();
 
         if !folded.is_empty() {
             let placeholders = vec!["?"; folded.len()].join(",");
@@ -797,11 +797,12 @@ impl SessionStore for SqliteSessionStore {
             .map_err(|error| session_error("failed to commit the compaction", error))?;
 
         debug!(
-            "Recorded a summary for session '{}' folding {} messages",
+            "Recorded a summary for session '{}' folding {} messages (seq {})",
             session_id,
-            folded.len()
+            folded.len(),
+            seq
         );
-        Ok(summary_id)
+        Ok(seq)
     }
 
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError> {
