@@ -101,3 +101,17 @@ fn the_free_token_is_the_only_credential_on_a_machine_without_an_account() {
         "the fallback is never the priority key"
     );
 }
+
+#[test]
+fn the_local_opencode_cli_is_detected_as_priority() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_path = home.path().join(".opencode/bin/opencode");
+    std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
+    std::fs::write(&bin_path, b"#!/bin/sh\nexit 0\n").unwrap();
+
+    let detected = detect_opencode_credentials_in(home.path(), None).unwrap();
+
+    let cli = find(&detected, "opencode", "opencode-cli").expect("the local CLI is found");
+    assert_eq!(cli.api_key, "cli");
+    assert!(cli.is_priority, "the local CLI should be priority");
+}

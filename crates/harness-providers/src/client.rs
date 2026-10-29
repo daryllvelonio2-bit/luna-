@@ -940,6 +940,39 @@ impl ModelProvider for GenericProviderClient {
             return res;
         }
 
+        if self.provider_id.starts_with("opencode") {
+            let auth_res = self.build_auth_headers().await;
+            match auth_res {
+                Ok((_, _, secret)) => {
+                    let api_key = secret.expose_secret().trim();
+                    if api_key == "cli" || api_key == "public" || api_key.is_empty() {
+                        if let Some(bin) = crate::opencode::find_opencode_binary() {
+                            return crate::opencode::stream_opencode_cli_completion(
+                                &bin,
+                                &model,
+                                messages,
+                                tools,
+                                options,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    if let Some(bin) = crate::opencode::find_opencode_binary() {
+                        return crate::opencode::stream_opencode_cli_completion(
+                            &bin,
+                            &model,
+                            messages,
+                            tools,
+                            options,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+
         let mut body = json!({
             "model": model,
             "messages": self.serialize_messages(messages, model.as_str()),
@@ -1003,6 +1036,25 @@ impl ModelProvider for GenericProviderClient {
             }
 
             let status = resp.status();
+            if (status.as_u16() == 429 || status.as_u16() == 401 || status.as_u16() == 403)
+                && self.provider_id.starts_with("opencode")
+            {
+                if let Some(bin) = crate::opencode::find_opencode_binary() {
+                    warn!(
+                        provider = %self.provider_id,
+                        status = %status,
+                        "OpenCode HTTP request failed; falling back to local opencode CLI"
+                    );
+                    return crate::opencode::stream_opencode_cli_completion(
+                        &bin,
+                        &model,
+                        messages,
+                        tools,
+                        options,
+                    )
+                    .await;
+                }
+            }
             if status.as_u16() == 429 {
                 let retry_after = retry_after_secs(&resp);
                 if self

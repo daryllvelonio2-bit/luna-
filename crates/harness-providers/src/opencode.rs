@@ -1,4 +1,6 @@
+use harness_core::types::{CompletionOptions, Message, Role, StreamEvent, TokenUsage, ToolDefinition};
 use harness_core::HarnessError;
+use futures_util::stream::BoxStream;
 use rand::Rng;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -161,6 +163,36 @@ pub fn ensure_compat_tools(body: &mut serde_json::Value) {
     body["tools"] = serde_json::Value::Array(tools_list);
 }
 
+pub fn find_opencode_binary_in(home: &Path) -> Option<PathBuf> {
+    let candidates = [
+        home.join(".opencode").join("bin").join("opencode"),
+        home.join(".local").join("bin").join("opencode"),
+        home.join(".npm-global").join("bin").join("opencode"),
+    ];
+    for c in candidates {
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+pub fn find_opencode_binary() -> Option<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    if let Some(bin) = find_opencode_binary_in(Path::new(&home)) {
+        return Some(bin);
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("opencode");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, HarnessError> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let xdg = std::env::var("XDG_DATA_HOME").ok();
@@ -175,10 +207,19 @@ pub fn detect_opencode_credentials_in(
 ) -> Result<Vec<DetectedOpencodeCredential>, HarnessError> {
     let mut detected = Vec::new();
 
-    // 1. OpenCode's own account key. OpenCode stores one entry per provider the user logged
-    //    into, and the entry for its own Zen service is the credential Luna must send to
-    //    opencode.ai. This file used to be read for Groq only, so a logged-in OpenCode account
-    //    was invisible to Luna and every request went out anonymously on the metered free tier.
+    // 0. Local OpenCode CLI binary
+    let has_binary = find_opencode_binary_in(home).is_some()
+        || (home == Path::new(&std::env::var("HOME").unwrap_or_default()) && find_opencode_binary().is_some());
+    if has_binary {
+        detected.push(DetectedOpencodeCredential {
+            provider: "opencode".to_string(),
+            label: "opencode-cli".to_string(),
+            api_key: "cli".to_string(),
+            is_priority: true,
+        });
+    }
+
+    // 1. OpenCode's own account key and provider keys from auth.json
     for path in opencode_auth_paths(home, xdg_data_home) {
         let Some(val) = read_json_file(&path) else {
             continue;
@@ -213,6 +254,23 @@ pub fn detect_opencode_credentials_in(
                 });
             }
         }
+        if let Some(obj) = val.as_object() {
+            for (prov, entry) in obj {
+                if prov == "opencode" || prov == "groq" {
+                    continue;
+                }
+                if let Some(key) = entry.get("key").and_then(|k| k.as_str()) {
+                    if !key.trim().is_empty() {
+                        detected.push(DetectedOpencodeCredential {
+                            provider: prov.clone(),
+                            label: format!("opencode-{}", prov),
+                            api_key: key.to_string(),
+                            is_priority: true,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // 2. ~/.shiina/auth.json (opencode-zen token)
@@ -238,7 +296,7 @@ pub fn detect_opencode_credentials_in(
                             provider: "opencode".to_string(),
                             label: label.to_string(),
                             api_key: tok.to_string(),
-                            is_priority: true,
+                            is_priority: !has_binary,
                         });
                     }
                 }
@@ -246,9 +304,7 @@ pub fn detect_opencode_credentials_in(
         }
     }
 
-    // 3. OpenCode Zen free tier: keyless access via the 'public' token. Registered last and
-    //    never as the priority key, so it is the fallback for a machine with no account rather
-    //    than the credential that shadows the account the user actually has.
+    // 3. OpenCode Zen free tier: keyless access via the 'public' token.
     detected.push(DetectedOpencodeCredential {
         provider: "opencode".to_string(),
         label: "opencode-free".to_string(),
@@ -272,8 +328,173 @@ pub const OPENCODE_FREE_MODELS: &[&str] = &[
     "longcat-2.5-preview-free",
 ];
 
+pub async fn stream_opencode_cli_completion(
+    bin: &Path,
+    model: &str,
+    messages: &[Message],
+    _tools: &[ToolDefinition],
+    _options: &CompletionOptions,
+) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+    let mut model_arg = model.to_string();
+    if model_arg.is_empty() {
+        model_arg = "opencode/mimo-v2.6-flash-free".to_string();
+    } else if !model_arg.contains('/') {
+        model_arg = format!("opencode/{}", model_arg);
+    }
+
+    let mut prompt_parts = Vec::new();
+    for msg in messages {
+        let content = msg.content.as_deref().unwrap_or("").trim();
+        if content.is_empty() && msg.tool_calls.is_empty() && msg.tool_result.is_none() {
+            continue;
+        }
+        match msg.role {
+            Role::System => {
+                if !content.is_empty() {
+                    prompt_parts.push(format!("[System Instruction]\n{}", content));
+                }
+            }
+            Role::User => {
+                if !content.is_empty() {
+                    prompt_parts.push(format!("[User]\n{}", content));
+                }
+            }
+            Role::Assistant => {
+                let mut text = content.to_string();
+                for call in &msg.tool_calls {
+                    text.push_str(&format!("\n[Tool Call: {} args: {}]", call.name, call.arguments));
+                }
+                prompt_parts.push(format!("[Assistant]\n{}", text.trim()));
+            }
+            Role::Tool => {
+                let res = msg.tool_result.as_ref().map(|r| r.content.as_str()).unwrap_or(content);
+                prompt_parts.push(format!("[Tool Result]\n{}", res.trim()));
+            }
+        }
+    }
+    let mut prompt = prompt_parts.join("\n\n");
+    if prompt.is_empty() {
+        prompt = "Hello".to_string();
+    }
+
+    let mut child = tokio::process::Command::new(bin)
+        .args(["run", "--format", "json", "--pure", "--thinking", "-m", &model_arg])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| HarnessError::ProviderError {
+            provider: "opencode".to_string(),
+            message: format!("Failed to spawn opencode CLI: {}", e),
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        });
+    }
+
+    let stdout = child.stdout.take().ok_or_else(|| HarnessError::ProviderError {
+        provider: "opencode".to_string(),
+        message: "Failed to capture opencode stdout".to_string(),
+    })?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, HarnessError>>(100);
+
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let reader = tokio::io::BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut completed_usage = None;
+        let mut finish_reason = None;
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+            if line.is_empty() || !line.starts_with('{') {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                let ev_type = val.get("type").and_then(|t| t.as_str());
+                let part = val.get("part");
+
+                if ev_type == Some("text") {
+                    if let Some(text) = part.and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            let _ = tx.send(Ok(StreamEvent::ContentDelta(text.to_string()))).await;
+                        }
+                    }
+                } else if ev_type == Some("reasoning") {
+                    if let Some(text) = part.and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            let _ = tx.send(Ok(StreamEvent::ReasoningDelta(text.to_string()))).await;
+                        }
+                    }
+                } else if ev_type == Some("step_finish") {
+                    if let Some(p) = part {
+                        finish_reason = p.get("reason").and_then(|r| r.as_str()).map(|s| s.to_string());
+                        if let Some(tokens) = p.get("tokens") {
+                            let inp = tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let out = tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let total = tokens.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            completed_usage = Some(TokenUsage {
+                                prompt_tokens: inp,
+                                completion_tokens: out,
+                                total_tokens: if total > 0 { total } else { inp + out },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = child.wait().await;
+
+        let _ = tx
+            .send(Ok(StreamEvent::Completed {
+                finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
+                usage: completed_usage,
+            }))
+            .await;
+    });
+
+    let rx_stream = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx));
+    Ok(futures_util::StreamExt::boxed(rx_stream))
+}
+
 pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
-    // 1. Try running `opencode api GET /api/model`
+    // 1. Try running `opencode models`
+    if let Some(bin) = find_opencode_binary() {
+        if let Ok(output) = tokio::process::Command::new(bin)
+            .args(["models"])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut list = Vec::new();
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if let Some(id) = line.strip_prefix("opencode/") {
+                        if !list.contains(&id.to_string()) {
+                            list.push(id.to_string());
+                        }
+                    } else if !line.is_empty() && !line.contains('/') {
+                        if !list.contains(&line.to_string()) {
+                            list.push(line.to_string());
+                        }
+                    }
+                }
+                if !list.is_empty() {
+                    list.sort();
+                    return Ok(list);
+                }
+            }
+        }
+    }
+
+    // 2. Try running `opencode api GET /api/model`
     if let Ok(output) = tokio::process::Command::new("opencode")
         .args(["api", "GET", "/api/model"])
         .output()
