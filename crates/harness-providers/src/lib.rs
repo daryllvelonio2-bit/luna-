@@ -24,6 +24,6 @@ pub use client::{build_http_client, GenericProviderClient};
 pub use discovery::{ModelDiscovery, ModelListing};
 pub use opencode::{
     detect_opencode_credentials, detect_opencode_credentials_in, ensure_compat_tools,
-    find_opencode_binary, get_or_create_opencode_session_id, new_opencode_session_id,
-    stream_opencode_cli_completion, DetectedOpencodeCredential,
+    get_or_create_opencode_session_id, new_opencode_request_id, new_opencode_session_id,
+    DetectedOpencodeCredential,
 };
