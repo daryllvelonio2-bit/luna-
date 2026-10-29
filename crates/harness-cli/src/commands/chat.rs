@@ -49,7 +49,8 @@ use commands::{
 };
 use keys::AppKey;
 use render::{
-    compaction_report, format_approval_verdict, format_patch_diff, format_tool_call,
+    compaction_report, format_approval_verdict, format_delegate_duration,
+    format_delegate_notification, format_delegate_title, format_patch_diff, format_tool_call,
     format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
     OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
@@ -527,28 +528,76 @@ pub async fn run_interactive_chat(
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     delegate_tool.set_steer_handle(steer_handle.clone());
+    let delegate_trackers: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let trackers_events = delegate_trackers.clone();
     let ui_delegate_events = ui.clone();
     delegate_tool.set_event_notifier(Arc::new(move |event| {
         use harness_core::tools::delegate::{SubagentActivity, SubagentTaskEvent};
         match event {
             SubagentTaskEvent::Started { id, goal } => {
+                let title = format_delegate_title(&goal);
+                trackers_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), (std::time::Instant::now(), "starting".to_string()));
+                let notice = format_delegate_notification(&"🤖".cyan().bold().to_string(), &title, "starting", "0s");
+                ui_delegate_events.emit_above(&notice);
                 ui_delegate_events.start_delegate_task(&id, &goal);
             }
-            SubagentTaskEvent::Progress { id, activity, .. } => {
-                let label = match activity {
+            SubagentTaskEvent::Progress { id, goal, activity } => {
+                let title = format_delegate_title(&goal);
+                let (time_str, should_notify, tool_desc) = {
+                    let mut trackers = trackers_events.lock().unwrap_or_else(|e| e.into_inner());
+                    let entry = trackers
+                        .entry(id.clone())
+                        .or_insert_with(|| (std::time::Instant::now(), "starting".to_string()));
+                    let time_str = format_delegate_duration(entry.0.elapsed());
+                    match &activity {
+                        SubagentActivity::ToolStarted { name } => {
+                            entry.1 = name.clone();
+                            (time_str, true, name.clone())
+                        }
+                        SubagentActivity::ToolFinished { name, is_error } if *is_error => {
+                            let desc = format!("{} (failed)", name);
+                            entry.1 = desc.clone();
+                            (time_str, true, desc)
+                        }
+                        SubagentActivity::ToolFinished { name, .. } => {
+                            entry.1 = name.clone();
+                            (time_str, false, name.clone())
+                        }
+                        SubagentActivity::ModelStreaming => {
+                            (time_str, false, "streaming".to_string())
+                        }
+                    }
+                };
+
+                let label = match &activity {
                     SubagentActivity::ModelStreaming => "streaming".to_string(),
                     SubagentActivity::ToolStarted { name } => format!("{} running", name),
                     SubagentActivity::ToolFinished { name, is_error } => {
-                        format!("{} {}", name, if is_error { "failed" } else { "done" })
+                        format!("{} {}", name, if *is_error { "failed" } else { "done" })
                     }
                 };
                 ui_delegate_events.update_delegate_task(&id, &label);
+
+                if should_notify {
+                    let notice = format_delegate_notification(
+                        &"🤖".cyan().bold().to_string(),
+                        &title,
+                        &tool_desc,
+                        &time_str,
+                    );
+                    ui_delegate_events.emit_above(&notice);
+                }
             }
             SubagentTaskEvent::Finished { record } => {
                 ui_delegate_events.finish_delegate_task(&record.id);
             }
         }
     }));
+    let trackers_finish = delegate_trackers.clone();
     let ui_delegate = ui.clone();
     let store_delegate = store.clone();
     let session_id_delegate = session_id.clone();
@@ -564,17 +613,24 @@ pub async fn run_interactive_chat(
             harness_core::tools::delegate::SubagentStatus::Failed { error, .. } => error.clone(),
             _ => "finished".to_string(),
         };
-        let notice = format!(
-            "{} Subagent task [{}] finished: {}",
-            if is_ok {
-                "✔".green().bold()
-            } else {
-                "✖".red().bold()
-            },
-            record.id.cyan(),
-            summary
-        );
+        let (started_at, _last_tool) = trackers_finish
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&record.id)
+            .unwrap_or_else(|| (std::time::Instant::now(), "done".to_string()));
+        let total_time = format_delegate_duration(started_at.elapsed());
+        let title = format_delegate_title(&record.goal);
+        let glyph = if is_ok {
+            "✔".green().bold().to_string()
+        } else {
+            "✖".red().bold().to_string()
+        };
+        let status = if is_ok { "finished" } else { "failed" };
+        let notice = format_delegate_notification(&glyph, &title, status, &total_time);
         ui_delegate.emit_above(&notice);
+        if !summary.is_empty() && summary != "completed" {
+            ui_delegate.emit_above(&format!("   {}", summary.dimmed()));
+        }
         let s_id = session_id_delegate.clone();
         let s_store = store_delegate.clone();
         tokio::spawn(async move {

@@ -750,3 +750,13 @@ fn finishing_a_thought_block_hands_it_to_the_transcript() {
 fn strip(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
 }
+
+#[test]
+fn delegate_task_notification_format_contains_title_tool_and_running_time() {
+    let title = crate::commands::chat::render::format_delegate_title("Extract all role credentials");
+    let dur = crate::commands::chat::render::format_delegate_duration(std::time::Duration::from_secs(14));
+    let notification = crate::commands::chat::render::format_delegate_notification("🤖", &title, "read_file", &dur);
+    assert!(notification.contains("delegate:"), "{notification}");
+    assert!(notification.contains("Extract all role credentials"), "{notification}");
+    assert!(notification.contains("> read_file (14s)"), "{notification}");
+}
