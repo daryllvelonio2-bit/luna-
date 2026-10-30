@@ -13,8 +13,8 @@ use crate::catalog::{resolve_descriptor, AuthHeaderFormat};
 use crate::discovery::ModelDiscovery;
 use crate::thought_signature;
 use harness_core::{
-    config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelProvider,
-    ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
+    config::ProviderOverride, CompletionOptions, HarnessError, Message, ModelCapabilities,
+    ModelProvider, ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
 
 /// Extract the stream events carried by one OpenAI-compatible SSE chunk. A single chunk can
@@ -336,6 +336,10 @@ impl GenericProviderClient {
     /// non-Google provider is unaffected — it neither sends a signature nor is sent one.
     fn serialize_messages(&self, messages: &[Message], model: &str) -> serde_json::Value {
         let enforce_signatures = thought_signature::model_enforces_thought_signature(model);
+        // Vision is a property of the model, so the serializer is told once per request whether
+        // pasted images may become content parts.
+        let vision = crate::capability::resolve(&self.provider_id, model).vision;
+        let mut dropped_images = false;
         let mut list = Vec::new();
         for m in messages {
             let role_str = match m.role {
@@ -350,7 +354,10 @@ impl GenericProviderClient {
             });
 
             if let Some(ref text) = m.content {
-                msg_obj["content"] = serialize_content_with_images(role_str, text);
+                if !vision && carries_attached_image(role_str, text) {
+                    dropped_images = true;
+                }
+                msg_obj["content"] = serialize_content_with_images(role_str, text, vision);
             } else if m.role == Role::Assistant {
                 msg_obj["content"] = serde_json::Value::Null;
             }
@@ -391,6 +398,15 @@ impl GenericProviderClient {
             }
 
             list.push(msg_obj);
+        }
+        if dropped_images {
+            // Once per request, not once per replayed message: a session that pasted a screenshot
+            // an hour ago still carries it, and the log should say so once.
+            warn!(
+                provider = %self.provider_id,
+                model = %model,
+                "dropped pasted image(s): this model has no vision capability, so the pixels cannot be sent (the model is told an image was omitted)"
+            );
         }
         json!(list)
     }
@@ -1153,6 +1169,14 @@ impl ModelProvider for GenericProviderClient {
 
         Ok(embeddings)
     }
+
+    /// What this client's resolved model can be asked to do. The model is the one every call will
+    /// use unless `CompletionOptions::model` overrides it, so the answer is about `default_model`
+    /// — the same model the request body names (`catalog` + `capability` are the two halves of
+    /// "what is this model": its window and its kind).
+    fn capabilities(&self) -> ModelCapabilities {
+        crate::capability::resolve(&self.provider_id, &self.default_model)
+    }
 }
 
 /// Serialize one message's text into a provider `content` value. A message that carries pasted
@@ -1160,10 +1184,15 @@ impl ModelProvider for GenericProviderClient {
 /// `[{"type":"text",...},{"type":"image_url",...}]` — so vision-capable providers receive the
 /// image. Plain text stays a bare string, which every provider accepts and which keeps the
 /// common path byte-identical to what it was before images existed.
-fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
+///
+/// `vision` is the resolved capability of the model this request names. A model without it is
+/// sent a one-line note where the image was, instead of a URL it cannot decode: the pixels are
+/// dropped either way, but the model is told *why* it is being asked about an image it cannot
+/// see, so it answers "I cannot see that image" instead of inventing a description.
+fn serialize_content_with_images(role: &str, text: &str, vision: bool) -> serde_json::Value {
     // Only user turns carry pasted images; a data URL inside a system/assistant/tool string is
     // prose about an image, not an attachment, and must not be lifted into a content part.
-    if role != "user" || !text.contains("data:image/") {
+    if !carries_attached_image(role, text) {
         return json!(text);
     }
 
@@ -1189,10 +1218,14 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
             if !flushed.is_empty() {
                 parts.push(json!({ "type": "text", "text": flushed }));
             }
-            parts.push(json!({
-                "type": "image_url",
-                "image_url": { "url": url }
-            }));
+            if vision {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": url }
+                }));
+            } else {
+                parts.push(json!({ "type": "text", "text": IMAGE_OMITTED_NOTE }));
+            }
             rest = after;
         }
         prose.push_str(rest);
@@ -1203,11 +1236,25 @@ fn serialize_content_with_images(role: &str, text: &str) -> serde_json::Value {
         parts.push(json!({ "type": "text", "text": tail }));
     }
 
-    if !parts.iter().any(|p| p["type"] == "image_url") {
+    if !parts
+        .iter()
+        .any(|p| p["type"] == "image_url" || p["text"] == IMAGE_OMITTED_NOTE)
+    {
         return json!(text);
     }
 
     json!(parts)
+}
+
+/// What a model without vision is told where the image was. Deliberately explicit about the
+/// cause: a bare "[image]" invites the model to guess at the pixels.
+pub const IMAGE_OMITTED_NOTE: &str =
+    "[image omitted: this model does not accept image input, so the image could not be sent]";
+
+/// Whether this message carries a pasted image the serializer would lift into a content part.
+/// One predicate, used both to lift and to report the drop, so the two cannot drift apart.
+fn carries_attached_image(role: &str, text: &str) -> bool {
+    role == "user" && text.contains("data:image/")
 }
 
 /// The byte offset of a `data:image/...;base64,...` token's start in `s`, if one occurs there.
@@ -1307,6 +1354,7 @@ mod tests {
         let content = serialize_content_with_images(
             "user",
             "what is in this image data:image/png;base64,iVBORw0KGgo exactly",
+            true,
         );
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
@@ -1322,8 +1370,11 @@ mod tests {
     /// The clipboard path appends the URL as its own line; that shape must keep working.
     #[test]
     fn a_line_starting_with_a_data_url_is_lifted() {
-        let content =
-            serialize_content_with_images("user", "describe it\n\ndata:image/jpeg;base64,QUJD");
+        let content = serialize_content_with_images(
+            "user",
+            "describe it\n\ndata:image/jpeg;base64,QUJD",
+            true,
+        );
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["text", "image_url"]);
@@ -1337,6 +1388,7 @@ mod tests {
         let content = serialize_content_with_images(
             "user",
             "two shots data:image/png;base64,AAAA and data:image/jpeg;base64,BBBB done",
+            true,
         );
         let parts = content.as_array().expect("multimodal array");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
@@ -1353,15 +1405,73 @@ mod tests {
 
     #[test]
     fn a_data_url_mention_in_system_role_stays_plain_text() {
-        let content =
-            serialize_content_with_images("system", "sent data:image/png;base64,QUJD once");
+        let content = serialize_content_with_images(
+            "system",
+            "sent data:image/png;base64,QUJD once",
+            true,
+        );
         assert!(content.is_string(), "system turns are never multimodal");
     }
 
     #[test]
     fn prose_without_base64_marker_is_not_lifted() {
-        let content = serialize_content_with_images("user", "the spec data:image/png draft");
+        let content = serialize_content_with_images("user", "the spec data:image/png draft", true);
         assert!(content.is_string());
+    }
+
+    /// A model without vision is told the image was omitted instead of being handed a base64 URL
+    /// it cannot decode — the pixels are dropped either way, and the model must know why.
+    #[test]
+    fn a_model_without_vision_is_told_the_image_was_omitted() {
+        let content = serialize_content_with_images(
+            "user",
+            "what is this\ndata:image/png;base64,AAAA",
+            false,
+        );
+        let parts = content.as_array().expect("the note replaces the image part");
+        let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["text", "text"]);
+        assert_eq!(parts[0]["text"], "what is this");
+        assert_eq!(parts[1]["text"], IMAGE_OMITTED_NOTE);
+        assert!(
+            !content.to_string().contains("base64"),
+            "no image bytes reach a model that cannot read them"
+        );
+    }
+
+    /// The same rule one level up: the request body built for a text-only model carries prose and
+    /// the omission note, and no `image_url` part at all.
+    #[test]
+    fn a_text_only_model_request_carries_no_image_part() {
+        let client = client_for("deepseek", "https://api.deepseek.com/v1");
+        let body = client.serialize_messages(
+            &[Message::user("look at this\ndata:image/png;base64,AAAA")],
+            "deepseek-chat",
+        );
+        let text = body.to_string();
+        assert!(!text.contains("image_url"), "no image part for a text model");
+        assert!(text.contains(IMAGE_OMITTED_NOTE));
+    }
+
+    #[test]
+    fn a_vision_model_request_still_carries_the_image_part() {
+        let client = client_for("openai", "https://api.openai.com/v1");
+        let body = client.serialize_messages(
+            &[Message::user("look at this\ndata:image/png;base64,AAAA")],
+            "gpt-4o",
+        );
+        assert!(body.to_string().contains("image_url"));
+    }
+
+    #[test]
+    fn the_client_reports_the_capabilities_of_its_resolved_model() {
+        let mut client = client_for("openai", "https://api.openai.com/v1");
+        client.default_model = "gpt-4o".to_string();
+        let caps = client.capabilities();
+        assert!(caps.vision && caps.tool_use);
+
+        client.default_model = "meta/llama-guard-4-12b".to_string();
+        assert!(!client.capabilities().tool_use);
     }
 
     #[test]

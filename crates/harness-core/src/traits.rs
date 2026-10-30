@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::ToolPreview;
+use crate::capability::ModelCapabilities;
 use crate::error::HarnessError;
 use crate::types::*;
 
@@ -43,6 +44,16 @@ pub trait ModelProvider: Send + Sync {
 
     /// Vector embeddings for memory indexing
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError>;
+
+    /// What this provider's resolved model can be asked to do.
+    ///
+    /// Defaulted to [`ModelCapabilities::default`] so an implementor that has nothing to say gets
+    /// the documented conservative answer instead of a compile error. The turn loop reads
+    /// `tool_use` before it sends the tool list; the provider client reads `vision` before it
+    /// lifts pasted images into content parts.
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
 }
 
 #[async_trait]
@@ -71,6 +82,9 @@ impl ModelProvider for Arc<dyn ModelProvider> {
     }
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
         (**self).embed(texts).await
+    }
+    fn capabilities(&self) -> ModelCapabilities {
+        (**self).capabilities()
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod approval;
+pub mod capability;
 pub mod checkpoint;
 pub mod config;
 pub mod error;
@@ -25,6 +26,7 @@ pub use approval::{
     unified_diff, AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings,
     Approver, DenyAll, FnApprover, NonInteractive, ToolPreview, DEFAULT_APPROVAL_TIMEOUT_SECS,
 };
+pub use capability::ModelCapabilities;
 pub use checkpoint::{
     Checkpoint, CheckpointController, CheckpointMiddleware, CheckpointStore, RestoreReport,
     TurnSnapshot, DEFAULT_KEEP_TURNS,

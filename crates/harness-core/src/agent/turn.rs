@@ -103,7 +103,22 @@ where
         // total, so every reported usage is folded in here rather than kept per call.
         let turn_started = std::time::Instant::now();
         let mut turn_usage: Option<TokenUsage> = None;
-        let tools = self.registry.list_tools().await?;
+        // A model that cannot call tools is not sent their schemas: every provider that accepts a
+        // `tools` array for a model without tool use charges for the tokens, and some reject the
+        // request outright. The capability is resolved from the provider's own model, so this is
+        // the model the loop is about to ask.
+        let capabilities = self.provider.capabilities();
+        let mut tools = self.registry.list_tools().await?;
+        if !capabilities.tool_use {
+            if !tools.is_empty() {
+                warn!(
+                    provider = %self.provider.provider_id(),
+                    withheld_tools = tools.len(),
+                    "model has no tool-use capability: sending the turn without tool definitions"
+                );
+            }
+            tools.clear();
+        }
 
         debug!("Starting agent task loop for query: '{}'", user_input);
 

@@ -1,5 +1,6 @@
 pub mod antigravity;
 pub mod auth;
+pub mod capability;
 pub mod catalog;
 pub mod client;
 pub mod discovery;
@@ -15,6 +16,7 @@ pub use antigravity::{
     AntigravityQuotaBucket, AntigravityQuotaGroup, AntigravityQuotaSummary,
 };
 pub use auth::{CredentialEntry, CredentialManager, RotationStrategy};
+pub use capability::{resolve as resolve_capabilities, resolve_default as resolve_default_capabilities};
 pub use catalog::{
     find_provider, get_context_window, get_default_model, get_provider_catalog, known_provider_ids,
     resolve_context_window, resolve_descriptor, AuthHeaderFormat, ProviderDescriptor,
