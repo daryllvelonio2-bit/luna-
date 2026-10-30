@@ -536,42 +536,35 @@ pub async fn run_interactive_chat(
         use harness_core::tools::delegate::{SubagentActivity, SubagentTaskEvent};
         match event {
             SubagentTaskEvent::Started { id, goal } => {
-                let title = format_delegate_title(&goal);
+                // The live row is the notification: `start_delegate_task` draws it above the
+                // composer the moment the child starts, and every event after this one repaints
+                // that same row. Printing a line here as well put the child's state on screen
+                // twice from the first instant.
                 trackers_events
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(id.clone(), (std::time::Instant::now(), "starting".to_string()));
-                let notice = format_delegate_notification(&"🤖".cyan().bold().to_string(), &title, "starting", "0s");
-                ui_delegate_events.emit_above(&notice);
                 ui_delegate_events.start_delegate_task(&id, &goal);
             }
-            SubagentTaskEvent::Progress { id, goal, activity } => {
-                let title = format_delegate_title(&goal);
-                let (time_str, should_notify, tool_desc) = {
+            SubagentTaskEvent::Progress { id, activity, .. } => {
+                // Progress belongs to the live row and nowhere else. A transcript line per tool
+                // event stacked one copy of the same notification per event — a long child buried
+                // the conversation under its own progress. `update_delegate_task` repaints the
+                // single running row in place instead, which is what the row is for.
+                {
                     let mut trackers = trackers_events.lock().unwrap_or_else(|e| e.into_inner());
                     let entry = trackers
                         .entry(id.clone())
                         .or_insert_with(|| (std::time::Instant::now(), "starting".to_string()));
-                    let time_str = format_delegate_duration(entry.0.elapsed());
-                    match &activity {
-                        SubagentActivity::ToolStarted { name } => {
-                            entry.1 = name.clone();
-                            (time_str, true, name.clone())
-                        }
+                    entry.1 = match &activity {
+                        SubagentActivity::ToolStarted { name } => name.clone(),
                         SubagentActivity::ToolFinished { name, is_error } if *is_error => {
-                            let desc = format!("{} (failed)", name);
-                            entry.1 = desc.clone();
-                            (time_str, true, desc)
+                            format!("{} (failed)", name)
                         }
-                        SubagentActivity::ToolFinished { name, .. } => {
-                            entry.1 = name.clone();
-                            (time_str, false, name.clone())
-                        }
-                        SubagentActivity::ModelStreaming => {
-                            (time_str, false, "streaming".to_string())
-                        }
-                    }
-                };
+                        SubagentActivity::ToolFinished { name, .. } => name.clone(),
+                        SubagentActivity::ModelStreaming => "streaming".to_string(),
+                    };
+                }
 
                 let label = match &activity {
                     SubagentActivity::ModelStreaming => "streaming".to_string(),
@@ -581,16 +574,6 @@ pub async fn run_interactive_chat(
                     }
                 };
                 ui_delegate_events.update_delegate_task(&id, &label);
-
-                if should_notify {
-                    let notice = format_delegate_notification(
-                        &"🤖".cyan().bold().to_string(),
-                        &title,
-                        &tool_desc,
-                        &time_str,
-                    );
-                    ui_delegate_events.emit_above(&notice);
-                }
             }
             SubagentTaskEvent::Finished { record } => {
                 ui_delegate_events.finish_delegate_task(&record.id);

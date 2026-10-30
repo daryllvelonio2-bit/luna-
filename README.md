@@ -249,8 +249,11 @@ cannot be enforced. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
 `delegate_task` can run isolated child agents in the background. The chat composer keeps a live
 row for every running child, showing its task id, goal, and current model/tool activity; the row
-is removed when the child finishes. A child fails only after **120 seconds with no model or tool
-activity**. Every streamed response and every tool event resets that inactivity timer, so a long
+is removed when the child finishes. Progress repaints that one row in place — a child's tool
+calls never append a line each to the transcript — so a long delegation leaves the conversation
+readable, and one verdict line is printed when the child ends. A child fails only after **120
+seconds with no model or tool activity**. Every streamed response and every tool event resets
+that inactivity timer, so a long
 task is not killed merely because it ran for a long time. `delegate_task(action: "wait")` waits
 for up to **5 minutes** by default and leaves the child running in the background if that wait
 window expires.
