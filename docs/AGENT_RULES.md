@@ -21,14 +21,14 @@ assigned by the dispatcher; you never pick your own lane.
   symbol that does not exist anywhere in your tree, usually in a file your card never touched. That
   is contamination, not your bug — `cargo clean -p <crate>` (or `touch` the file) and rebuild,
   and say so in the handoff instead of "fixing" it. The same mechanism can silently build stale code.
-  Measured on this fleet: `docs/ROADMAP.md` §0, blocker B1.
+  Measured on this fleet (2026-10-15): a shared target dir handed one worktree's artifacts to another.
 - The first build in a fresh worktree is **cold, and it is the slowest thing you will do**: budget
   tens of minutes, not minutes. Measured on this box while other workers compile: 16+ minutes for a
   release build alone, and a fresh-clone full test build was still compiling at 55 minutes. There is
   no per-tree cache to reuse — `~/.cargo` (dependency *sources* and the registry cache) is shared, but
   `target/` is not. Start the build early in your card, and prefer `cargo build -p <crate>` for the
   inner loop over a workspace-wide build.
-  Measured on this fleet: `docs/ROADMAP.md` §0, blocker B1.
+  Measured on this fleet (2026-10-15): a shared target dir handed one worktree's artifacts to another.
 - **Builds are limited to two parallel jobs each** (`CARGO_BUILD_JOBS=2`). This machine is 7.6 GB with
   an 8-core CPU and up to five workers; unbounded rustc parallelism (`zbus`, `rustls`, `reqwest` at
   ~500 MB each) pushed the box into swap and made the dispatcher refuse to spawn anyone. Do not raise
