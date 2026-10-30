@@ -724,6 +724,63 @@ async fn the_registry_registers_every_default_tool() {
     }
 }
 
+/// `tools.network: deny` says this machine does not talk to the network. The seccomp filter behind
+/// it confines a `terminal` child, not the harness process, so the web tools are withdrawn rather
+/// than left to bypass the very boundary that setting draws.
+#[tokio::test]
+async fn denying_the_network_and_disabling_web_access_both_withhold_the_web_tools() {
+    let mut config = Config::default();
+    let dir = tempdir().unwrap();
+    config.paths.workspace_root = dir.path().to_path_buf();
+    config.tools.network = harness_core::tools::netguard::NetworkPolicy::Deny;
+
+    let registry: Arc<dyn ToolRegistry> = Arc::new(DefaultToolRegistry::new());
+    register_core_tools(
+        &registry,
+        &config,
+        ReadCache::new(),
+        TodoScope::new(dir.path().join("todos"), "test"),
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = registry
+        .list_tools()
+        .await
+        .unwrap()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+
+    assert!(!names.contains(&"web_search".to_string()), "{names:?}");
+    assert!(!names.contains(&"web_fetch".to_string()), "{names:?}");
+    // Only the sockets are bounded: the filesystem and shell surface is untouched.
+    assert!(names.contains(&"terminal".to_string()), "{names:?}");
+    assert!(names.contains(&"read_file".to_string()), "{names:?}");
+
+    // `tools.web.enabled: false` is the same absence for a user who wants no web access at all,
+    // and it is reachable while the network policy allows everything.
+    config.tools.network = harness_core::tools::netguard::NetworkPolicy::Allow;
+    config.tools.web.enabled = false;
+    let registry: Arc<dyn ToolRegistry> = Arc::new(DefaultToolRegistry::new());
+    register_core_tools(
+        &registry,
+        &config,
+        ReadCache::new(),
+        TodoScope::new(dir.path().join("todos"), "test"),
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = registry
+        .list_tools()
+        .await
+        .unwrap()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    assert!(!names.contains(&"web_search".to_string()), "{names:?}");
+    assert!(!names.contains(&"web_fetch".to_string()), "{names:?}");
+}
+
 /// `list_files` is the filename-discovery surface that previously forced a `terminal` call.
 /// It must be non-mutating, so it never prompts under the HITL approval gate.
 #[tokio::test]
