@@ -5,12 +5,12 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
-use super::gate::GateOutcome;
-use super::{retry_delay_secs, Agent, AgentEvent, TurnOutcome, TurnToolCall};
+use super::dispatch::DispatchState;
+use super::{retry_delay_secs, Agent, AgentEvent, TurnOutcome};
 use crate::error::HarnessError;
-use crate::hooks::{HookContext, HookEvent, HookVerdict};
+use crate::hooks::HookEvent;
 use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
 use crate::traits::*;
 use crate::types::*;
@@ -325,234 +325,20 @@ where
             self.append(&response, false).await?;
             messages.push(response.clone());
 
-            // Execute each requested tool call
-            for tool_call in response.tool_calls {
-                if cancel_token.is_cancelled() {
-                    return Err(HarnessError::Cancelled);
-                }
-
-                debug!(
-                    "Dispatching tool call: '{}' (call id: {})",
-                    tool_call.name, tool_call.id
-                );
-
-                // Hooks run before the human gate and can only narrow the call: a denial replaces
-                // its result, an argument rewrite is what the gate and the tool then see. A hook
-                // can never approve what the gate would refuse, so the two cannot disagree.
-                let mut effective_arguments = tool_call.arguments.clone();
-                let mut hook_denial: Option<String> = None;
-                if let Some(hooks) = self.hooks.as_ref() {
-                    let context = HookContext {
-                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
-                        tool: Some(tool_call.name.as_str()),
-                        arguments: Some(&tool_call.arguments),
-                        ..HookContext::default()
-                    };
-                    let hook_outcome = hooks.run(HookEvent::PreToolUse, &context).await;
-                    for note in &hook_outcome.notes {
-                        debug!(tool = %tool_call.name, "pre_tool_use hook: {}", note);
-                    }
-                    match hook_outcome.verdict {
-                        HookVerdict::Deny(reason) => {
-                            warn!(tool = %tool_call.name, "pre_tool_use hook denied the call: {}", reason);
-                            hook_denial = Some(reason);
-                        }
-                        HookVerdict::ProceedWith(arguments) => {
-                            debug!(tool = %tool_call.name, "pre_tool_use hook rewrote the arguments");
-                            effective_arguments = arguments;
-                        }
-                        HookVerdict::Proceed => {}
-                    }
-                }
-
-                // The gate next: a mutating call is put to the human before it runs, and a
-                // denial comes back as an ordinary tool result the model can react to.
-                let gate_outcome = match hook_denial {
-                    Some(ref reason) => GateOutcome::Denied(format!("hook: {reason}")),
-                    None => {
-                        let gated = ToolCall {
-                            arguments: effective_arguments.clone(),
-                            ..tool_call.clone()
-                        };
-                        self.gate_decision(&gated).await
-                    }
-                };
-                let is_denial = matches!(gate_outcome, GateOutcome::Denied(_));
-                let outcome: Result<ToolResult, HarnessError> = match gate_outcome {
-                    GateOutcome::Denied(reason) => {
-                        warn!(tool = %tool_call.name, "approval denied: {}", reason);
-                        Ok(ToolResult::error(
-                            &tool_call.id,
-                            format!("approval denied: {reason}"),
-                        ))
-                    }
-                    GateOutcome::Run(edited) => {
-                        if let Some(ref observer) = self.observer {
-                            observer(AgentEvent::ToolExecuting {
-                                name: tool_call.name.clone(),
-                                arguments: tool_call.arguments.clone(),
-                            });
-                        }
-                        let call = ToolCall {
-                            arguments: edited.unwrap_or_else(|| effective_arguments.clone()),
-                            ..tool_call.clone()
-                        };
-                        self.registry.execute(&call, &cancel_token).await
-                    }
-                };
-                let execution_result = match outcome {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("Tool execution error for '{}': {}", tool_call.name, e);
-                        ToolResult::error(&tool_call.id, e.to_string())
-                    }
-                };
-
-                // `post_tool_use` can replace what the model reads without changing what the tool
-                // did: a redaction or truncation hook whose output was discarded would be a
-                // guardrail that silently guards nothing, which is worse than no hook at all.
-                let mut execution_result = execution_result;
-                if let Some(hooks) = self.hooks.as_ref() {
-                    let event = if execution_result.is_error {
-                        HookEvent::PostToolUseFailure
-                    } else {
-                        HookEvent::PostToolUse
-                    };
-                    let context = HookContext {
-                        session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
-                        tool: Some(tool_call.name.as_str()),
-                        arguments: Some(&effective_arguments),
-                        message: Some(execution_result.content.as_str()),
-                        reason: execution_result
-                            .is_error
-                            .then_some(execution_result.content.as_str()),
-                    };
-                    let hook_outcome = hooks.run(event, &context).await;
-                    for note in &hook_outcome.notes {
-                        debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
-                    }
-                    if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
-                        match crate::hooks::replacement_text(&replacement) {
-                            Some(text) => {
-                                debug!(
-                                    tool = %tool_call.name,
-                                    "{} hook replaced the result the model sees ({} -> {} chars)",
-                                    event.as_str(),
-                                    execution_result.content.chars().count(),
-                                    text.chars().count()
-                                );
-                                execution_result.content = text;
-                            }
-                            None => warn!(
-                                tool = %tool_call.name,
-                                "{} hook returned a payload with no \"content\"; ignoring it",
-                                event.as_str()
-                            ),
-                        }
-                    }
-                }
-
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::ToolExecuted {
-                        name: tool_call.name.clone(),
-                        output: execution_result.content.clone(),
-                        is_error: execution_result.is_error,
-                    });
-                }
-
-                executed_tools.push(TurnToolCall {
-                    name: tool_call.name.clone(),
-                    arguments: tool_call.arguments.clone(),
-                    output: execution_result.content.clone(),
-                    is_error: execution_result.is_error,
-                    denied: is_denial,
-                });
-
-                // Track consecutive non-working calls (failure thrashing guardrail).
-                // Human/policy denials are intentional choices, not malfunctioning tool thrashing.
-                if execution_result.is_error && !is_denial {
-                    consecutive_failures += 1;
-                    warn!(
-                        "Tool '{}' failed (consecutive failures: {}/{})",
-                        tool_call.name, consecutive_failures, self.config.max_consecutive_failures
-                    );
-
-                    if consecutive_failures >= self.config.max_consecutive_failures {
-                        error!(
-                            "Halt triggered: {} consecutive tool failures exceeded threshold",
-                            consecutive_failures
-                        );
-                        return Err(HarnessError::ConsecutiveFailuresExceeded {
-                            failures: consecutive_failures,
-                            last_tool: tool_call.name.clone(),
-                        });
-                    }
-                } else {
-                    // Reset consecutive failures on successful execution
-                    if consecutive_failures > 0 {
-                        debug!(
-                            "Resetting consecutive failures counter from {} to 0",
-                            consecutive_failures
-                        );
-                    }
-                    consecutive_failures = 0;
-                }
-
-                // If a note was saved successfully, ensure memory pointer bridge is updated
-                if tool_call.name == "save_note" && !execution_result.is_error {
-                    if let Ok(note) = serde_json::from_str::<Note>(&execution_result.content) {
-                        debug!(
-                            "Registering 1-5 word note pointer: '{}' -> '{}'",
-                            note.id, note.summary_pointer
-                        );
-                        if let Err(e) = self
-                            .memory
-                            .add_note_pointer(&note.id, &note.summary_pointer)
-                            .await
-                        {
-                            warn!("Failed to add note pointer to memory: {}", e);
-                        }
-                    }
-                }
-
-                // ...and if a note was deleted, drop its pointer so memory holds no dangling
-                // reference to a document that no longer exists.
-                if tool_call.name == "delete_note" && !execution_result.is_error {
-                    if let Ok(removed) =
-                        serde_json::from_str::<serde_json::Value>(&execution_result.content)
-                    {
-                        let deleted =
-                            removed.get("status").and_then(|s| s.as_str()) == Some("deleted");
-                        if deleted {
-                            if let Some(note_id) = removed.get("note_id").and_then(|n| n.as_str()) {
-                                debug!("Removing note pointer for deleted note '{}'", note_id);
-                                if let Err(e) = self.memory.remove_note_pointer(note_id).await {
-                                    warn!("Failed to remove note pointer from memory: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Add tool result to conversation history
-                let tool_message = Message::tool(execution_result);
-                self.append(&tool_message, false).await?;
-                messages.push(tool_message);
-
-                self.try_rebind_completed_fold(
-                    &mut messages,
-                    &mut turn_user_idx,
-                    &mut fold_watermark,
-                    &system_text,
-                );
-
-                let current_tokens = estimate_tokens(&messages).tokens;
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::ContextTokensUpdated {
-                        tokens_used: current_tokens,
-                    });
-                }
-            }
+            // Execute each requested tool call, in the order the model asked for them: consecutive
+            // read-only calls run together, and anything the human gate may touch stays serial
+            // (see `dispatch.rs` for what that costs and why the boundary is where it is).
+            let mut dispatch_state = DispatchState {
+                messages: &mut messages,
+                turn_user_idx: &mut turn_user_idx,
+                fold_watermark: &mut fold_watermark,
+                system_text: &system_text,
+                executed_tools: &mut executed_tools,
+                consecutive_failures: &mut consecutive_failures,
+                cancel_token: &cancel_token,
+            };
+            self.dispatch_tool_calls(response.tool_calls, &mut dispatch_state)
+                .await?;
 
             // Check for mid-turn steering queued while tools were executing
             let pending_steers: Vec<String> = {

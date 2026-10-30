@@ -1405,11 +1405,8 @@ mod tests {
 
     #[test]
     fn a_data_url_mention_in_system_role_stays_plain_text() {
-        let content = serialize_content_with_images(
-            "system",
-            "sent data:image/png;base64,QUJD once",
-            true,
-        );
+        let content =
+            serialize_content_with_images("system", "sent data:image/png;base64,QUJD once", true);
         assert!(content.is_string(), "system turns are never multimodal");
     }
 
@@ -1428,7 +1425,9 @@ mod tests {
             "what is this\ndata:image/png;base64,AAAA",
             false,
         );
-        let parts = content.as_array().expect("the note replaces the image part");
+        let parts = content
+            .as_array()
+            .expect("the note replaces the image part");
         let kinds: Vec<&str> = parts.iter().map(|p| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["text", "text"]);
         assert_eq!(parts[0]["text"], "what is this");
@@ -1449,7 +1448,10 @@ mod tests {
             "deepseek-chat",
         );
         let text = body.to_string();
-        assert!(!text.contains("image_url"), "no image part for a text model");
+        assert!(
+            !text.contains("image_url"),
+            "no image part for a text model"
+        );
         assert!(text.contains(IMAGE_OMITTED_NOTE));
     }
 

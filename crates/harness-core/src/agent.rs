@@ -1,6 +1,7 @@
 //! The agent loop: types and wiring live here, the turn/fold/gate/prompt/session mechanics in the
 //! topical submodules below.
 
+mod dispatch;
 mod fold;
 mod gate;
 mod prompt;

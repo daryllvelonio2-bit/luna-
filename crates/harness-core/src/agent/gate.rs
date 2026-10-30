@@ -17,6 +17,22 @@ pub(super) enum GateOutcome {
     Denied(String),
 }
 
+/// What the gate can decide **without asking anyone**: the standing rules and the mutability
+/// default, and nothing else.
+///
+/// Split out of [`GateOutcome`] so the tool dispatcher can tell a call that will be approved
+/// silently (and may therefore run beside another read-only call) from one that needs the human —
+/// without a second, drifting copy of the rules. The split is exact: every `GateVerdict::Run`
+/// becomes `GateOutcome::Run(None)` with no prompt, and every `NeedsHuman` goes to the approver.
+pub(super) enum GateVerdict {
+    /// Run it: a rule allowed it, or nothing asked for a human and the call is read-only.
+    Run,
+    /// The human has to be asked: a rule said `ask`, or the call mutates.
+    NeedsHuman,
+    /// Refused by a rule. The string is the reason, which goes into the tool result and the log.
+    Denied(String),
+}
+
 impl<P, M, N, R> Agent<P, M, N, R>
 where
     P: ModelProvider + 'static,
@@ -58,23 +74,37 @@ where
     /// can quiet the forty `cargo test` prompts without being able to approve a `write_file` the
     /// gate would have asked about.
     pub(super) async fn gate_decision(&self, call: &ToolCall) -> GateOutcome {
+        match self.gate_verdict(call).await {
+            GateVerdict::Run => GateOutcome::Run(None),
+            GateVerdict::Denied(reason) => GateOutcome::Denied(reason),
+            GateVerdict::NeedsHuman => self.ask_the_human(call).await,
+        }
+    }
+
+    /// The non-interactive half of [`Self::gate_decision`]: rules and mutability, no prompt.
+    pub(super) async fn gate_verdict(&self, call: &ToolCall) -> GateVerdict {
         match self.permissions.evaluate(call) {
             RuleVerdict::Deny(reason) => {
                 debug!(tool = %call.name, "denied by permission rule: {}", reason);
-                return GateOutcome::Denied(reason);
+                return GateVerdict::Denied(reason);
             }
             RuleVerdict::Allow => {
                 debug!(tool = %call.name, "allowed by permission rule");
-                return GateOutcome::Run(None);
+                return GateVerdict::Run;
             }
             RuleVerdict::Ask => {}
             RuleVerdict::NoOpinion => {
                 if !self.needs_approval(call).await {
-                    return GateOutcome::Run(None);
+                    return GateVerdict::Run;
                 }
             }
         }
 
+        GateVerdict::NeedsHuman
+    }
+
+    /// Put one call to the human and turn the answer into a decision.
+    async fn ask_the_human(&self, call: &ToolCall) -> GateOutcome {
         let preview = self.registry.preview(call).await.unwrap_or_default();
         let request = ApprovalRequest {
             tool: call.name.clone(),
