@@ -92,7 +92,8 @@ cargo run --bin luna -- models list --provider openai
 
 ### 2.5 The Filesystem & Shell Tool Surface
 
-The model drives the machine through eight registered tools. All of them resolve every path
+The registry knows eight tools; seven are enabled by default (`process` is opt-in). All of them
+resolve every path
 against `paths.workspace_root`, and an attempt to escape it (`..`, an absolute path outside the
 root, a symlink pointing out) is refused with an explanatory error rather than silently clamped.
 
@@ -107,8 +108,10 @@ list_files(path, glob)            recursive listing, find files by name
 todo_list(action, ...)            tracked task list for the session
 terminal(command, timeout_s, workdir)
                                    bounded foreground shell, non-zero exit is a normal result
-process(action, ...)              background jobs sharing the terminal's task queue
+process(action, ...)              background jobs sharing the terminal's task queue (opt-in)
 ```
+
+Of the eight, `tools.enabled` defaults to all but `process`.
 
 `read_file` emits whole lines and stops before the line that would overflow its budget, then
 appends a notice naming the resume offset — a cut line cannot be recovered by an offset, so it
@@ -129,7 +132,7 @@ output mode (200 matching lines for `content`, 500 files for `files_only` and `c
 appends a notice naming whatever ceiling it hit and how to narrow it. `list_files` skips `.git`,
 `target` and `node_modules`, and caps at 1,000 entries with the same style of notice.
 
-**Configuring the surface.** `tools.enabled` (default: all eight) is the single switch — `config`
+**Configuring the surface.** `tools.enabled` (default: all but `process`) is the single switch — `config`
 sections and env layers resolve it like every other key, so an install can drop `terminal` and
 still keep the read/write/search tools:
 
