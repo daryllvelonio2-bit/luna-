@@ -556,12 +556,19 @@ fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
             .get("candidatesTokenCount")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
+        // Gemini counts cache hits *inside* `promptTokenCount` and reports them separately here,
+        // which is exactly the relationship `TokenUsage::cached_tokens` describes.
+        let cached_tokens = meta
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         events.push(StreamEvent::Completed {
             finish_reason: None,
             usage: Some(TokenUsage {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                cached_tokens,
             }),
         });
     }

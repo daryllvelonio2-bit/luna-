@@ -315,10 +315,20 @@ pub async fn stream_supercode_completion(
                                             .and_then(|n| n.as_u64())
                                             .unwrap_or(0)
                                             as u32;
+                                        // This route names the cache count in camelCase where the
+                                        // OpenAI shape nests it; absent means the route does not
+                                        // report one.
+                                        let cached_tokens = u
+                                            .get("cachedTokens")
+                                            .or_else(|| u.get("cached_tokens"))
+                                            .and_then(|n| n.as_u64())
+                                            .unwrap_or(0)
+                                            as u32;
                                         Some(TokenUsage {
                                             prompt_tokens,
                                             completion_tokens,
                                             total_tokens,
+                                            cached_tokens,
                                         })
                                     });
                                     let _ = tx
@@ -416,10 +426,9 @@ pub async fn execute_supercode_completion(
         },
         tool_calls: Vec::new(),
         tool_result: None,
-        usage: final_usage.or(Some(TokenUsage {
+        usage: final_usage.or(Some(TokenUsage::estimated(
             prompt_tokens,
             completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-        })),
+        ))),
     })
 }

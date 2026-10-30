@@ -17,6 +17,23 @@ use harness_core::{
     ModelProvider, ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
 
+/// The cache-read count a provider reported, in either shape the catalog's routes use.
+///
+/// OpenAI-shaped usage (OpenAI, Gemini's compatible route, DeepSeek, most aggregators) carries it
+/// in `prompt_tokens_details.cached_tokens`; Anthropic carries `cache_read_input_tokens` beside
+/// the other counts. Absent from both means zero: a provider that says nothing about caching is
+/// not credited with a cache hit, because a hit is a discount and inventing one understates a bill.
+fn cached_tokens_from(usage: &serde_json::Value) -> u32 {
+    let openai = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(|value| value.as_u64());
+    let anthropic = usage
+        .get("cache_read_input_tokens")
+        .and_then(|value| value.as_u64());
+    openai.or(anthropic).unwrap_or(0) as u32
+}
+
 /// Extract the stream events carried by one OpenAI-compatible SSE chunk. A single chunk can
 /// hold reasoning, visible text and a tool-call fragment at the same time, so every field is
 /// examined instead of returning on the first hit.
@@ -131,6 +148,7 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
                     .get("total_tokens")
                     .and_then(|t| t.as_u64())
                     .unwrap_or(0) as u32,
+                cached_tokens: cached_tokens_from(usage),
             }),
         }));
     }
@@ -845,6 +863,7 @@ impl ModelProvider for GenericProviderClient {
                 .get("total_tokens")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0) as u32,
+            cached_tokens: cached_tokens_from(usage),
         });
 
         if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
@@ -1463,6 +1482,50 @@ mod tests {
             "gpt-4o",
         );
         assert!(body.to_string().contains("image_url"));
+    }
+
+    /// A cache read is reported in two shapes and both are read: the OpenAI shape nests it under
+    /// `prompt_tokens_details`, Anthropic puts `cache_read_input_tokens` beside the other counts.
+    #[test]
+    fn a_cache_read_is_read_from_either_usage_shape() {
+        fn usage_from_chunk(chunk: &serde_json::Value) -> TokenUsage {
+            delta_events(chunk)
+                .into_iter()
+                .find_map(|event| match event {
+                    Ok(StreamEvent::Completed {
+                        usage: Some(usage), ..
+                    }) => Some(usage),
+                    _ => None,
+                })
+                .expect("a usage event")
+        }
+
+        let openai = usage_from_chunk(&json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 5,
+                "total_tokens": 1005,
+                "prompt_tokens_details": { "cached_tokens": 896 }
+            }
+        }));
+        assert_eq!(openai.cached_tokens, 896);
+        assert_eq!(openai.prompt_tokens, 1000);
+
+        let anthropic = usage_from_chunk(&json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 5,
+                "total_tokens": 1005,
+                "cache_read_input_tokens": 640
+            }
+        }));
+        assert_eq!(anthropic.cached_tokens, 640);
+
+        // A provider that says nothing about caching is not credited with a hit.
+        let silent = usage_from_chunk(&json!({
+            "usage": { "prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8 }
+        }));
+        assert_eq!(silent.cached_tokens, 0);
     }
 
     #[test]

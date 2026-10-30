@@ -46,7 +46,13 @@ impl ToolRegistry for DefaultToolRegistry {
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError> {
         let map = self.tools.read().await;
-        Ok(map.values().map(|t| t.definition()).collect())
+        let mut definitions: Vec<ToolDefinition> = map.values().map(|t| t.definition()).collect();
+        // Sorted by name, because a `HashMap` iterates in an arbitrary order and the tool list is
+        // the head of every request. Two turns that differ only in this order are two different
+        // prompts, and a prompt cache keys on the bytes: an unstable prefix is a cache miss that
+        // costs the full input price on every turn of a session.
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(definitions)
     }
 
     /// An unknown tool is an error rather than `false`: the gate fails closed on it, and
@@ -139,5 +145,59 @@ impl ToolRegistry for DefaultToolRegistry {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "a tool with a name"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            call_id: &str,
+            _arguments: &serde_json::Value,
+            _cancel_token: &CancellationToken,
+        ) -> Result<ToolResult, HarnessError> {
+            Ok(ToolResult::success(call_id, "ok"))
+        }
+    }
+
+    /// Registration order is not request order: the tool list must come out the same way every
+    /// turn, whatever order the tools were registered in, or no prompt cache can ever hit it.
+    #[tokio::test]
+    async fn tool_definitions_are_listed_in_a_stable_order() {
+        let registry = DefaultToolRegistry::new();
+        for name in ["write_file", "read_file", "search_files"] {
+            registry
+                .register(Arc::new(NamedTool(name)))
+                .await
+                .expect("register");
+        }
+
+        let names = |definitions: Vec<crate::types::ToolDefinition>| -> Vec<String> {
+            definitions
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect()
+        };
+
+        let listed = names(registry.list_tools().await.expect("list"));
+        assert_eq!(listed, vec!["read_file", "search_files", "write_file"]);
+
+        // Listed the same way twice: nothing about the iteration order leaks into the request.
+        assert_eq!(listed, names(registry.list_tools().await.expect("list")));
     }
 }

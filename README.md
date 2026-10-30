@@ -219,7 +219,9 @@ cost. `luna usage`, `--since 7d`, `--by model|session|source|day`, `--recent`, `
 
 Cost is only reported when it is known: a model with no price is counted as **unpriced**, never
 guessed at. Prices live in `usage.prices` (`provider/model`, with `provider/*` and `*/model`
-wildcards) over a small built-in table. Details: [`docs/USAGE.md`](docs/USAGE.md).
+wildcards) over a small built-in table. A provider's reported cache reads are stored per turn and
+priced at `cached_input_per_million` when it is set — at the full input rate when it is not, so the
+figure stays an upper bound. Details: [`docs/USAGE.md`](docs/USAGE.md).
 
 ### 2.11 Hooks on every surface: `luna hooks`
 

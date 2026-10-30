@@ -440,5 +440,6 @@ fn usage_delta(opts: &RunOptions, before: Option<TokenUsage>) -> Option<TokenUsa
             .completion_tokens
             .saturating_sub(before.completion_tokens),
         total_tokens: after.total_tokens.saturating_sub(before.total_tokens),
+        cached_tokens: after.cached_tokens.saturating_sub(before.cached_tokens),
     })
 }

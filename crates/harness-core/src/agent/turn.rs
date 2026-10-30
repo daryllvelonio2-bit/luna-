@@ -218,6 +218,11 @@ where
                 accumulated.total_tokens = accumulated
                     .prompt_tokens
                     .saturating_add(accumulated.completion_tokens);
+                // Cache reads are summed like the rest: the ledger prices a turn's cache hits, and
+                // a turn is several model calls.
+                accumulated.cached_tokens = accumulated
+                    .cached_tokens
+                    .saturating_add(usage.cached_tokens);
             }
 
             if rebound {

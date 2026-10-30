@@ -97,9 +97,17 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
     caps
 }
 
-/// Providers whose OpenAI-compatible route is documented to honour the caching the family claims.
-/// An aggregator is deliberately absent: it decides per upstream and may reject the marker.
-const CACHING_PROVIDERS: &[&str] = &["openai", "copilot", "gemini", "anthropic", "deepseek"];
+/// Providers whose *route* is known to cache a stable prompt prefix.
+///
+/// Anthropic is deliberately absent even though the model family caches: this crate reaches
+/// Anthropic through the provider's OpenAI-compatible route (`/v1/chat/completions` — see the
+/// catalog's `default_base_url` and `AuthHeaderFormat::AnthropicApiKey`), and that route states
+/// plainly that "Prompt caching is not supported, but it is supported in the Anthropic SDKs"
+/// (docs.claude.com/en/api/openai-sdk). Claiming it here would light up a capability the wire
+/// cannot deliver: the ledger would never see a cache hit, and `cache_control` blocks would be
+/// silently ignored. Making it true means a native `/v1/messages` path with cache breakpoints,
+/// which is a different piece of work than a flag.
+const CACHING_PROVIDERS: &[&str] = &["openai", "copilot", "gemini", "deepseek"];
 
 /// Resolve the capabilities of `model` as served by `provider`.
 pub fn resolve(provider: &str, model: &str) -> ModelCapabilities {
@@ -188,9 +196,12 @@ mod tests {
     }
 
     #[test]
-    fn caching_is_only_claimed_where_the_provider_honours_it() {
+    fn caching_is_only_claimed_where_the_route_honours_it() {
         assert!(resolve("openai", "gpt-4o").prompt_cache);
-        assert!(resolve("anthropic", "claude-sonnet-4").prompt_cache);
+        assert!(resolve("deepseek", "deepseek-chat").prompt_cache);
+        // The Claude models cache, but the route this crate uses for them does not: Anthropic's
+        // OpenAI-compatible layer documents prompt caching as unsupported.
+        assert!(!resolve("anthropic", "claude-sonnet-4").prompt_cache);
         // Same model, aggregator route: the family caches, the route may not, so we do not claim it.
         assert!(!resolve("openrouter", "openai/gpt-4o").prompt_cache);
     }

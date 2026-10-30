@@ -685,10 +685,9 @@ pub async fn execute_kiro_completion(
         },
         tool_calls: Vec::new(),
         tool_result: None,
-        usage: final_usage.or(Some(TokenUsage {
+        usage: final_usage.or(Some(TokenUsage::estimated(
             prompt_tokens,
             completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-        })),
+        ))),
     })
 }

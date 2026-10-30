@@ -28,16 +28,43 @@ use crate::types::TokenUsage;
 pub struct ModelPrice {
     pub input_per_million: f64,
     pub output_per_million: f64,
+    /// What one cache-read token costs per million, when the model publishes a cheaper rate.
+    ///
+    /// `None` — the default for every built-in price — means no cache rate is on file, and a
+    /// cached token is then charged at the full input rate. That keeps the reported cost an upper
+    /// bound instead of a discount nobody set: the alternative (assuming the vendor's usual 10–50%
+    /// of input) would put a confident, invented saving in a spending report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_per_million: Option<f64>,
 }
 
 impl ModelPrice {
+    /// A price with no cache rate known.
+    pub const fn new(input_per_million: f64, output_per_million: f64) -> Self {
+        Self {
+            input_per_million,
+            output_per_million,
+            cached_input_per_million: None,
+        }
+    }
+
     /// What `usage` costs at this price. `None` when the price cannot be applied sensibly.
     fn cost(&self, usage: &TokenUsage) -> Option<f64> {
         if !self.input_per_million.is_finite() || !self.output_per_million.is_finite() {
             return None;
         }
+        // A cache read is charged at the cache rate when one is known, and at the input rate
+        // otherwise. `cached_tokens` cannot exceed the prompt it is a subset of, but a provider
+        // that reported it that way must not be allowed to make a token free.
+        let cached_rate = match self.cached_input_per_million {
+            Some(rate) if rate.is_finite() => rate,
+            _ => self.input_per_million,
+        };
+        let cached = usage.cached_tokens.min(usage.prompt_tokens) as f64;
+        let fresh = usage.prompt_tokens.saturating_sub(usage.cached_tokens) as f64;
         Some(
-            (usage.prompt_tokens as f64 * self.input_per_million
+            (fresh * self.input_per_million
+                + cached * cached_rate
                 + usage.completion_tokens as f64 * self.output_per_million)
                 / 1_000_000.0,
         )
@@ -64,13 +91,7 @@ impl PriceTable {
     pub fn builtin() -> Self {
         let mut prices = BTreeMap::new();
         let mut add = |key: &str, input: f64, output: f64| {
-            prices.insert(
-                key.to_string(),
-                ModelPrice {
-                    input_per_million: input,
-                    output_per_million: output,
-                },
-            );
+            prices.insert(key.to_string(), ModelPrice::new(input, output));
         };
         add("openai/gpt-4o", 2.50, 10.00);
         add("openai/gpt-4o-mini", 0.15, 0.60);
@@ -133,6 +154,10 @@ pub struct UsageRecord {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// How many of `prompt_tokens` were served from the provider's prompt cache. Defaulted for
+    /// rows written before the column existed.
+    #[serde(default)]
+    pub cached_tokens: u32,
     /// `None` when the model has no price: unknown, not free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
@@ -163,6 +188,7 @@ impl UsageRecord {
             total_tokens: usage
                 .total_tokens
                 .max(usage.prompt_tokens.saturating_add(usage.completion_tokens)),
+            cached_tokens: usage.cached_tokens,
             cost_usd: prices.cost(provider, model, usage),
             duration_ms,
             tool_calls: 0,
@@ -254,6 +280,8 @@ pub struct UsageTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// How many of the `prompt_tokens` in these rows the provider served from its prompt cache.
+    pub cached_tokens: u64,
     /// Sum over the priced rows only.
     pub cost_usd: f64,
     /// Rows with no known price; their tokens are counted above, their cost is not in `cost_usd`.
@@ -314,6 +342,7 @@ CREATE TABLE IF NOT EXISTS usage (
     prompt_tokens     INTEGER NOT NULL,
     completion_tokens INTEGER NOT NULL,
     total_tokens      INTEGER NOT NULL,
+    cached_tokens     INTEGER NOT NULL DEFAULT 0,
     cost_usd          REAL,
     duration_ms       INTEGER NOT NULL,
     tool_calls        INTEGER NOT NULL,
@@ -326,6 +355,29 @@ CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts);
 CREATE INDEX IF NOT EXISTS usage_session ON usage (session_id);
 CREATE INDEX IF NOT EXISTS usage_model ON usage (provider, model);
 "#;
+
+/// Add `cached_tokens` to a ledger written before the column existed.
+///
+/// `CREATE TABLE IF NOT EXISTS` cannot change a table that is already there, so an existing
+/// `usage.db` would keep its old shape and reject every insert with "no such column" — the ledger
+/// is the one file a user is least willing to throw away, so it is migrated in place instead.
+fn ensure_cached_tokens_column(conn: &Connection) -> Result<(), HarnessError> {
+    let present: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('usage') WHERE name = 'cached_tokens'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| HarnessError::Io(format!("usage schema probe: {e}")))?;
+    if present == 0 {
+        conn.execute(
+            "ALTER TABLE usage ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| HarnessError::Io(format!("usage schema migration: {e}")))?;
+    }
+    Ok(())
+}
 
 /// The sqlite-backed usage ledger. One process-wide handle, like the session store.
 pub struct UsageLedger {
@@ -351,6 +403,7 @@ impl UsageLedger {
         };
         conn.execute_batch(SCHEMA)
             .map_err(|e| HarnessError::Io(format!("usage schema: {e}")))?;
+        ensure_cached_tokens_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -365,8 +418,9 @@ impl UsageLedger {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO usage (ts, session_id, provider, model, prompt_tokens, completion_tokens,
-                                total_tokens, cost_usd, duration_ms, tool_calls, denied_calls, ok, source)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                total_tokens, cached_tokens, cost_usd, duration_ms, tool_calls,
+                                denied_calls, ok, source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 record.ts.to_rfc3339(),
                 record.session_id,
@@ -375,6 +429,7 @@ impl UsageLedger {
                 record.prompt_tokens,
                 record.completion_tokens,
                 record.total_tokens,
+                record.cached_tokens,
                 record.cost_usd,
                 record.duration_ms as i64,
                 record.tool_calls,
@@ -414,7 +469,8 @@ impl UsageLedger {
         let (where_clause, values) = filter.sql();
         let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
-                    COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_usd), 0.0),
+                    COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0.0),
                     COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(duration_ms), 0),
                     COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0),
@@ -432,11 +488,12 @@ impl UsageLedger {
                     prompt_tokens: row.get::<_, i64>(1)? as u64,
                     completion_tokens: row.get::<_, i64>(2)? as u64,
                     total_tokens: row.get::<_, i64>(3)? as u64,
-                    cost_usd: row.get::<_, f64>(4)?,
-                    unpriced_turns: row.get::<_, i64>(5)? as u64,
-                    duration_ms: row.get::<_, i64>(6)? as u64,
-                    failed_turns: row.get::<_, i64>(7)? as u64,
-                    denied_calls: row.get::<_, i64>(8)? as u64,
+                    cached_tokens: row.get::<_, i64>(4)? as u64,
+                    cost_usd: row.get::<_, f64>(5)?,
+                    unpriced_turns: row.get::<_, i64>(6)? as u64,
+                    duration_ms: row.get::<_, i64>(7)? as u64,
+                    failed_turns: row.get::<_, i64>(8)? as u64,
+                    denied_calls: row.get::<_, i64>(9)? as u64,
                 })
             })
             .map_err(|e| HarnessError::Io(format!("usage totals: {e}")))?;
@@ -454,6 +511,7 @@ impl UsageLedger {
         let sql = format!(
             "SELECT {key} AS bucket, COUNT(*), COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(total_tokens), 0),
+                    COALESCE(SUM(cached_tokens), 0),
                     COALESCE(SUM(cost_usd), 0.0),
                     COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(duration_ms), 0),
@@ -461,7 +519,7 @@ impl UsageLedger {
                     COALESCE(SUM(denied_calls), 0)
              FROM usage{where_clause}
              GROUP BY bucket
-             ORDER BY 6 DESC, 5 DESC"
+             ORDER BY 7 DESC, 5 DESC"
         );
         let conn = self.conn.lock().await;
         let mut statement = conn
@@ -476,11 +534,12 @@ impl UsageLedger {
                         prompt_tokens: row.get::<_, i64>(2)? as u64,
                         completion_tokens: row.get::<_, i64>(3)? as u64,
                         total_tokens: row.get::<_, i64>(4)? as u64,
-                        cost_usd: row.get::<_, f64>(5)?,
-                        unpriced_turns: row.get::<_, i64>(6)? as u64,
-                        duration_ms: row.get::<_, i64>(7)? as u64,
-                        failed_turns: row.get::<_, i64>(8)? as u64,
-                        denied_calls: row.get::<_, i64>(9)? as u64,
+                        cached_tokens: row.get::<_, i64>(5)? as u64,
+                        cost_usd: row.get::<_, f64>(6)?,
+                        unpriced_turns: row.get::<_, i64>(7)? as u64,
+                        duration_ms: row.get::<_, i64>(8)? as u64,
+                        failed_turns: row.get::<_, i64>(9)? as u64,
+                        denied_calls: row.get::<_, i64>(10)? as u64,
                     },
                 })
             })
@@ -498,7 +557,7 @@ impl UsageLedger {
         let (where_clause, values) = filter.sql();
         let sql = format!(
             "SELECT ts, session_id, provider, model, prompt_tokens, completion_tokens, total_tokens,
-                    cost_usd, duration_ms, tool_calls, denied_calls, ok, source
+                    cached_tokens, cost_usd, duration_ms, tool_calls, denied_calls, ok, source
              FROM usage{where_clause}
              ORDER BY ts DESC, id DESC
              LIMIT {limit}"
@@ -520,12 +579,13 @@ impl UsageLedger {
                     prompt_tokens: row.get::<_, i64>(4)? as u32,
                     completion_tokens: row.get::<_, i64>(5)? as u32,
                     total_tokens: row.get::<_, i64>(6)? as u32,
-                    cost_usd: row.get(7)?,
-                    duration_ms: row.get::<_, i64>(8)? as u64,
-                    tool_calls: row.get::<_, i64>(9)? as u32,
-                    denied_calls: row.get::<_, i64>(10)? as u32,
-                    ok: row.get::<_, i64>(11)? != 0,
-                    source: row.get(12)?,
+                    cached_tokens: row.get::<_, i64>(7)? as u32,
+                    cost_usd: row.get(8)?,
+                    duration_ms: row.get::<_, i64>(9)? as u64,
+                    tool_calls: row.get::<_, i64>(10)? as u32,
+                    denied_calls: row.get::<_, i64>(11)? as u32,
+                    ok: row.get::<_, i64>(12)? != 0,
+                    source: row.get(13)?,
                 })
             })
             .map_err(|e| HarnessError::Io(format!("usage recent: {e}")))?;

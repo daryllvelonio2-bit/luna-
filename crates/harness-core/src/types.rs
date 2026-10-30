@@ -144,6 +144,29 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// How many of `prompt_tokens` the provider served from its prompt cache and billed at the
+    /// cache-read rate. Zero when the provider reports no cache — which is not the same as "no
+    /// cache was used", only as "nothing was said about it".
+    ///
+    /// `#[serde(default)]` because this field postdates stored sessions and ledger rows: a
+    /// transcript written before it existed must still load.
+    #[serde(default)]
+    pub cached_tokens: u32,
+}
+
+impl TokenUsage {
+    /// A usage figure this crate computed itself (message text ÷ 4) instead of one a provider
+    /// reported. No cache split: an estimate derived from characters knows nothing about which
+    /// prefix the provider had already cached, and claiming it did would put a made-up number in
+    /// the cost ledger.
+    pub fn estimated(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+            cached_tokens: 0,
+        }
+    }
 }
 
 /// One increment of a streaming completion. Reasoning is a separate channel because providers

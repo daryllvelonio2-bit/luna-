@@ -29,7 +29,7 @@ know.
 usage:
   enabled: true                # default; false records nothing at all
   prices:
-    openai/gpt-4o: { input_per_million: 2.50, output_per_million: 10.00 }
+    openai/gpt-4o: { input_per_million: 2.50, output_per_million: 10.00, cached_input_per_million: 1.25 }
     local/*:       { input_per_million: 0.0,  output_per_million: 0.0 }   # a model you host
     */gpt-4o-mini: { input_per_million: 0.15, output_per_million: 0.60 }
 ```
@@ -37,12 +37,39 @@ usage:
 Keys are `provider/model`, with `provider/*` and `*/model` wildcards; the exact key wins, then the
 provider wildcard, then the model wildcard.
 
+## Cache reads
+
+A provider that serves part of the prompt from its own prompt cache reports it, in one of two
+shapes the harness reads: OpenAI-style `prompt_tokens_details.cached_tokens` (also used by Gemini's
+compatible route and DeepSeek), or Anthropic-style `cache_read_input_tokens`. The count is stored
+per row as `cached_tokens` and totalled:
+
+```
+  tokens           1.05M (1.00M in, 50k out)
+  cache            896k tok served from cache (90% of input)
+```
+
+`cached_input_per_million` is what a cache-read token costs. **With no cache rate on file, a cached
+token is charged at the full input rate** — the reported cost stays an upper bound rather than
+becoming a discount nobody set. Set the rate when you know it; leave it out when you do not.
+
+Two things this is not. It is not a promise that caching happened: providers that say nothing about
+a cache report zero, and the cache line is simply absent. And it is not Anthropic's
+`cache_control`: the harness reaches Anthropic through that provider's *OpenAI-compatible* route,
+which documents prompt caching as unsupported ("it is supported in the Anthropic SDKs"), so no
+cache breakpoints are sent and none are claimed.
+
+What the harness does do for caching is the half it can control: the tool list is sent in a stable
+order every turn, so the prompt prefix is byte-identical across a session and a provider that caches
+automatically actually gets a prefix worth caching.
+
 ## What a row means
 
 | field | meaning |
 |---|---|
 | `prompt_tokens` / `completion_tokens` | summed over **every model call in the turn** (tool loops, retries, compaction is its own turn) |
 | `total_tokens` | sum of the two |
+| `cached_tokens` | how many of `prompt_tokens` the provider served from its prompt cache (0 when it said nothing) |
 | `duration_ms` | wall clock for the turn, including tool execution and retry backoff |
 | `tool_calls` / `denied_calls` | how many ran, how many the gate or a rule refused |
 | `ok` | false when a tool failed or a call was denied — the tokens were spent either way |

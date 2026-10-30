@@ -170,6 +170,9 @@ fn print_totals(totals: &UsageTotals) {
         "  tokens           {} ({} in, {} out)",
         totals.total_tokens, totals.prompt_tokens, totals.completion_tokens
     );
+    if let Some(cache) = cache_text(totals) {
+        println!("  cache            {cache}");
+    }
     println!("  cost             {}", cost_text(totals));
     println!("  time in turns    {}", format_duration(totals.duration_ms));
     if totals.failed_turns > 0 || totals.denied_calls > 0 {
@@ -219,6 +222,28 @@ fn print_buckets(by: &str, buckets: &[UsageBucket], totals: &UsageTotals) {
             width = width
         );
     }
+    if let Some(cache) = cache_text(totals) {
+        println!("  {}", cache.dimmed());
+    }
+}
+
+/// Tokens the provider served from its prompt cache, and what share of the input that is.
+///
+/// `None` when no row reported a cache read: a line of zeroes would read as "caching was measured
+/// and did not help", when what actually happened is that nothing was said about it.
+fn cache_text(totals: &UsageTotals) -> Option<String> {
+    if totals.cached_tokens == 0 {
+        return None;
+    }
+    let share = if totals.prompt_tokens == 0 {
+        0.0
+    } else {
+        totals.cached_tokens as f64 * 100.0 / totals.prompt_tokens as f64
+    };
+    Some(format!(
+        "{} tok served from cache ({share:.0}% of input)",
+        totals.cached_tokens
+    ))
 }
 
 fn print_recent(records: &[UsageRecord]) {
@@ -227,10 +252,18 @@ fn print_recent(records: &[UsageRecord]) {
         return;
     }
     for record in records {
+        // Only turns whose provider reported a cache read carry the marker, so the column stays
+        // quiet on the providers that say nothing about caching.
+        let cached = if record.cached_tokens > 0 {
+            format!(" ({} cached)", record.cached_tokens)
+        } else {
+            String::new()
+        };
         println!(
-            "{}  {:>6} tok  {:>9}  {:>7}  {}",
+            "{}  {:>6} tok{}  {:>9}  {:>7}  {}",
             record.ts.format("%Y-%m-%d %H:%M:%S"),
             record.total_tokens,
+            cached,
             record
                 .cost_usd
                 .map(|cost| format!("${cost:.4}"))

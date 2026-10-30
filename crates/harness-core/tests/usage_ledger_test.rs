@@ -16,18 +16,11 @@ use harness_core::usage::{
 use harness_core::*;
 
 fn price(input: f64, output: f64) -> ModelPrice {
-    ModelPrice {
-        input_per_million: input,
-        output_per_million: output,
-    }
+    ModelPrice::new(input, output)
 }
 
 fn usage(prompt: u32, completion: u32) -> TokenUsage {
-    TokenUsage {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        total_tokens: prompt + completion,
-    }
+    TokenUsage::estimated(prompt, completion)
 }
 
 fn at(offset: Duration) -> chrono::DateTime<Utc> {
@@ -49,6 +42,7 @@ fn record(
         prompt_tokens: tokens / 2,
         completion_tokens: tokens - tokens / 2,
         total_tokens: tokens,
+        cached_tokens: 0,
         cost_usd: cost,
         duration_ms: 1000,
         tool_calls: 0,

@@ -912,11 +912,7 @@ async fn heuristic_and_reported_estimates_agree_on_a_fixed_sample() {
 #[tokio::test]
 async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
     let mut with_usage = Message::assistant("an answer");
-    with_usage.usage = Some(TokenUsage {
-        prompt_tokens: 1_000,
-        completion_tokens: 200,
-        total_tokens: 1_200,
-    });
+    with_usage.usage = Some(TokenUsage::estimated(1_000, 200));
     let tail = Message::user("x".repeat(400));
 
     let estimate = estimate_tokens(&[with_usage, tail]);
@@ -1916,11 +1912,7 @@ async fn seeded_store_with_reported_usage(
         if turn + 1 == turns {
             // Reported for the request that produced this reply, which covers the transcript as it
             // stood before the fold.
-            reply.usage = Some(TokenUsage {
-                prompt_tokens: reported_prompt_tokens,
-                completion_tokens: 20,
-                total_tokens: reported_prompt_tokens + 20,
-            });
+            reply.usage = Some(TokenUsage::estimated(reported_prompt_tokens, 20));
         }
         store.append("s1", &reply, false).await.unwrap();
     }

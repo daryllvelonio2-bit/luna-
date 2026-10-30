@@ -321,11 +321,7 @@ impl ModelProvider for ToolLoopUsageProvider {
         } else {
             estimate_tokens(messages).tokens as u32
         };
-        message.usage = Some(TokenUsage {
-            prompt_tokens,
-            completion_tokens: 10,
-            total_tokens: prompt_tokens + 10,
-        });
+        message.usage = Some(TokenUsage::estimated(prompt_tokens, 10));
         if n < self.rounds {
             message.tool_calls = vec![ToolCall {
                 id: format!("call_{n}"),
@@ -360,11 +356,7 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
             .await
             .unwrap();
         let mut asst = Message::assistant("short answer");
-        asst.usage = Some(TokenUsage {
-            prompt_tokens: 120_000,
-            completion_tokens: 10,
-            total_tokens: 120_010,
-        });
+        asst.usage = Some(TokenUsage::estimated(120_000, 10));
         store.append("s1", &asst, false).await.unwrap();
     }
 
