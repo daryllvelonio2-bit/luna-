@@ -90,9 +90,9 @@ Dynamically query models from the provider endpoint:
 cargo run --bin luna -- models list --provider openai
 ```
 
-### 2.5 The Filesystem & Shell Tool Surface
+### 2.5 The Filesystem, Shell & Web Tool Surface
 
-The registry knows eight tools; seven are enabled by default (`process` is opt-in). All of them
+The registry knows ten tools; nine are enabled by default (`process` is opt-in). All of them
 resolve every path
 against `paths.workspace_root`, and an attempt to escape it (`..`, an absolute path outside the
 root, a symlink pointing out) is refused with an explanatory error rather than silently clamped.
@@ -109,9 +109,13 @@ todo_list(action, ...)            tracked task list for the session
 terminal(command, timeout_s, workdir)
                                    bounded foreground shell, non-zero exit is a normal result
 process(action, ...)              background jobs sharing the terminal's task queue (opt-in)
+web_search(query, max_results, allowed_domains, blocked_domains)
+                                   one query → a numbered list of title / URL / snippet
+web_fetch(url, prompt, allowed_domains, blocked_domains)
+                                   one URL → the page as text, HTML converted to prose
 ```
 
-Of the eight, `tools.enabled` defaults to all but `process`.
+Of the ten, `tools.enabled` defaults to all but `process`.
 
 `read_file` emits whole lines and stops before the line that would overflow its budget, then
 appends a notice naming the resume offset — a cut line cannot be recovered by an offset, so it
@@ -145,8 +149,66 @@ tools:
 ```
 
 Mutating tools (`write_file`, `patch`, `terminal`) go through the approval gate when
-`agent.require_hitl_for_mutation` is set; `read_file`, `search_files` and `list_files` are
-read-only and never prompt.
+`agent.require_hitl_for_mutation` is set; `read_file`, `search_files`, `list_files`, `web_search`
+and `web_fetch` are read-only and never prompt.
+
+**Reading the web.** `web_search` turns one query into a numbered list of results; `web_fetch`
+turns one URL into readable text. Both are on by default, because an agent that has to be told
+where to look is an agent that reaches for `curl` instead.
+
+A fresh install searches through DuckDuckGo's HTML endpoint — no account, no key, nothing to sign
+up for, and no contract either, which is why the parser is the most defensive code in the module.
+`tools.web.search_backend: brave | tavily` points search at a keyed JSON API instead; the key is
+read from the environment variable named by `tools.web.search_api_key_env` and is never written to
+the config file. `search_backend: none` registers `web_fetch` alone, and `tools.web.enabled: false`
+registers neither.
+
+**What a URL is allowed to reach** is decided in one place (`tools::web::policy`), because a URL
+the model hands over is attacker-influenced text when the page that suggested it was not
+trustworthy:
+
+- `http`/`https` only, and credentials in a URL are refused;
+- an optional allow/deny domain policy (`allowed_domains`, `blocked_domains`, glob semantics, deny
+  wins), which the per-call `allowed_domains` argument can narrow but never widen;
+- every address a host resolves to must be publicly routable — so `127.0.0.1`, `169.254.169.254`
+  (cloud instance credentials), RFC1918 and CGNAT addresses are refused *before a socket is
+  opened*, unless `allow_private_hosts` says otherwise;
+- the validated address is pinned into the client for that host, so the lookup that was checked is
+  the address that is dialled rather than a second one;
+- redirects are followed by hand and re-checked on every hop, capped at `max_redirects`;
+- the body is capped while streaming (`fetch_max_bytes`), a content-type allowlist keeps binaries
+  out, `robots.txt` is honoured, and one request gets `timeout_secs`.
+
+The result is bounded in characters too (`fetch_max_chars`), and every cut is stated in the result
+rather than left to look complete. A page fetched once is reused for `cache_ttl_secs`, so a loop
+that re-reads its own sources costs nothing.
+
+`web_fetch` accepts a `prompt` argument and **ignores** it: the page text comes back and the reading
+is left to the model that asked for it, because a hidden second model summarising a page is a call
+the user cannot see, cache, price, or check against the source. For pages that need JavaScript,
+screenshots or clicking, the [`browser` skill](.harness/skills/browser/SKILL.md) still drives
+headless Chromium; these two tools are the fast path for text.
+
+```yaml
+tools:
+  web:
+    enabled: true
+    search_backend: duckduckgo    # duckduckgo | brave | tavily | none
+    search_api_key_env: ""        # e.g. BRAVE_SEARCH_API_KEY; empty uses the backend's default
+    search_max_results: 8
+    fetch_max_bytes: 262144
+    fetch_max_chars: 40000
+    timeout_secs: 30
+    max_redirects: 3
+    cache_ttl_secs: 900
+    allowed_domains: []           # file-only keys: comma lists are not accepted from the env layer
+    blocked_domains: []
+    allow_private_hosts: false
+    respect_robots: true
+```
+
+The setup flow asks this question too, so a first run ends with a working search rather than a
+config to edit by hand: `luna setup`, or `luna config set tools.web.search_backend brave` later.
 
 ### 2.6 Lifecycle Hooks
 
@@ -245,7 +307,13 @@ Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 seccomp filter installed between `fork` and `exec`: `socket(2)` works for `AF_UNIX` only, everything
 else returns `EPERM` — `curl`, DNS and dependency fetches fail before a packet leaves the machine,
 while local IPC keeps working. Kernel enforcement, not a command-string match; fails closed where it
-cannot be enforced. Details: [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
+cannot be enforced.
+
+That filter confines a child, not the harness, so `deny` also withholds `web_search` and
+`web_fetch`: they are not registered, and the reason — naming `tools.network` and
+`tools.web.enabled` — is logged at start-up. A machine that has declared itself offline should not
+be able to reach the internet through the agent's own sockets. Details:
+[`docs/PERMISSIONS.md`](docs/PERMISSIONS.md).
 
 ### 2.14 Delegated subagents stay observable
 

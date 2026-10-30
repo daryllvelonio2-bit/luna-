@@ -1,7 +1,10 @@
 //! Persistence of the onboarding result.
 //!
-//! The flow records four keys in the harness config file (`$LUNA_CONFIG`, else
-//! `~/.luna/config.yaml`): `persona.id`, `persona.name`, `memory.mode`, and `first_run: false`.
+//! The flow records its answers in the harness config file (`$LUNA_CONFIG`, else
+//! `~/.luna/config.yaml`): the persona (`persona.id`, `persona.name`), who writes memory
+//! (`memory.mode`), where notes live (`paths.notes_dir`), the auto-compact budget, the messaging
+//! gateway, whether the web tools are registered (`tools.web.enabled`, `tools.web.search_backend`,
+//! `tools.web.search_api_key_env`), and `first_run: false` to close the gate.
 //!
 //! What is deliberately *not* written is the persona's prompt block. Prompt text has exactly one
 //! home — `crates/harness-core/prompts.md` — so an install stores the *choice* and the block is
@@ -18,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use harness_core::config::{self, Layers};
+use harness_core::config::{self, Layers, SearchBackend};
 use harness_core::error::HarnessError;
 use harness_core::MemoryMode;
 
@@ -50,8 +53,47 @@ pub const GATEWAY_DISCORD_BOT_TOKEN_KEY: &str = "gateway.discord_bot_token";
 pub const GATEWAY_WHATSAPP_TOKEN_KEY: &str = "gateway.whatsapp_token";
 /// The config key holding where markdown notes are stored.
 pub const NOTES_DIR_KEY: &str = "paths.notes_dir";
+/// The config key holding whether `web_search` / `web_fetch` are registered.
+pub const WEB_ENABLED_KEY: &str = "tools.web.enabled";
+/// The config key holding which provider backs `web_search`.
+pub const WEB_BACKEND_KEY: &str = "tools.web.search_backend";
+/// The config key holding the environment variable a key is read from. The key itself is never
+/// written here — see the `WebSettings` documentation.
+pub const WEB_API_KEY_ENV_KEY: &str = "tools.web.search_api_key_env";
 /// The config key that switches the first-run flow off.
 pub const FIRST_RUN_KEY: &str = "first_run";
+
+/// The web-access answer: whether the pair is registered, which provider backs search, and which
+/// environment variable holds a key for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSelection {
+    pub enabled: bool,
+    pub backend: SearchBackend,
+    pub api_key_env: Option<String>,
+}
+
+impl WebSelection {
+    /// Neither tool is registered.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            backend: SearchBackend::Disabled,
+            api_key_env: None,
+        }
+    }
+}
+
+impl Default for WebSelection {
+    /// A working keyless search: what a user gets by pressing Enter, and what a script that ends
+    /// before this step leaves behind.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: SearchBackend::DuckDuckGo,
+            api_key_env: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewaySelection {
@@ -97,6 +139,7 @@ pub fn persist(
     notes_dir: &std::path::Path,
     auto_compact: &AutoCompactSelection,
     gateway: &GatewaySelection,
+    web: &WebSelection,
 ) -> Result<PathBuf, HarnessError> {
     config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
     config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
@@ -145,6 +188,17 @@ pub fn persist(
             }
         }
     }
+    config::set_in_file(
+        layers,
+        WEB_ENABLED_KEY,
+        if web.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, WEB_BACKEND_KEY, web.backend.as_str())?;
+    config::set_in_file(
+        layers,
+        WEB_API_KEY_ENV_KEY,
+        web.api_key_env.as_deref().unwrap_or(""),
+    )?;
     config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
     config_file(layers)
 }

@@ -90,6 +90,13 @@ A rule decides **whether the human is asked**. It does not decide **what a call 
 have. Two independent knobs, as elsewhere in the harness — a prompt is not a boundary, and a
 boundary is not a policy.
 
+The web tools add reach bounds of the same shape, one axis further out: `tools.web.allowed_domains`
+and `tools.web.blocked_domains` (plus the per-call `allowed_domains` argument, which can narrow but
+never widen) decide which hosts `web_search` and `web_fetch` may reach, and
+`tools.web.allow_private_hosts` decides whether loopback and RFC1918 addresses are in scope at all.
+A rule can make a `web_fetch` ask for approval; the domain list and the address check are what
+decide whether the request has anywhere to go.
+
 Rules are also not a substitute for hooks: rules are declarative and evaluated by the harness,
 hooks are programs you run at an event (see [`HOOKS.md`](HOOKS.md)).
 
@@ -137,6 +144,11 @@ rather than run unconfined.
 process, which the child's filter does not cover, so the boundary wins over the convenience. An
 explicit `terminal_prefix` still applies — a prefix is a child of the harness process and inherits
 the filter — but if that prefix is itself a daemon client, the command runs in the daemon.
+
+`deny` also withholds `web_search` and `web_fetch`: they are not registered while it is set, and the
+reason — naming both keys — is logged at start-up. The filter confines a `terminal` child, not the
+harness process, so an HTTP client inside the harness would otherwise be exactly the hole this
+boundary is meant to close.
 
 What it does not bound: an already-open descriptor (only stdio is inherited, so there is nothing
 else), and commands run outside the harness.

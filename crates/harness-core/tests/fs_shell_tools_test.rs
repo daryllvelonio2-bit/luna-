@@ -682,7 +682,7 @@ async fn test_mutating_declarations() {
 }
 
 #[tokio::test]
-async fn test_registry_contains_all_six_tools() {
+async fn the_registry_registers_every_default_tool() {
     let mut config = Config::default();
     let dir = tempdir().unwrap();
     config.paths.workspace_root = dir.path().to_path_buf();
@@ -702,14 +702,26 @@ async fn test_registry_contains_all_six_tools() {
     let tools = registry.list_tools().await.unwrap();
     let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
-    assert_eq!(tool_names.len(), 7);
-    assert!(tool_names.contains(&"read_file".to_string()));
-    assert!(tool_names.contains(&"write_file".to_string()));
-    assert!(tool_names.contains(&"patch".to_string()));
-    assert!(tool_names.contains(&"search_files".to_string()));
-    assert!(tool_names.contains(&"list_files".to_string()));
-    assert!(tool_names.contains(&"todo_list".to_string()));
-    assert!(tool_names.contains(&"terminal".to_string()));
+    // Everything `tools.enabled` names by default, which is all ten minus the opt-in `process`.
+    // The web pair is in that set: a registry that quietly dropped them is a registry whose model
+    // reaches for `curl` instead.
+    assert_eq!(tool_names.len(), 9, "{tool_names:?}");
+    for expected in [
+        "read_file",
+        "write_file",
+        "patch",
+        "search_files",
+        "list_files",
+        "todo_list",
+        "terminal",
+        "web_search",
+        "web_fetch",
+    ] {
+        assert!(
+            tool_names.contains(&expected.to_string()),
+            "{expected} is missing from the registry: {tool_names:?}"
+        );
+    }
 }
 
 /// `list_files` is the filename-discovery surface that previously forced a `terminal` call.

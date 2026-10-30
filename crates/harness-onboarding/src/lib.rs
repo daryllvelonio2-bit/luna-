@@ -31,12 +31,13 @@ pub mod signal;
 pub mod store;
 pub mod style;
 pub mod typewriter;
+pub mod web_step;
 
 pub use flow::{needs_onboarding, run, run_interactive, Outcome};
 pub use gateway_step::Choice as GatewayChoice;
 pub use memory_step::Choice as MemoryChoice;
 pub use persona::{Persona, CATALOG};
 pub use screen::Size;
-pub use store::{persist, GatewaySelection};
+pub use store::{persist, GatewaySelection, WebSelection};
 pub use style::Line;
 pub use typewriter::{InstantPacer, Pacer, RealPacer};

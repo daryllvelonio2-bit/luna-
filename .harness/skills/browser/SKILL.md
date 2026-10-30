@@ -50,6 +50,22 @@ python3 {skill_dir}/scripts/browse.py open "https://example.com"
 python3 {skill_dir}/scripts/browse.py screenshot "https://example.com" /tmp/example.png
 ```
 
+## Native web tools
+
+The harness also ships `web_search` and `web_fetch` as native tools, on by default. The division is
+worth knowing before reaching for this skill:
+
+| need | use |
+|---|---|
+| find pages for a question | `web_search` — policy-checked, no Python, no browser |
+| read one page as text | `web_fetch` — HTML converted to prose, robots-aware, cached briefly |
+| a page that needs JavaScript (SPA, React/Vue) | this skill's `open` / `eval` |
+| a screenshot, or clicking/scrolling | this skill's `screenshot` / `open` |
+| a page behind the native tools' policy (private host, unusual scheme) | this skill, with `tools.web.allow_private_hosts` or an explicit domain list |
+
+The native pair refuses loopback/RFC1918 addresses by default and honours `robots.txt`; this script's
+`fetch` action has its own SSRF guard. Both are read-only, and neither needs an API key.
+
 ## Changing Configuration
 
 To customize user agent, timeouts, or search engine backend, edit `{skill_dir}/scripts/browse.py`.

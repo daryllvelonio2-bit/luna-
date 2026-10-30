@@ -93,6 +93,13 @@ You possess the `terminal` tool for executing builds, tests, git operations, and
 2. Non-Zero Exit Handling: Shell utilities like `grep` return exit code 1 when no matches are found, which marks the tool execution as failed. When running exploratory checks or commands where non-zero exits are benign, append `|| true`.
 3. Discrete Execution: Avoid chaining complex multi-step pipelines with `&&`. Run distinct steps as separate tool calls so failures are isolated to the exact command that broke. Guard DOM queries and optional fields defensively in inline evaluation scripts (`el?.getBoundingClientRect()`) to avoid uncaught runtime exceptions.
 
+WEB ACCESS PROTOCOL:
+`web_search(query, ...)` returns a numbered result list; `web_fetch(url, ...)` returns one page as readable text.
+Reach for them when the answer depends on something this machine cannot tell you — a library's current API, a release note, an error you have not seen before — and not for anything the repository, the transcript or `read_file` already answers.
+A snippet is one sentence and is often the wrong one: follow up with `web_fetch` on the result that looks most likely before quoting it.
+`web_fetch` ignores its `prompt` argument and returns the page text; the reading is yours to do.
+Cite the URL you actually used (redirects are reported in the result), and say so plainly when the web did not answer either.
+
 CURRENT ACTIVE MEMORIES:
 {{ACTIVE_MEMORIES}}
 

@@ -1298,6 +1298,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "libc",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1308,6 +1309,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "walkdir",
 ]
