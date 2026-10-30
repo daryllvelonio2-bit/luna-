@@ -88,3 +88,24 @@ The estimation heuristic exists only to decide *when to compact*, and it says so
 - `luna exec --json` carries `usage` and `duration_ms` on its `result` event.
 - `luna usage --json` prints `{ totals, by_model }` or `{ grouped_by, totals, buckets }`; with
   `--recent` it prints one JSON object per line.
+- `/usage` in a chat session prints the same numbers for the session on screen — turns, tokens in
+  and out, the cached share, the cost, the time in turns — plus the live context the transcript
+  fills. The whole ledger is shown under it, so a new session still shows what the machine has
+  spent.
+
+## The chat's own report
+
+```
+Usage — session s71d07fc7
+  turns            12
+  tokens           48.2k (40.1k in, 8.1k out)
+  cache            30.0k tok served from cache (75% of input)
+  cost             $0.0123
+  time in turns    12.4s
+  context          41.0k / 128.0k tokens (32.0%)
+```
+
+Two of those lines are not the ledger: `cache` is absent when no row reported a cache read (a
+zero would read as "caching was measured and did not help"), and `context` is the agent's own
+estimate of the live transcript against the model's window — what is still in the prompt, not what
+has been paid for.

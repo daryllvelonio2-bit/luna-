@@ -231,7 +231,7 @@ fn print_buckets(by: &str, buckets: &[UsageBucket], totals: &UsageTotals) {
 ///
 /// `None` when no row reported a cache read: a line of zeroes would read as "caching was measured
 /// and did not help", when what actually happened is that nothing was said about it.
-fn cache_text(totals: &UsageTotals) -> Option<String> {
+pub(crate) fn cache_text(totals: &UsageTotals) -> Option<String> {
     if totals.cached_tokens == 0 {
         return None;
     }
@@ -242,8 +242,26 @@ fn cache_text(totals: &UsageTotals) -> Option<String> {
     };
     Some(format!(
         "{} tok served from cache ({share:.0}% of input)",
-        totals.cached_tokens
+        format_tokens(totals.cached_tokens)
     ))
+}
+
+/// A token count in the units a person reads at a glance: `812`, `48.2k`, `1.05M`.
+///
+/// The count is rounded for the eye, never for the ledger: the numbers behind it are exact, and
+/// this is the line somebody reads while a session is still running.
+pub(crate) fn format_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    let thousands = tokens as f64 / 1_000.0;
+    if thousands < 1_000.0 {
+        if thousands.fract() == 0.0 {
+            return format!("{thousands:.0}k");
+        }
+        return format!("{thousands:.1}k");
+    }
+    format!("{:.2}M", tokens as f64 / 1_000_000.0)
 }
 
 fn print_recent(records: &[UsageRecord]) {
@@ -274,7 +292,11 @@ fn print_recent(records: &[UsageRecord]) {
     }
 }
 
-fn cost_text(totals: &UsageTotals) -> String {
+/// What the rows cost: a dollar figure, or the truth that the price is not known.
+///
+/// A model with no price on file is counted in tokens and reported as unpriced, because a dollar
+/// figure with a guess inside it is worse than no dollar figure at all.
+pub(crate) fn cost_text(totals: &UsageTotals) -> String {
     if totals.turns == 0 {
         return "$0.0000".to_string();
     }
@@ -288,7 +310,7 @@ fn cost_text(totals: &UsageTotals) -> String {
     text
 }
 
-fn format_duration(ms: u64) -> String {
+pub(crate) fn format_duration(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
     } else if ms < 60_000 {

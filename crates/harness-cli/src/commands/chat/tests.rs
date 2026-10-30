@@ -93,3 +93,14 @@ fn slash_commands_includes_sessions_picker() {
         "/sessions command must be registered in SLASH_COMMANDS"
     );
 }
+
+/// The usage report is a command of its own: it reads the ledger, so it has to be reachable by
+/// name and not only through the terminal's `luna usage`.
+#[test]
+fn slash_commands_includes_usage() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/usage"),
+        "/usage command must be registered in SLASH_COMMANDS"
+    );
+}

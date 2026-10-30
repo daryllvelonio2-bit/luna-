@@ -45,7 +45,7 @@ use commands::{
     handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
     handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
     handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
-    select_slash_command, SLASH_COMMANDS,
+    handle_usage_command, select_slash_command, SLASH_COMMANDS,
 };
 use keys::AppKey;
 use render::{
@@ -946,6 +946,18 @@ pub async fn run_interactive_chat(
                     &config,
                     &agent,
                     &mut session_id,
+                    &current_provider,
+                    &current_model,
+                )
+                .await?;
+                continue;
+            }
+            if query == "/usage" || query.starts_with("/usage ") {
+                handle_usage_command(
+                    &ui,
+                    &config,
+                    &agent,
+                    &session_id,
                     &current_provider,
                     &current_model,
                 )

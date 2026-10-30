@@ -21,6 +21,8 @@ use crate::commands::sessions::{find_by_name, resolve_session, SessionSelection}
 mod picker;
 use picker::pick_provider_and_model;
 pub(crate) use picker::{input_from_rx, select_from_rx, select_slash_command};
+mod usage;
+pub(crate) use usage::handle_usage_command;
 
 pub struct SlashCommand {
     pub name: &'static str,
@@ -140,6 +142,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/jobs",
         details: "List background task queue jobs",
+    },
+    SlashCommand {
+        name: "/usage",
+        details: "Show tokens, cache, cost and context for this session",
     },
     SlashCommand {
         name: "/todo",
@@ -541,6 +547,21 @@ pub(crate) async fn execute_slash_command(
             .await;
             if ui.is_attended {
                 ui.draw_initial_box();
+            }
+            Ok(false)
+        }
+        "/usage" => {
+            if let Err(e) = handle_usage_command(
+                ui,
+                config,
+                agent,
+                session_id.as_str(),
+                current_provider.as_str(),
+                current_model.as_str(),
+            )
+            .await
+            {
+                ui.emit_above(&format!("{} Failed to read usage: {}", "✖".red().bold(), e));
             }
             Ok(false)
         }
