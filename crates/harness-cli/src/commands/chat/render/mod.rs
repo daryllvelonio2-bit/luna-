@@ -53,6 +53,124 @@ fn extract_out_of_band_steer(content: &str) -> Option<String> {
     Some(body.trim().to_string())
 }
 
+/// Clean up raw user queries stored in session history for human-readable transcript display.
+///
+/// Historical user messages stored in SQLite include attached image base64 data URLs
+/// (which multimodal models require for vision), plan mode prompt banners, and temp file paths.
+/// When replaying or displaying transcripts, these raw payloads must not be dumped as thousands
+/// of lines of base64 text into the terminal.
+pub fn clean_user_query_for_transcript(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return raw.to_string();
+    }
+
+    // 1. Strip plan mode instruction prefix if present
+    let mut text = raw;
+    if let Some(rest) = text.strip_prefix("[PLAN MODE ACTIVE:") {
+        if let Some(end) = rest.find(']') {
+            text = rest[end + 1..].trim_start_matches(|c| c == '\r' || c == '\n');
+        }
+    }
+
+    // 2. Strip saved file paths from markers if present: [image: ... saved to ...] -> [image: ...]
+    let text = crate::commands::prompt_images::strip_image_saved_paths(text);
+
+    // If there's no data URL, return trimmed text
+    if !text.contains("data:image/") {
+        return text.trim().to_string();
+    }
+
+    let has_image_marker = text.contains("[image");
+
+    let mut in_data_url = false;
+    let mut out_lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if is_whole_data_url(trimmed) {
+            in_data_url = true;
+            if !has_image_marker {
+                out_lines.push("[image]".to_string());
+            }
+            continue;
+        }
+
+        if in_data_url {
+            if is_base64_continuation(trimmed) {
+                continue;
+            } else {
+                in_data_url = false;
+            }
+        }
+
+        if line.contains("data:image/") {
+            out_lines.push(replace_data_urls_in_line(line));
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+
+    let joined = out_lines.join("\n");
+    collapse_blank_lines(&joined)
+}
+
+fn is_whole_data_url(trimmed: &str) -> bool {
+    let stripped = trimmed.trim_matches(|c: char| "\"'`<>".contains(c));
+    stripped.starts_with("data:image/")
+        && stripped.contains(";base64,")
+        && !stripped.chars().any(char::is_whitespace)
+}
+
+fn is_base64_continuation(trimmed: &str) -> bool {
+    let stripped = trimmed.trim_matches(|c: char| "\"'`<>".contains(c));
+    !stripped.is_empty()
+        && stripped.len() >= 4
+        && stripped.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
+        })
+}
+
+fn replace_data_urls_in_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("data:image/") {
+        let (before, after_start) = rest.split_at(start);
+        out.push_str(before);
+        let end = after_start
+            .find(char::is_whitespace)
+            .unwrap_or(after_start.len());
+        let (token, tail) = after_start.split_at(end);
+        if token.contains(";base64,") {
+            let trimmed = token.trim_end_matches(|c: char| ".,;:!?)'\"`]}".contains(c));
+            let punct = &token[trimmed.len()..];
+            out.push_str("[image]");
+            out.push_str(punct);
+        } else {
+            out.push_str(token);
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut result = Vec::new();
+    let mut prev_blank = false;
+    for line in text.lines() {
+        let is_blank = line.trim().is_empty();
+        if is_blank {
+            if !prev_blank {
+                result.push("");
+                prev_blank = true;
+            }
+        } else {
+            result.push(line);
+            prev_blank = false;
+        }
+    }
+    result.join("\n").trim().to_string()
+}
+
 /// Parse historical stored messages into structured `TurnRecord`s for collapsible rendering.
 pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
     let mut turns = Vec::new();
@@ -89,7 +207,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         reply: current_reply.take().unwrap_or_default(),
                     });
                 }
-                current_query = msg.content.clone();
+                current_query = msg.content.as_deref().map(clean_user_query_for_transcript);
             }
             Role::Assistant => {
                 if let Some(ref r) = msg.reasoning {
@@ -426,11 +544,13 @@ pub fn right_aligned_user_message(query: &str, width: usize) -> String {
         return format!("{}{}", " ".repeat(pad), prompt.blue().bold());
     }
 
+    let cleaned = clean_user_query_for_transcript(query);
+
     // Two columns of the block are held back so " ☾" always fits on the final row.
     let block = user_block_width(width)
         .saturating_sub(prompt.chars().count() + 1)
         .max(8);
-    let mut rows = wrap_rows(query, block);
+    let mut rows = wrap_rows(&cleaned, block);
 
     if let Some(last) = rows.last_mut() {
         last.push(' ');

@@ -1183,3 +1183,115 @@ async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     assert_eq!(turns[1].user_query, "second question");
     assert_eq!(turns[1].reply, "second answer");
 }
+
+#[test]
+fn clean_user_query_for_transcript_strips_plan_mode_and_data_urls() {
+    use super::clean_user_query_for_transcript;
+
+    // Normal text unchanged
+    assert_eq!(
+        clean_user_query_for_transcript("just a regular question"),
+        "just a regular question"
+    );
+
+    // Multiline normal text
+    assert_eq!(
+        clean_user_query_for_transcript("line 1\nline 2"),
+        "line 1\nline 2"
+    );
+
+    // Plan mode banner stripped
+    let plan_prompt = "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\nactual question here";
+    assert_eq!(
+        clean_user_query_for_transcript(plan_prompt),
+        "actual question here"
+    );
+
+    // Attached image with marker drops whole-line base64 data URL
+    let attached_image = "[image: 948x1058] look at this UI bug\n\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcAAAAPoCAYAAAC";
+    assert_eq!(
+        clean_user_query_for_transcript(attached_image),
+        "[image: 948x1058] look at this UI bug"
+    );
+
+    // Attached image with saved-to path in marker
+    let attached_saved = "[image: 948x1058 saved to /tmp/screenshot_1.png] look at this\n\ndata:image/png;base64,AAAA";
+    assert_eq!(
+        clean_user_query_for_transcript(attached_saved),
+        "[image: 948x1058] look at this"
+    );
+
+    // Plan mode + attached image
+    let plan_image = "[PLAN MODE ACTIVE: Formulate a blueprint.]\n\n[image: 800x600] what is broken?\n\ndata:image/jpeg;base64,BBBB";
+    assert_eq!(
+        clean_user_query_for_transcript(plan_image),
+        "[image: 800x600] what is broken?"
+    );
+
+    // Mid-line inlined data URL without image marker
+    let inline_url = "inspect data:image/png;base64,CCCC and report";
+    assert_eq!(
+        clean_user_query_for_transcript(inline_url),
+        "inspect [image] and report"
+    );
+
+    // Standalone data URL without marker becomes [image]
+    let bare_url = "data:image/png;base64,DDDD";
+    assert_eq!(clean_user_query_for_transcript(bare_url), "[image]");
+}
+
+#[test]
+fn parse_turns_from_history_cleans_historical_image_data_urls() {
+    use harness_core::{Message, Role};
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::User,
+                content: Some(
+                    "[image: 948x1058] investigate this issue\n\ndata:image/png;base64,hxbMY87NCWUEZa3j5+PtQ1H7VD+7J/pgu/00V6/PWdodoAtS4k+/4b5Bydg/lyuE9s+x\n6e7d8dno/ER7UFF4sQc9bkf9AdCPRL+N8BxVFY0sAv6IoAAAAASUVORK5CYII="
+                        .to_string(),
+                ),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: Some("I fixed the issue.".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].user_query, "[image: 948x1058] investigate this issue");
+    assert_eq!(turns[0].reply, "I fixed the issue.");
+
+    let rendered = right_aligned_user_message(&turns[0].user_query, 80);
+    assert!(
+        !rendered.contains("base64"),
+        "rendered user turn must not contain base64 text"
+    );
+    assert!(
+        !rendered.contains("hxbMY87NCWUE"),
+        "rendered user turn must not contain base64 bytes"
+    );
+    assert!(
+        rendered.contains("[image: 948x1058]"),
+        "rendered user turn retains the image marker"
+    );
+}

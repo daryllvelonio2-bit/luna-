@@ -70,14 +70,14 @@ pub(super) fn launch_turn(
     // Image paths typed into the prompt are inlined the same way, so naming a file on disk sends
     // its pixels rather than a path the model would have to OCR through a shell tool.
     let images = std::mem::take(&mut *pending_images.lock().unwrap_or_else(|e| e.into_inner()));
-    let query = crate::commands::prompt_images::inline_image_paths(query);
+    let inlined_query = crate::commands::prompt_images::inline_image_paths(query);
     let q = if plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
         format!(
             "[PLAN MODE ACTIVE: Formulate a detailed, step-by-step plan/blueprint. Do not attempt to modify files or execute mutating commands until the plan is approved.]\n\n{}",
-            query
+            inlined_query
         )
     } else {
-        query.to_string()
+        inlined_query
     };
     let q_with_images = if images.is_empty() {
         q
@@ -90,24 +90,26 @@ pub(super) fn launch_turn(
     // before the box is drawn so the busy line is what the user sees while it runs.
     ui.set_turn_active(true);
 
+    let display_query = crate::commands::prompt_images::strip_image_saved_paths(query);
+
     if ui.is_attended {
         crate::commands::clear_screen();
         redraw_transcript(turns, process_expanded);
         println!();
         println!(
             "{}",
-            right_aligned_user_message(&query, get_terminal_width())
+            right_aligned_user_message(&display_query, get_terminal_width())
         );
         ui.draw_initial_box();
     } else {
         ui.begin_block(OutputBlockKind::User);
-        ui.emit_above(&right_aligned_user_message(&query, get_terminal_width()));
+        ui.emit_above(&right_aligned_user_message(&display_query, get_terminal_width()));
     }
 
     *current_cancel = CancellationToken::new();
     let cancel_child = current_cancel.child_token();
     let ag_ref = agent.clone();
-    *current_query = query.to_string();
+    *current_query = display_query;
     *turn_start = std::time::Instant::now();
     in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *active_turn = Some(tokio::spawn(async move {
