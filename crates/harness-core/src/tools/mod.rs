@@ -5,6 +5,7 @@ pub mod process;
 pub mod sandbox;
 pub mod shell;
 pub mod todo;
+pub mod web;
 
 pub use delegate::DelegateTaskTool;
 pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
@@ -15,6 +16,7 @@ pub use shell::{
 };
 use std::sync::{Arc, Mutex};
 pub use todo::{read_snapshot, TodoItem, TodoListTool, TodoScope, TodoSnapshot, TodoStatus};
+pub use web::{WebFetchTool, WebSearchTool};
 
 use crate::config::Config;
 use crate::error::HarnessError;
@@ -161,6 +163,11 @@ pub async fn register_core_tools_shared_queue(
             _ => {}
         }
     }
+
+    // The web pair is registered after the loop rather than inside it: two names share one policy
+    // and one decision about whether this machine talks to the network at all, and a match arm that
+    // had to remember whether it had already built that policy is a bug waiting to be written.
+    web::register(registry, config).await?;
 
     Ok(bg_queue)
 }

@@ -4,13 +4,17 @@
 //! itself, written against `BufRead`/`Write`/`Pacer`/a column-count closure so the whole three-phase
 //! sequence can be driven from a test with a scripted answer and no terminal.
 //!
-//! The three phases:
+//! The phases:
 //!
 //! 1. A centered, typed mission briefing (`🌙`, greeting, what Luna is for, the hand-off line).
 //! 2. The persona menu, with `1..=10` accepted, a blank line taking the default, and anything else
 //!    rejected with a reason and re-prompted.
-//! 3. The selection written to the config file, then a centered confirmation naming the persona and
-//!    the file it was written to.
+//! 3. The other settings screens — who writes memory, auto-compaction, the messaging gateway, where
+//!    notes live, and whether the agent may search and read the web — each drawn and validated by
+//!    its own module ([`crate::memory_step`], [`crate::compact_step`], [`crate::gateway_step`],
+//!    [`crate::notes_step`], [`crate::web_step`]) against the same panel.
+//! 4. The selections written to the config file, then a centered confirmation naming them and the
+//!    file they were written to.
 //!
 //! The cursor is restored on every path: by the [`CursorGuard`] drop guard, and — because a signal
 //! does not unwind — by the SIGINT/SIGTERM handlers [`run_interactive`] installs.
@@ -60,6 +64,8 @@ pub struct Outcome {
     pub auto_compact: store::AutoCompactSelection,
     /// Messaging platform gateway settings.
     pub gateway: store::GatewaySelection,
+    /// Web access settings (`web_search` / `web_fetch`).
+    pub web: store::WebSelection,
     /// The config file the choice was written to.
     pub config_path: PathBuf,
 }
@@ -106,7 +112,18 @@ where
     // Phase 2e: where markdown notes are stored.
     let notes_dir = crate::notes_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(layers, persona, memory, &notes_dir, &auto_compact, &gateway)?;
+    // Phase 2f: whether the agent may search and read the web.
+    let web = crate::web_step::select(&mut writer, reader)?;
+
+    let config_path = store::persist(
+        layers,
+        persona,
+        memory,
+        &notes_dir,
+        &auto_compact,
+        &gateway,
+        &web,
+    )?;
 
     let mut writer = Typewriter::new(out, pacer, size);
     confirmation(
@@ -116,6 +133,7 @@ where
         &notes_dir,
         &auto_compact,
         &gateway,
+        &web,
         &config_path,
     )?;
 
@@ -125,6 +143,7 @@ where
         notes_dir,
         auto_compact,
         gateway,
+        web,
         config_path,
     })
 }
@@ -238,6 +257,7 @@ fn confirmation<W: Write, P: Pacer>(
     notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
+    web: &store::WebSelection,
     config_path: &Path,
 ) -> Result<(), HarnessError> {
     writer.clear_screen()?;
@@ -248,6 +268,7 @@ fn confirmation<W: Write, P: Pacer>(
         notes_dir,
         auto_compact,
         gateway,
+        web,
         config_path,
         writer.size(),
     );
@@ -262,6 +283,7 @@ pub fn confirmation_lines(
     notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
     gateway: &store::GatewaySelection,
+    web: &store::WebSelection,
     config_path: &Path,
     size: Size,
 ) -> Vec<Line> {
@@ -336,6 +358,20 @@ pub fn confirmation_lines(
         }
     }
     lines.push(Line::blank());
+    let web_label = "Web access";
+    let web_summary = crate::web_step::summary(web);
+    if web_label.len() + 2 + web_summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{web_label}  ")))
+                .with(Span::strong(web_summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(web_label)));
+        for wrapped in screen::wrap(&web_summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
+    lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
         limit,
@@ -367,12 +403,14 @@ mod tests {
         let notes_dir = PathBuf::from("/home/janelle/.luna/notes");
         let ac = store::AutoCompactSelection::default();
         let gw = store::GatewaySelection::default();
+        let web = store::WebSelection::default();
         let block = confirmation_lines(
             persona,
             MemoryMode::Background,
             &notes_dir,
             &ac,
             &gw,
+            &web,
             &path,
             Size::new(90, 24),
         )
@@ -388,6 +426,9 @@ mod tests {
         // Both answers are reported, so the screen states the whole outcome.
         assert!(block.contains("Background saver"), "{block}");
         assert!(block.contains("memory.mode"), "{block}");
+        // And so is the web answer, including where a key would come from.
+        assert!(block.contains("Web access"), "{block}");
+        assert!(block.contains("DuckDuckGo"), "{block}");
     }
 
     #[test]
@@ -397,12 +438,18 @@ mod tests {
         for columns in [40u16, 80, 120] {
             let ac = store::AutoCompactSelection::default();
             let gw = store::GatewaySelection::default();
+            let web = store::WebSelection {
+                enabled: true,
+                backend: harness_core::config::SearchBackend::Brave,
+                api_key_env: Some("A_VERY_LONG_ENVIRONMENT_VARIABLE_NAME".to_string()),
+            };
             for line in confirmation_lines(
                 persona,
                 MemoryMode::Session,
                 &notes_dir,
                 &ac,
                 &gw,
+                &web,
                 &PathBuf::from("~/.luna/config.yaml"),
                 Size::new(columns, 24),
             ) {

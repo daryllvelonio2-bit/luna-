@@ -21,6 +21,8 @@ uuid = { workspace = true }
 similar = { workspace = true }
 rusqlite = { workspace = true }
 walkdir = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

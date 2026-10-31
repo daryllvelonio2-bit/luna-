@@ -27,9 +27,17 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
+pub mod web;
+
 use crate::agent::AgentConfig;
 use crate::approval::{ApprovalMode, DEFAULT_APPROVAL_TIMEOUT_SECS};
 use crate::error::HarnessError;
+pub use web::{
+    web_tools_blocked_reason, SearchBackend, WebSettings, DEFAULT_WEB_USER_AGENT, SEARCH_BACKENDS,
+    WEB_CACHE_CEILING_SECS, WEB_FETCH_MAX_BYTES_CEILING, WEB_FETCH_MAX_CHARS_CEILING,
+    WEB_FETCH_MIN_BYTES, WEB_FETCH_MIN_CHARS, WEB_MAX_REDIRECT_CEILING,
+    WEB_SEARCH_MAX_RESULTS_CEILING, WEB_TIMEOUT_CEILING_SECS,
+};
 
 /// Environment variable that relocates the config file.
 pub const CONFIG_PATH_ENV: &str = "LUNA_CONFIG";
@@ -189,6 +197,7 @@ impl Config {
             ));
         }
         self.mcp.validate()?;
+        self.tools.web.validate()?;
         Ok(())
     }
 }
@@ -641,6 +650,8 @@ pub struct ToolsSettings {
     pub enabled: Vec<String>,
     /// Standing policy applied before the human gate: `deny` > `ask` > `allow`.
     pub permissions: Vec<crate::permission::PermissionRule>,
+    /// Web access: the `web_search` / `web_fetch` pair. See [`WebSettings`].
+    pub web: WebSettings,
 }
 
 impl Default for ToolsSettings {
@@ -656,6 +667,7 @@ impl Default for ToolsSettings {
             terminal_prefix: None,
             rtk_rewrite: true,
             permissions: Vec::new(),
+            web: WebSettings::default(),
             enabled: vec![
                 "read_file".to_string(),
                 "write_file".to_string(),
@@ -664,6 +676,8 @@ impl Default for ToolsSettings {
                 "list_files".to_string(),
                 "todo_list".to_string(),
                 "terminal".to_string(),
+                "web_search".to_string(),
+                "web_fetch".to_string(),
             ],
         }
     }
