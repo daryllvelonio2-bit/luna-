@@ -598,6 +598,104 @@ fn a_tool_call_is_stamped_with_its_verdict_once() {
 }
 
 #[test]
+fn multiple_tool_calls_in_one_turn_each_get_their_own_verdict_without_duplication() {
+    use harness_core::{Message, ToolResult};
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("check things"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![
+                    harness_core::ToolCall {
+                        id: "c1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "src/a.rs" }),
+                        signature: None,
+                    },
+                    harness_core::ToolCall {
+                        id: "c2".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "src/b.rs" }),
+                        signature: None,
+                    },
+                    harness_core::ToolCall {
+                        id: "c3".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "src/c.rs" }),
+                        signature: None,
+                    },
+                ],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Tool,
+                content: None,
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: Some(ToolResult::success("c1", "content a")),
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message {
+                role: Role::Tool,
+                content: None,
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: Some(ToolResult::error("c2", "file b not found")),
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message {
+                role: Role::Tool,
+                content: None,
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: Some(ToolResult::success("c3", "content c")),
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns[0].tool_items.len(), 3);
+    for (i, item) in turns[0].tool_items.iter().enumerate() {
+        let call = plain(&item.call_formatted);
+        assert_eq!(
+            call.matches("(success)").count() + call.matches("(failed)").count(),
+            1,
+            "tool item {i} must have exactly one verdict: {call}"
+        );
+    }
+    assert!(plain(&turns[0].tool_items[0].call_formatted).ends_with("(success)"));
+    assert!(plain(&turns[0].tool_items[1].call_formatted).ends_with("(failed)"));
+    assert!(plain(&turns[0].tool_items[2].call_formatted).ends_with("(success)"));
+}
+
+#[test]
 fn a_coloured_verdict_counts_as_a_verdict() {
     assert!(has_verdict(&format!(
         "read src/lib.rs {}",

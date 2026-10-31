@@ -140,11 +140,11 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                     } else {
                         " (success)".green().to_string()
                     };
-                    if let Some(last) = current_tools.last_mut() {
-                        if !has_verdict(&last.call_formatted) {
-                            last.call_formatted.push_str(&status);
-                        }
-                        last.result_formatted.clear();
+                    if let Some(target) = current_tools.iter_mut().find(|it| {
+                        !is_non_tool_event(&it.call_formatted) && !has_verdict(&it.call_formatted)
+                    }) {
+                        target.call_formatted.push_str(&status);
+                        target.result_formatted.clear();
                     }
                 }
             }
@@ -274,13 +274,19 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
     }
 }
 
+/// Whether a formatted line is a non-tool event (steer, approval rejection, etc.)
+pub fn is_non_tool_event(call: &str) -> bool {
+    let plain = dialoguer::console::strip_ansi_codes(call);
+    plain.starts_with('⏩') || plain.starts_with('✖') || plain.starts_with('✔')
+}
+
 /// Whether a formatted call already carries a verdict.
 ///
 /// The verdict is written in colour, so the string ends in the reset escape rather than
 /// in "(success)": comparing the *visible* text is what keeps a call from being
 /// stamped with its verdict twice — once when the tool returned, once when the
 /// transcript was drawn.
-fn has_verdict(call: &str) -> bool {
+pub fn has_verdict(call: &str) -> bool {
     let plain = dialoguer::console::strip_ansi_codes(call);
     let trimmed = plain.trim_end();
     trimmed.ends_with("(success)") || trimmed.ends_with("(failed)")

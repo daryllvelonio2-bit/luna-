@@ -53,8 +53,9 @@ use keys::AppKey;
 use render::{
     compaction_report, format_approval_verdict, format_delegate_duration,
     format_delegate_notification, format_delegate_title, format_patch_diff, format_tool_call,
-    format_tool_result, parse_turns_from_history, render_transcript, right_aligned_user_message,
-    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    format_tool_result, has_verdict, is_non_tool_event, parse_turns_from_history,
+    render_transcript, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
+    LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -569,15 +570,22 @@ pub async fn run_interactive_chat(
                 };
                 let (line, diff_to_show) = {
                     let mut tools = in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(last) = tools.last_mut() {
-                        last.call_formatted.push_str(&status);
-                        last.result_formatted.clear();
+                    // When multiple tool calls run in parallel, in_flight_tools holds all of them.
+                    // Match the first in-flight tool call that hasn't received a verdict yet,
+                    // preserving call order. Using tools.last_mut() repeatedly updated the last
+                    // tool in the batch, appending duplicate verdicts and printing it multiple times.
+                    let target = tools.iter_mut().find(|it| {
+                        !is_non_tool_event(&it.call_formatted) && !has_verdict(&it.call_formatted)
+                    });
+                    if let Some(item) = target {
+                        item.call_formatted.push_str(&status);
+                        item.result_formatted.clear();
                         let diff = if !is_error && name == "patch" {
-                            last.diff_lines.clone()
+                            item.diff_lines.clone()
                         } else {
                             Vec::new()
                         };
-                        (last.call_formatted.clone(), diff)
+                        (item.call_formatted.clone(), diff)
                     } else {
                         (format_tool_result(is_error, &output), Vec::new())
                     }
