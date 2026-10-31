@@ -84,6 +84,9 @@ pub struct Config {
     /// Messaging platform gateway (Telegram, Discord, WhatsApp).
     #[serde(default)]
     pub gateway: GatewaySettings,
+    /// Model Context Protocol servers whose tools are exposed to the agent.
+    #[serde(default)]
+    pub mcp: McpSettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -133,6 +136,7 @@ impl Default for Config {
             auto_compact_percent: Some(AUTO_COMPACT_DEFAULT_PERCENT),
             auto_compact_turns: AUTO_COMPACT_DEFAULT_TURNS,
             gateway: GatewaySettings::default(),
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -183,6 +187,44 @@ impl Config {
             return Err(HarnessError::ConfigurationError(
                 "agent.auto_compact_turns must be positive, got 0".to_string(),
             ));
+        }
+        self.mcp.validate()?;
+        Ok(())
+    }
+}
+
+impl McpSettings {
+    /// Reject a config that cannot produce a usable tool surface: a server with no name, no
+    /// command, or a duplicate namespace would silently shadow another server's tools.
+    pub fn validate(&self) -> Result<(), HarnessError> {
+        if self.startup_timeout_secs == 0 {
+            return Err(HarnessError::ConfigurationError(
+                "mcp.startup_timeout_secs must be positive".to_string(),
+            ));
+        }
+        if self.call_timeout_secs == 0 {
+            return Err(HarnessError::ConfigurationError(
+                "mcp.call_timeout_secs must be positive".to_string(),
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for server in &self.servers {
+            let name = server.name.trim();
+            if name.is_empty() {
+                return Err(HarnessError::ConfigurationError(
+                    "mcp.servers[].name must not be empty".to_string(),
+                ));
+            }
+            if server.command.trim().is_empty() {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "mcp server '{name}' has an empty command"
+                )));
+            }
+            if !seen.insert(name.to_string()) {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "duplicate mcp server name '{name}': names are the tool namespace and must be unique"
+                )));
+            }
         }
         Ok(())
     }
@@ -249,6 +291,66 @@ impl Default for GatewaySettings {
             allow_mutating_tools: false,
         }
     }
+}
+
+/// Model Context Protocol (MCP) integration.
+///
+/// Each entry under `servers` is a stdio MCP server the harness spawns once per session. The
+/// tools it advertises are registered under `mcp__<server>__<tool>`, so two servers may expose the
+/// same tool name without colliding. `enabled: false` (or an empty `servers` list) means no process
+/// is ever spawned — a config file with no `mcp` section behaves exactly as before.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpSettings {
+    /// Master switch. Default `true`: servers only run because the user listed them.
+    pub enabled: bool,
+    /// Bound on the `initialize` handshake and `tools/list` at session start.
+    pub startup_timeout_secs: u64,
+    /// Bound on one `tools/call`. A hung server is reported as a tool error, not a stalled turn.
+    pub call_timeout_secs: u64,
+    pub servers: Vec<McpServerConfig>,
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            startup_timeout_secs: 20,
+            call_timeout_secs: 120,
+            servers: Vec::new(),
+        }
+    }
+}
+
+/// One stdio MCP server.
+///
+/// `name` is the namespace in the registered tool name (`mcp__<name>__<tool>`); `command` + `args`
+/// are the process the harness spawns. `env` is added to the inherited environment rather than
+/// replacing it, so a server that needs `PATH`/`HOME` still finds them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerConfig {
+    /// Namespace for this server's tools. Must be non-empty and unique.
+    pub name: String,
+    /// Executable to spawn.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the child process.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Working directory; defaults to `paths.workspace_root`. `~` is expanded.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Tool-name allowlist. Empty means every tool the server advertises.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Lifecycle-hook settings.

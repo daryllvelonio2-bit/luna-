@@ -10,6 +10,7 @@ pub mod exec;
 pub mod gateway;
 pub mod heartbeat;
 pub mod hooks;
+pub mod mcp;
 pub mod models;
 pub mod prompt_images;
 pub mod sessions;

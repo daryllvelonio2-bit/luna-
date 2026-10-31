@@ -34,6 +34,7 @@ where
             .skills_summary
             .as_deref()
             .unwrap_or("(no specialized skills installed)");
+        let mcp_prompt = self.mcp_tools_prompt().await?;
 
         let memory_instruction = match self.config.memory_mode {
             crate::config::MemoryMode::Session => {
@@ -52,6 +53,7 @@ where
             )
             .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
             .replace("{{AVAILABLE_SKILLS}}", skills_prompt)
+            .replace("{{MCP_TOOLS}}", &mcp_prompt)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", &memory_instruction)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction);
 
@@ -75,5 +77,78 @@ where
         };
 
         Ok(format!("{}{}", base, env_info))
+    }
+
+    /// The registered MCP tools as a `- name: description` index for the prompt.
+    ///
+    /// Read from the registry rather than the config so the index is exactly the surface the model
+    /// can call: a server that failed to start contributes nothing, and its absence is honest
+    /// instead of a promise the tools cannot keep.
+    async fn mcp_tools_prompt(&self) -> Result<String, HarnessError> {
+        Ok(format_mcp_tools(&self.registry.list_tools().await?))
+    }
+}
+
+/// The prompt's MCP block body: one `- name: description` line per registered `mcp__` tool, in
+/// stable name order, or a fallback line when none are registered.
+///
+/// Stable order matters: the tool index sits in the request prefix, so an order that shifts between
+/// turns is a prompt-cache miss on every turn.
+pub(crate) fn format_mcp_tools(tools: &[crate::types::ToolDefinition]) -> String {
+    let mut mcp: Vec<&crate::types::ToolDefinition> = tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("mcp__"))
+        .collect();
+
+    if mcp.is_empty() {
+        return "(no MCP tools registered — add an `mcp.servers` block to the config to enable them)"
+            .to_string();
+    }
+
+    mcp.sort_by(|left, right| left.name.cmp(&right.name));
+    mcp.into_iter()
+        .map(|tool| format!("- {}: {}", tool.name, tool.description))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ToolDefinition;
+
+    fn tool(name: &str, description: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    /// Native tools never leak into the MCP block, and the block says so plainly when the config
+    /// declared no servers.
+    #[test]
+    fn no_mcp_tools_yields_the_fallback_line() {
+        let body = format_mcp_tools(&[tool("read_file", "Read a file"), tool("terminal", "shell")]);
+        assert!(body.starts_with("(no MCP tools registered"), "got: {body}");
+    }
+
+    /// Only `mcp__` tools are listed, one per line, sorted by name for a stable cache prefix.
+    #[test]
+    fn mcp_tools_are_listed_sorted_and_namespaced() {
+        let body = format_mcp_tools(&[
+            tool("read_file", "native"),
+            tool("mcp__z__do", "z tool"),
+            tool("mcp__a__ping", "a tool"),
+        ]);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "- mcp__a__ping: a tool",
+                "- mcp__z__do: z tool",
+            ],
+            "got: {body}"
+        );
     }
 }

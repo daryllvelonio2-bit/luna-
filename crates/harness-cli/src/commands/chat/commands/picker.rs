@@ -44,19 +44,32 @@ pub(crate) async fn select_slash_command(
             .iter()
             .enumerate()
             .filter(|(_, cmd)| {
-                cmd.name.to_lowercase().contains(&f) || cmd.details.to_lowercase().contains(&f)
+                let name = cmd.name.to_lowercase();
+                let details = cmd.details.to_lowercase();
+                name.contains(&f) || details.contains(&f)
             })
             .collect();
-        // The command the user named comes first. The filter matches on "contains", so
-        // without this, typing "/compact" and pressing Enter would run "/compact-model":
-        // the first command whose name happens to hold the word.
-        if let Some(position) = matches
-            .iter()
-            .position(|(_, cmd)| cmd.name.to_lowercase() == format!("/{}", f))
-        {
-            let exact = matches.remove(position);
-            matches.insert(0, exact);
-        }
+        // Prioritize prefix matches (commands starting with the filter) over substring matches.
+        // Then, within each group, the exact name match comes first.
+        matches.sort_by(|a, b| {
+            let a_name = a.1.name.to_lowercase();
+            let b_name = b.1.name.to_lowercase();
+            let a_prefix = a_name.starts_with(&format!("/{}", f));
+            let b_prefix = b_name.starts_with(&format!("/{}", f));
+            match (a_prefix, b_prefix) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    let a_exact = a_name == format!("/{}", f);
+                    let b_exact = b_name == format!("/{}", f);
+                    match (a_exact, b_exact) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                }
+            }
+        });
         matches
     };
 

@@ -71,6 +71,7 @@ mod tests {
             body.contains("{{AVAILABLE_SKILLS}}"),
             "skills marker missing"
         );
+        assert!(body.contains("{{MCP_TOOLS}}"), "mcp tools marker missing");
         assert!(
             body.contains("{{MEMORY_AND_NOTE_PROTOCOL}}"),
             "memory and note protocol marker missing"

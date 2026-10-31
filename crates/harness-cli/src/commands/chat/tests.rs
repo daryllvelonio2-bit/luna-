@@ -1,4 +1,5 @@
 use super::turn::{composer_command, submission, ComposerCommand};
+use super::commands::{SLASH_COMMANDS, SlashCommand};
 
 /// The commands the composer owns are recognised by their whole name, and their argument is
 /// kept verbatim: guidance is prose, not a token.
@@ -103,4 +104,98 @@ fn slash_commands_includes_usage() {
         SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/usage"),
         "/usage command must be registered in SLASH_COMMANDS"
     );
+}
+
+/// The slash command filter prioritizes prefix matches: typing "/s" should show /sessions,
+/// /summarize, /skills, etc. before /model (which merely contains "s").
+#[test]
+fn slash_command_filter_prioritizes_prefix() {
+    use super::commands::SLASH_COMMANDS;
+
+    // Simulate the filter logic from picker.rs
+    let filter = |f: &str| -> Vec<&'static str> {
+        let f = f.strip_prefix('/').unwrap_or(f).trim().to_lowercase();
+        if f.is_empty() {
+            return SLASH_COMMANDS.iter().map(|c| c.name).collect();
+        }
+        let mut matches: Vec<&'static SlashCommand> = SLASH_COMMANDS
+            .iter()
+            .filter(|cmd| {
+                let name = cmd.name.to_lowercase();
+                let details = cmd.details.to_lowercase();
+                name.contains(&f) || details.contains(&f)
+            })
+            .collect();
+        matches.sort_by(|a, b| {
+            let a_name = a.name.to_lowercase();
+            let b_name = b.name.to_lowercase();
+            let a_prefix = a_name.starts_with(&format!("/{}", f));
+            let b_prefix = b_name.starts_with(&format!("/{}", f));
+            match (a_prefix, b_prefix) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    let a_exact = a_name == format!("/{}", f);
+                    let b_exact = b_name == format!("/{}", f);
+                    match (a_exact, b_exact) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                }
+            }
+        });
+        matches.into_iter().map(|c| c.name).collect()
+    };
+
+    let results = filter("s");
+    // First results should be /s* commands, not /model
+    let first_s_prefix = results.iter().position(|n| n.starts_with("/s")).unwrap_or(usize::MAX);
+    let first_model = results.iter().position(|n| *n == "/model").unwrap_or(usize::MAX);
+    assert!(first_s_prefix < first_model, "/s* commands should appear before /model when filtering 's', got: {:?}", results);
+}
+
+/// Exact match comes first within its prefix group.
+#[test]
+fn slash_command_filter_exact_match_first() {
+    use super::commands::SLASH_COMMANDS;
+
+    let filter = |f: &str| -> Vec<&'static str> {
+        let f = f.strip_prefix('/').unwrap_or(f).trim().to_lowercase();
+        if f.is_empty() {
+            return SLASH_COMMANDS.iter().map(|c| c.name).collect();
+        }
+        let mut matches: Vec<&'static SlashCommand> = SLASH_COMMANDS
+            .iter()
+            .filter(|cmd| {
+                let name = cmd.name.to_lowercase();
+                let details = cmd.details.to_lowercase();
+                name.contains(&f) || details.contains(&f)
+            })
+            .collect();
+        matches.sort_by(|a, b| {
+            let a_name = a.name.to_lowercase();
+            let b_name = b.name.to_lowercase();
+            let a_prefix = a_name.starts_with(&format!("/{}", f));
+            let b_prefix = b_name.starts_with(&format!("/{}", f));
+            match (a_prefix, b_prefix) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    let a_exact = a_name == format!("/{}", f);
+                    let b_exact = b_name == format!("/{}", f);
+                    match (a_exact, b_exact) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                }
+            }
+        });
+        matches.into_iter().map(|c| c.name).collect()
+    };
+
+    // Exact match "/sessions" should come first when filtering "sessions"
+    let results = filter("sessions");
+    assert_eq!(results.first(), Some(&"/sessions"));
 }

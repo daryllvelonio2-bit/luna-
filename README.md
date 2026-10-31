@@ -24,7 +24,8 @@ A production-grade, extensible **Autonomous AI Agent Harness** implemented in **
    - Native tools: `save_note`, `search_notes`, `list_notes`, `read_note`, `update_note`, `delete_note`.
 
 4. **Ecosystem Extensibility**:
-   - Model Context Protocol (MCP) client implementation over Stdio and SSE.
+   - Model Context Protocol (MCP) client over stdio: servers are spawned from config and their
+     tools are registered as `mcp__<server>__<tool>`.
    - Sandboxed Wasm plugins with memory and execution constraints.
    - Declarative Markdown prompt skills loader.
 
@@ -259,6 +260,26 @@ that inactivity timer, so a long
 task is not killed merely because it ran for a long time. `delegate_task(action: "wait")` waits
 for up to **5 minutes** by default and leaves the child running in the background if that wait
 window expires.
+
+### 2.15 MCP servers
+
+```yaml
+mcp:
+  enabled: true            # default true: servers only run because you listed them
+  startup_timeout_secs: 20
+  call_timeout_secs: 120
+  servers:
+    - name: filesystem     # the tool namespace: mcp__filesystem__<tool>
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      tools: []           # empty = every tool the server advertises
+```
+
+Each server is spawned once per session over stdio, and its tools are registered as
+`mcp__<server>__<tool>` so two servers may expose the same tool name without colliding. A
+server that fails to start or list its tools is reported and skipped — it never fails the turn.
+`luna mcp list` prints the configured servers from the config alone; `luna mcp tools` spawns
+each enabled server and prints the namespaced tools the agent actually sees.
 
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):

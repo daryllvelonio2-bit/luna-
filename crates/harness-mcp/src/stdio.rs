@@ -1,10 +1,13 @@
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info};
 
 use crate::types::{JsonRpcRequest, JsonRpcResponse, McpToolInfo};
@@ -16,24 +19,40 @@ pub struct McpStdioClient {
     stdin: Mutex<ChildStdin>,
     reader: Mutex<BufReader<ChildStdout>>,
     next_id: AtomicU64,
+    call_timeout: Duration,
 }
 
 impl McpStdioClient {
-    pub async fn spawn(command: &str, args: &[&str]) -> Result<Arc<Self>, HarnessError> {
+    pub async fn spawn(
+        command: &str,
+        args: &[&str],
+        env: &BTreeMap<String, String>,
+        cwd: Option<&Path>,
+        startup_timeout_secs: u64,
+        call_timeout_secs: u64,
+    ) -> Result<Arc<Self>, HarnessError> {
         info!(
             "Spawning MCP stdio server: '{}' with args {:?}",
             command, args
         );
 
-        let mut child = Command::new(command)
-            .args(args)
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e))
-            })?;
+            .stderr(Stdio::inherit());
+        // `env` is layered over the inherited environment, not substituted for
+        // it: a server that needs PATH or HOME still finds them.
+        if !env.is_empty() {
+            cmd.envs(env.iter());
+        }
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e))
+        })?;
 
         let stdin = child
             .stdin
@@ -49,10 +68,41 @@ impl McpStdioClient {
             stdin: Mutex::new(stdin),
             reader: Mutex::new(BufReader::new(stdout)),
             next_id: AtomicU64::new(1),
+            call_timeout: Duration::from_secs(call_timeout_secs),
         });
 
-        client.initialize().await?;
+        let init_fut = client.initialize();
+        let init_res = timeout(Duration::from_secs(startup_timeout_secs), init_fut).await;
+        match init_res {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(HarnessError::ToolExecutionFailed {
+                    tool: "mcp_initialize".to_string(),
+                    reason: format!(
+                        "MCP server '{}' initialize timed out after {}s",
+                        command, startup_timeout_secs
+                    ),
+                });
+            }
+        }
         Ok(client)
+    }
+
+    pub async fn initialize(&self) -> Result<(), HarnessError> {
+        let init_params = json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "clientInfo": {
+                "name": "luna-agent-harness",
+                "version": "0.1.0"
+            }
+        });
+
+        debug!("Sending MCP initialize handshake");
+        self.send_request("initialize", Some(init_params)).await?;
+        Ok(())
     }
 
     async fn send_request(
@@ -85,12 +135,27 @@ impl McpStdioClient {
         }
 
         let mut response_line = String::new();
-        {
+        let read_fut = async {
             let mut reader = self.reader.lock().await;
             reader
                 .read_line(&mut response_line)
                 .await
-                .map_err(|e| HarnessError::Io(e.to_string()))?;
+                .map_err(|e| HarnessError::Io(e.to_string()))
+        };
+        match timeout(self.call_timeout, read_fut).await {
+            Ok(res) => {
+                res?;
+            }
+            Err(_) => {
+                return Err(HarnessError::ToolExecutionFailed {
+                    tool: method.to_string(),
+                    reason: format!(
+                        "MCP server '{}' timed out after {}s",
+                        self.command,
+                        self.call_timeout.as_secs()
+                    ),
+                });
+            }
         }
 
         let resp: JsonRpcResponse = serde_json::from_str(&response_line).map_err(|e| {
@@ -108,23 +173,6 @@ impl McpStdioClient {
         }
 
         Ok(resp.result.unwrap_or(serde_json::Value::Null))
-    }
-
-    pub async fn initialize(&self) -> Result<(), HarnessError> {
-        let init_params = json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {}
-            },
-            "clientInfo": {
-                "name": "luna-agent-harness",
-                "version": "0.1.0"
-            }
-        });
-
-        debug!("Sending MCP initialize handshake");
-        self.send_request("initialize", Some(init_params)).await?;
-        Ok(())
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>, HarnessError> {
