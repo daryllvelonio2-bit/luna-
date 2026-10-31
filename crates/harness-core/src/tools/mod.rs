@@ -8,7 +8,10 @@ pub mod todo;
 pub mod web;
 
 pub use delegate::DelegateTaskTool;
-pub use fs::{ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool, WriteFileTool};
+pub use fs::{
+    char_safe_cut, ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool,
+    WriteFileTool,
+};
 pub use process::ProcessTool;
 pub use shell::{
     check_sudo_nopasswd, contains_sudo, is_sudo_auth_failure, rewrite_sudo_command, SudoPrompter,

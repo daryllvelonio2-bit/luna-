@@ -132,6 +132,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "List available specialized skills",
     },
     SlashCommand {
+        name: "/mcp",
+        details: "List configured MCP servers and tools (/mcp, /mcp tools)",
+    },
+    SlashCommand {
         name: "/plan",
         details: "Toggle read-only plan mode (or Tab key)",
     },
@@ -529,6 +533,26 @@ pub(crate) async fn execute_slash_command(
                         "•".cyan(),
                         config.paths.skills_dir.display()
                     ));
+                }
+            }
+            Ok(false)
+        }
+        "/mcp" => {
+            let sub = arg.unwrap_or("").trim();
+            if sub == "list" {
+                let readout = crate::commands::mcp::format_mcp_servers(config);
+                ui.emit_above(&format!("\n{}", readout.trim_end()));
+            } else if sub == "tools" {
+                ui.emit_above(&format!("{} Querying MCP tools...", "•".cyan()));
+                let readout = crate::commands::mcp::format_mcp_tools(config).await;
+                ui.emit_above(&format!("\n{}", readout.trim_end()));
+            } else {
+                let servers = crate::commands::mcp::format_mcp_servers(config);
+                ui.emit_above(&format!("\n{}", servers.trim_end()));
+                if config.mcp.enabled && config.mcp.servers.iter().any(|s| s.enabled) {
+                    ui.emit_above(&format!("\n{} Querying MCP tools...", "•".cyan()));
+                    let tools = crate::commands::mcp::format_mcp_tools(config).await;
+                    ui.emit_above(&format!("\n{}", tools.trim_end()));
                 }
             }
             Ok(false)

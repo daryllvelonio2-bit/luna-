@@ -1006,7 +1006,7 @@ async fn test_list_files_skips_noise_directories() {
     let cancel = CancellationToken::new();
 
     tokio::fs::write(root.join("keep.rs"), "x").await.unwrap();
-    for noise in [".git", "target", "node_modules"] {
+    for noise in [".git", "target", "node_modules", "checkpoints", ".cache"] {
         tokio::fs::create_dir_all(root.join(noise)).await.unwrap();
         tokio::fs::write(root.join(noise).join("hidden"), "x")
             .await
@@ -1019,13 +1019,92 @@ async fn test_list_files_skips_noise_directories() {
         .unwrap();
 
     assert!(res.content.contains("keep.rs"), "got: {}", res.content);
-    for noise in ["hidden", ".git/", "target/", "node_modules/"] {
+    for noise in ["hidden", ".git/", "target/", "node_modules/", "checkpoints/", ".cache/"] {
         assert!(
             !res.content.contains(noise),
             "'{noise}' must be skipped: {}",
             res.content
         );
     }
+}
+
+#[tokio::test]
+async fn test_search_files_truncates_long_matching_lines() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    let prefix = "a".repeat(25_000);
+    let suffix = "b".repeat(25_000);
+    let long_line = format!("{prefix}target_needle{suffix}\n");
+    tokio::fs::write(root.join("huge_line.json"), long_line)
+        .await
+        .unwrap();
+
+    let res = SearchFilesTool::new(root)
+        .execute("c1", &json!({ "pattern": "target_needle" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(res.content.contains("target_needle"));
+    assert!(res.content.contains("[line truncated]"));
+    // The truncated line should be roughly ~500 chars plus path/prefix/suffix, far below 50,000 chars
+    assert!(res.content.len() < 1_000, "content was {} chars", res.content.len());
+}
+
+#[tokio::test]
+async fn test_search_files_skips_noise_directories() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    tokio::fs::write(root.join("src.rs"), "find_me").await.unwrap();
+    for noise in [".git", "target", "node_modules", "checkpoints", ".cache"] {
+        tokio::fs::create_dir_all(root.join(noise)).await.unwrap();
+        tokio::fs::write(root.join(noise).join("leak.txt"), "find_me")
+            .await
+            .unwrap();
+    }
+
+    let res = SearchFilesTool::new(root)
+        .execute("c2", &json!({ "pattern": "find_me" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(res.content.contains("src.rs:1: find_me"));
+    for noise in [".git", "target", "node_modules", "checkpoints", ".cache"] {
+        assert!(
+            !res.content.contains(&format!("{noise}/leak.txt")),
+            "'{noise}' directory must be skipped: {}",
+            res.content
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_search_files_output_ceiling() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cancel = CancellationToken::new();
+
+    // Create files with lines designed to exceed 100,000 characters before 200 lines
+    for i in 0..250 {
+        let line = format!("match_output_ceiling_token_{}: {}\n", i, "z".repeat(1000));
+        tokio::fs::write(root.join(format!("file_{i}.txt")), line)
+            .await
+            .unwrap();
+    }
+
+    let res = SearchFilesTool::new(root)
+        .execute("c3", &json!({ "pattern": "match_output_ceiling_token" }), &cancel)
+        .await
+        .unwrap();
+
+    assert!(
+        res.content.contains("characters of matches"),
+        "must announce output character ceiling: {}",
+        res.content
+    );
 }
 
 #[test]

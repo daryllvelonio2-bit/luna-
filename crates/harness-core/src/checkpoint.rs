@@ -231,6 +231,33 @@ impl DiffSummary {
     }
 }
 
+fn sanitize_checkpoint_prompt(raw: &str) -> String {
+    if !raw.contains("data:image/") && raw.len() <= 4096 {
+        return raw.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("data:image/") {
+        let (before, after_start) = rest.split_at(start);
+        out.push_str(before);
+        let end = after_start
+            .find(char::is_whitespace)
+            .unwrap_or(after_start.len());
+        out.push_str("[image]");
+        rest = &after_start[end..];
+    }
+    out.push_str(rest);
+    if out.len() > 4096 {
+        let mut end = 4096;
+        while !out.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("... [truncated]");
+    }
+    out
+}
+
 /// A snapshot being filled as a turn runs.
 ///
 /// Shared between the agent loop (which opens it) and the middleware (which adds to it), which is
@@ -557,7 +584,7 @@ impl CheckpointStore {
             session_id: session_id.to_string(),
             seq,
             created_at: now_rfc3339(),
-            prompt: prompt.map(str::to_string),
+            prompt: prompt.map(sanitize_checkpoint_prompt),
             files: Mutex::new(Vec::new()),
             next_blob: Mutex::new(0),
             baseline,

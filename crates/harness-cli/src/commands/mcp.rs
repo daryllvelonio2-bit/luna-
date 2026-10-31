@@ -38,6 +38,50 @@ pub async fn handle_mcp_command(cmd: McpCommand, config: &Config) -> Result<(), 
     }
 }
 
+/// The configured servers formatted as human-readable text. No process is spawned.
+pub fn format_mcp_servers(config: &Config) -> String {
+    let mcp = &config.mcp;
+
+    if mcp.servers.is_empty() {
+        return "no MCP servers configured — add an `mcp.servers` block to the config to enable them".to_string();
+    }
+
+    let mut out = String::new();
+    if !mcp.enabled {
+        out.push_str(&format!(
+            "{}\n",
+            "mcp.enabled = false — no server is spawned until it is set to true".yellow()
+        ));
+    }
+
+    out.push_str(&format!("{:<16} {:<8} {:<8} COMMAND\n", "NAME", "ENABLED", "TOOLS"));
+    for server in &mcp.servers {
+        // An empty allowlist means every tool the server advertises.
+        let tools = if server.tools.is_empty() {
+            "all".to_string()
+        } else {
+            server.tools.len().to_string()
+        };
+        let mut command = server.command.clone();
+        if !server.args.is_empty() {
+            command.push(' ');
+            command.push_str(&server.args.join(" "));
+        }
+        out.push_str(&format!(
+            "{:<16} {:<8} {:<8} {}\n",
+            server.name,
+            if server.enabled { "yes" } else { "no" },
+            tools,
+            command
+        ));
+    }
+    out.push_str(&format!(
+        "\nUse {} to query live tools from enabled servers.",
+        "/mcp tools".cyan()
+    ));
+    out
+}
+
 /// The configured servers, from the config alone. No process is spawned.
 fn list_servers(config: &Config, json_out: bool) {
     let mcp = &config.mcp;
@@ -69,66 +113,15 @@ fn list_servers(config: &Config, json_out: bool) {
         return;
     }
 
-    if mcp.servers.is_empty() {
-        println!(
-            "no MCP servers configured — add an `mcp.servers` block to the config to enable them"
-        );
-        return;
-    }
-
-    if !mcp.enabled {
-        println!(
-            "{}",
-            "mcp.enabled = false — no server is spawned until it is set to true".yellow()
-        );
-    }
-
-    println!("{:<16} {:<8} {:<8} COMMAND", "NAME", "ENABLED", "TOOLS");
-    for server in &mcp.servers {
-        // An empty allowlist means every tool the server advertises.
-        let tools = if server.tools.is_empty() {
-            "all".to_string()
-        } else {
-            server.tools.len().to_string()
-        };
-        let mut command = server.command.clone();
-        if !server.args.is_empty() {
-            command.push(' ');
-            command.push_str(&server.args.join(" "));
-        }
-        println!(
-            "{:<16} {:<8} {:<8} {}",
-            server.name,
-            if server.enabled { "yes" } else { "no" },
-            tools,
-            command
-        );
-    }
+    println!("{}", format_mcp_servers(config));
 }
 
-/// The live tool list: spawn each enabled server and read back its `tools/list`.
-async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError> {
+/// The live tool list formatted as human-readable text.
+pub async fn format_mcp_tools(config: &Config) -> String {
     if config.mcp.servers.is_empty() {
-        if json_out {
-            println!("{}", json!({ "servers": [] }));
-        } else {
-            println!(
-                "no MCP servers configured — add an `mcp.servers` block to the config to enable them"
-            );
-        }
-        return Ok(());
+        return "no MCP servers configured — add an `mcp.servers` block to the config to enable them".to_string();
     }
 
-    if !config.mcp.enabled && !json_out {
-        println!(
-            "{}",
-            "mcp.enabled = false — no server is spawned until it is set to true".yellow()
-        );
-        return Ok(());
-    }
-
-    // (server name, advertised tool names namespaced as `mcp__<server>__<tool>`) or the reason the
-    // server could not be queried. A single unreachable server must not hide the others.
     let mut report: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
 
     for server in &config.mcp.servers {
@@ -164,7 +157,84 @@ async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError>
         report.push((server.name.clone(), outcome.map_err(|e| e.to_string())));
     }
 
+    if report.is_empty() {
+        return "no enabled MCP servers to query (all entries have `enabled: false`)".to_string();
+    }
+
+    let mut out = String::new();
+    if !config.mcp.enabled {
+        out.push_str(&format!(
+            "{}\n",
+            "mcp.enabled = false — no server is spawned until it is set to true".yellow()
+        ));
+    }
+
+    for (name, outcome) in &report {
+        match outcome {
+            Ok(tools) if tools.is_empty() => {
+                out.push_str(&format!("{} {}: no tools advertised\n", "•".dimmed(), name.cyan()));
+            }
+            Ok(tools) => {
+                out.push_str(&format!(
+                    "{} {} — {} tool(s):\n",
+                    "•".dimmed(),
+                    name.cyan().bold(),
+                    tools.len()
+                ));
+                for tool in tools {
+                    out.push_str(&format!("    {}\n", tool));
+                }
+            }
+            Err(error) => {
+                out.push_str(&format!("{} {}: {}\n", "✖".red().bold(), name.cyan(), error));
+            }
+        }
+    }
+    out
+}
+
+/// The live tool list: spawn each enabled server and read back its `tools/list`.
+async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError> {
     if json_out {
+        if config.mcp.servers.is_empty() {
+            println!("{}", json!({ "servers": [] }));
+            return Ok(());
+        }
+
+        let mut report: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
+        for server in &config.mcp.servers {
+            if !server.enabled {
+                continue;
+            }
+            let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
+            let cwd = server
+                .cwd
+                .as_ref()
+                .map(|dir| std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy())));
+            let outcome = match McpStdioClient::spawn(
+                &server.command,
+                &args,
+                &server.env,
+                cwd.as_deref(),
+                config.mcp.startup_timeout_secs,
+                config.mcp.call_timeout_secs,
+            )
+            .await
+            {
+                Ok(client) => client.list_tools().await.map(|tools| {
+                    let allowed: std::collections::HashSet<&str> =
+                        server.tools.iter().map(|s| s.as_str()).collect();
+                    tools
+                        .into_iter()
+                        .filter(|t| allowed.is_empty() || allowed.contains(t.name.as_str()))
+                        .map(|t| format!("mcp__{}__{}", server.name, t.name))
+                        .collect::<Vec<_>>()
+                }),
+                Err(e) => Err(e),
+            };
+            report.push((server.name.clone(), outcome.map_err(|e| e.to_string())));
+        }
+
         let servers: Vec<_> = report
             .iter()
             .map(|(name, outcome)| match outcome {
@@ -180,32 +250,6 @@ async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError>
         return Ok(());
     }
 
-    if report.is_empty() {
-        println!("no enabled MCP servers to query (all entries have `enabled: false`)");
-        return Ok(());
-    }
-
-    for (name, outcome) in &report {
-        match outcome {
-            Ok(tools) if tools.is_empty() => {
-                println!("{} {}: no tools advertised", "•".dimmed(), name.cyan());
-            }
-            Ok(tools) => {
-                println!(
-                    "{} {} — {} tool(s):",
-                    "•".dimmed(),
-                    name.cyan().bold(),
-                    tools.len()
-                );
-                for tool in tools {
-                    println!("    {}", tool);
-                }
-            }
-            Err(error) => {
-                println!("{} {}: {}", "✖".red().bold(), name.cyan(), error);
-            }
-        }
-    }
-
+    println!("{}", format_mcp_tools(config).await);
     Ok(())
 }

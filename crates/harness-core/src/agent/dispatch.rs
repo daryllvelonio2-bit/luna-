@@ -293,6 +293,17 @@ where
         // redaction or truncation hook whose output was discarded would be a guardrail that
         // silently guards nothing, which is worse than no hook at all.
         let mut execution_result = execution_result;
+
+        // Safety cap: Never allow an unbounded tool result (from any tool, MCP, or plugin)
+        // to blow past model context limits.
+        const MAX_TOOL_RESULT_CHARS: usize = 200_000;
+        if execution_result.content.len() > MAX_TOOL_RESULT_CHARS {
+            let cut = crate::tools::char_safe_cut(&execution_result.content, MAX_TOOL_RESULT_CHARS);
+            execution_result.content = format!(
+                "{}\n\n[Tool output truncated: exceeded {} characters to protect context window]",
+                cut, MAX_TOOL_RESULT_CHARS
+            );
+        }
         if let Some(hooks) = self.hooks.as_ref() {
             let event = if execution_result.is_error {
                 HookEvent::PostToolUseFailure

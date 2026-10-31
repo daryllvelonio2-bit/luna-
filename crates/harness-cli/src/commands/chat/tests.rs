@@ -106,6 +106,15 @@ fn slash_commands_includes_usage() {
     );
 }
 
+#[test]
+fn slash_commands_includes_mcp() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/mcp"),
+        "/mcp command must be registered in SLASH_COMMANDS"
+    );
+}
+
 /// The slash command filter prioritizes prefix matches: typing "/s" should show /sessions,
 /// /summarize, /skills, etc. before /model (which merely contains "s").
 #[test]

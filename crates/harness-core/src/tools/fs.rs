@@ -92,7 +92,7 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
 /// `String::truncate` panics when `max_chars` lands in the middle of a multi-byte character,
 /// so it must never be used to bound model-facing output: one CJK or emoji file would turn a
 /// routine read into a panic. This walks back to the nearest char boundary instead.
-fn char_safe_cut(s: &str, max_chars: usize) -> &str {
+pub fn char_safe_cut(s: &str, max_chars: usize) -> &str {
     if s.len() <= max_chars {
         return s;
     }
@@ -637,11 +637,48 @@ const MAX_MATCHING_LINES: usize = 200;
 /// larger ceiling rather than sharing the line budget.
 const MAX_MATCHING_FILES: usize = 500;
 
+/// Maximum characters of a single matching line emitted in 'content' mode before it is truncated.
+const MAX_MATCHING_LINE_CHARS: usize = 500;
+
+/// Total characters of matching content across all lines before a search stops early.
+const MAX_MATCHING_OUTPUT_CHARS: usize = 100_000;
+
+/// Noise directories that search_files and list_files skip by default.
+pub(crate) fn is_noise_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | "checkpoints" | ".checkpoints" | ".cache"
+    )
+}
+
+/// Truncate a single line to `MAX_MATCHING_LINE_CHARS`, keeping a centered window around `pattern`.
+fn truncate_matching_line(line: &str, pattern: &str) -> String {
+    if line.len() <= MAX_MATCHING_LINE_CHARS {
+        return line.to_string();
+    }
+    let match_byte = line.find(pattern).unwrap_or(0);
+    let half_budget = MAX_MATCHING_LINE_CHARS / 2;
+    let raw_start = match_byte.saturating_sub(half_budget);
+    let mut start = raw_start;
+    while start > 0 && !line.is_char_boundary(start) {
+        start = start.saturating_sub(1);
+    }
+    let raw_end = (start + MAX_MATCHING_LINE_CHARS).min(line.len());
+    let mut end = raw_end;
+    while end < line.len() && !line.is_char_boundary(end) {
+        end += 1;
+    }
+    let prefix = if start > 0 { "..." } else { "" };
+    let suffix = if end < line.len() { "... [line truncated]" } else { "" };
+    format!("{}{}{}", prefix, &line[start..end], suffix)
+}
+
 /// Which ceiling a scan hit. `None` means the walk finished exhaustively.
 enum ScanLimit {
     FileCeiling,
     LineCeiling,
     FileListCeiling,
+    OutputCeiling,
 }
 
 /// Result of one blocking scan: matching lines, matching files, per-file counts, and which
@@ -650,6 +687,7 @@ struct ScanOutcome {
     matching_lines: Vec<String>,
     matching_files: Vec<String>,
     file_counts: Vec<(String, usize)>,
+    total_output_chars: usize,
     /// The ceiling that stopped the walk early, or `None` when it was exhaustive.
     limit: Option<ScanLimit>,
 }
@@ -671,6 +709,10 @@ impl ScanOutcome {
             ScanLimit::FileListCeiling => (
                 format!("{MAX_MATCHING_FILES} files"),
                 "narrow 'path' or 'file_glob'".to_string(),
+            ),
+            ScanLimit::OutputCeiling => (
+                format!("{MAX_MATCHING_OUTPUT_CHARS} characters of matches"),
+                "use output_mode 'files_only' or 'count', or narrow 'path'/'file_glob'".to_string(),
             ),
         };
         Some(format!("[search stopped after {ceiling}; {hint}]"))
@@ -894,6 +936,7 @@ fn scan_files(
         matching_lines: Vec::new(),
         matching_files: Vec::new(),
         file_counts: Vec::new(),
+        total_output_chars: 0,
         limit: None,
     };
     // Per-file counts are only rendered in 'count' mode; 'content' and 'files_only' never
@@ -903,17 +946,11 @@ fn scan_files(
     // by lines; the two list modes by files. Each mode checks its own ceiling and records which
     // one stopped the walk, so the notice names the limit the caller hit.
     let file_list_mode = output_mode != "content";
-    let result_cap = if file_list_mode {
-        MAX_MATCHING_FILES
-    } else {
-        MAX_MATCHING_LINES
-    };
 
     for (visited, entry) in walkdir::WalkDir::new(resolved)
         .into_iter()
         .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".git" && name != "target" && name != "node_modules"
+            e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy())
         })
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
@@ -926,7 +963,12 @@ fn scan_files(
             outcome.limit = Some(ScanLimit::FileCeiling);
             break;
         }
-        if (outcome.matching_lines.len() + outcome.matching_files.len()) >= result_cap {
+        let reached_cap = if file_list_mode {
+            outcome.matching_files.len() >= MAX_MATCHING_FILES
+        } else {
+            outcome.matching_lines.len() >= MAX_MATCHING_LINES
+        };
+        if reached_cap {
             outcome.limit = Some(if file_list_mode {
                 ScanLimit::FileListCeiling
             } else {
@@ -968,10 +1010,23 @@ fn scan_files(
             for (idx, line) in content.lines().enumerate() {
                 if line.contains(pattern) {
                     matches_in_file += 1;
-                    if outcome.matching_lines.len() < MAX_MATCHING_LINES {
-                        outcome
-                            .matching_lines
-                            .push(format!("{}:{}: {}", rel_path, idx + 1, line));
+                    if !file_list_mode {
+                        if outcome.matching_lines.len() >= MAX_MATCHING_LINES {
+                            outcome.limit = Some(ScanLimit::LineCeiling);
+                            break;
+                        }
+                        let formatted = format!(
+                            "{}:{}: {}",
+                            rel_path,
+                            idx + 1,
+                            truncate_matching_line(line, pattern)
+                        );
+                        outcome.total_output_chars += formatted.len() + 1;
+                        outcome.matching_lines.push(formatted);
+                        if outcome.total_output_chars >= MAX_MATCHING_OUTPUT_CHARS {
+                            outcome.limit = Some(ScanLimit::OutputCeiling);
+                            break;
+                        }
                     }
                 }
             }
@@ -981,6 +1036,10 @@ fn scan_files(
                 if needs_counts {
                     outcome.file_counts.push((rel_path, matches_in_file));
                 }
+            }
+
+            if outcome.limit.is_some() {
+                break;
             }
         }
     }
@@ -1115,8 +1174,7 @@ fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (
     for entry in walkdir::WalkDir::new(resolved)
         .into_iter()
         .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".git" && name != "target" && name != "node_modules"
+            e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy())
         })
         .filter_map(Result::ok)
     {

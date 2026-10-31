@@ -857,6 +857,20 @@ pub async fn run_interactive_chat(
                 }
                 continue;
             }
+            if query == "/mcp" || query.starts_with("/mcp ") {
+                let sub = query.strip_prefix("/mcp").unwrap_or("").trim();
+                if sub == "list" {
+                    println!("{}", crate::commands::mcp::format_mcp_servers(&config));
+                } else if sub == "tools" {
+                    println!("{}", crate::commands::mcp::format_mcp_tools(&config).await);
+                } else {
+                    println!("{}", crate::commands::mcp::format_mcp_servers(&config));
+                    if config.mcp.enabled && config.mcp.servers.iter().any(|s| s.enabled) {
+                        println!("\n{}", crate::commands::mcp::format_mcp_tools(&config).await);
+                    }
+                }
+                continue;
+            }
             if query == "/plan" || query.starts_with("/plan ") {
                 let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
                 let next = !current;

@@ -400,3 +400,102 @@ async fn test_mid_turn_steering_delivers_user_message() {
     );
     assert_eq!(outcome.reply, "Acknowledged steering instruction");
 }
+
+struct HugeTool;
+
+#[async_trait]
+impl Tool for HugeTool {
+    fn name(&self) -> &str {
+        "huge_tool"
+    }
+    fn description(&self) -> &str {
+        "returns an enormous output"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
+    async fn execute(
+        &self,
+        call_id: &str,
+        _args: &serde_json::Value,
+        _cancel: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        Ok(ToolResult::success(call_id, "x".repeat(500_000)))
+    }
+}
+
+struct ToolResultCappingProvider {
+    attempts: AtomicUsize,
+    observed_truncated: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl ModelProvider for ToolResultCappingProvider {
+    fn provider_id(&self) -> &str {
+        "capping-mock"
+    }
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt > 0 {
+            for msg in messages {
+                if let Some(ref content) = msg.content {
+                    if content.contains("[Tool output truncated: exceeded 200000 characters")
+                        && content.len() < 210_000
+                    {
+                        self.observed_truncated.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            return Ok(Message::assistant("Done"));
+        }
+        Ok(Message::assistant_with_tools(vec![ToolCall {
+            id: "call_huge".to_string(),
+            name: "huge_tool".to_string(),
+            arguments: serde_json::json!({}),
+            signature: None,
+        }]))
+    }
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn test_huge_tool_result_is_capped_in_dispatch() {
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(ToolResultCappingProvider {
+        attempts: AtomicUsize::new(0),
+        observed_truncated: observed.clone(),
+    });
+    let memory = Arc::new(MockMemory);
+    let notes = Arc::new(MockNotes);
+    let registry = Arc::new(DefaultToolRegistry::new());
+    registry.register(Arc::new(HugeTool)).await.unwrap();
+
+    let agent = Agent::new(
+        provider,
+        memory,
+        notes,
+        registry,
+        AgentConfig::default(),
+    );
+
+    let cancel = CancellationToken::new();
+    let outcome = agent.run_turn("Run huge tool", cancel).await.unwrap();
+    assert_eq!(outcome.reply, "Done");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "Tool output >200,000 chars must be capped before feeding back to the model"
+    );
+}
