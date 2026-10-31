@@ -701,7 +701,7 @@ fn build_antigravity_payload(
     // history masquerading as instructions.
     let mut system_texts: Vec<String> = Vec::new();
 
-    for msg in messages {
+    for (msg_idx, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::System => {
                 if let Some(ref text) = msg.content {
@@ -800,17 +800,34 @@ fn build_antigravity_payload(
                     .as_ref()
                     .map(|r| r.content.as_str())
                     .unwrap_or("");
-                let tool_name = messages
+                // Search backwards from the current message to find the matching tool call:
+                // a tool result answers the most recent preceding assistant message that called
+                // it. Scanning forward from message 0 is prone to ID collisions across turns (or
+                // sequential call_0 defaults), which mismatches the tool name and causes Gemini to
+                // reject the request with HTTP 400 ("Request contains an invalid argument").
+                let tool_name = messages[..msg_idx]
                     .iter()
-                    .filter_map(|m| {
+                    .rev()
+                    .find_map(|m| {
                         m.tool_calls
                             .iter()
+                            .rev()
                             .find(|tc| {
                                 tc.id == call_id || (tc.id.is_empty() && call_id == "call_0")
                             })
                             .map(|tc| tc.name.as_str())
                     })
-                    .next();
+                    .or_else(|| {
+                        messages.iter().rev().find_map(|m| {
+                            m.tool_calls
+                                .iter()
+                                .rev()
+                                .find(|tc| {
+                                    tc.id == call_id || (tc.id.is_empty() && call_id == "call_0")
+                                })
+                                .map(|tc| tc.name.as_str())
+                        })
+                    });
 
                 let resp_part = if let Some(tool_name) = tool_name {
                     json!({
@@ -1862,5 +1879,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn build_antigravity_payload_matches_most_recent_tool_call_on_id_collision() {
+        // If a call ID is reused across turns (e.g. random 6-digit collision in a long session,
+        // or synthetic defaults like call_0), the tool result must pair with the most recent
+        // assistant call, not the first one from the beginning of the transcript.
+        let call1 = ToolCall {
+            id: "call_collision_123".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "file1.rs"}),
+            signature: None,
+        };
+        let call2 = ToolCall {
+            id: "call_collision_123".to_string(),
+            name: "search_files".to_string(),
+            arguments: serde_json::json!({"pattern": "foo"}),
+            signature: None,
+        };
+
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: Some("first question".to_string()),
+                tool_calls: vec![],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call1],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: None,
+                tool_calls: vec![],
+                tool_result: Some(ToolResult::success("call_collision_123", "content 1")),
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: Some("done with first".to_string()),
+                tool_calls: vec![],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::User,
+                content: Some("second question".to_string()),
+                tool_calls: vec![],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![call2],
+                tool_result: None,
+                usage: None,
+                reasoning: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: None,
+                tool_calls: vec![],
+                tool_result: Some(ToolResult::success("call_collision_123", "content 2")),
+                usage: None,
+                reasoning: None,
+            },
+        ];
+
+        let payload = build_antigravity_payload(
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            "gemini-3.8-flash",
+        );
+        let contents = payload["request"]["contents"]
+            .as_array()
+            .expect("contents array");
+
+        // Find the functionResponse parts in the generated payload
+        let mut fr_names = Vec::new();
+        for turn in contents {
+            if let Some(parts) = turn["parts"].as_array() {
+                for part in parts {
+                    if let Some(fr) = part.get("functionResponse") {
+                        if let Some(name) = fr.get("name").and_then(|n| n.as_str()) {
+                            fr_names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            fr_names,
+            vec!["read_file", "search_files"],
+            "Second tool result must be named 'search_files', not the older 'read_file'"
+        );
     }
 }
