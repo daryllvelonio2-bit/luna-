@@ -193,35 +193,141 @@ impl SqliteMemoryEngine {
         Ok(())
     }
 
-    /// Resolves the id a caller meant. The system prompt renders records as `subject.predicate`,
-    /// which is not always the stored primary key (ids are derived from a sanitized subject), so
-    /// an exact miss falls back to the rendered display name.
-    fn resolve_id(
-        tx: &rusqlite::Transaction<'_>,
-        id: &str,
-    ) -> Result<Option<String>, HarnessError> {
-        let exact: Option<String> = tx
+    /// Resolves one or more active memory IDs from any user/agent input:
+    /// exact id, case-insensitive id, subject, subject.predicate, name, slugified form, or note pointer id.
+    pub fn resolve_active_ids(
+        conn: &Connection,
+        raw_query: &str,
+    ) -> Result<Vec<String>, HarnessError> {
+        let query = raw_query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut matched = Vec::new();
+
+        // 1. Exact match on ID
+        let exact: Option<String> = conn
             .query_row(
                 "SELECT id FROM memories WHERE id = ?1",
-                params![id],
+                params![query],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        if exact.is_some() {
-            return Ok(exact);
+        if let Some(id) = exact {
+            matched.push(id);
         }
 
-        tx.query_row(
-            "SELECT id FROM memories
-             WHERE is_active = 1 AND subject || '.' || predicate = ?1
-             ORDER BY updated_at DESC
-             LIMIT 1",
-            params![id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))
+        // 2. Case-insensitive match on ID, subject, subject.predicate, or name
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM memories
+                 WHERE is_active = 1 AND (
+                     LOWER(id) = LOWER(?1)
+                     OR LOWER(subject) = LOWER(?1)
+                     OR LOWER(subject || '.' || predicate) = LOWER(?1)
+                     OR LOWER(name) = LOWER(?1)
+                 )
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![query], |row| row.get::<_, String>(0))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for r in rows.flatten() {
+            if !matched.contains(&r) {
+                matched.push(r);
+            }
+        }
+
+        // 3. Note pointer specific matches: if query matches note_id or stripped mem_ptr_
+        let note_candidate = query.strip_prefix("mem_ptr_").unwrap_or(query);
+        let mut note_stmt = conn
+            .prepare(
+                "SELECT id FROM memories
+                 WHERE category = 'note_pointer' AND (
+                     id = ?1
+                     OR id = 'mem_ptr_' || ?2
+                     OR predicate = 'doc_' || ?2
+                     OR LOWER(object) = LOWER(?3)
+                 )",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let note_rows = note_stmt
+            .query_map(params![query, note_candidate, query], |row| row.get::<_, String>(0))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for r in note_rows.flatten() {
+            if !matched.contains(&r) {
+                matched.push(r);
+            }
+        }
+
+        // 4. Slugified form (matching how IDs were derived)
+        let slug = query
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string();
+        if !slug.is_empty() && slug != query {
+            let mut slug_stmt = conn
+                .prepare(
+                    "SELECT id FROM memories
+                     WHERE is_active = 1 AND (
+                         id = ?1
+                         OR id LIKE ?1 || '.%'
+                         OR LOWER(subject) = LOWER(?1)
+                     )
+                     ORDER BY updated_at DESC",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let slug_rows = slug_stmt
+                .query_map(params![slug], |row| row.get::<_, String>(0))
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            for r in slug_rows.flatten() {
+                if !matched.contains(&r) {
+                    matched.push(r);
+                }
+            }
+        }
+
+        // 5. Fallback substring/contains match if nothing found yet
+        if matched.is_empty() {
+            let pattern = format!("%{}%", query);
+            let mut sub_stmt = conn
+                .prepare(
+                    "SELECT id FROM memories
+                     WHERE is_active = 1 AND (
+                         subject LIKE ?1
+                         OR id LIKE ?1
+                         OR name LIKE ?1
+                     )
+                     ORDER BY updated_at DESC
+                     LIMIT 5",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let sub_rows = sub_stmt
+                .query_map(params![pattern], |row| row.get::<_, String>(0))
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            for r in sub_rows.flatten() {
+                if !matched.contains(&r) {
+                    matched.push(r);
+                }
+            }
+        }
+
+        Ok(matched)
+    }
+
+    /// Resolves the id a caller meant, falling back to flexible active lookup.
+    fn resolve_id(
+        conn: &Connection,
+        id: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        let ids = Self::resolve_active_ids(conn, id)?;
+        Ok(ids.into_iter().next())
     }
 }
 
@@ -480,14 +586,59 @@ impl MemoryEngine for SqliteMemoryEngine {
     }
 
     async fn forget(&self, id: &str) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "UPDATE memories SET is_active = 0, updated_at = ?1 WHERE id = ?2",
-            params![Utc::now().to_rfc3339(), id],
-        )
-        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return Err(HarnessError::MemoryError(
+                "Cannot forget empty memory identifier".to_string(),
+            ));
+        }
 
-        info!("Deactivated memory '{}'", id);
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        let matching_ids = Self::resolve_active_ids(&tx, trimmed)?;
+        if matching_ids.is_empty() {
+            return Err(HarnessError::MemoryError(format!(
+                "Cannot forget memory '{}': no matching memory record found in persistent storage",
+                trimmed
+            )));
+        }
+
+        for target_id in &matching_ids {
+            tx.execute(
+                "UPDATE memories SET superseded_by = NULL WHERE superseded_by = ?1",
+                params![target_id],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+            let _ = tx.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+                params![target_id],
+            );
+
+            tx.execute(
+                "DELETE FROM memories WHERE id = ?1",
+                params![target_id],
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+            info!("Permanently deleted memory '{}'", target_id);
+        }
+
+        // Also purge any duplicate records matching this exact subject if not a note pointer
+        if !trimmed.starts_with("mem_ptr_") {
+            let _ = tx.execute(
+                "DELETE FROM memories WHERE LOWER(subject) = LOWER(?1) AND category != 'note_pointer'",
+                params![trimmed],
+            );
+        }
+
+        tx.commit()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        info!("Hard-deleted memory records matching '{}'", trimmed);
         Ok(())
     }
 
@@ -510,6 +661,56 @@ impl MemoryEngine for SqliteMemoryEngine {
         self.save(&record).await
     }
 
+    async fn get_record(&self, id_or_subject: &str) -> Result<Option<MemoryRecord>, HarnessError> {
+        let conn = self.conn.lock().await;
+        let ids = Self::resolve_active_ids(&conn, id_or_subject)?;
+        let Some(first_id) = ids.first() else {
+            return Ok(None);
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                 FROM memories WHERE id = ?1",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        let rec = stmt
+            .query_row(params![first_id], |row| {
+                let cat_str: String = row.get(5)?;
+                let category = match cat_str.as_str() {
+                    "user_profile" => MemoryCategory::UserProfile,
+                    "code_pattern" => MemoryCategory::CodePattern,
+                    "workflow_rule" => MemoryCategory::WorkflowRule,
+                    "note_pointer" => MemoryCategory::NotePointer,
+                    _ => MemoryCategory::Fact,
+                };
+                let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let updated_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                Ok(MemoryRecord {
+                    id: row.get(0)?,
+                    subject: row.get(1)?,
+                    predicate: row.get(2)?,
+                    object: row.get(3)?,
+                    raw_content: row.get(4)?,
+                    category,
+                    confidence: row.get(6)?,
+                    created_at,
+                    updated_at,
+                    is_active: row.get::<_, i64>(9)? != 0,
+                    superseded_by: row.get(10)?,
+                    name: row.get(11)?,
+                    path: row.get(12)?,
+                })
+            })
+            .optional()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        Ok(rec)
+    }
+
     fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {
         if memories.is_empty() {
             return "(No persistent memories registered yet)".to_string();
@@ -518,12 +719,8 @@ impl MemoryEngine for SqliteMemoryEngine {
         let mut lines = Vec::new();
         for m in memories {
             if m.category == MemoryCategory::NotePointer {
-                let clean_content = if let Some(idx) = m.raw_content.find(" (id: note_") {
-                    m.raw_content[..idx].to_string()
-                } else {
-                    m.raw_content.clone()
-                };
-                lines.push(format!("- [Note] {}", clean_content));
+                let note_id = m.id.strip_prefix("mem_ptr_").unwrap_or(&m.id);
+                lines.push(format!("- [Note] {} (id: {})", m.object, note_id));
             } else {
                 let display_cat = match m.category {
                     MemoryCategory::UserProfile => "User Profile",

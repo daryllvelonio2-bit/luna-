@@ -249,7 +249,13 @@ impl Tool for ReadNoteTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let id = args.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+        let id = args
+            .get("id")
+            .or_else(|| args.get("note_id"))
+            .or_else(|| args.get("title"))
+            .or_else(|| args.get("name"))
+            .and_then(|i| i.as_str())
+            .unwrap_or_default();
         let note = self.engine.read_note(id).await?;
         Ok(ToolResult::success(
             call_id,
@@ -309,7 +315,12 @@ impl Tool for UpdateNoteTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let id = args.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+        let id = args
+            .get("id")
+            .or_else(|| args.get("note_id"))
+            .or_else(|| args.get("title"))
+            .and_then(|i| i.as_str())
+            .unwrap_or_default();
         let title = args.get("title").and_then(|t| t.as_str());
         let content = args.get("content").and_then(|c| c.as_str());
 
@@ -338,7 +349,7 @@ impl Tool for DeleteNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Permanently delete a stored note by its note_id. Use this to remove notes that are obsolete or were saved in error; the note's full-text index entry is removed with it."
+        "Permanently delete a stored note by its note_id or title. Use this to remove notes that are obsolete or were saved in error; the note's full-text index entry is removed with it."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -359,7 +370,12 @@ impl Tool for DeleteNoteTool {
     /// The id of the note the call would delete.
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         Some(ToolPreview {
-            target: args.get("id").and_then(|i| i.as_str()).map(str::to_string),
+            target: args
+                .get("id")
+                .or_else(|| args.get("note_id"))
+                .or_else(|| args.get("title"))
+                .and_then(|i| i.as_str())
+                .map(str::to_string),
             diff: None,
         })
     }
@@ -370,14 +386,25 @@ impl Tool for DeleteNoteTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let id = args.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+        let id = args
+            .get("id")
+            .or_else(|| args.get("note_id"))
+            .or_else(|| args.get("title"))
+            .and_then(|i| i.as_str())
+            .unwrap_or_default();
+        let canonical_id = self
+            .engine
+            .read_note(id)
+            .await
+            .map(|n| n.id)
+            .unwrap_or_else(|_| id.to_string());
         let deleted = self.engine.delete_note(id).await?;
 
         Ok(ToolResult::success(
             call_id,
             json!({
                 "status": if deleted { "deleted" } else { "not_found" },
-                "note_id": id,
+                "note_id": canonical_id,
             })
             .to_string(),
         ))

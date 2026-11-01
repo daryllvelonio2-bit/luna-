@@ -110,7 +110,14 @@ pub trait MemoryEngine: Send + Sync {
     /// Defaulted: the pointer id is derived from the note id (`mem_ptr_{note_id}`), so a plain
     /// `forget` is sufficient and implementors need not override it.
     async fn remove_note_pointer(&self, note_id: &str) -> Result<(), HarnessError> {
-        self.forget(&format!("mem_ptr_{}", note_id)).await
+        let _ = self.forget(&format!("mem_ptr_{}", note_id)).await;
+        let _ = self.forget(note_id).await;
+        Ok(())
+    }
+
+    /// Retrieve a specific active memory record by ID or subject
+    async fn get_record(&self, _id: &str) -> Result<Option<MemoryRecord>, HarnessError> {
+        Ok(None)
     }
 
     /// Render memories into a system prompt block

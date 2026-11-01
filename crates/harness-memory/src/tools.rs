@@ -32,19 +32,19 @@ impl Tool for SaveMemoryTool {
         json!({
             "type": "object",
             "properties": {
-                "subject": { "type": "string", "description": "Entity topic or subject (e.g. 'project.astra', 'user.profile')" },
-                "predicate": { "type": "string", "description": "Property or qualifier (default: 'profile')" },
-                "object": { "type": "string", "description": "Short 2-5 word description of what it is about" },
+                "subject": { "type": "string", "description": "Entity topic or subject (e.g. 'project.astra', 'user.profile', 'user.editor')" },
+                "object": { "type": "string", "description": "Short description or value of what to remember (also accepts content/value)" },
+                "predicate": { "type": "string", "description": "Optional property or qualifier (default: 'profile')" },
                 "name": { "type": "string", "description": "Optional friendly name (e.g. 'Astra IDE')" },
                 "path": { "type": "string", "description": "Optional absolute project or file path" },
                 "category": {
                     "type": "string",
                     "enum": ["user_profile", "code_pattern", "workflow_rule", "fact"],
-                    "description": "Category of memory"
+                    "description": "Optional category (default: 'fact' or 'user_profile' for user.*)"
                 },
                 "confidence": { "type": "number", "description": "Confidence score from 0.0 to 1.0 (default 1.0)" }
             },
-            "required": ["subject", "predicate", "object", "category"]
+            "required": ["subject", "object"]
         })
     }
 
@@ -62,7 +62,7 @@ impl Tool for SaveMemoryTool {
                 args.get("subject").and_then(|s| s.as_str()).unwrap_or("?"),
                 args.get("predicate")
                     .and_then(|p| p.as_str())
-                    .unwrap_or("?")
+                    .unwrap_or("profile")
             )),
             diff: None,
         })
@@ -77,19 +77,29 @@ impl Tool for SaveMemoryTool {
         let subject = args
             .get("subject")
             .and_then(|s| s.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .trim();
         let predicate = args
             .get("predicate")
             .and_then(|p| p.as_str())
-            .unwrap_or_default();
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("profile");
         let object = args
             .get("object")
+            .or_else(|| args.get("content"))
+            .or_else(|| args.get("value"))
             .and_then(|o| o.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .trim();
         let cat_str = args
             .get("category")
             .and_then(|c| c.as_str())
-            .unwrap_or("fact");
+            .unwrap_or(if subject.starts_with("user.") {
+                "user_profile"
+            } else {
+                "fact"
+            });
         let confidence = args
             .get("confidence")
             .and_then(|c| c.as_f64())

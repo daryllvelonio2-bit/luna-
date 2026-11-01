@@ -155,6 +155,9 @@ impl MemoryEngine for DynMemory {
     async fn remove_note_pointer(&self, note_id: &str) -> Result<(), HarnessError> {
         self.0.remove_note_pointer(note_id).await
     }
+    async fn get_record(&self, id: &str) -> Result<Option<MemoryRecord>, HarnessError> {
+        self.0.get_record(id).await
+    }
     fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {
         self.0.format_as_system_prompt(memories)
     }

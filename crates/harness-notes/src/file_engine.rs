@@ -227,6 +227,18 @@ impl NotesEngine for FileNotesEngine {
         tags: &[String],
     ) -> Result<Note, HarnessError> {
         let slug = slugify(title);
+
+        // Consolidate: if a note for this topic/title already exists, update it rather than creating duplicate slug-1.md
+        if let Ok(existing) = self.find(title).or_else(|_| self.find(&slug)) {
+            info!(
+                "Consolidating note for '{}' onto existing note '{}'",
+                title, existing.id
+            );
+            return self
+                .update_note(&existing.id, Some(title), Some(content), Some(tags))
+                .await;
+        }
+
         let id = {
             let mut candidate = slug.clone();
             let mut attempt = 0u32;
