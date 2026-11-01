@@ -84,8 +84,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Choose provider and model for context compaction",
     },
     SlashCommand {
+        name: "/thinking",
+        details: "Set thinking level (off, low, medium, high)",
+    },
+    SlashCommand {
+        name: "/think",
+        details: "Alias for /thinking",
+    },
+    SlashCommand {
         name: "/reasoning",
-        details: "Set reasoning effort (off, low, medium, high)",
+        details: "Set reasoning effort (alias: /thinking)",
     },
     SlashCommand {
         name: "/name",
@@ -280,6 +288,17 @@ pub(crate) async fn execute_slash_command(
             if let Err(e) = handle_reasoning_switch(Some(key_rx), ui, agent, arg).await {
                 ui.emit_above(&format!(
                     "{} Failed to set reasoning effort: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
+            Ok(false)
+        }
+        "/thinking" | "/think" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_thinking_switch(Some(key_rx), ui, agent, arg).await {
+                ui.emit_above(&format!(
+                    "{} Failed to set thinking level: {}",
                     "✖".red().bold(),
                     e
                 ));
@@ -1943,14 +1962,49 @@ pub(crate) async fn handle_auto_compact_command(
     Ok(())
 }
 
-pub(crate) async fn handle_reasoning_switch(
-    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
+pub(crate) async fn handle_thinking_switch(
+    key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     arg: Option<&str>,
 ) -> Result<(), HarnessError> {
+    handle_reasoning_or_thinking_switch(key_rx, ui, agent, arg, true).await
+}
+
+pub(crate) async fn handle_reasoning_switch(
+    key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    handle_reasoning_or_thinking_switch(key_rx, ui, agent, arg, false).await
+}
+
+async fn handle_reasoning_or_thinking_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    arg: Option<&str>,
+    is_thinking: bool,
+) -> Result<(), HarnessError> {
+    let concept_name = if is_thinking {
+        "thinking level"
+    } else {
+        "reasoning effort"
+    };
+    let title = if is_thinking {
+        "Select Thinking Level"
+    } else {
+        "Select Reasoning Effort"
+    };
+
     let chosen_effort = if let Some(s) = arg {
-        if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") {
+        if s.eq_ignore_ascii_case("off")
+            || s.eq_ignore_ascii_case("none")
+            || s.eq_ignore_ascii_case("disabled")
+            || s == "0"
+            || s.eq_ignore_ascii_case("false")
+        {
             None
         } else {
             match ReasoningEffort::from_str_loose(s) {
@@ -1958,8 +2012,9 @@ pub(crate) async fn handle_reasoning_switch(
                 None => {
                     ui.draw_initial_box();
                     ui.emit_above(&format!(
-                        "{} Unknown reasoning effort '{}'. Available: minimal, low, medium, high, xhigh, max, off",
+                        "{} Unknown {} '{}'. Available: minimal, low, medium, high, xhigh, max, off",
                         "✖".red().bold(),
+                        concept_name,
                         s
                     ));
                     return Ok(());
@@ -1996,7 +2051,7 @@ pub(crate) async fn handle_reasoning_switch(
             match select_from_rx(
                 rx,
                 ui,
-                "Select Reasoning Effort",
+                title,
                 &reasoning_items,
                 default_idx,
                 false,
@@ -2010,7 +2065,17 @@ pub(crate) async fn handle_reasoning_switch(
                 }
             }
         } else {
-            None
+            let cur = agent.lock().await.reasoning_effort();
+            let cur_label = cur
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "off".to_string());
+            ui.emit_above(&format!(
+                "{} Current {} is '{}'",
+                "ℹ".blue().bold(),
+                concept_name,
+                cur_label.yellow()
+            ));
+            return Ok(());
         }
     };
 
@@ -2023,9 +2088,16 @@ pub(crate) async fn handle_reasoning_switch(
         .map(|e| e.to_string())
         .unwrap_or_else(|| "off".to_string());
 
+    let label_capitalized = if is_thinking {
+        "Thinking level"
+    } else {
+        "Reasoning effort"
+    };
+
     ui.emit_above(&format!(
-        "{} Reasoning effort set to '{}'",
+        "{} {} set to '{}'",
         "✔".green().bold(),
+        label_capitalized,
         effort_label.yellow()
     ));
 

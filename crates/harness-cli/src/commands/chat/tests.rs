@@ -1,5 +1,5 @@
 use super::turn::{composer_command, submission, ComposerCommand};
-use super::commands::{SLASH_COMMANDS, SlashCommand};
+use super::commands::SlashCommand;
 
 /// The commands the composer owns are recognised by their whole name, and their argument is
 /// kept verbatim: guidance is prose, not a token.
@@ -115,6 +115,23 @@ fn slash_commands_includes_mcp() {
     );
 }
 
+#[test]
+fn slash_commands_includes_thinking() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/thinking"),
+        "/thinking command must be registered in SLASH_COMMANDS"
+    );
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/think"),
+        "/think command must be registered in SLASH_COMMANDS"
+    );
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/reasoning"),
+        "/reasoning command must be registered in SLASH_COMMANDS"
+    );
+}
+
 /// The slash command filter prioritizes prefix matches: typing "/s" should show /sessions,
 /// /summarize, /skills, etc. before /model (which merely contains "s").
 #[test]
@@ -207,4 +224,59 @@ fn slash_command_filter_exact_match_first() {
     // Exact match "/sessions" should come first when filtering "sessions"
     let results = filter("sessions");
     assert_eq!(results.first(), Some(&"/sessions"));
+
+    // Prefix match "/think" should bring /thinking and /think first
+    let results = filter("think");
+    assert!(results.starts_with(&["/think", "/thinking"]) || results.starts_with(&["/thinking", "/think"]));
+}
+
+#[tokio::test]
+async fn handle_thinking_switch_sets_effort() {
+    use std::sync::Arc;
+    use harness_core::{Agent, AgentConfig, DefaultToolRegistry, ReasoningEffort};
+    use harness_memory::SqliteMemoryEngine;
+    use harness_notes::FileNotesEngine;
+    use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
+    use super::commands::handle_thinking_switch;
+    use super::ui::ChatUi;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let memory = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
+    let notes = Arc::new(FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let creds = CredentialManager::new(None).unwrap();
+    let discovery = Arc::new(ModelDiscovery::new(None, 0, Default::default()));
+    let provider = Arc::new(GenericProviderClient::new("openai".to_string(), "gpt-4o".to_string(), creds, discovery, None).unwrap());
+    let agent = Arc::new(tokio::sync::Mutex::new(Agent::new(provider, memory, notes, registry, AgentConfig::default())));
+    let ui = ChatUi::new(false);
+
+    // Initial effort is None (off)
+    assert_eq!(agent.lock().await.reasoning_effort(), None);
+
+    // Set to high
+    handle_thinking_switch(None, &ui, &agent, Some("high")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), Some(ReasoningEffort::High));
+
+    // Set to low
+    handle_thinking_switch(None, &ui, &agent, Some("low")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), Some(ReasoningEffort::Low));
+
+    // Set to off
+    handle_thinking_switch(None, &ui, &agent, Some("off")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), None);
+
+    // Set to 0 (alias for off)
+    handle_thinking_switch(None, &ui, &agent, Some("medium")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), Some(ReasoningEffort::Medium));
+    handle_thinking_switch(None, &ui, &agent, Some("0")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), None);
+
+    // Unknown effort does not change setting
+    handle_thinking_switch(None, &ui, &agent, Some("high")).await.unwrap();
+    handle_thinking_switch(None, &ui, &agent, Some("invalid_effort")).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), Some(ReasoningEffort::High));
+
+    // Non-interactive with no arg leaves setting unchanged
+    handle_thinking_switch(None, &ui, &agent, None).await.unwrap();
+    assert_eq!(agent.lock().await.reasoning_effort(), Some(ReasoningEffort::High));
 }
