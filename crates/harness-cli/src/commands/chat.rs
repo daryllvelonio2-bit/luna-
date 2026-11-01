@@ -47,7 +47,7 @@ use commands::{
     handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
     handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
     handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
-    handle_usage_command, select_slash_command, SLASH_COMMANDS,
+    handle_thinking_switch, handle_usage_command, select_slash_command, SLASH_COMMANDS,
 };
 use keys::AppKey;
 use render::{
@@ -949,10 +949,24 @@ pub async fn run_interactive_chat(
                 .await;
                 continue;
             }
-            if query.starts_with("/reasoning") {
+            if query == "/reasoning" || query.starts_with("/reasoning ") {
                 let arg = query.strip_prefix("/reasoning").unwrap().trim();
                 let arg_opt = if arg.is_empty() { None } else { Some(arg) };
                 handle_reasoning_switch(None, &ui, &agent, arg_opt).await?;
+                continue;
+            }
+            if query == "/thinking"
+                || query.starts_with("/thinking ")
+                || query == "/think"
+                || query.starts_with("/think ")
+            {
+                let stripped = if let Some(s) = query.strip_prefix("/thinking") {
+                    s.trim()
+                } else {
+                    query.strip_prefix("/think").unwrap().trim()
+                };
+                let arg_opt = if stripped.is_empty() { None } else { Some(stripped) };
+                handle_thinking_switch(None, &ui, &agent, arg_opt).await?;
                 continue;
             }
             if query.starts_with("/name") {
