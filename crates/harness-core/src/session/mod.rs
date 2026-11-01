@@ -137,12 +137,29 @@ pub trait SessionStore: Send + Sync {
 
     /// Write `summary` as a new summary row and mark `folded` rows `compacted_at`, in one
     /// transaction. Returns the summary's sequence number.
+    ///
+    /// Every size report the session holds is dropped with it: see [`Self::clear_usage_reports`].
     async fn record_compaction(
         &self,
         session_id: &str,
         folded: &[i64],
         summary: &str,
     ) -> Result<i64, HarnessError>;
+
+    /// Drop every size report the session has recorded.
+    ///
+    /// `usage` on a row is not an annotation on that message: it is the size of the *request* the
+    /// provider answered, which covered the whole transcript up to that reply. A fold retires the
+    /// rows those requests carried, so every report written before it describes a prompt that will
+    /// never be sent again — while both the fold bar and the context gauge read it as the size of
+    /// the session. A transcript a fold has already bounded then still looks as large as the one it
+    /// replaced: the bar folds it again, and again, chewing the stored transcript down to a fraction
+    /// of the configured target. That is not hypothetical: one session folded twenty times inside a
+    /// single turn, and its next prompt collapsed from 180k tokens to 11k.
+    ///
+    /// Called when the fold is written and again when a running turn adopts it, so a report made by
+    /// a request sent against the transcript the fold replaced cannot raise the bar a second time.
+    async fn clear_usage_reports(&self, session_id: &str) -> Result<(), HarnessError>;
 
     /// Every session, most recently updated first.
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError>;

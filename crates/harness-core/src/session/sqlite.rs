@@ -780,6 +780,17 @@ impl SessionStore for SqliteSessionStore {
                 .map_err(|error| session_error("failed to mark the compacted rows", error))?;
         }
 
+        // Every stored size report describes a request made against the transcript this fold just
+        // replaced, so none of them may be believed again — see `clear_usage_reports`. Cleared in
+        // the same transaction as the fold, so a crash cannot leave a fold the bar has not been
+        // told about.
+        transaction
+            .execute(
+                "UPDATE messages SET usage_json = NULL WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|error| session_error("failed to clear the retired size reports", error))?;
+
         transaction
             .execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -797,6 +808,16 @@ impl SessionStore for SqliteSessionStore {
             seq
         );
         Ok(seq)
+    }
+
+    async fn clear_usage_reports(&self, session_id: &str) -> Result<(), HarnessError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE messages SET usage_json = NULL WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|error| session_error("failed to clear the retired size reports", error))?;
+        Ok(())
     }
 
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError> {

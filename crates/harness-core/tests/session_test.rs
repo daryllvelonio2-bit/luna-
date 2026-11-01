@@ -2515,3 +2515,90 @@ async fn auto_compact_percentage_folds_target_portion_of_transcript() {
         "carries percentage-based summary"
     );
 }
+
+/// The configured percentage is a share of the transcript, and that is where the fold must land.
+///
+/// `auto_compact_percent: 50` means the next request carries about half of what the last one did. A
+/// fold that takes more than it was asked to is not a smaller fold: it is the remembered
+/// conversation, gone. Ten percent is what this looked like in the wild — a session that went from
+/// 180k tokens to 11k on its next prompt.
+#[tokio::test]
+async fn auto_compact_leaves_the_share_it_was_configured_to_leave() {
+    use harness_core::session::{heuristic_tokens, sendable_messages};
+
+    let (_dir, path, raw_store) = temp_store();
+    let store = Arc::new(raw_store);
+    store.ensure_session("s1").await.unwrap();
+    // Eight turns of ~12k tokens: 96k of transcript, so a 50% fold has real room to be exact in.
+    for turn in 0..8 {
+        store
+            .append(
+                "s1",
+                &Message::user(format!("question {turn} {}", "q".repeat(24_000))),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &Message::assistant(format!("answer {turn} {}", "a".repeat(24_000))),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let before = heuristic_tokens(&sendable_messages(
+        &store.replay("s1", 500).await.unwrap().history,
+    ));
+
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED HALF"));
+
+    let mut cfg = agent_config();
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 40_000;
+    cfg.auto_compact_percent = Some(50);
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 500,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "canned-model".to_string(),
+    });
+
+    let (observer, folded) = fold_finished();
+    agent.set_observer(observer);
+
+    agent
+        .run_turn("the new question", CancellationToken::new())
+        .await
+        .unwrap();
+    folded.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        count_rows(&path, "is_summary = 1"),
+        1,
+        "one crossing, one fold"
+    );
+    let after = heuristic_tokens(&sendable_messages(
+        &store.replay("s1", 500).await.unwrap().history,
+    ));
+    let share = after as f64 / before as f64;
+    assert!(
+        (0.35..=0.65).contains(&share),
+        "a 50% fold must leave about half the transcript: {after} of {before} ({:.0}%)",
+        share * 100.0
+    );
+}

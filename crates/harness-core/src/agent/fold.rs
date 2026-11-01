@@ -11,7 +11,7 @@ use crate::session::{
     CompactionOutcome, SessionStore, StoredMessage,
 };
 use crate::traits::*;
-use crate::types::{Message, Role};
+use crate::types::Message;
 
 impl<P, M, N, R> Agent<P, M, N, R>
 where
@@ -205,72 +205,76 @@ where
         });
     }
 
+    /// Adopt a fold that landed while this turn was running: the turn goes on with the transcript
+    /// the next request would send, instead of the one the fold just replaced.
+    ///
+    /// `fold_watermark` — the newest fold in the transcript when this turn began,
+    /// [`last_fold_seq`] — moves to this fold's summary, so the bar does not answer a fold it has
+    /// already adopted.
+    ///
+    /// Rebuilt from the store, not spliced out of the copy in hand. An automatic fold inside a long
+    /// turn retires rows of *this* turn — an agentic turn is hundreds of rounds and the fold cuts
+    /// across them — and the splice this replaced kept every message after the turn's user line,
+    /// which is exactly what the fold had removed. The turn then went on sending the unfolded
+    /// transcript while the store held the folded one, so the next look at the bar still saw the old
+    /// size, folded again, and again, chewing the stored transcript down to a fraction of the
+    /// configured target: one real session folded twenty times inside a single turn, and its next
+    /// prompt collapsed from 180k tokens to 11k.
+    ///
+    /// What the store holds is what the next request sends, so that is what the running turn is
+    /// handed — with the size reports of the retired requests dropped, so that what this turn
+    /// reports from here on describes the transcript it is actually sending.
+    pub(super) async fn try_rebind_completed_fold(
+        &self,
+        messages: &mut Vec<Message>,
+        fold_watermark: &mut Option<i64>,
+        system_text: &str,
+    ) -> bool {
+        let outcome = self
+            .completed_fold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        debug!("Mid-turn fold outcome arrived; rebuilding the active turn from the folded session");
+        if let Some(seq) = outcome.fold_seq {
+            *fold_watermark = Some(seq);
+        }
+        let Some(binding) = self.session.as_ref() else {
+            return true;
+        };
+        // The bar must never read a size reported against the transcript this fold replaced. A
+        // running turn writes those reports in the window between the fold landing and this
+        // adoption, and they carry sequence numbers newer than the summary row, so the replay below
+        // would believe them and fold again — the loop this method exists to stop.
+        if let Err(error) = binding.store.clear_usage_reports(&binding.session_id).await {
+            warn!("Cannot drop the session's retired size reports: {}", error);
+        }
+        match binding.store.replay(&binding.session_id, usize::MAX).await {
+            Ok(replayed) => {
+                let mut rebuilt = Vec::with_capacity(replayed.history.len() + 1);
+                rebuilt.push(Message::system(system_text.to_string()));
+                rebuilt.extend(sendable_messages(&replayed.history));
+                *messages = rebuilt;
+            }
+            Err(error) => warn!(
+                "Cannot re-read session '{}' to adopt the fold; this turn runs on the transcript it holds: {}",
+                binding.session_id, error
+            ),
+        }
+        true
+    }
+
     /// Re-check the fold bar against the transcript the session now holds, and start a fold if it is
     /// over. The second look behind [`Self::spawn_fold_if_needed`], which only ever runs at the top
     /// of a turn.
     ///
-    /// Measured on the *stored* transcript, not on the in-memory copy the turn is carrying: a fold
-    /// that landed earlier in this turn has already shrunk the store, and estimating the copy the
-    /// running turn still holds would start a second fold of rows that are no longer there — and
-    /// animate it. What is estimated here is exactly what the next turn will send.
-    ///
-    /// `watermark` is the newest fold in the transcript when this turn began
-    /// ([`last_fold_seq`]). A fold that finished during the turn has rewritten the stored history,
-    /// and the numbers a caller can see afterwards describe the transcript it replaced: the turn's
-    /// own model calls go on reporting the *unfolded* prompt size, because that is the transcript
-    /// the running turn is still carrying. Without this check the turn's last request looks over the
-    /// bar again and the session folds a second time — summarising the summary out of a history that
-    /// was just bounded.
-    pub(super) fn try_rebind_completed_fold(
-        &self,
-        messages: &mut Vec<Message>,
-        turn_user_idx: &mut usize,
-        fold_watermark: &mut Option<i64>,
-        system_text: &str,
-    ) -> bool {
-        if let Some(outcome) = self
-            .completed_fold
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
-            let mut turn_messages = messages.split_off(*turn_user_idx);
-            for msg in &mut turn_messages {
-                msg.usage = None;
-            }
-            let user_content = turn_messages.first().and_then(|m| m.content.as_ref());
-            let past_kept = match user_content {
-                Some(content) => {
-                    if let Some(pos) = outcome.kept.iter().rposition(|m| {
-                        m.role == Role::User && m.content.as_deref() == Some(content)
-                    }) {
-                        &outcome.kept[..pos]
-                    } else {
-                        &outcome.kept[..]
-                    }
-                }
-                None => &outcome.kept[..],
-            };
-            let mut new_messages = Vec::with_capacity(past_kept.len() + 2 + turn_messages.len());
-            new_messages.push(Message::system(system_text.to_string()));
-            new_messages.push(Message::system(outcome.summary.clone()));
-            for mut msg in past_kept.iter().cloned() {
-                msg.usage = None;
-                new_messages.push(msg);
-            }
-            *turn_user_idx = new_messages.len();
-            new_messages.extend(turn_messages);
-            *messages = new_messages;
-            if outcome.fold_seq.is_some() {
-                *fold_watermark = outcome.fold_seq;
-            }
-            true
-        } else {
-            false
-        }
-    }
-
+    /// Measured on the *stored* transcript, not on the in-memory copy the turn is carrying: this is
+    /// the transcript a fold will act on, so a bar measured against any other one folds a different
+    /// session than the one it sized — and the size it saw decides how much the fold takes. What is
+    /// estimated here is exactly what the next turn will send.
     pub(super) async fn spawn_fold_from_stored(
         &self,
         policy: FoldPolicy,

@@ -57,7 +57,6 @@ where
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::system(system_text.clone()));
         messages.extend(sendable_messages(&history));
-        let mut turn_user_idx = messages.len();
         messages.push(Message::user(user_input));
 
         // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
@@ -132,12 +131,8 @@ where
                 return Err(HarnessError::Cancelled);
             }
 
-            self.try_rebind_completed_fold(
-                &mut messages,
-                &mut turn_user_idx,
-                &mut fold_watermark,
-                &system_text,
-            );
+            self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
+                .await;
 
             let current_tokens = estimate_tokens(&messages).tokens;
             if let Some(ref observer) = self.observer {
@@ -205,12 +200,9 @@ where
                 message: "Model request failed after retries".to_string(),
             })?;
 
-            let rebound = self.try_rebind_completed_fold(
-                &mut messages,
-                &mut turn_user_idx,
-                &mut fold_watermark,
-                &system_text,
-            );
+            let rebound = self
+                .try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
+                .await;
 
             if let Some(ref usage) = response.usage {
                 let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
@@ -340,7 +332,6 @@ where
             // (see `dispatch.rs` for what that costs and why the boundary is where it is).
             let mut dispatch_state = DispatchState {
                 messages: &mut messages,
-                turn_user_idx: &mut turn_user_idx,
                 fold_watermark: &mut fold_watermark,
                 system_text: &system_text,
                 executed_tools: &mut executed_tools,

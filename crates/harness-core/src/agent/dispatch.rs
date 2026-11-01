@@ -40,7 +40,6 @@ pub(super) const MAX_PARALLEL_TOOL_CALLS: usize = 4;
 /// cannot bookkeep differently.
 pub(super) struct DispatchState<'a> {
     pub messages: &'a mut Vec<Message>,
-    pub turn_user_idx: &'a mut usize,
     pub fold_watermark: &'a mut Option<i64>,
     pub system_text: &'a str,
     pub executed_tools: &'a mut Vec<TurnToolCall>,
@@ -432,12 +431,8 @@ where
         self.append(&tool_message, false).await?;
         state.messages.push(tool_message);
 
-        self.try_rebind_completed_fold(
-            state.messages,
-            state.turn_user_idx,
-            state.fold_watermark,
-            state.system_text,
-        );
+        self.try_rebind_completed_fold(state.messages, state.fold_watermark, state.system_text)
+            .await;
 
         let current_tokens = estimate_tokens(state.messages).tokens;
         if let Some(ref observer) = self.observer {

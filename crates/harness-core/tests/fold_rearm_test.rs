@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
+use harness_core::session::{heuristic_tokens, sendable_messages};
 use harness_core::*;
 
 /// Answers large on the call indexes in `big_at`, small otherwise.
@@ -434,5 +435,153 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
     assert!(
         last_update < 50_000,
         "context gauge at end of turn must reflect compacted tokens (<50k), got {last_update}"
+    );
+}
+
+/// A tool loop that paces itself, and remembers the size of every prompt it answered.
+///
+/// The pacing matters: a fold is a background call and needs a moment to land, and the point here is
+/// what the turn sends while folds come and go.
+struct PacedToolLoopProvider {
+    rounds: usize,
+    reply_chars: usize,
+    calls: AtomicUsize,
+    prompts: std::sync::Mutex<Vec<usize>>,
+}
+
+impl PacedToolLoopProvider {
+    fn new(rounds: usize, reply_chars: usize) -> Self {
+        Self {
+            rounds,
+            reply_chars,
+            calls: AtomicUsize::new(0),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn prompts(&self) -> Vec<usize> {
+        self.prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ModelProvider for PacedToolLoopProvider {
+    fn provider_id(&self) -> &str {
+        "paced"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["paced-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.prompts
+            .lock()
+            .unwrap()
+            .push(estimate_tokens(messages).tokens as usize);
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let mut message = Message::assistant("x".repeat(self.reply_chars));
+        message.usage = Some(TokenUsage::estimated(
+            estimate_tokens(messages).tokens,
+            self.reply_chars as u32 / 4,
+        ));
+        if n < self.rounds {
+            message.tool_calls = vec![ToolCall {
+                id: format!("call_{n}"),
+                name: "list_files".to_string(),
+                arguments: serde_json::json!({ "path": "." }),
+                signature: None,
+            }];
+        }
+        Ok(message)
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+/// One long turn, many folds: the turn must send the folded transcript after each one.
+///
+/// A fold that lands mid-turn retires rows of *this* turn, and if the turn keeps the copy it had,
+/// the bar sees the size of the transcript the fold replaced on every later round — so it folds
+/// again, and again, while the stored transcript collapses to a fraction of the configured target.
+/// A real session folded twenty times inside one turn this way and its next prompt went from 180k
+/// tokens to 11k: not the 50% that was configured. What the turn sends is what the store holds.
+#[tokio::test]
+async fn a_fold_landing_mid_turn_bounds_what_the_turn_sends_next() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+    let store = Arc::new(SqliteSessionStore::new(Some(path.clone())).expect("open store"));
+    store.ensure_session("s1").await.unwrap();
+
+    // 60 rounds of ~3k tokens: the transcript crosses a 20k bar again and again after every fold.
+    let main = Arc::new(PacedToolLoopProvider::new(60, 12_000));
+
+    let cfg = AgentConfig {
+        compact_at_tokens: 1_000_000, // the legacy bar stays out of the way
+        keep_recent_turns: 1,
+        auto_compact_enabled: true,
+        auto_compact_threshold: 20_000,
+        auto_compact_percent: Some(50),
+        ..AgentConfig::default()
+    };
+
+    let mut agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 500,
+    })
+    .with_compaction(CompactionSetup {
+        provider: Arc::new(CannedSummariser {
+            calls: AtomicUsize::new(0),
+        }),
+        model: "canned-model".to_string(),
+    });
+
+    let (observer, fold_count) = fold_counter();
+    agent.set_observer(observer);
+
+    agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    // Let a fold started by the last round land before reading the store.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // Three thousand tokens a round against a 20k bar buys about three rounds per fold, so the
+    // count itself is a shape of the test, not the thing under test. What must hold is that a fold
+    // buys the rounds it should: one per round is a fold that bought nothing.
+    let folds = fold_count.load(Ordering::SeqCst);
+    assert!(
+        folds < 30,
+        "a fold must bound the transcript the turn sends, not fire once per round: {folds} folds in 60 rounds"
+    );
+
+    let prompts = main.prompts();
+    let biggest = prompts.iter().copied().max().unwrap_or(0);
+    assert!(
+        biggest < 60_000,
+        "the turn must not keep sending the transcript a fold replaced: biggest prompt {biggest} tokens under a 20k bar"
+    );
+
+    let live = store.replay("s1", 10_000).await.unwrap();
+    let live_tokens = heuristic_tokens(&sendable_messages(&live.history)) as usize;
+    assert!(
+        (5_000..=40_000).contains(&live_tokens),
+        "a 50% fold of a 20k bar leaves the stored transcript near the bar: {live_tokens} tokens live"
     );
 }
