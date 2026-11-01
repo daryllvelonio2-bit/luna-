@@ -107,7 +107,16 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
 /// cannot deliver: the ledger would never see a cache hit, and `cache_control` blocks would be
 /// silently ignored. Making it true means a native `/v1/messages` path with cache breakpoints,
 /// which is a different piece of work than a flag.
-const CACHING_PROVIDERS: &[&str] = &["openai", "copilot", "gemini", "deepseek"];
+const CACHING_PROVIDERS: &[&str] = &[
+    "openai",
+    "copilot",
+    "gemini",
+    "deepseek",
+    "antigravity",
+    "agy",
+    "google",
+    "supercode",
+];
 
 /// Resolve the capabilities of `model` as served by `provider`.
 pub fn resolve(provider: &str, model: &str) -> ModelCapabilities {
@@ -199,6 +208,10 @@ mod tests {
     fn caching_is_only_claimed_where_the_route_honours_it() {
         assert!(resolve("openai", "gpt-4o").prompt_cache);
         assert!(resolve("deepseek", "deepseek-chat").prompt_cache);
+        assert!(resolve("antigravity", "gemini-3.8-flash").prompt_cache);
+        assert!(resolve("agy", "gemini-2.5-pro").prompt_cache);
+        assert!(resolve("google", "gemini-2.5-flash").prompt_cache);
+        assert!(resolve("supercode", "gemini-2.5-pro").prompt_cache);
         // The Claude models cache, but the route this crate uses for them does not: Anthropic's
         // OpenAI-compatible layer documents prompt caching as unsupported.
         assert!(!resolve("anthropic", "claude-sonnet-4").prompt_cache);
