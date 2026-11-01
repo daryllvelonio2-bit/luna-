@@ -219,6 +219,29 @@ impl SqliteMemoryEngine {
             matched.push(id);
         }
 
+        // 1.5 Wildcard match: e.g. "user.*", "project.*", or "*"
+        if query.contains('*') {
+            let pat = query.replace('*', "%");
+            let mut w_stmt = conn
+                .prepare(
+                    "SELECT id FROM memories
+                     WHERE is_active = 1 AND (
+                         id LIKE ?1
+                         OR subject LIKE ?1
+                     )
+                     ORDER BY updated_at DESC",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let w_rows = w_stmt
+                .query_map(params![pat], |row| row.get::<_, String>(0))
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            for r in w_rows.flatten() {
+                if !matched.contains(&r) {
+                    matched.push(r);
+                }
+            }
+        }
+
         // 2. Case-insensitive match on ID, subject, subject.predicate, or name
         let mut stmt = conn
             .prepare(
@@ -588,57 +611,89 @@ impl MemoryEngine for SqliteMemoryEngine {
     async fn forget(&self, id: &str) -> Result<(), HarnessError> {
         let trimmed = id.trim();
         if trimmed.is_empty() {
-            return Err(HarnessError::MemoryError(
-                "Cannot forget empty memory identifier".to_string(),
-            ));
+            return Ok(());
         }
+
+        let is_all = matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "all"
+                | "*"
+                | "everything"
+                | "all memory"
+                | "all memories"
+                | "clear"
+                | "clear all"
+                | "delete all"
+                | "delete it all"
+                | "delete all memories"
+                | "delete all memory"
+                | "forget all"
+                | "forget all memories"
+        );
 
         let mut conn = self.conn.lock().await;
         let tx = conn
             .transaction()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        let matching_ids = Self::resolve_active_ids(&tx, trimmed)?;
-        if matching_ids.is_empty() {
-            return Err(HarnessError::MemoryError(format!(
-                "Cannot forget memory '{}': no matching memory record found in persistent storage",
-                trimmed
-            )));
+        if is_all {
+            let _ = tx.execute("DELETE FROM memory_embeddings", []);
+            let count = tx
+                .execute("DELETE FROM memories", [])
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            tx.commit()
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            info!("Hard-deleted all {} memory records from persistent storage", count);
+            return Ok(());
         }
 
-        for target_id in &matching_ids {
-            tx.execute(
-                "UPDATE memories SET superseded_by = NULL WHERE superseded_by = ?1",
-                params![target_id],
-            )
-            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let tokens: Vec<&str> = if trimmed.contains(';') || trimmed.contains(',') || trimmed.contains('\n') {
+            trimmed
+                .split(|c| c == ';' || c == ',' || c == '\n')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            vec![trimmed]
+        };
 
-            let _ = tx.execute(
-                "DELETE FROM memory_embeddings WHERE memory_id = ?1",
-                params![target_id],
-            );
+        let mut deleted_count = 0;
+        for token in tokens {
+            let matching_ids = Self::resolve_active_ids(&tx, token)?;
+            for target_id in &matching_ids {
+                tx.execute(
+                    "UPDATE memories SET superseded_by = NULL WHERE superseded_by = ?1",
+                    params![target_id],
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-            tx.execute(
-                "DELETE FROM memories WHERE id = ?1",
-                params![target_id],
-            )
-            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+                let _ = tx.execute(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+                    params![target_id],
+                );
 
-            info!("Permanently deleted memory '{}'", target_id);
-        }
+                tx.execute(
+                    "DELETE FROM memories WHERE id = ?1",
+                    params![target_id],
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        // Also purge any duplicate records matching this exact subject if not a note pointer
-        if !trimmed.starts_with("mem_ptr_") {
-            let _ = tx.execute(
-                "DELETE FROM memories WHERE LOWER(subject) = LOWER(?1) AND category != 'note_pointer'",
-                params![trimmed],
-            );
+                deleted_count += 1;
+                info!("Permanently deleted memory '{}'", target_id);
+            }
+
+            if !token.starts_with("mem_ptr_") {
+                let _ = tx.execute(
+                    "DELETE FROM memories WHERE LOWER(subject) = LOWER(?1) AND category != 'note_pointer'",
+                    params![token],
+                );
+            }
         }
 
         tx.commit()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        info!("Hard-deleted memory records matching '{}'", trimmed);
+        info!("Finished forgetting operation for '{}' (deleted {} records)", trimmed, deleted_count);
         Ok(())
     }
 

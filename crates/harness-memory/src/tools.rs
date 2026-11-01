@@ -187,6 +187,28 @@ impl Tool for SaveMemoryTool {
     }
 }
 
+fn derive_memory_id(subject: &str, predicate: &str) -> String {
+    let s_sub = subject
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    let s_pred = predicate
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if !s_sub.is_empty() && !s_pred.is_empty() {
+        format!("{}.{}", s_sub, s_pred)
+    } else if !s_sub.is_empty() {
+        s_sub
+    } else {
+        format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8])
+    }
+}
+
 pub struct UpdateMemoryTool {
     engine: Arc<dyn MemoryEngine>,
 }
@@ -204,25 +226,44 @@ impl Tool for UpdateMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Update or correct an existing memory record (name, path, short 2-5 word about). Detailed notes belong in notes, not memories."
+        "Update or edit an existing memory record. Accepts memory_id (or topic/subject) and any fields to update (e.g. object/content, name, path). Omitted fields are automatically preserved from the existing record. If the record does not exist yet, it will be created."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "memory_id": { "type": "string", "description": "ID of memory record being superseded" },
-                "subject": { "type": "string", "description": "Updated entity or subject (e.g. 'project.astra')" },
-                "predicate": { "type": "string", "description": "Updated property or qualifier (default: 'profile')" },
-                "object": { "type": "string", "description": "Short 2-5 word description of what it is about" },
-                "name": { "type": "string", "description": "Optional friendly name (e.g. 'Astra IDE')" },
-                "path": { "type": "string", "description": "Optional absolute project or file path" },
+                "memory_id": {
+                    "type": "string",
+                    "description": "ID or topic of memory record to update (e.g. 'user.profile', 'project.luna')"
+                },
+                "object": {
+                    "type": "string",
+                    "description": "Updated short description, content, preference, or fact"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional updated display name"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional updated absolute project or file path"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Optional entity topic (preserved from existing record if omitted)"
+                },
+                "predicate": {
+                    "type": "string",
+                    "description": "Optional property qualifier (preserved from existing record if omitted)"
+                },
                 "category": {
                     "type": "string",
-                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact"]
+                    "enum": ["user_profile", "code_pattern", "workflow_rule", "fact"],
+                    "description": "Optional category (preserved from existing record if omitted)"
                 }
             },
-            "required": ["memory_id", "subject", "predicate", "object", "category"]
+            "required": ["memory_id"]
         })
     }
 
@@ -236,6 +277,10 @@ impl Tool for UpdateMemoryTool {
         Some(ToolPreview {
             target: args
                 .get("memory_id")
+                .or_else(|| args.get("id"))
+                .or_else(|| args.get("target"))
+                .or_else(|| args.get("topic"))
+                .or_else(|| args.get("subject"))
                 .and_then(|i| i.as_str())
                 .map(str::to_string),
             diff: None,
@@ -250,99 +295,138 @@ impl Tool for UpdateMemoryTool {
     ) -> Result<ToolResult, HarnessError> {
         let old_id = args
             .get("memory_id")
+            .or_else(|| args.get("id"))
+            .or_else(|| args.get("target"))
+            .or_else(|| args.get("topic"))
+            .or_else(|| args.get("subject"))
             .and_then(|id| id.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .trim();
+
+        if old_id.is_empty() {
+            return Ok(ToolResult::error(
+                call_id,
+                "Missing required parameter 'memory_id'",
+            ));
+        }
+
+        let existing = self.engine.get_record(old_id).await.unwrap_or(None);
+
         let subject = args
             .get("subject")
             .and_then(|s| s.as_str())
-            .unwrap_or_default();
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|r| r.subject.clone())
+                    .unwrap_or_else(|| old_id.to_string())
+            });
+
         let predicate = args
             .get("predicate")
             .and_then(|p| p.as_str())
-            .unwrap_or_default();
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|r| r.predicate.clone())
+                    .unwrap_or_else(|| "profile".to_string())
+            });
+
         let object = args
             .get("object")
+            .or_else(|| args.get("content"))
+            .or_else(|| args.get("value"))
+            .or_else(|| args.get("text"))
+            .or_else(|| args.get("description"))
             .and_then(|o| o.as_str())
-            .unwrap_or_default();
-        let cat_str = args
-            .get("category")
-            .and_then(|c| c.as_str())
-            .unwrap_or("fact");
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|r| r.object.clone())
+                    .unwrap_or_default()
+            });
 
         let name = args
             .get("name")
             .and_then(|n| n.as_str())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| existing.as_ref().and_then(|r| r.name.clone()));
+
         let path = args
             .get("path")
             .and_then(|p| p.as_str())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| existing.as_ref().and_then(|r| r.path.clone()));
 
-        let category = match cat_str {
-            "user_profile" => MemoryCategory::UserProfile,
-            "code_pattern" => MemoryCategory::CodePattern,
-            "workflow_rule" => MemoryCategory::WorkflowRule,
-            _ => MemoryCategory::Fact,
-        };
-
-        let s_sub = subject
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string();
-        let s_pred = predicate
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string();
-        let new_id = if !s_sub.is_empty() && !s_pred.is_empty() {
-            format!("{}.{}", s_sub, s_pred)
-        } else if !s_sub.is_empty() {
-            s_sub
+        let category = if let Some(cat_str) = args.get("category").and_then(|c| c.as_str()) {
+            match cat_str {
+                "user_profile" => MemoryCategory::UserProfile,
+                "code_pattern" => MemoryCategory::CodePattern,
+                "workflow_rule" => MemoryCategory::WorkflowRule,
+                _ => MemoryCategory::Fact,
+            }
+        } else if let Some(ref ex) = existing {
+            ex.category
         } else {
-            format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8])
+            MemoryCategory::Fact
         };
+
+        let new_id = if let Some(ref ex) = existing {
+            if args.get("subject").is_none() && args.get("predicate").is_none() {
+                ex.id.clone()
+            } else {
+                derive_memory_id(&subject, &predicate)
+            }
+        } else {
+            derive_memory_id(&subject, &predicate)
+        };
+
         let raw_content = format!("{} {} {}", subject, predicate, object);
 
         let record = MemoryRecord {
             id: new_id.clone(),
-            subject: subject.to_string(),
-            predicate: predicate.to_string(),
-            object: object.to_string(),
+            subject,
+            predicate,
+            object,
             name,
             path,
             raw_content,
             category,
             confidence: 1.0,
-            created_at: Utc::now(),
+            created_at: existing
+                .as_ref()
+                .map(|r| r.created_at)
+                .unwrap_or_else(Utc::now),
             updated_at: Utc::now(),
             is_active: true,
             superseded_by: None,
         };
 
-        self.engine.update(old_id, &record).await?;
+        if let Some(ref ex) = existing {
+            self.engine.update(&ex.id, &record).await?;
+        } else {
+            self.engine.update(old_id, &record).await?;
+        }
+
         Ok(ToolResult::success(
             call_id,
             json!({
                 "status": "updated",
                 "old_memory_id": old_id,
                 "new_memory_id": new_id,
+                "subject": record.subject,
+                "object": record.object,
             })
             .to_string(),
         ))
@@ -366,14 +450,17 @@ impl Tool for ForgetMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Deactivate an obsolete memory record when it is no longer true or desired."
+        "Delete or deactivate memory records. Use when the user asks to delete, forget, or clear memory. Accepts 'all' (or '*') to delete all memories, a specific ID, a topic/subject, multiple IDs separated by commas or semicolons, or a wildcard ('user.*')."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "memory_id": { "type": "string", "description": "ID of memory record to deactivate" }
+                "memory_id": {
+                    "type": "string",
+                    "description": "ID, topic/subject, comma-separated IDs, wildcard ('user.*'), or 'all' to delete all memories"
+                }
             },
             "required": ["memory_id"]
         })
@@ -389,6 +476,10 @@ impl Tool for ForgetMemoryTool {
         Some(ToolPreview {
             target: args
                 .get("memory_id")
+                .or_else(|| args.get("id"))
+                .or_else(|| args.get("target"))
+                .or_else(|| args.get("query"))
+                .or_else(|| args.get("subject"))
                 .and_then(|i| i.as_str())
                 .map(str::to_string),
             diff: None,
@@ -401,16 +492,29 @@ impl Tool for ForgetMemoryTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let memory_id = args
+        let raw_id = args
             .get("memory_id")
+            .or_else(|| args.get("id"))
+            .or_else(|| args.get("target"))
+            .or_else(|| args.get("query"))
+            .or_else(|| args.get("subject"))
             .and_then(|id| id.as_str())
-            .unwrap_or_default();
-        self.engine.forget(memory_id).await?;
+            .unwrap_or_default()
+            .trim();
+
+        if raw_id.is_empty() {
+            return Ok(ToolResult::error(
+                call_id,
+                "Missing memory identifier to forget. Pass memory_id, or 'all' to delete all memories.",
+            ));
+        }
+
+        self.engine.forget(raw_id).await?;
         Ok(ToolResult::success(
             call_id,
             json!({
-                "status": "deactivated",
-                "memory_id": memory_id,
+                "status": "forgotten",
+                "target": raw_id,
             })
             .to_string(),
         ))

@@ -259,3 +259,148 @@ async fn test_note_pointer_reshadowing_same_note_stays_active() {
     assert_eq!(res[0].object, "New Pointer Title");
     assert!(res[0].is_active);
 }
+
+#[tokio::test]
+async fn test_forget_all_memories() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    engine
+        .save(&record("user.profile", "user.profile", "profile", "Daryll"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("env.system", "env.system", "profile", "Arch Linux"))
+        .await
+        .unwrap();
+
+    assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 2);
+
+    // Forget all via "all"
+    engine.forget("all").await.unwrap();
+    assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 0);
+    assert_eq!(engine.retrieve("env", 5).await.unwrap().len(), 0);
+
+    // Forget all via "delete it all"
+    engine
+        .save(&record("user.profile", "user.profile", "profile", "Daryll"))
+        .await
+        .unwrap();
+    assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 1);
+    engine.forget("delete it all").await.unwrap();
+    assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_forget_wildcard_memories() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    engine
+        .save(&record("user.skills.list", "user.skills.list", "profile", "Rust, Python"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("user.profile", "user.profile", "profile", "Daryll"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("project.luna", "project.luna", "profile", "Harness"))
+        .await
+        .unwrap();
+
+    assert_eq!(engine.retrieve("skills", 5).await.unwrap().len(), 3);
+
+    // Wildcard forget "user.*"
+    engine.forget("user.*").await.unwrap();
+    assert!(engine.get_record("user.skills.list").await.unwrap().is_none());
+    assert!(engine.get_record("user.profile").await.unwrap().is_none());
+    assert!(engine.get_record("project.luna").await.unwrap().is_some());
+    assert_eq!(engine.retrieve("skills", 5).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_forget_multiple_semicolon_delimited() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    engine
+        .save(&record("luna.binary.location", "luna.binary.location", "profile", "/usr/bin/luna"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("user.skills.list", "user.skills.list", "profile", "Coding"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("env.luna.provider", "env.luna.provider", "profile", "antigravity"))
+        .await
+        .unwrap();
+
+    engine
+        .forget("luna.binary.location; user.skills.list; env.luna.provider")
+        .await
+        .unwrap();
+
+    assert_eq!(engine.retrieve("location", 5).await.unwrap().len(), 0);
+    assert_eq!(engine.retrieve("skills", 5).await.unwrap().len(), 0);
+    assert_eq!(engine.retrieve("antigravity", 5).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_update_memory_tool_partial_fields_preserves_existing() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let engine = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
+    let mut initial = record("user.profile", "user.profile", "profile", "Initial preference");
+    initial.name = Some("Daryll".to_string());
+    initial.path = Some("/home/janelle".to_string());
+    initial.category = MemoryCategory::UserProfile;
+    engine.save(&initial).await.unwrap();
+
+    let update_tool = UpdateMemoryTool::new(engine.clone());
+    let cancel = CancellationToken::new();
+
+    // Call update_memory passing ONLY memory_id and updated object/content
+    let call_args = serde_json::json!({
+        "memory_id": "user.profile",
+        "object": "Updated aesthetic preference: plain text"
+    });
+
+    let res = update_tool.execute("call_1", &call_args, &cancel).await.unwrap();
+    assert!(!res.is_error);
+
+    // Verify existing record's name, path, and category were preserved
+    let updated = engine.get_record("user.profile").await.unwrap().unwrap();
+    assert_eq!(updated.object, "Updated aesthetic preference: plain text");
+    assert_eq!(updated.name.as_deref(), Some("Daryll"));
+    assert_eq!(updated.path.as_deref(), Some("/home/janelle"));
+    assert_eq!(updated.category, MemoryCategory::UserProfile);
+}
+
+#[tokio::test]
+async fn test_forget_memory_tool_all() {
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let engine = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
+    engine
+        .save(&record("user.profile", "user.profile", "profile", "Daryll"))
+        .await
+        .unwrap();
+    engine
+        .save(&record("project.luna", "project.luna", "profile", "Harness"))
+        .await
+        .unwrap();
+
+    let forget_tool = ForgetMemoryTool::new(engine.clone());
+    let cancel = CancellationToken::new();
+
+    let call_args = serde_json::json!({
+        "memory_id": "all"
+    });
+
+    let res = forget_tool.execute("call_2", &call_args, &cancel).await.unwrap();
+    assert!(!res.is_error);
+
+    assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 0);
+    assert_eq!(engine.retrieve("luna", 5).await.unwrap().len(), 0);
+}

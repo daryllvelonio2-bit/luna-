@@ -139,8 +139,8 @@ Constraints:
 Operations:
 - Check `CURRENT ACTIVE MEMORIES` before writing to prevent duplicate entities.
 - `save_memory`: Store lean index card records (display name, path, short 2-5 word description) for an entity topic.
-- `update_memory`: Modify or append to existing entity records when facts change or get refined.
-- `forget_memory`: Remove outdated, contradicted, or explicitly retracted preferences.
+- `update_memory`: Modify or edit an existing entity record (`memory_id` and the updated `object`/content).
+- `forget_memory`: Remove memory records. When the user asks to "delete all memory", "clear memory", "forget all", or "delete it all", immediately call `forget_memory(memory_id="all")`. Never ask the user to specify individual IDs when they asked to delete all memory. When the user asks to forget a specific entity or topic, pass its ID or topic (or a wildcard like `user.*`).
 
 NOTE PROTOCOL (SESSION WRITER MODE):
 You possess note tools: `save_note`, `search_notes`, `list_notes`, `read_note`, `update_note`, and `delete_note`.
