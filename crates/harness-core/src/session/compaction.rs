@@ -452,6 +452,45 @@ const TRANSCRIPT_MESSAGE_CHARS: usize = 4_000;
 /// Characters of the whole transcript that go into the summariser's call.
 const TRANSCRIPT_TOTAL_CHARS: usize = 60_000;
 
+/// Inline image data URLs replaced by a marker, for the summariser's transcript.
+///
+/// A folded message can begin with `data:image/png;base64,…` — a screenshot, an inline image — and
+/// what the clip keeps is the head, so the blob's opening characters are exactly what survives. A
+/// provider reads that as an image and decodes it: Gemini answers
+/// `HTTP 400 {"message":"Failed to base64-decode image data"}` for a payload the clip has already
+/// cut. Every fold over such a session failed, and the session ran on unbounded: six of the ten
+/// compaction failures in this machine's log were this. A summary needs to know an image was there,
+/// not what its pixels were.
+fn elide_image_data(text: &str) -> String {
+    if !text.contains("data:image/") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("data:image/") {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start..];
+        let end = after_start
+            .find(char::is_whitespace)
+            .unwrap_or(after_start.len());
+        let url = &after_start[..end];
+        match url.split_once(";base64,") {
+            Some((kind, payload)) => {
+                out.push_str(&format!(
+                    "[inline image {}: {} base64 characters elided]",
+                    kind.trim_start_matches("data:"),
+                    payload.chars().count()
+                ));
+            }
+            // Not an inline payload: a link, a path, documentation about one. Leave it.
+            None => out.push_str(url),
+        }
+        rest = &after_start[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The head of `text`, cut to `limit` characters, with a marker that says how much was cut.
 fn clip(text: &str, limit: usize) -> String {
     let count = text.chars().count();
@@ -476,8 +515,10 @@ fn render_stored(stored: &StoredMessage) -> String {
         }
     };
     let mut out = String::new();
+    // Elided before the clip, not after: a data URL is one unbroken run of base64, so clipping it
+    // first spends the whole budget on the cut blob and drops what the message actually says.
     let body = clip(
-        message.content.as_deref().unwrap_or_default(),
+        &elide_image_data(message.content.as_deref().unwrap_or_default()),
         TRANSCRIPT_MESSAGE_CHARS,
     );
     out.push_str(&format!("{}: {}\n", label, body));
@@ -486,13 +527,16 @@ fn render_stored(stored: &StoredMessage) -> String {
             "  tool call {} {} {}\n",
             call.name,
             call.id,
-            clip(&call.arguments.to_string(), TRANSCRIPT_MESSAGE_CHARS)
+            clip(
+                &elide_image_data(&call.arguments.to_string()),
+                TRANSCRIPT_MESSAGE_CHARS
+            )
         ));
     }
     if let Some(result) = &message.tool_result {
         out.push_str(&format!(
             "  tool result: {}\n",
-            clip(&result.content, TRANSCRIPT_MESSAGE_CHARS)
+            clip(&elide_image_data(&result.content), TRANSCRIPT_MESSAGE_CHARS)
         ));
     }
     out
@@ -722,4 +766,65 @@ pub async fn summarize_session(
         })?;
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(seq: i64, message: Message) -> StoredMessage {
+        StoredMessage {
+            id: seq,
+            seq,
+            message,
+            is_summary: false,
+        }
+    }
+
+    /// A summariser prompt must carry no base64 image payload.
+    ///
+    /// A provider reads one as an image and decodes it, and the clip has already cut it, so the
+    /// call comes back `HTTP 400 {"message":"Failed to base64-decode image data"}` — which is how
+    /// six folds on this machine failed, each leaving the session running on its full transcript.
+    #[test]
+    fn an_inline_image_is_elided_from_the_summarisers_transcript() {
+        let payload = "A".repeat(3_000);
+        let rendered = render_transcript(&[stored(
+            1,
+            Message::tool(crate::types::ToolResult::success(
+                "call_1",
+                format!("screenshot: data:image/png;base64,{payload}"),
+            )),
+        )]);
+        assert!(
+            !rendered.contains(&payload),
+            "the base64 payload must not reach the summariser"
+        );
+        assert!(
+            rendered.contains("[inline image image/png: 3000 base64 characters elided]"),
+            "the marker says an image was there: {rendered}"
+        );
+    }
+
+    /// The elision is for inline payloads only: a link, a path, or prose about one is left alone.
+    #[test]
+    fn a_data_url_that_carries_no_payload_is_left_alone() {
+        let text = "see data:image/png;base64 not the format";
+        assert_eq!(elide_image_data(text), text);
+    }
+
+    /// Eliding first and clipping second is what keeps a message's meaning: a data URL is one
+    /// unbroken run, so a clip that ran first would spend the whole budget on the blob.
+    #[test]
+    fn a_message_keeps_its_text_when_it_opens_with_an_image() {
+        let payload = "B".repeat(50_000);
+        let rendered = render_transcript(&[stored(
+            1,
+            Message::user(format!(
+                "data:image/jpeg;base64,{payload} and here is what I saw"
+            )),
+        )]);
+        assert!(rendered.contains("and here is what I saw"), "{rendered}");
+        assert!(!rendered.contains("characters cut"), "{rendered}");
+    }
 }
