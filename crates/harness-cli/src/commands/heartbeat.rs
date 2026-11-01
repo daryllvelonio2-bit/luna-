@@ -71,6 +71,7 @@ pub fn get_git_status(path: &std::path::Path) -> Option<String> {
     Some(status)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_chat_heartbeat(
     arg: Option<&str>,
     ui: &ChatUi,

@@ -15,7 +15,7 @@ async fn test_notes_fts_and_pointer_distillation() {
 
     // Summary pointer must strictly not exceed 5 words
     let word_count = note.summary_pointer.split_whitespace().count();
-    assert!(word_count >= 1 && word_count <= 5);
+    assert!((1..=5).contains(&word_count));
     assert_eq!(
         note.summary_pointer,
         "Stripe Payment Gateway Integration Specification"

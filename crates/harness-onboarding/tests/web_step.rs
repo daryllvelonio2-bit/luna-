@@ -83,7 +83,10 @@ fn a_blank_web_answer_records_the_keyless_search() {
         config["tools"]["web"]["search_backend"].as_str(),
         Some("duckduckgo")
     );
-    assert!(rendered.contains("WEB ACCESS"), "the step has its own panel");
+    assert!(
+        rendered.contains("WEB ACCESS"),
+        "the step has its own panel"
+    );
     assert!(rendered.contains("Web access"));
     assert!(rendered.contains("DuckDuckGo"));
 
@@ -108,7 +111,10 @@ fn choosing_a_keyed_backend_records_the_variable_that_holds_the_key() {
     assert_eq!(outcome.web.api_key_env.as_deref(), Some("MY_BRAVE_KEY"));
 
     let config = read_config(&file);
-    assert_eq!(config["tools"]["web"]["search_backend"].as_str(), Some("brave"));
+    assert_eq!(
+        config["tools"]["web"]["search_backend"].as_str(),
+        Some("brave")
+    );
     assert_eq!(
         config["tools"]["web"]["search_api_key_env"].as_str(),
         Some("MY_BRAVE_KEY"),
@@ -161,7 +167,10 @@ fn web_access_can_be_turned_off_entirely() {
 
     let config = read_config(&file);
     assert_eq!(config["tools"]["web"]["enabled"].as_bool(), Some(false));
-    assert_eq!(config["tools"]["web"]["search_backend"].as_str(), Some("none"));
+    assert_eq!(
+        config["tools"]["web"]["search_backend"].as_str(),
+        Some("none")
+    );
     assert!(rendered.contains("Disabled (no web tools)"), "{rendered}");
 }
 
@@ -200,5 +209,8 @@ fn a_script_that_ends_before_the_web_question_still_leaves_a_usable_default() {
     assert_eq!(outcome.web.backend, SearchBackend::DuckDuckGo);
     let config = read_config(&file);
     assert_eq!(config["tools"]["web"]["enabled"].as_bool(), Some(true));
-    assert_eq!(config["tools"]["web"]["search_backend"].as_str(), Some("duckduckgo"));
+    assert_eq!(
+        config["tools"]["web"]["search_backend"].as_str(),
+        Some("duckduckgo")
+    );
 }

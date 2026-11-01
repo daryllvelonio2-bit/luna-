@@ -12,13 +12,13 @@ use harness_core::{
     Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
     SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
 };
+use harness_mcp::{McpStdioClient, McpToolAdapter};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
 };
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
-use harness_mcp::{McpStdioClient, McpToolAdapter};
 
 use super::approval::{approval_settings, build_approver, ApprovalChoice, ChatApprover};
 use super::context_window::context_window;
@@ -144,8 +144,11 @@ async fn register_mcp_servers(
         // server, which would reject `mcp__<server>__<tool>` as an unknown tool.
         for tool_info in &filtered_tools {
             let namespaced_name = format!("mcp__{}__{}", server_config.name, tool_info.name);
-            let adapter =
-                McpToolAdapter::namespaced(namespaced_name.clone(), tool_info.clone(), client.clone());
+            let adapter = McpToolAdapter::namespaced(
+                namespaced_name.clone(),
+                tool_info.clone(),
+                client.clone(),
+            );
             if let Err(e) = registry.register(Arc::new(adapter)).await {
                 eprintln!(
                     "warning: failed to register MCP tool '{}': {}",
@@ -540,11 +543,14 @@ pub async fn run_interactive_chat(
                     // visible while it runs; `ToolExecuted` below finalizes the same line into the
                     // transcript with its verdict.
                     ui_obs.start_activity(&call_fmt, &name, &arguments);
-                    in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
-                        call_formatted: call_fmt,
-                        result_formatted: String::new(),
-                        diff_lines,
-                    });
+                    in_flight_tools_obs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(TurnProcessItem {
+                            call_formatted: call_fmt,
+                            result_formatted: String::new(),
+                            diff_lines,
+                        });
                 }
             }
             harness_core::AgentEvent::ToolExecuted {
@@ -569,7 +575,9 @@ pub async fn run_interactive_chat(
                     " (success)".green().to_string()
                 };
                 let (line, diff_to_show) = {
-                    let mut tools = in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut tools = in_flight_tools_obs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     // When multiple tool calls run in parallel, in_flight_tools holds all of them.
                     // Match the first in-flight tool call that hasn't received a verdict yet,
                     // preserving call order. Using tools.last_mut() repeatedly updated the last
@@ -599,11 +607,14 @@ pub async fn run_interactive_chat(
                 ui_obs.clear_patch_diff();
                 ui_obs.finish_reasoning();
                 let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
-                in_flight_tools_obs.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
-                    call_formatted: line.clone(),
-                    result_formatted: String::new(),
-                    diff_lines: Vec::new(),
-                });
+                in_flight_tools_obs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(TurnProcessItem {
+                        call_formatted: line.clone(),
+                        result_formatted: String::new(),
+                        diff_lines: Vec::new(),
+                    });
                 ui_obs.emit_above(&line);
             }
             harness_core::AgentEvent::CompactionStarted { forced } => {
@@ -629,8 +640,9 @@ pub async fn run_interactive_chat(
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     delegate_tool.set_steer_handle(steer_handle.clone());
-    let delegate_trackers: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let delegate_trackers: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let trackers_events = delegate_trackers.clone();
     let ui_delegate_events = ui.clone();
     delegate_tool.set_event_notifier(Arc::new(move |event| {
@@ -644,7 +656,10 @@ pub async fn run_interactive_chat(
                 trackers_events
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(id.clone(), (std::time::Instant::now(), "starting".to_string()));
+                    .insert(
+                        id.clone(),
+                        (std::time::Instant::now(), "starting".to_string()),
+                    );
                 ui_delegate_events.start_delegate_task(&id, &goal);
             }
             SubagentTaskEvent::Progress { id, activity, .. } => {
@@ -738,12 +753,24 @@ pub async fn run_interactive_chat(
         .compact_model
         .as_ref()
         .map(|(p, _)| p.clone())
-        .or_else(|| config.agent.compaction_provider.clone().filter(|p| !p.is_empty()));
+        .or_else(|| {
+            config
+                .agent
+                .compaction_provider
+                .clone()
+                .filter(|p| !p.is_empty())
+        });
     let mut compact_model: Option<String> = record
         .compact_model
         .as_ref()
         .map(|(_, m)| m.clone())
-        .or_else(|| config.agent.compaction_model.clone().filter(|m| !m.is_empty()));
+        .or_else(|| {
+            config
+                .agent
+                .compaction_model
+                .clone()
+                .filter(|m| !m.is_empty())
+        });
 
     if !is_attended {
         let cancel_token = CancellationToken::new();
@@ -866,7 +893,10 @@ pub async fn run_interactive_chat(
                 } else {
                     println!("{}", crate::commands::mcp::format_mcp_servers(&config));
                     if config.mcp.enabled && config.mcp.servers.iter().any(|s| s.enabled) {
-                        println!("\n{}", crate::commands::mcp::format_mcp_tools(&config).await);
+                        println!(
+                            "\n{}",
+                            crate::commands::mcp::format_mcp_tools(&config).await
+                        );
                     }
                 }
                 continue;
@@ -965,7 +995,11 @@ pub async fn run_interactive_chat(
                 } else {
                     query.strip_prefix("/think").unwrap().trim()
                 };
-                let arg_opt = if stripped.is_empty() { None } else { Some(stripped) };
+                let arg_opt = if stripped.is_empty() {
+                    None
+                } else {
+                    Some(stripped)
+                };
                 handle_thinking_switch(None, &ui, &agent, arg_opt).await?;
                 continue;
             }

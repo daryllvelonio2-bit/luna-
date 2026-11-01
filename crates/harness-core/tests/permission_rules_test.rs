@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::tools::{ReadCache, WriteFileTool};

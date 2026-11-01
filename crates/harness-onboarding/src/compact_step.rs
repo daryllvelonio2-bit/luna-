@@ -89,7 +89,7 @@ pub fn parse_threshold(input: &str) -> Result<usize, String> {
             .map_err(|_| format!("'{trimmed}' is not a valid number"))?
     };
 
-    if num < AUTO_COMPACT_MIN_THRESHOLD || num > AUTO_COMPACT_MAX_THRESHOLD {
+    if !(AUTO_COMPACT_MIN_THRESHOLD..=AUTO_COMPACT_MAX_THRESHOLD).contains(&num) {
         return Err(format!(
             "threshold must be between {} and {} (got {})",
             AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, num
@@ -106,7 +106,7 @@ pub fn parse_percent(input: &str) -> Result<usize, String> {
     let n: usize = trimmed
         .parse()
         .map_err(|_| format!("'{trimmed}' is not a valid number"))?;
-    if n < AUTO_COMPACT_MIN_PERCENT || n > AUTO_COMPACT_MAX_PERCENT {
+    if !(AUTO_COMPACT_MIN_PERCENT..=AUTO_COMPACT_MAX_PERCENT).contains(&n) {
         return Err(format!(
             "percentage must be between {} and {} (got {})",
             AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, n

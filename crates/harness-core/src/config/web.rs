@@ -363,7 +363,10 @@ mod tests {
         assert!(settings.search_backend.is_keyless());
         assert!(settings.respect_robots);
         assert!(!settings.allow_private_hosts, "reaching the LAN is opt-in");
-        assert!(settings.allowed_domains.is_empty(), "no list means any public host");
+        assert!(
+            settings.allowed_domains.is_empty(),
+            "no list means any public host"
+        );
         assert!(settings.validate().is_ok());
     }
 
@@ -380,9 +383,15 @@ mod tests {
 
     #[test]
     fn a_backend_name_is_accepted_with_the_spellings_a_person_types() {
-        assert_eq!(SearchBackend::parse(" DDG ").unwrap(), SearchBackend::DuckDuckGo);
+        assert_eq!(
+            SearchBackend::parse(" DDG ").unwrap(),
+            SearchBackend::DuckDuckGo
+        );
         assert_eq!(SearchBackend::parse("Brave").unwrap(), SearchBackend::Brave);
-        assert_eq!(SearchBackend::parse("off").unwrap(), SearchBackend::Disabled);
+        assert_eq!(
+            SearchBackend::parse("off").unwrap(),
+            SearchBackend::Disabled
+        );
         let error = SearchBackend::parse("google").unwrap_err();
         assert!(error.contains("duckduckgo, brave, tavily, none"), "{error}");
     }
@@ -396,8 +405,10 @@ mod tests {
 
     #[test]
     fn the_key_env_falls_back_to_the_backend_default_and_can_be_overridden() {
-        let mut settings = WebSettings::default();
-        settings.search_backend = SearchBackend::Brave;
+        let mut settings = WebSettings {
+            search_backend: SearchBackend::Brave,
+            ..WebSettings::default()
+        };
         assert_eq!(settings.api_key_env(), "BRAVE_SEARCH_API_KEY");
         settings.search_backend = SearchBackend::Tavily;
         assert_eq!(settings.api_key_env(), "TAVILY_API_KEY");
@@ -407,11 +418,16 @@ mod tests {
         assert_eq!(settings.api_key_env(), "LUNA_BRAVE_KEY");
     }
 
+    type BudgetCase = (fn(&mut WebSettings), &'static str);
+
     #[test]
     fn out_of_range_budgets_are_refused_with_the_key_and_the_range() {
-        let cases: [(fn(&mut WebSettings), &str); 7] = [
+        let cases: [BudgetCase; 7] = [
             (|s| s.search_max_results = 0, "tools.web.search_max_results"),
-            (|s| s.search_max_results = 99, "tools.web.search_max_results"),
+            (
+                |s| s.search_max_results = 99,
+                "tools.web.search_max_results",
+            ),
             (|s| s.fetch_max_bytes = 10, "tools.web.fetch_max_bytes"),
             (|s| s.fetch_max_chars = 10, "tools.web.fetch_max_chars"),
             (|s| s.timeout_secs = 0, "tools.web.timeout_secs"),
@@ -428,17 +444,24 @@ mod tests {
 
     #[test]
     fn an_empty_user_agent_is_refused_because_robots_cannot_match_it() {
-        let mut settings = WebSettings::default();
-        settings.user_agent = "   ".to_string();
+        let settings = WebSettings {
+            user_agent: "   ".to_string(),
+            ..WebSettings::default()
+        };
         let error = settings.validate().expect_err("empty agent");
-        assert!(error.to_string().contains("tools.web.user_agent"), "{error}");
+        assert!(
+            error.to_string().contains("tools.web.user_agent"),
+            "{error}"
+        );
     }
 
     #[test]
     fn an_enabled_keyed_backend_without_a_key_reports_the_variable_and_still_validates() {
-        let mut settings = WebSettings::default();
-        settings.search_backend = SearchBackend::Brave;
-        settings.search_api_key_env = "LUNA_TEST_ABSENT_BRAVE_KEY".to_string();
+        let mut settings = WebSettings {
+            search_backend: SearchBackend::Brave,
+            search_api_key_env: "LUNA_TEST_ABSENT_BRAVE_KEY".to_string(),
+            ..WebSettings::default()
+        };
         let problem = settings.api_key_problem().expect("a key is missing");
         assert!(problem.contains("LUNA_TEST_ABSENT_BRAVE_KEY"), "{problem}");
         assert!(
@@ -460,8 +483,10 @@ mod tests {
 
     #[test]
     fn a_search_backend_of_none_leaves_search_unconfigured_but_not_an_error() {
-        let mut settings = WebSettings::default();
-        settings.search_backend = SearchBackend::Disabled;
+        let settings = WebSettings {
+            search_backend: SearchBackend::Disabled,
+            ..WebSettings::default()
+        };
         assert!(!settings.search_configured());
         assert!(settings.validate().is_ok());
     }

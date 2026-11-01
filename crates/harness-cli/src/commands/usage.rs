@@ -104,10 +104,7 @@ pub async fn run_usage(
         let records = ledger.recent(&filter, options.limit).await?;
         if options.json {
             for record in &records {
-                println!(
-                    "{}",
-                    serde_json::to_string(record).unwrap_or_default()
-                );
+                println!("{}", serde_json::to_string(record).unwrap_or_default());
             }
         } else {
             print_recent(&records);

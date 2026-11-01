@@ -299,7 +299,7 @@ pub async fn stream_supercode_completion(
                                         .get("reason")
                                         .and_then(|r| r.as_str())
                                         .map(str::to_string);
-                                    let usage = event.get("usage").and_then(|u| {
+                                    let usage = event.get("usage").map(|u| {
                                         let prompt_tokens = u
                                             .get("inputTokens")
                                             .and_then(|n| n.as_u64())
@@ -324,12 +324,12 @@ pub async fn stream_supercode_completion(
                                             .and_then(|n| n.as_u64())
                                             .unwrap_or(0)
                                             as u32;
-                                        Some(TokenUsage {
+                                        TokenUsage {
                                             prompt_tokens,
                                             completion_tokens,
                                             total_tokens,
                                             cached_tokens,
-                                        })
+                                        }
                                     });
                                     let _ = tx
                                         .send(Ok(StreamEvent::Completed {

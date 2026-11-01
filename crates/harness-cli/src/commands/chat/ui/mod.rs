@@ -253,7 +253,7 @@ pub fn physical_line_count(visible_len: usize, width: usize) -> usize {
     if visible_len == 0 {
         1
     } else {
-        (visible_len + width - 1) / width
+        visible_len.div_ceil(width)
     }
 }
 
@@ -291,7 +291,7 @@ pub struct ChatUi {
 fn humanize_tokens(count: u32) -> String {
     if count >= 1_000_000 {
         let m = count as f64 / 1_000_000.0;
-        if count % 1_000_000 == 0 {
+        if count.is_multiple_of(1_000_000) {
             format!("{}M", (count / 1_000_000))
         } else {
             let rounded = (m * 10.0).round() / 10.0;
@@ -303,7 +303,7 @@ fn humanize_tokens(count: u32) -> String {
         }
     } else if count >= 10_000 {
         let k = count as f64 / 1_000.0;
-        if k >= 100.0 || (count % 1_000 == 0) {
+        if k >= 100.0 || count.is_multiple_of(1_000) {
             format!("{}k", k.round() as u64)
         } else {
             let rounded = (k * 10.0).round() / 10.0;
@@ -338,19 +338,31 @@ impl ChatUi {
     }
 
     pub fn set_transient_error(&self, err: Option<String>) {
-        *self.transient_error.lock().unwrap_or_else(|e| e.into_inner()) = err;
+        *self
+            .transient_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = err;
     }
 
     pub fn transient_error(&self) -> Option<String> {
-        self.transient_error.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.transient_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn clear_transient_error(&self) {
-        *self.transient_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .transient_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn has_status(&self) -> bool {
-        self.status.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// The rows the todo panel is drawn from, empty when the list is.
@@ -395,7 +407,10 @@ impl ChatUi {
 
     /// Whether a todo panel snapshot is active.
     pub fn has_todo_panel(&self) -> bool {
-        self.todo_snapshot.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.todo_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Whether the todo panel is folded to a single row.
@@ -494,7 +509,11 @@ impl ChatUi {
     }
 
     pub fn push_reasoning(&self, text: &str) {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).reasoning.push_str(text);
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reasoning
+            .push_str(text);
     }
 
     pub fn finish_reasoning(&self) {
@@ -556,7 +575,11 @@ impl ChatUi {
 
     #[allow(dead_code)]
     pub fn is_compacting(&self) -> bool {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).compaction.is_some()
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .compaction
+            .is_some()
     }
 
     /// How many submitted messages are waiting to be sent.
@@ -854,7 +877,11 @@ impl ChatUi {
         }
         self.box_drawn.store(false, Ordering::SeqCst);
 
-        let metrics_opt = self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let metrics_opt = self
+            .drawn_metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let (rows_below, rows_above) = if let Some(m) = metrics_opt {
             let current_width = get_terminal_width().max(1);
             let bottom_rows = physical_line_count(m.divider_len, current_width);
@@ -979,13 +1006,22 @@ impl ChatUi {
         if !self.box_drawn.load(Ordering::SeqCst) {
             return None;
         }
-        let metrics = self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        let metrics = self
+            .drawn_metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
         if metrics.width != width {
             // A resize redraws everything anyway.
             return None;
         }
 
-        let live_rows = self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+        let live_rows = self
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rows
+            .clone();
         let panel_rows = self.todo_panel_rows(width);
         let delegate_rows = self.delegate_task_rows(width);
         let queued_line = self.format_queue_line(width);
@@ -1134,7 +1170,14 @@ impl ChatUi {
             rows
         };
 
-        if rows.is_empty() && self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.is_empty() {
+        if rows.is_empty()
+            && self
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rows
+                .is_empty()
+        {
             return;
         }
 
@@ -1191,7 +1234,12 @@ impl ChatUi {
         }
         let _ = io::stdout().flush();
 
-        let live_rows = self.live.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+        let live_rows = self
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rows
+            .clone();
         let live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
 
         let panel = self.todo_panel_rows(width);
@@ -1333,7 +1381,11 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let buf = self
+            .input_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let chrome = self.box_row_count() + 2;
 
         let rows = {
@@ -1374,7 +1426,11 @@ impl ChatUi {
             return;
         }
         let width = get_terminal_width();
-        let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let buf = self
+            .input_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let previous = {
             let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             let prev = live.rows.len();

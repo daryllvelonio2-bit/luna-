@@ -27,12 +27,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Two-pointer matcher with a single backtrack anchor for the last `*` (`*` matches any run of
 /// items, including none; `?` matches exactly one). No recursion, so a pattern of many stars
 /// cannot blow the stack; generic over the item type so the ASCII path needs no allocation.
-fn glob_match_slice<T: PartialEq + Copy>(
-    pattern: &[T],
-    text: &[T],
-    star: T,
-    any: T,
-) -> bool {
+fn glob_match_slice<T: PartialEq + Copy>(pattern: &[T], text: &[T], star: T, any: T) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let (mut star_p, mut resume): (Option<usize>, usize) = (None, 0);
 

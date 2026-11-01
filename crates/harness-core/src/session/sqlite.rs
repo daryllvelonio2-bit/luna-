@@ -134,7 +134,7 @@ impl SqliteSessionStore {
             .prepare("PRAGMA table_info(sessions)")
             .and_then(|mut stmt| {
                 let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                Ok(columns.collect::<Result<Vec<_>, _>>()?)
+                columns.collect::<Result<Vec<_>, _>>()
             })
             .map_err(|error| session_error("failed to inspect the sessions schema", error))?;
 
@@ -162,7 +162,9 @@ impl SqliteSessionStore {
                 "ALTER TABLE sessions ADD COLUMN compact_model TEXT NOT NULL DEFAULT ''",
                 [],
             )
-            .map_err(|error| session_error("failed to add the session compact_model column", error))?;
+            .map_err(|error| {
+                session_error("failed to add the session compact_model column", error)
+            })?;
         }
 
         // Reasoning is part of the conversation: replaying a session without it hands the model
@@ -171,7 +173,7 @@ impl SqliteSessionStore {
             .prepare("PRAGMA table_info(messages)")
             .and_then(|mut stmt| {
                 let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                Ok(columns.collect::<Result<Vec<_>, _>>()?)
+                columns.collect::<Result<Vec<_>, _>>()
             })
             .map_err(|error| session_error("failed to inspect the messages schema", error))?;
         let has_reasoning = message_columns.iter().any(|column| column == "reasoning");
@@ -311,7 +313,12 @@ fn query_summary_rows(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<StoredMessage>, HarnessError> {
-    query_rows(conn, session_id, "is_summary = 1 AND compacted_at IS NULL", None)
+    query_rows(
+        conn,
+        session_id,
+        "is_summary = 1 AND compacted_at IS NULL",
+        None,
+    )
 }
 
 /// The live transcript, bounded by `limit` rows.
@@ -335,12 +342,7 @@ fn query_ordinary_rows(
     } else {
         "is_summary = 0 AND compacted_at IS NULL"
     };
-    let mut stored = query_rows(
-        conn,
-        session_id,
-        filter,
-        Some(start),
-    )?;
+    let mut stored = query_rows(conn, session_id, filter, Some(start))?;
     // If a limit boundary cuts in the middle of a turn, drop leading messages until
     // the first User message so replayed history always starts on a clean user turn.
     if let Some(first_user) = stored.iter().position(|m| m.message.role == Role::User) {
@@ -405,11 +407,9 @@ fn ordinary_window_start(
          LIMIT 1"
     };
     let anchored: Option<i64> = conn
-        .query_row(
-            anchored_sql,
-            params![session_id, boundary],
-            |row| row.get(0),
-        )
+        .query_row(anchored_sql, params![session_id, boundary], |row| {
+            row.get(0)
+        })
         .optional()
         .map_err(|error| session_error("failed to read the replay window anchor", error))?;
     if anchored.is_some() {
@@ -426,11 +426,9 @@ fn ordinary_window_start(
            AND role = 'user' AND seq < ?2"
     };
     let anchor: Option<i64> = conn
-        .query_row(
-            anchor_sql,
-            params![session_id, boundary],
-            |row| row.get::<_, Option<i64>>(0),
-        )
+        .query_row(anchor_sql, params![session_id, boundary], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
         .map_err(|error| session_error("failed to read the replay window anchor", error))?;
     Ok(Some(anchor.unwrap_or(boundary)))
 }
@@ -448,12 +446,8 @@ fn first_seq(
         "SELECT MIN(seq) FROM messages
          WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL"
     };
-    conn.query_row(
-        sql,
-        params![session_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .map_err(|error| session_error("failed to read the session replay window", error))
+    conn.query_row(sql, params![session_id], |row| row.get::<_, Option<i64>>(0))
+        .map_err(|error| session_error("failed to read the session replay window", error))
 }
 
 fn count_live(conn: &Connection, session_id: &str) -> Result<usize, HarnessError> {

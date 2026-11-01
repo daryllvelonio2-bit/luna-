@@ -41,7 +41,10 @@ where
         user_input: &str,
         cancel_token: CancellationToken,
     ) -> Result<TurnOutcome, HarnessError> {
-        self.completed_fold.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.completed_fold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         self.fold_disabled_this_turn.store(false, Ordering::SeqCst);
         let _reaper_guard = super::FoldReaperGuard(&self.completed_fold);
         let system_text = self.system_prompt(user_input).await?;
@@ -153,8 +156,10 @@ where
                 messages.len(),
                 tools.len()
             );
-            let mut options = CompletionOptions::default();
-            options.reasoning_effort = self.reasoning_effort;
+            let options = CompletionOptions {
+                reasoning_effort: self.reasoning_effort,
+                ..Default::default()
+            };
 
             // Retrying on transient / overloaded errors with backoff
             let max_retries = 3;

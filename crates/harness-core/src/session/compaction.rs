@@ -96,7 +96,10 @@ pub fn text_content_chars(text: &str) -> usize {
 /// Characters that will be sent for one message: content, tool call names and arguments, tool
 /// result.
 fn message_chars(message: &Message) -> usize {
-    let mut chars = message.content.as_ref().map_or(0, |s| text_content_chars(s));
+    let mut chars = message
+        .content
+        .as_ref()
+        .map_or(0, |s| text_content_chars(s));
     if let Some(result) = &message.tool_result {
         chars += text_content_chars(&result.content);
     }
@@ -657,7 +660,8 @@ async fn compact_at_boundary(
         }
     };
 
-    let mut kept_messages: Vec<Message> = kept.iter().map(|stored| stored.message.clone()).collect();
+    let mut kept_messages: Vec<Message> =
+        kept.iter().map(|stored| stored.message.clone()).collect();
     for msg in &mut kept_messages {
         msg.usage = None;
     }

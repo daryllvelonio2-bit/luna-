@@ -313,7 +313,9 @@ impl WebPolicy {
                     // Re-vetted on the next turn of the loop: a redirect is a second URL the model
                     // did not write and the page did.
                     current = current.join(&location).map_err(|error| {
-                        WebError::Refused(format!("redirect target '{location}' is not a URL: {error}"))
+                        WebError::Refused(format!(
+                            "redirect target '{location}' is not a URL: {error}"
+                        ))
                     })?;
                 }
             }
@@ -325,7 +327,12 @@ impl WebPolicy {
     }
 
     /// Vet one URL's host and port before dialling it.
-    fn check_host(&self, url: &Url, allowed: &[String], blocked: &[String]) -> Result<(), WebError> {
+    fn check_host(
+        &self,
+        url: &Url,
+        allowed: &[String],
+        blocked: &[String],
+    ) -> Result<(), WebError> {
         let host = url
             .host_str()
             .ok_or_else(|| WebError::Refused("the URL has no host".to_string()))?;
@@ -351,9 +358,7 @@ impl WebPolicy {
             Some(ip) => vec![SocketAddr::new(ip, port)],
             None => tokio::net::lookup_host((host.as_str(), port))
                 .await
-                .map_err(|error| {
-                    WebError::Transport(format!("cannot resolve '{host}': {error}"))
-                })?
+                .map_err(|error| WebError::Transport(format!("cannot resolve '{host}': {error}")))?
                 .collect(),
         };
         if addresses.is_empty() {
@@ -376,7 +381,10 @@ impl WebPolicy {
         let mut builder = Client::builder()
             .user_agent(self.user_agent.clone())
             .timeout(self.timeout)
-            .connect_timeout(self.timeout.min(Duration::from_secs(CONNECT_TIMEOUT_CEILING_SECS)))
+            .connect_timeout(
+                self.timeout
+                    .min(Duration::from_secs(CONNECT_TIMEOUT_CEILING_SECS)),
+            )
             .redirect(reqwest::redirect::Policy::none())
             // One request per client: a pool would outlive the validation above.
             .pool_max_idle_per_host(0);
@@ -509,7 +517,10 @@ impl WebPolicy {
         let rules = match self.robots_rules(&robots_url, cancel).await {
             Ok(rules) => rules,
             Err(error) => {
-                tracing::debug!("robots.txt for {origin} could not be read ({}): allowing", error);
+                tracing::debug!(
+                    "robots.txt for {origin} could not be read ({}): allowing",
+                    error
+                );
                 return true;
             }
         };
@@ -565,7 +576,10 @@ impl WebPolicy {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(parse_robots(&String::from_utf8_lossy(&body), &self.user_agent_token()))
+        Ok(parse_robots(
+            &String::from_utf8_lossy(&body),
+            &self.user_agent_token(),
+        ))
     }
 
     /// The product token robots groups are matched against: the `User-Agent` up to the first `/`
@@ -652,9 +666,7 @@ fn host_matches(pattern: &str, host: &str) -> bool {
         return false;
     }
     let bare = pattern.trim_start_matches("*.").to_string();
-    glob_match(&pattern, host)
-        || glob_match(&bare, host)
-        || glob_match(&format!("*.{bare}"), host)
+    glob_match(&pattern, host) || glob_match(&bare, host) || glob_match(&format!("*.{bare}"), host)
 }
 
 /// Parse a robots file for one agent token, keeping only the groups that apply to it.
@@ -828,7 +840,10 @@ mod tests {
         );
         // Our own group exists, so the wildcard group is not consulted.
         assert!(rules.allows("/public"));
-        assert!(rules.allows("/private/secret"), "wildcard group is not ours");
+        assert!(
+            rules.allows("/private/secret"),
+            "wildcard group is not ours"
+        );
         assert!(!rules.allows("/draft"));
         assert!(!rules.allows("/draft/2026"));
 
@@ -836,7 +851,10 @@ mod tests {
             allow: vec!["/a".to_string()],
             disallow: vec!["/a".to_string()],
         };
-        assert!(tie.allows("/a/b"), "an allow beats a disallow of equal length");
+        assert!(
+            tie.allows("/a/b"),
+            "an allow beats a disallow of equal length"
+        );
     }
 
     #[test]
@@ -851,7 +869,10 @@ mod tests {
 
     #[test]
     fn a_robots_file_that_names_no_one_leaves_everything_open() {
-        let rules = parse_robots("# just a comment\nSitemap: https://x/sitemap.xml\n", "lunaharness");
+        let rules = parse_robots(
+            "# just a comment\nSitemap: https://x/sitemap.xml\n",
+            "lunaharness",
+        );
         assert!(rules.allows("/anything"));
     }
 

@@ -582,6 +582,26 @@ pub fn canonicalize_provider_id(id: &str) -> &str {
     }
 }
 
+/// Whether `id`'s route is known to cache a stable prompt prefix.
+///
+/// This sits beside the descriptors instead of inside the capability resolver on purpose: a
+/// provider that reports cache hits but is missing from a second hand-kept list is exactly how
+/// the `cache` flag drifts out of step with the ledger. Adding a route should mean editing the
+/// catalog, not the catalog *and* a list somewhere else. Aliases are folded through
+/// [`canonicalize_provider_id`], so `agy` answers for `antigravity` without a second entry.
+///
+/// Anthropic is deliberately absent even though the model family caches: this crate reaches it
+/// through the provider's OpenAI-compatible route, which documents prompt caching as unsupported
+/// ("it is supported in the Anthropic SDKs"). Claiming it would light up a capability the wire
+/// cannot deliver. Making it true means a native `/v1/messages` path with cache breakpoints,
+/// which is a different piece of work than a flag.
+pub fn route_caches_prompt_prefix(id: &str) -> bool {
+    matches!(
+        canonicalize_provider_id(id).to_lowercase().as_str(),
+        "openai" | "copilot" | "gemini" | "deepseek" | "antigravity" | "supercode"
+    )
+}
+
 pub fn find_provider(id: &str) -> Option<ProviderDescriptor> {
     let canonical = canonicalize_provider_id(id);
     get_provider_catalog()

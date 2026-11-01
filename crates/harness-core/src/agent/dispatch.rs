@@ -391,7 +391,9 @@ where
         }
 
         // If a note was saved or updated successfully, ensure memory pointer bridge is updated
-        if (tool_call.name == "save_note" || tool_call.name == "update_note") && !execution_result.is_error {
+        if (tool_call.name == "save_note" || tool_call.name == "update_note")
+            && !execution_result.is_error
+        {
             if let Ok(note) = serde_json::from_str::<Note>(&execution_result.content) {
                 debug!(
                     "Registering 1-5 word note pointer: '{}' -> '{}'",

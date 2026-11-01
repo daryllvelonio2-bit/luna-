@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are the usual cause of a `ld` bus error on a shared runner
+  # disk, and the release profile is what ships.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting is its own step so a whitespace failure reads as one line instead of
+      # scrolling past in the middle of a compile log.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # `--all-targets` is what makes this gate catch test and bench modules too: a
+      # warning that only exists under `#[cfg(test)]` still fails the build.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace

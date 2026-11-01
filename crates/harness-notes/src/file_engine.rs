@@ -28,11 +28,12 @@ pub fn slugify(text: &str) -> String {
         if c.is_alphanumeric() {
             slug.push(c.to_ascii_lowercase());
             prev_dash = false;
-        } else if c.is_whitespace() || c == '-' || c == '_' || c == '.' || c == '/' {
-            if !slug.is_empty() && !prev_dash {
-                slug.push('-');
-                prev_dash = true;
-            }
+        } else if (c.is_whitespace() || c == '-' || c == '_' || c == '.' || c == '/')
+            && !slug.is_empty()
+            && !prev_dash
+        {
+            slug.push('-');
+            prev_dash = true;
         }
     }
     while slug.ends_with('-') {
@@ -194,7 +195,7 @@ impl FileNotesEngine {
             }
         }
 
-        notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        notes.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
         Ok(notes)
     }
 
@@ -292,7 +293,7 @@ impl NotesEngine for FileNotesEngine {
 
         // Most mentions first — a document that names the term five times is more likely the one
         // being asked about than a passing reference. Ties keep the newest-update ordering.
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         Ok(scored.into_iter().take(limit).map(|(_, n)| n).collect())
     }
 

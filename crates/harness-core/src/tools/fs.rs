@@ -669,11 +669,16 @@ fn truncate_matching_line(line: &str, pattern: &str) -> String {
         end += 1;
     }
     let prefix = if start > 0 { "..." } else { "" };
-    let suffix = if end < line.len() { "... [line truncated]" } else { "" };
+    let suffix = if end < line.len() {
+        "... [line truncated]"
+    } else {
+        ""
+    };
     format!("{}{}{}", prefix, &line[start..end], suffix)
 }
 
 /// Which ceiling a scan hit. `None` means the walk finished exhaustively.
+#[allow(clippy::enum_variant_names)]
 enum ScanLimit {
     FileCeiling,
     LineCeiling,
@@ -891,12 +896,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Two-pointer matcher with a single backtrack anchor for the last `*`, generic over the item
 /// type so the ASCII path works on bytes without allocating.
-fn glob_match_slice<T: PartialEq + Copy>(
-    pattern: &[T],
-    text: &[T],
-    star: T,
-    any: T,
-) -> bool {
+fn glob_match_slice<T: PartialEq + Copy>(pattern: &[T], text: &[T], star: T, any: T) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     // Backtrack anchors: where a failed `*` resumes in the pattern, and in the text.
     let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
@@ -949,9 +949,7 @@ fn scan_files(
 
     for (visited, entry) in walkdir::WalkDir::new(resolved)
         .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy())
-        })
+        .filter_entry(|e| e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy()))
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .enumerate()
@@ -1173,9 +1171,7 @@ fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (
 
     for entry in walkdir::WalkDir::new(resolved)
         .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy())
-        })
+        .filter_entry(|e| e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy()))
         .filter_map(Result::ok)
     {
         // The walk yields the root itself first; echoing it back is noise, not a listing.

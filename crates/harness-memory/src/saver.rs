@@ -505,7 +505,10 @@ mod tests {
             _tools: &[harness_core::ToolDefinition],
             _options: &CompletionOptions,
         ) -> Result<Message, HarnessError> {
-            self.seen.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(messages);
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(messages);
             if self.fail {
                 return Err(HarnessError::ProviderError {
                     provider: "canned".to_string(),

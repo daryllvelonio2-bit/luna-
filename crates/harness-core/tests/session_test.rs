@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -602,7 +601,10 @@ async fn record_compaction_writes_a_summary_and_keeps_the_folded_rows() {
 
     // The human conversation transcript keeps every ordinary message and drops synthetic summaries.
     let transcript = store.replay_transcript("s1", 200).await.unwrap();
-    assert_eq!(transcript.total, 4, "all four conversation messages are counted");
+    assert_eq!(
+        transcript.total, 4,
+        "all four conversation messages are counted"
+    );
     assert_eq!(transcript.replayed, 4, "all four messages are replayed");
     assert!(
         transcript.history.iter().all(|s| !s.is_summary),
@@ -944,21 +946,22 @@ async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
 
 #[tokio::test]
 async fn compact_does_not_fold_when_only_summaries_would_be_folded() {
-    let mut history = Vec::new();
-    // Prior summary row
-    history.push(StoredMessage {
-        id: 1,
-        seq: 1,
-        message: Message::system("prior summary of old turns"),
-        is_summary: true,
-    });
-    // One active user turn with a large content that exceeds keep budget
-    history.push(StoredMessage {
-        id: 2,
-        seq: 2,
-        message: Message::user("current active user prompt"),
-        is_summary: false,
-    });
+    let history = vec![
+        // Prior summary row
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::system("prior summary of old turns"),
+            is_summary: true,
+        },
+        // One active user turn with a large content that exceeds keep budget
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::user("current active user prompt"),
+            is_summary: false,
+        },
+    ];
 
     let provider = CannedProvider::new("new summary");
     let outcome = compact(&provider, "canned-model", &history, Some(1))

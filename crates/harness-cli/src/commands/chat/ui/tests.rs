@@ -273,7 +273,7 @@ fn demo_the_in_place_repaint() {
     println!("\x01DEMO_START");
     // The screen as it stands: transcript, live row, composer, prompt.
     println!("a transcript line above");
-    println!("{}", "⠋ reading");
+    println!("⠋ reading");
     println!("{}", status);
     println!("{}", divider);
     println!();
@@ -753,10 +753,20 @@ fn strip(s: &str) -> String {
 
 #[test]
 fn delegate_task_notification_format_contains_title_tool_and_running_time() {
-    let title = crate::commands::chat::render::format_delegate_title("Extract all role credentials");
-    let dur = crate::commands::chat::render::format_delegate_duration(std::time::Duration::from_secs(14));
-    let notification = crate::commands::chat::render::format_delegate_notification("🤖", &title, "read_file", &dur);
+    let title =
+        crate::commands::chat::render::format_delegate_title("Extract all role credentials");
+    let dur =
+        crate::commands::chat::render::format_delegate_duration(std::time::Duration::from_secs(14));
+    let notification = crate::commands::chat::render::format_delegate_notification(
+        "🤖",
+        &title,
+        "read_file",
+        &dur,
+    );
     assert!(notification.contains("delegate:"), "{notification}");
-    assert!(notification.contains("Extract all role credentials"), "{notification}");
+    assert!(
+        notification.contains("Extract all role credentials"),
+        "{notification}"
+    );
     assert!(notification.contains("> read_file (14s)"), "{notification}");
 }

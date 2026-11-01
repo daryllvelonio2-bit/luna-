@@ -130,9 +130,9 @@ impl TerminalTool {
 pub fn find_rtk_executable(custom_prefix: Option<&str>) -> Option<PathBuf> {
     if let Some(prefix) = custom_prefix {
         let p_str = prefix.trim();
-        let expanded = if p_str.starts_with("~/") {
+        let expanded = if let Some(stripped) = p_str.strip_prefix("~/") {
             if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(&p_str[2..])
+                PathBuf::from(home).join(stripped)
             } else {
                 PathBuf::from(p_str)
             }
@@ -214,11 +214,7 @@ pub fn rewrite_sudo_command(command: &str) -> (String, usize) {
             false
         } else {
             out.push_str(word);
-            if at_cmd && word.contains('=') && !word.starts_with('=') {
-                true
-            } else {
-                false
-            }
+            at_cmd && word.contains('=') && !word.starts_with('=')
         }
     };
 
@@ -317,7 +313,7 @@ fn is_benign_exit(cmd: &str, code: i32) -> bool {
     if code != 1 {
         return false;
     }
-    let last_pipeline_segment = cmd.split('|').last().unwrap_or(cmd).trim();
+    let last_pipeline_segment = cmd.rsplit('|').next().unwrap_or(cmd).trim();
     let mut words = last_pipeline_segment.split_whitespace();
     let mut bin = words.next().unwrap_or("").trim_start_matches("./");
 
@@ -469,14 +465,21 @@ impl Tool for TerminalTool {
                 if check_sudo_nopasswd_with_env(&resolved_workdir, &self.env_vars).await {
                     (effective_command.clone(), None)
                 } else {
-                    let cached_opt = self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let cached_opt = self
+                        .sudo_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
                     let password_opt = match cached_opt {
                         Some(p) => Some(p),
                         None => {
                             if let Some(ref prompter) = self.sudo_prompter {
                                 match prompter.prompt_sudo_password(&effective_command).await {
                                     Ok(Some(pwd)) if !pwd.is_empty() => {
-                                        *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(pwd.clone());
+                                        *self
+                                            .sudo_cache
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner()) = Some(pwd.clone());
                                         Some(pwd)
                                     }
                                     _ => None,

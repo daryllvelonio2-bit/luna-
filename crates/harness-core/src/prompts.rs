@@ -103,7 +103,10 @@ mod tests {
         assert!(body.contains("notes_dir"), "{body}");
         assert!(body.contains("AUDIT NOTE CONTENT"), "{body}");
         assert!(body.contains("current worktrees"), "{body}");
-        assert!(body.contains("build, test, run, and deployment workflows"), "{body}");
+        assert!(
+            body.contains("build, test, run, and deployment workflows"),
+            "{body}"
+        );
         // The old contract — a rich record per entity — is gone.
         assert!(!body.contains("consolidated memory record"), "{body}");
     }

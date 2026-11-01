@@ -290,8 +290,10 @@ async fn a_zero_interval_disables_the_saver_entirely() {
 
 #[tokio::test]
 async fn memory_mode_switches_system_prompt_instructions_dynamically() {
-    let mut config = AgentConfig::default();
-    config.memory_mode = harness_core::MemoryMode::Session;
+    let config = AgentConfig {
+        memory_mode: harness_core::MemoryMode::Session,
+        ..Default::default()
+    };
 
     let agent = Agent::new(
         Arc::new(MockProvider),

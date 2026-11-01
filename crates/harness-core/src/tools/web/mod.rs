@@ -114,7 +114,10 @@ mod tests {
             "allowed_domains": [" a.example ", "", 7, "b.example"],
             "blocked_domains": "not-an-array",
         }));
-        assert_eq!(allowed, vec!["a.example".to_string(), "b.example".to_string()]);
+        assert_eq!(
+            allowed,
+            vec!["a.example".to_string(), "b.example".to_string()]
+        );
         assert!(blocked.is_empty());
 
         let (allowed, blocked) = domain_lists(&json!({}));

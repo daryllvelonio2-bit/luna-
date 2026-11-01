@@ -174,19 +174,24 @@ done
         let info = tools[0].clone();
         assert_eq!(info.name, "luna_start");
 
-        let adapter = McpToolAdapter::namespaced(
-            "mcp__stub__luna_start".to_string(),
-            info,
-            client.clone(),
-        );
+        let adapter =
+            McpToolAdapter::namespaced("mcp__stub__luna_start".to_string(), info, client.clone());
         assert_eq!(adapter.name(), "mcp__stub__luna_start");
         assert_eq!(adapter.remote_name(), "luna_start");
 
         let result = adapter
-            .execute("call-1", &serde_json::json!({ "text": "hi" }), &CancellationToken::new())
+            .execute(
+                "call-1",
+                &serde_json::json!({ "text": "hi" }),
+                &CancellationToken::new(),
+            )
             .await
             .expect("execute should not fail at the transport level");
-        assert!(!result.is_error, "stub reported an error: {}", result.content);
+        assert!(
+            !result.is_error,
+            "stub reported an error: {}",
+            result.content
+        );
 
         let requests = stub.requests();
         let call = requests

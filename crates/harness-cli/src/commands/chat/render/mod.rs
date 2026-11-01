@@ -68,7 +68,7 @@ pub fn clean_user_query_for_transcript(raw: &str) -> String {
     let mut text = raw;
     if let Some(rest) = text.strip_prefix("[PLAN MODE ACTIVE:") {
         if let Some(end) = rest.find(']') {
-            text = rest[end + 1..].trim_start_matches(|c| c == '\r' || c == '\n');
+            text = rest[end + 1..].trim_start_matches(['\r', '\n']);
         }
     }
 
@@ -124,9 +124,9 @@ fn is_base64_continuation(trimmed: &str) -> bool {
     let stripped = trimmed.trim_matches(|c: char| "\"'`<>".contains(c));
     !stripped.is_empty()
         && stripped.len() >= 4
-        && stripped.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
-        })
+        && stripped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
 }
 
 fn replace_data_urls_in_line(line: &str) -> String {
@@ -327,10 +327,7 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                         {
                             None
                         } else {
-                            plain
-                                .split_whitespace()
-                                .nth(1)
-                                .map(|s| s.to_string())
+                            plain.split_whitespace().nth(1).map(|s| s.to_string())
                         }
                     })
                     .collect()
@@ -739,7 +736,7 @@ pub fn format_delegate_title(goal: &str) -> String {
         .unwrap_or(goal)
         .trim();
     if first.chars().count() > 50 {
-        format!("{}…", &first.chars().take(49).collect::<String>())
+        format!("{}…", first.chars().take(49).collect::<String>())
     } else {
         first.to_string()
     }
@@ -858,7 +855,7 @@ pub fn shorten_path(raw: &str) -> String {
         return trimmed.to_string();
     }
     let parts: Vec<&str> = trimmed
-        .split(|c| c == '/' || c == '\\')
+        .split(['/', '\\'])
         .filter(|s| !s.is_empty() && *s != "." && *s != "~")
         .collect();
     if parts.len() > 3 {

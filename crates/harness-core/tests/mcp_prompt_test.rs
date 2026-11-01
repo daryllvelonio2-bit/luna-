@@ -113,7 +113,9 @@ impl Tool for NamedTool {
     }
 }
 
-fn agent_with(registry: DefaultToolRegistry) -> Agent<MockProvider, MockMemory, MockNotes, DefaultToolRegistry> {
+fn agent_with(
+    registry: DefaultToolRegistry,
+) -> Agent<MockProvider, MockMemory, MockNotes, DefaultToolRegistry> {
     Agent::new(
         Arc::new(MockProvider),
         Arc::new(MockMemory),

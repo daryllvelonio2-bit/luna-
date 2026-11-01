@@ -191,7 +191,11 @@ where
     /// Append to the session store, if this run is bound to one. A failed write is an error: the
     /// session is the record of what was sent, and a turn that cannot be recorded must not be
     /// reported as a normal turn.
-    pub(super) async fn append(&self, message: &Message, is_summary: bool) -> Result<(), HarnessError> {
+    pub(super) async fn append(
+        &self,
+        message: &Message,
+        is_summary: bool,
+    ) -> Result<(), HarnessError> {
         let Some(binding) = &self.session else {
             return Ok(());
         };

@@ -161,7 +161,7 @@ impl Config {
             )));
         }
         if let Some(pct) = self.auto_compact_percent {
-            if pct < AUTO_COMPACT_MIN_PERCENT || pct > AUTO_COMPACT_MAX_PERCENT {
+            if !(AUTO_COMPACT_MIN_PERCENT..=AUTO_COMPACT_MAX_PERCENT).contains(&pct) {
                 return Err(HarnessError::ConfigurationError(format!(
                     "auto_compact_percent must be between {} and {}, got {}",
                     AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, pct
@@ -184,7 +184,7 @@ impl Config {
             )));
         }
         if let Some(pct) = self.agent.auto_compact_percent {
-            if pct < AUTO_COMPACT_MIN_PERCENT || pct > AUTO_COMPACT_MAX_PERCENT {
+            if !(AUTO_COMPACT_MIN_PERCENT..=AUTO_COMPACT_MAX_PERCENT).contains(&pct) {
                 return Err(HarnessError::ConfigurationError(format!(
                     "agent.auto_compact_percent must be between {} and {}, got {}",
                     AUTO_COMPACT_MIN_PERCENT, AUTO_COMPACT_MAX_PERCENT, pct
@@ -429,20 +429,11 @@ impl Default for CheckpointSettings {
 }
 
 /// Which provider and model `luna` talks to.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelSettings {
     pub provider: String,
     pub default: String,
-}
-
-impl Default for ModelSettings {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            default: String::new(),
-        }
-    }
 }
 
 /// Who writes durable memory.

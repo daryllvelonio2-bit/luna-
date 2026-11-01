@@ -36,7 +36,8 @@ pub const PANEL: Panel = Panel {
 /// The question, in the accent colour.
 pub const PROMPT: &str = "Select 1-4 ▸ ";
 /// The footer: what to type, what is recorded, and where the key lives.
-pub const HINT: &str = "Enter a number, then press Enter — blank keeps DuckDuckGo (1), which needs \
+pub const HINT: &str =
+    "Enter a number, then press Enter — blank keeps DuckDuckGo (1), which needs \
                         no account. Keys are read from the environment and never written to the \
                         config file. Change it later with `luna config set \
                         tools.web.search_backend brave`.";
@@ -124,7 +125,10 @@ pub fn choice(id: u8) -> Option<Choice> {
 
 /// The option that writes this backend, if it is offered.
 pub fn choice_for(backend: SearchBackend) -> Option<Choice> {
-    CHOICES.iter().copied().find(|choice| choice.backend == backend)
+    CHOICES
+        .iter()
+        .copied()
+        .find(|choice| choice.backend == backend)
 }
 
 /// The one-line summary of a choice, for the confirmation screen.
@@ -252,7 +256,10 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
 
     if !choice.enabled {
         writer.blank()?;
-        writer.write_centered(&format!("✓ {}", summary(&WebSelection::disabled())), Some(NAME_COLOR))?;
+        writer.write_centered(
+            &format!("✓ {}", summary(&WebSelection::disabled())),
+            Some(NAME_COLOR),
+        )?;
         return Ok(WebSelection::disabled());
     }
     if choice.backend.is_keyless() {
@@ -340,7 +347,10 @@ mod tests {
     #[test]
     fn the_keyless_backend_is_the_default_and_off_is_the_fourth_option() {
         assert_eq!(CHOICES.len(), 4);
-        assert_eq!(parse_selection("").unwrap().backend, SearchBackend::DuckDuckGo);
+        assert_eq!(
+            parse_selection("").unwrap().backend,
+            SearchBackend::DuckDuckGo
+        );
         assert!(parse_selection("").unwrap().enabled);
         assert_eq!(choice(4).unwrap().backend, SearchBackend::Disabled);
         assert!(!choice(4).unwrap().enabled);
@@ -380,7 +390,10 @@ mod tests {
             api_key_env: Some("MY_KEY".to_string()),
         };
         assert_eq!(summary(&custom), "Tavily Search API — key from MY_KEY");
-        assert_eq!(summary(&WebSelection::disabled()), "Disabled (no web tools)");
+        assert_eq!(
+            summary(&WebSelection::disabled()),
+            "Disabled (no web tools)"
+        );
     }
 
     #[test]

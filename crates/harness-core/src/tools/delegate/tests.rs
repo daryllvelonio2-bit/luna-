@@ -250,7 +250,8 @@ async fn test_subagent_child_approver_fails_closed() {
 
 #[tokio::test]
 async fn test_watchdog_does_not_timeout_while_tool_is_running() {
-    let tracker = SubagentActivityTracker::new("sub_tool_busy".to_string(), "tool".to_string(), None);
+    let tracker =
+        SubagentActivityTracker::new("sub_tool_busy".to_string(), "tool".to_string(), None);
     let cancel = CancellationToken::new();
 
     // Tool starts: active_tools becomes 1
@@ -264,13 +265,9 @@ async fn test_watchdog_does_not_timeout_while_tool_is_running() {
         "success"
     };
 
-    let result = await_subagent_with_inactivity_timeout(
-        work,
-        &tracker,
-        Duration::from_millis(30),
-        &cancel,
-    )
-    .await;
+    let result =
+        await_subagent_with_inactivity_timeout(work, &tracker, Duration::from_millis(30), &cancel)
+            .await;
 
     assert!(result.is_ok(), "active tool must prevent idle timeout");
     assert_eq!(result.unwrap(), "success");

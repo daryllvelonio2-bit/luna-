@@ -97,7 +97,7 @@ impl WebSearchTool {
     }
 
     /// The query, or the error shown when there is none.
-    fn query<'a>(args: &'a serde_json::Value) -> Option<&'a str> {
+    fn query(args: &serde_json::Value) -> Option<&str> {
         args.get("query")
             .and_then(|value| value.as_str())
             .map(str::trim)
@@ -198,7 +198,9 @@ impl WebSearchTool {
             .fetch(url.as_str(), &request, &[], &[], cancel)
             .await?;
         let parsed: serde_json::Value = serde_json::from_str(&fetched.body).map_err(|error| {
-            WebError::Transport(format!("brave returned something that is not JSON: {error}"))
+            WebError::Transport(format!(
+                "brave returned something that is not JSON: {error}"
+            ))
         })?;
         Ok(parse_brave(&parsed))
     }
@@ -233,17 +235,16 @@ impl WebSearchTool {
                 ("accept".to_string(), "application/json".to_string()),
                 ("content-type".to_string(), "application/json".to_string()),
             ],
-            body: Some((
-                "application/json".to_string(),
-                payload.to_string(),
-            )),
+            body: Some(("application/json".to_string(), payload.to_string())),
         };
         let fetched = self
             .policy
             .fetch(TAVILY_ENDPOINT, &request, &[], &[], cancel)
             .await?;
         let parsed: serde_json::Value = serde_json::from_str(&fetched.body).map_err(|error| {
-            WebError::Transport(format!("tavily returned something that is not JSON: {error}"))
+            WebError::Transport(format!(
+                "tavily returned something that is not JSON: {error}"
+            ))
         })?;
         Ok(parse_tavily(&parsed))
     }
@@ -360,7 +361,10 @@ fn render(
     limit: usize,
 ) -> String {
     if hits.is_empty() {
-        let mut out = format!("[web_search] \"{query}\" · {} · no results", backend.label());
+        let mut out = format!(
+            "[web_search] \"{query}\" · {} · no results",
+            backend.label()
+        );
         if filtered > 0 {
             out.push_str(&format!(
                 "\nnote: {filtered} result(s) were dropped by the domain policy"
@@ -468,12 +472,10 @@ fn parse_brave(json: &serde_json::Value) -> Vec<SearchHit> {
         .map(|results| {
             results
                 .iter()
-                .filter_map(|result| {
-                    Some(SearchHit {
-                        title: string_at(result, "title"),
-                        url: string_at(result, "url"),
-                        snippet: string_at(result, "description"),
-                    })
+                .map(|result| SearchHit {
+                    title: string_at(result, "title"),
+                    url: string_at(result, "url"),
+                    snippet: string_at(result, "description"),
                 })
                 .filter(|hit| !hit.url.is_empty() && !hit.title.is_empty())
                 .collect()
@@ -488,12 +490,10 @@ fn parse_tavily(json: &serde_json::Value) -> Vec<SearchHit> {
         .map(|results| {
             results
                 .iter()
-                .filter_map(|result| {
-                    Some(SearchHit {
-                        title: string_at(result, "title"),
-                        url: string_at(result, "url"),
-                        snippet: string_at(result, "content"),
-                    })
+                .map(|result| SearchHit {
+                    title: string_at(result, "title"),
+                    url: string_at(result, "url"),
+                    snippet: string_at(result, "content"),
                 })
                 .filter(|hit| !hit.url.is_empty())
                 .collect()
@@ -541,14 +541,22 @@ mod tests {
             hits[0].url, "https://doc.rust-lang.org/book/",
             "the tracker URL must be unwrapped, or the real host hides from the domain policy"
         );
-        assert!(hits[0].snippet.contains("'the book'"), "{}", hits[0].snippet);
+        assert!(
+            hits[0].snippet.contains("'the book'"),
+            "{}",
+            hits[0].snippet
+        );
         assert_eq!(hits[1].url, "https://docs.rs/serde/latest/serde/");
         assert_eq!(hits[1].snippet, "Serde documentation on docs.rs");
     }
 
     #[test]
     fn a_results_page_with_nothing_on_it_is_no_results_rather_than_a_panic() {
-        for body in ["", "<html><body>no results found</body></html>", "<a class='result-link'>"] {
+        for body in [
+            "",
+            "<html><body>no results found</body></html>",
+            "<a class='result-link'>",
+        ] {
             assert!(parse_duckduckgo(body).is_empty(), "{body}");
         }
     }
@@ -647,8 +655,10 @@ mod tests {
 
     #[test]
     fn the_limit_prefers_the_call_and_is_clamped_to_the_ceiling() {
-        let mut settings = WebSettings::default();
-        settings.search_max_results = 4;
+        let settings = WebSettings {
+            search_max_results: 4,
+            ..WebSettings::default()
+        };
         let tool = tool(&settings);
         assert_eq!(tool.limit(&json!({})), 4);
         assert_eq!(tool.limit(&json!({"max_results": 2})), 2);
@@ -667,7 +677,11 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("'query' is required"), "{}", result.content);
+        assert!(
+            result.content.contains("'query' is required"),
+            "{}",
+            result.content
+        );
 
         let result = tool
             .execute("c1", &json!({"query": "  "}), &CancellationToken::new())
@@ -678,9 +692,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_keyed_backend_without_a_key_fails_before_the_network_is_touched() {
-        let mut settings = WebSettings::default();
-        settings.search_backend = SearchBackend::Brave;
-        settings.search_api_key_env = "LUNA_TEST_ABSENT_BRAVE_KEY".to_string();
+        let settings = WebSettings {
+            search_backend: SearchBackend::Brave,
+            search_api_key_env: "LUNA_TEST_ABSENT_BRAVE_KEY".to_string(),
+            ..WebSettings::default()
+        };
         let tool = tool(&settings);
 
         let result = tool
@@ -697,15 +713,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_backend_of_none_is_refused_rather_than_guessed_at() {
-        let mut settings = WebSettings::default();
-        settings.search_backend = SearchBackend::Disabled;
+        let settings = WebSettings {
+            search_backend: SearchBackend::Disabled,
+            ..WebSettings::default()
+        };
         let tool = tool(&settings);
         let result = tool
             .execute("c1", &json!({"query": "rust"}), &CancellationToken::new())
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("no search backend"), "{}", result.content);
+        assert!(
+            result.content.contains("no search backend"),
+            "{}",
+            result.content
+        );
     }
 
     #[test]

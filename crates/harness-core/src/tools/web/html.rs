@@ -15,14 +15,7 @@
 //! and a way to smuggle instructions past the reader.
 
 /// Elements whose *contents* are not prose and are dropped entirely.
-const SKIP_CONTENT: [&str; 6] = [
-    "script",
-    "style",
-    "noscript",
-    "svg",
-    "iframe",
-    "template",
-];
+const SKIP_CONTENT: [&str; 6] = ["script", "style", "noscript", "svg", "iframe", "template"];
 
 /// Elements that end a line: text after one of these starts a new block, and a space between two
 /// blocks is what keeps adjacent sentences from running together.
@@ -247,9 +240,7 @@ pub fn elements(html: &str, name: &str) -> Vec<Element> {
                     depth += 1;
                 } else if depth > 0 && SKIP_CONTENT.contains(&tag.name.as_str()) {
                     skipping = Some(tag.name.clone());
-                } else if depth > 0
-                    && (BLOCK.contains(&tag.name.as_str()) || tag.name == "br")
-                {
+                } else if depth > 0 && (BLOCK.contains(&tag.name.as_str()) || tag.name == "br") {
                     buffer.push(' ');
                 }
             }
@@ -343,7 +334,12 @@ fn parse_tag(inner: &str) -> Option<Tag> {
     let name = rest[..name_end].to_ascii_lowercase();
     // A tag name starts with a letter; `<!doctype>` and `<?xml` are handled before this point, and
     // anything else (`<3`, `<>`) is prose.
-    if !name.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+    if !name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic())
+        .unwrap_or(false)
+    {
         return None;
     }
     Some(Tag {
@@ -550,7 +546,9 @@ mod tests {
 
     #[test]
     fn the_title_is_read_and_not_repeated_in_the_body() {
-        let document = extract("<html><head><title>Hi &amp; bye</title></head><body><p>Body</p></body></html>");
+        let document = extract(
+            "<html><head><title>Hi &amp; bye</title></head><body><p>Body</p></body></html>",
+        );
         assert_eq!(document.title.as_deref(), Some("Hi & bye"));
         assert_eq!(document.text, "Body");
     }
@@ -606,7 +604,8 @@ mod tests {
 
     #[test]
     fn elements_returns_attrs_and_inner_text() {
-        let html = "<a class='result-link' href='//d.example/x'>One <b>bold</b></a><a href='/y'>Two</a>";
+        let html =
+            "<a class='result-link' href='//d.example/x'>One <b>bold</b></a><a href='/y'>Two</a>";
         let links = elements(html, "a");
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].attr("href"), Some("//d.example/x"));

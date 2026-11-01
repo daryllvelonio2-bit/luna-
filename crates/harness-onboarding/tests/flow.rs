@@ -414,7 +414,9 @@ fn onboarding_disables_auto_compact() {
 
 #[test]
 fn compact_step_parsers() {
-    use harness_onboarding::compact_step::{parse_percent, parse_selection, parse_threshold, parse_turns};
+    use harness_onboarding::compact_step::{
+        parse_percent, parse_selection, parse_threshold, parse_turns,
+    };
 
     assert!(parse_selection("1").unwrap().enabled);
     assert!(!parse_selection("2").unwrap().enabled);

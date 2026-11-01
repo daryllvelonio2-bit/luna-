@@ -318,10 +318,11 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
                     if !list.contains(&id.to_string()) {
                         list.push(id.to_string());
                     }
-                } else if !line.is_empty() && !line.contains('/') {
-                    if !list.contains(&line.to_string()) {
-                        list.push(line.to_string());
-                    }
+                } else if !line.is_empty()
+                    && !line.contains('/')
+                    && !list.contains(&line.to_string())
+                {
+                    list.push(line.to_string());
                 }
             }
             if !list.is_empty() {

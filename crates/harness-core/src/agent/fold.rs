@@ -152,7 +152,8 @@ where
             .await
             {
                 Ok(Some(outcome)) => {
-                    *completed_fold.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome.clone());
+                    *completed_fold.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(outcome.clone());
                     let new_tokens = estimate_tokens(&outcome.kept).tokens
                         + estimate_tokens(&[Message::system(outcome.summary.clone())]).tokens;
                     if let Some(observer) = observer {
@@ -227,7 +228,12 @@ where
         fold_watermark: &mut Option<i64>,
         system_text: &str,
     ) -> bool {
-        if let Some(outcome) = self.completed_fold.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(outcome) = self
+            .completed_fold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             debug!("Mid-turn fold outcome arrived; rebinding active turn messages");
             let mut turn_messages = messages.split_off(*turn_user_idx);
             for msg in &mut turn_messages {
@@ -236,11 +242,9 @@ where
             let user_content = turn_messages.first().and_then(|m| m.content.as_ref());
             let past_kept = match user_content {
                 Some(content) => {
-                    if let Some(pos) = outcome
-                        .kept
-                        .iter()
-                        .rposition(|m| m.role == Role::User && m.content.as_deref() == Some(content))
-                    {
+                    if let Some(pos) = outcome.kept.iter().rposition(|m| {
+                        m.role == Role::User && m.content.as_deref() == Some(content)
+                    }) {
                         &outcome.kept[..pos]
                     } else {
                         &outcome.kept[..]
@@ -267,7 +271,11 @@ where
         }
     }
 
-    pub(super) async fn spawn_fold_from_stored(&self, policy: FoldPolicy, watermark: &mut Option<i64>) {
+    pub(super) async fn spawn_fold_from_stored(
+        &self,
+        policy: FoldPolicy,
+        watermark: &mut Option<i64>,
+    ) {
         if self.session.is_none()
             || self.compaction.is_none()
             || self.fold_disabled_this_turn.load(Ordering::SeqCst)

@@ -13,8 +13,8 @@ mod tui;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
-use commands::models::{handle_models_command, ModelsCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
+use commands::models::{handle_models_command, ModelsCommand};
 use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
 use commands::supervisor::run_supervisor_loop;
 use commands::voice::run_voice_loop;
@@ -475,7 +475,7 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Fetch { provider, refresh }) => {
             let default_provider = config.model.provider.clone();
-            let provider = provider.unwrap_or_else(|| default_provider);
+            let provider = provider.unwrap_or(default_provider);
             println!(
                 "Fetching models for provider '{}'...",
                 provider.cyan().bold()
@@ -582,8 +582,11 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Mcp { subcommand }) => {
             // Bare `luna mcp` reads the config, the cheap and safe default.
-            handle_mcp_command(subcommand.unwrap_or(McpCommand::List { json: false }), &config)
-                .await?;
+            handle_mcp_command(
+                subcommand.unwrap_or(McpCommand::List { json: false }),
+                &config,
+            )
+            .await?;
         }
         Some(Commands::App) | Some(Commands::Tui) => {
             let model_name = config.model.default.clone();

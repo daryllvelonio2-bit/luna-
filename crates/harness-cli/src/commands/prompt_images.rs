@@ -60,18 +60,12 @@ pub fn inline_image_paths(prompt: &str) -> String {
     for line in prompt.lines_including_final() {
         let mut replaced = false;
         let inlined = replace_tokens_with_data_urls(line, &mut |token| {
-            let Some(data_url) = data_url_for_file(token) else {
-                return None;
-            };
+            let data_url = data_url_for_file(token)?;
             replaced = true;
             Some(data_url)
         });
         out.push_str(&inlined);
-        if !replaced {
-            out.push('\n');
-        } else {
-            out.push('\n');
-        }
+        out.push('\n');
     }
 
     // `lines_including_final` already preserves the trailing-newline shape; strip the extra

@@ -286,7 +286,9 @@ impl GenericProviderClient {
             let request_id = crate::opencode::new_opencode_request_id();
             headers.insert(
                 "User-Agent",
-                HeaderValue::from_static("opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4"),
+                HeaderValue::from_static(
+                    "opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4",
+                ),
             );
             headers.insert("x-opencode-client", HeaderValue::from_static("cli"));
             headers.insert("x-opencode-project", HeaderValue::from_static("global"));
@@ -466,7 +468,8 @@ impl ModelProvider for GenericProviderClient {
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
+            if let Err(error) =
+                crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
             {
                 // Not fatal here: the request below will fail with the real auth error if the
                 // sync was actually needed, but log it so the cause is not invisible.
@@ -905,7 +908,8 @@ impl ModelProvider for GenericProviderClient {
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
+            if let Err(error) =
+                crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
             {
                 // Not fatal here: the request below fails with the real auth error if the sync
                 // was needed; log it so the underlying cause is not invisible.

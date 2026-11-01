@@ -167,7 +167,10 @@ impl BackgroundTaskQueue {
             kill_tx: Some(kill_tx),
         };
 
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), internal);
+        self.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), internal);
         Ok(id)
     }
 
@@ -239,7 +242,7 @@ fn read_tail(path: &Path, count: usize) -> String {
     };
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
-    for line in reader.lines().filter_map(Result::ok) {
+    for line in reader.lines().map_while(Result::ok) {
         lines.push(line);
         if lines.len() > count * 2 {
             lines.drain(0..count);

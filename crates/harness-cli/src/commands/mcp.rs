@@ -54,7 +54,10 @@ pub fn format_mcp_servers(config: &Config) -> String {
         ));
     }
 
-    out.push_str(&format!("{:<16} {:<8} {:<8} COMMAND\n", "NAME", "ENABLED", "TOOLS"));
+    out.push_str(&format!(
+        "{:<16} {:<8} {:<8} COMMAND\n",
+        "NAME", "ENABLED", "TOOLS"
+    ));
     for server in &mcp.servers {
         // An empty allowlist means every tool the server advertises.
         let tools = if server.tools.is_empty() {
@@ -129,10 +132,9 @@ pub async fn format_mcp_tools(config: &Config) -> String {
             continue;
         }
         let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
-        let cwd = server
-            .cwd
-            .as_ref()
-            .map(|dir| std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy())));
+        let cwd = server.cwd.as_ref().map(|dir| {
+            std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy()))
+        });
         let outcome = match McpStdioClient::spawn(
             &server.command,
             &args,
@@ -172,7 +174,11 @@ pub async fn format_mcp_tools(config: &Config) -> String {
     for (name, outcome) in &report {
         match outcome {
             Ok(tools) if tools.is_empty() => {
-                out.push_str(&format!("{} {}: no tools advertised\n", "•".dimmed(), name.cyan()));
+                out.push_str(&format!(
+                    "{} {}: no tools advertised\n",
+                    "•".dimmed(),
+                    name.cyan()
+                ));
             }
             Ok(tools) => {
                 out.push_str(&format!(
@@ -186,7 +192,12 @@ pub async fn format_mcp_tools(config: &Config) -> String {
                 }
             }
             Err(error) => {
-                out.push_str(&format!("{} {}: {}\n", "✖".red().bold(), name.cyan(), error));
+                out.push_str(&format!(
+                    "{} {}: {}\n",
+                    "✖".red().bold(),
+                    name.cyan(),
+                    error
+                ));
             }
         }
     }
@@ -207,10 +218,9 @@ async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError>
                 continue;
             }
             let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
-            let cwd = server
-                .cwd
-                .as_ref()
-                .map(|dir| std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy())));
+            let cwd = server.cwd.as_ref().map(|dir| {
+                std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy()))
+            });
             let outcome = match McpStdioClient::spawn(
                 &server.command,
                 &args,

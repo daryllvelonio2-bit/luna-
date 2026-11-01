@@ -136,7 +136,12 @@ mod tests {
             1_000_000
         );
         assert_eq!(
-            context_window(&config(), &discovery, "nvidia", "minimaxai/minimax-m3.1-flash"),
+            context_window(
+                &config(),
+                &discovery,
+                "nvidia",
+                "minimaxai/minimax-m3.1-flash"
+            ),
             1_000_000
         );
     }
@@ -149,7 +154,12 @@ mod tests {
 
         // Even though nvidia endpoint reports no context window, the real window from discovery cache is used
         assert_eq!(
-            context_window(&config(), &discovery, "nvidia", "minimaxai/minimax-m3.1-flash"),
+            context_window(
+                &config(),
+                &discovery,
+                "nvidia",
+                "minimaxai/minimax-m3.1-flash"
+            ),
             1_048_576
         );
     }

@@ -74,7 +74,7 @@ pub(crate) async fn select_slash_command(
     };
 
     let render_box = |sel: usize, filt: &str| -> Vec<String> {
-        let width = get_terminal_width().min(76).max(44);
+        let width = get_terminal_width().clamp(44, 76);
         let inner_width = width.saturating_sub(4);
         let filtered = get_filtered(filt);
 
@@ -100,8 +100,7 @@ pub(crate) async fn select_slash_command(
             };
             let end = (start + PAGE_SIZE).min(filtered.len());
 
-            for idx in start..end {
-                let (_, cmd) = filtered[idx];
+            for (idx, &(_, cmd)) in filtered.iter().enumerate().take(end).skip(start) {
                 let is_sel = idx == sel;
                 let pfx = if is_sel {
                     "❯ ".cyan().bold().to_string()
@@ -166,7 +165,11 @@ pub(crate) async fn select_slash_command(
     };
 
     // Ensure space below: scroll terminal if needed to provide canvas
-    let buf = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let buf = ui
+        .input_buf
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     print!("\x1b[2B\r");
     for _ in 0..BOX_ROWS {
         println!();
@@ -208,7 +211,11 @@ pub(crate) async fn select_slash_command(
     let mut result = None;
 
     while let Some(key) = key_rx.recv().await {
-        let filter_str = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let filter_str = ui
+            .input_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let filtered = get_filtered(&filter_str);
 
         match key {
@@ -250,7 +257,10 @@ pub(crate) async fn select_slash_command(
                 }
             }
             AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
-                ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                ui.input_buf
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
                 break;
             }
             AppKey::Backspace => {
@@ -281,7 +291,11 @@ pub(crate) async fn select_slash_command(
         }
     }
 
-    let final_buf = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let final_buf = ui
+        .input_buf
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     erase_menu(&final_buf);
     result
 }
@@ -332,7 +346,7 @@ pub(crate) async fn select_from_rx(
         let total_pages = if filtered.is_empty() {
             1
         } else {
-            (filtered.len() + PAGE_SIZE - 1) / PAGE_SIZE
+            filtered.len().div_ceil(PAGE_SIZE)
         };
         let current_page = if filtered.is_empty() {
             1
@@ -374,13 +388,12 @@ pub(crate) async fn select_from_rx(
             };
             let end = (start + PAGE_SIZE).min(filtered.len());
 
-            for idx in start..end {
-                let (_, item) = filtered[idx];
+            for (idx, (_, item)) in filtered.iter().enumerate().take(end).skip(start) {
                 let item_width = term_width.saturating_sub(6);
                 let display_item = if item.len() > item_width {
                     format!("{}…", &item[..item_width.saturating_sub(1)])
                 } else {
-                    item.clone()
+                    item.to_string()
                 };
 
                 if idx == selected {
@@ -653,13 +666,10 @@ pub(super) async fn pick_provider_and_model(
     let chosen_provider = available_catalog[sel].id.clone();
 
     // Fetch models for chosen provider
-    let mut models = match discovery
+    let mut models = discovery
         .get_models(&chosen_provider, cred_manager, false)
         .await
-    {
-        Ok(m) => m,
-        Err(_) => Vec::new(),
-    };
+        .unwrap_or_default();
 
     let default_model = get_default_model(&chosen_provider).to_string();
     if !default_model.is_empty() && !models.contains(&default_model) {

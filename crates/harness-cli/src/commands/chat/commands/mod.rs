@@ -201,6 +201,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_slash_command(
     cmd: &str,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
@@ -316,8 +317,13 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            super::refresh_antigravity_status_if_needed(ui, current_provider, current_model, cred_manager)
-                .await;
+            super::refresh_antigravity_status_if_needed(
+                ui,
+                current_provider,
+                current_model,
+                cred_manager,
+            )
+            .await;
             Ok(false)
         }
         "/name" => {
@@ -640,6 +646,7 @@ pub(crate) async fn execute_slash_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_model_switch(
     mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
@@ -915,12 +922,27 @@ pub(crate) async fn handle_compact_model_switch(
     *compact_model = Some(chosen_model.clone());
 
     if is_global {
-        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
-        if let Err(e) = harness_core::config::set_in_file(&layers, "agent.compaction_provider", &chosen_provider) {
-            ui.emit_above(&format!("{} Failed to persist global compaction provider: {}", "⚠".yellow(), e));
+        let layers =
+            harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+        if let Err(e) = harness_core::config::set_in_file(
+            &layers,
+            "agent.compaction_provider",
+            &chosen_provider,
+        ) {
+            ui.emit_above(&format!(
+                "{} Failed to persist global compaction provider: {}",
+                "⚠".yellow(),
+                e
+            ));
         }
-        if let Err(e) = harness_core::config::set_in_file(&layers, "agent.compaction_model", &chosen_model) {
-            ui.emit_above(&format!("{} Failed to persist global compaction model: {}", "⚠".yellow(), e));
+        if let Err(e) =
+            harness_core::config::set_in_file(&layers, "agent.compaction_model", &chosen_model)
+        {
+            ui.emit_above(&format!(
+                "{} Failed to persist global compaction model: {}",
+                "⚠".yellow(),
+                e
+            ));
         }
         let _ = store.clear_compact_model(session_id).await;
         ui.emit_above(&format!(
@@ -1027,10 +1049,7 @@ pub(crate) async fn handle_rewind_command(
                 prompt
             ));
         }
-        ui.emit_above(&format!(
-            "    Restore one with {}",
-            format!("/rewind <turn>").bold()
-        ));
+        ui.emit_above(&format!("    Restore one with {}", "/rewind <turn>".bold()));
         return Ok(());
     };
 
@@ -1237,6 +1256,7 @@ pub(crate) async fn handle_name_command(
 }
 
 /// `/new [name]`: start a fresh chat session, rebinding the agent and clearing the screen.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_new_command(
     ui: &ChatUi,
     store: &Arc<SqliteSessionStore>,
@@ -1429,12 +1449,7 @@ pub(crate) async fn handle_sessions_switch(
                 let time = s.updated_at.format("%m/%d %H:%M").to_string();
                 format!(
                     "{:<9} {:<14} {:>3} msgs  {:<11} {}{}",
-                    s.id,
-                    name,
-                    s.message_count,
-                    time,
-                    title,
-                    tag
+                    s.id, name, s.message_count, time, title, tag
                 )
             })
             .collect();
@@ -1446,16 +1461,7 @@ pub(crate) async fn handle_sessions_switch(
 
         let chosen_idx = if let Some(ref mut rx) = key_rx {
             while rx.try_recv().is_ok() {}
-            match select_from_rx(
-                rx,
-                ui,
-                "Select Session",
-                &items,
-                default_idx,
-                false,
-                false,
-            )
-            .await
+            match select_from_rx(rx, ui, "Select Session", &items, default_idx, false, false).await
             {
                 Some(i) => i,
                 None => {
@@ -1557,12 +1563,24 @@ pub(crate) async fn handle_sessions_switch(
         .compact_model
         .as_ref()
         .map(|(p, _)| p.clone())
-        .or_else(|| config.agent.compaction_provider.clone().filter(|p| !p.is_empty()));
+        .or_else(|| {
+            config
+                .agent
+                .compaction_provider
+                .clone()
+                .filter(|p| !p.is_empty())
+        });
     *compact_model = record
         .compact_model
         .as_ref()
         .map(|(_, m)| m.clone())
-        .or_else(|| config.agent.compaction_model.clone().filter(|m| !m.is_empty()));
+        .or_else(|| {
+            config
+                .agent
+                .compaction_model
+                .clone()
+                .filter(|m| !m.is_empty())
+        });
 
     todo_scope.set_session(&target_id);
     todo::refresh_panel(ui, todo_scope);
@@ -1621,6 +1639,7 @@ pub(crate) async fn handle_sessions_switch(
 
 /// `/summarize [name]`, `/compact [name]`, or `/new -s [name]`:
 /// Summarize the current session's history and start a new session seeded with the summary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_summarize_and_new_command(
     ui: &ChatUi,
     store: &Arc<SqliteSessionStore>,
@@ -1947,11 +1966,8 @@ pub(crate) async fn handle_auto_compact_command(
         "auto_compact_threshold",
         &threshold.to_string(),
     )?;
-    let _ = harness_core::config::set_in_file(
-        &layers,
-        "auto_compact_percent",
-        &percent.to_string(),
-    )?;
+    let _ =
+        harness_core::config::set_in_file(&layers, "auto_compact_percent", &percent.to_string())?;
 
     ui.emit_above(&format!(
         "{} Auto-compact enabled (threshold: {} tokens, compact: {}%)",
@@ -2048,17 +2064,7 @@ async fn handle_reasoning_or_thinking_switch(
 
         if let Some(ref mut rx) = key_rx {
             while rx.try_recv().is_ok() {}
-            match select_from_rx(
-                rx,
-                ui,
-                title,
-                &reasoning_items,
-                default_idx,
-                false,
-                false,
-            )
-            .await
-            {
+            match select_from_rx(rx, ui, title, &reasoning_items, default_idx, false, false).await {
                 Some(i) => reasoning_options[i].1,
                 None => {
                     return Ok(());
@@ -2151,7 +2157,11 @@ where
     let mut error: Option<String> = None;
 
     let compute_advisory = |text: &str| -> Option<String> {
-        let val_str = if text.is_empty() { placeholder.as_str() } else { text };
+        let val_str = if text.is_empty() {
+            placeholder.as_str()
+        } else {
+            text
+        };
         parse(val_str).ok().and_then(|val| advisory(val_str, val))
     };
     let mut adv = compute_advisory(&input);
@@ -2297,10 +2307,7 @@ fn render_value_box(
             cut(message, total.saturating_sub(8)).red()
         )));
     } else if let Some(message) = advisory {
-        lines.push(row(&format!(
-            " {}",
-            cut(message, total.saturating_sub(6))
-        )));
+        lines.push(row(&format!(" {}", cut(message, total.saturating_sub(6)))));
     } else {
         // Kept as an empty row rather than dropped: the height must not depend on the state.
         lines.push(blank.clone());
@@ -2359,7 +2366,8 @@ mod value_box_tests {
         for width in [24, 32, 40, 60, 76, 140] {
             for error in [None, Some(long_error)] {
                 for input in ["", "150k", "not a number at all"] {
-                    let text = render_value_box(&THRESHOLD_PROMPT, input, "150000", error, None, width);
+                    let text =
+                        render_value_box(&THRESHOLD_PROMPT, input, "150000", error, None, width);
                     let widths = widths_of(&text);
                     assert!(
                         widths.iter().all(|&w| w == widths[0]),
@@ -2434,10 +2442,7 @@ mod value_box_tests {
             harness_onboarding::compact_step::parse_threshold(""),
             Ok(150_000)
         );
-        assert_eq!(
-            harness_onboarding::compact_step::parse_percent(""),
-            Ok(50)
-        );
+        assert_eq!(harness_onboarding::compact_step::parse_percent(""), Ok(50));
         assert_eq!(harness_onboarding::compact_step::parse_turns(""), Ok(20));
     }
 

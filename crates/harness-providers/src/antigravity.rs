@@ -100,7 +100,7 @@ impl AntigravityQuotaSummary {
             }) {
                 let pct_str = q_info
                     .remaining_fraction
-                    .map(|frac| format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round()))
+                    .map(|frac| format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round()))
                     .unwrap_or_else(|| "100%".to_string());
                 let time_str = q_info
                     .reset_time
@@ -149,7 +149,7 @@ impl AntigravityQuotaSummary {
                             w == "weekly" || w == "w" || b_id.contains("weekly")
                         }) {
                             let w_pct = if let Some(frac) = b.remaining_fraction {
-                                format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+                                format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round())
                             } else {
                                 "100%".to_string()
                             };
@@ -184,13 +184,8 @@ impl AntigravityQuotaSummary {
             .iter()
             .find(|g| {
                 let name = g.display_name.as_deref().unwrap_or("").to_lowercase();
-                if is_gemini && name.contains("gemini") {
-                    true
-                } else if is_claude_gpt && (name.contains("claude") || name.contains("gpt")) {
-                    true
-                } else {
-                    false
-                }
+                (is_gemini && name.contains("gemini"))
+                    || (is_claude_gpt && (name.contains("claude") || name.contains("gpt")))
             })
             .or_else(|| {
                 if !is_gemini {
@@ -217,7 +212,7 @@ impl AntigravityQuotaSummary {
             }
 
             let pct_str = if let Some(frac) = b.remaining_fraction {
-                format!("{:.0}%", (frac.max(0.0).min(1.0) * 100.0).round())
+                format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round())
             } else {
                 "100%".to_string()
             };

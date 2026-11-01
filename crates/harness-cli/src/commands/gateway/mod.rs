@@ -113,21 +113,21 @@ pub async fn run_gateway(
             }
         });
 
-    if (requested_platform == "telegram" || requested_platform == "all") && telegram_token.is_some()
-    {
-        let token = telegram_token.unwrap();
-        let allowed = if !config.gateway.telegram_allowed_users.is_empty() {
-            config.gateway.telegram_allowed_users.clone()
-        } else if let Ok(val) = std::env::var("TELEGRAM_ALLOWED_USERS") {
-            val.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        adapters.push(Box::new(TelegramAdapter::new(token, allowed)));
-        info!("Telegram platform adapter enabled");
+    if requested_platform == "telegram" || requested_platform == "all" {
+        if let Some(token) = telegram_token {
+            let allowed = if !config.gateway.telegram_allowed_users.is_empty() {
+                config.gateway.telegram_allowed_users.clone()
+            } else if let Ok(val) = std::env::var("TELEGRAM_ALLOWED_USERS") {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            adapters.push(Box::new(TelegramAdapter::new(token, allowed)));
+            info!("Telegram platform adapter enabled");
+        }
     }
 
     // 2. Discord
@@ -152,21 +152,22 @@ pub async fn run_gateway(
             }
         });
 
-    if (requested_platform == "discord" || requested_platform == "all") && discord_token.is_some() {
-        let token = discord_token.unwrap();
-        let channel = discord_channel.unwrap_or_default();
-        let allowed = if !config.gateway.discord_allowed_users.is_empty() {
-            config.gateway.discord_allowed_users.clone()
-        } else if let Ok(val) = std::env::var("DISCORD_ALLOWED_USERS") {
-            val.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        adapters.push(Box::new(DiscordAdapter::new(token, channel, allowed)));
-        info!("Discord platform adapter enabled");
+    if requested_platform == "discord" || requested_platform == "all" {
+        if let Some(token) = discord_token {
+            let channel = discord_channel.unwrap_or_default();
+            let allowed = if !config.gateway.discord_allowed_users.is_empty() {
+                config.gateway.discord_allowed_users.clone()
+            } else if let Ok(val) = std::env::var("DISCORD_ALLOWED_USERS") {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            adapters.push(Box::new(DiscordAdapter::new(token, channel, allowed)));
+            info!("Discord platform adapter enabled");
+        }
     }
 
     // 3. WhatsApp Cloud
@@ -204,14 +205,12 @@ pub async fn run_gateway(
 
     let port = options.port.unwrap_or(config.gateway.port);
 
-    if (requested_platform == "whatsapp" || requested_platform == "all")
-        && wa_token.is_some()
-        && wa_phone.is_some()
-    {
-        let wa =
-            WhatsAppAdapter::new(wa_token.unwrap(), wa_phone.unwrap(), wa_verify, port).await?;
-        adapters.push(Box::new(wa));
-        info!("WhatsApp Cloud platform adapter enabled on port {port}");
+    if requested_platform == "whatsapp" || requested_platform == "all" {
+        if let (Some(token), Some(phone)) = (wa_token, wa_phone) {
+            let wa = WhatsAppAdapter::new(token, phone, wa_verify, port).await?;
+            adapters.push(Box::new(wa));
+            info!("WhatsApp Cloud platform adapter enabled on port {port}");
+        }
     }
 
     if adapters.is_empty() {

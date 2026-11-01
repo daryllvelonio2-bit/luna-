@@ -3,9 +3,9 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::ToolPreview;
 use crate::error::HarnessError;
 use crate::tasks::BackgroundTaskQueue;
-use crate::approval::ToolPreview;
 use crate::traits::Tool;
 use crate::types::ToolResult;
 

@@ -88,11 +88,9 @@ impl SqliteMemoryEngine {
         let rows = pragma
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        for col_res in rows {
-            if let Ok(col_name) = col_res {
-                if col_name.eq_ignore_ascii_case(column) {
-                    return Ok(());
-                }
+        for col_name in rows.flatten() {
+            if col_name.eq_ignore_ascii_case(column) {
+                return Ok(());
             }
         }
         conn.execute(
@@ -279,7 +277,9 @@ impl SqliteMemoryEngine {
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         let note_rows = note_stmt
-            .query_map(params![query, note_candidate, query], |row| row.get::<_, String>(0))
+            .query_map(params![query, note_candidate, query], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         for r in note_rows.flatten() {
             if !matched.contains(&r) {
@@ -290,7 +290,13 @@ impl SqliteMemoryEngine {
         // 4. Slugified form (matching how IDs were derived)
         let slug = query
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
@@ -345,10 +351,7 @@ impl SqliteMemoryEngine {
     }
 
     /// Resolves the id a caller meant, falling back to flexible active lookup.
-    fn resolve_id(
-        conn: &Connection,
-        id: &str,
-    ) -> Result<Option<String>, HarnessError> {
+    fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>, HarnessError> {
         let ids = Self::resolve_active_ids(conn, id)?;
         Ok(ids.into_iter().next())
     }
@@ -410,12 +413,7 @@ impl MemoryEngine for SqliteMemoryEngine {
             })
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        let mut memories = Vec::new();
-        for r in rows {
-            if let Ok(m) = r {
-                memories.push(m);
-            }
-        }
+        let mut memories: Vec<_> = rows.flatten().collect();
 
         // If query search returned fewer than limit, also fetch recent top active memories
         if memories.len() < limit {
@@ -464,11 +462,9 @@ impl MemoryEngine for SqliteMemoryEngine {
                 })
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-            for r in recent_rows {
-                if let Ok(m) = r {
-                    if !memories.iter().any(|existing| existing.id == m.id) {
-                        memories.push(m);
-                    }
+            for m in recent_rows.flatten() {
+                if !memories.iter().any(|existing| existing.id == m.id) {
+                    memories.push(m);
                 }
             }
         }
@@ -643,13 +639,16 @@ impl MemoryEngine for SqliteMemoryEngine {
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
             tx.commit()
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-            info!("Hard-deleted all {} memory records from persistent storage", count);
+            info!(
+                "Hard-deleted all {} memory records from persistent storage",
+                count
+            );
             return Ok(());
         }
 
-        let tokens: Vec<&str> = if trimmed.contains(';') || trimmed.contains(',') || trimmed.contains('\n') {
+        let tokens: Vec<&str> = if trimmed.contains([';', ',', '\n']) {
             trimmed
-                .split(|c| c == ';' || c == ',' || c == '\n')
+                .split([';', ',', '\n'])
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .collect()
@@ -672,11 +671,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                     params![target_id],
                 );
 
-                tx.execute(
-                    "DELETE FROM memories WHERE id = ?1",
-                    params![target_id],
-                )
-                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+                tx.execute("DELETE FROM memories WHERE id = ?1", params![target_id])
+                    .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
                 deleted_count += 1;
                 info!("Permanently deleted memory '{}'", target_id);
@@ -693,7 +689,10 @@ impl MemoryEngine for SqliteMemoryEngine {
         tx.commit()
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        info!("Finished forgetting operation for '{}' (deleted {} records)", trimmed, deleted_count);
+        info!(
+            "Finished forgetting operation for '{}' (deleted {} records)",
+            trimmed, deleted_count
+        );
         Ok(())
     }
 

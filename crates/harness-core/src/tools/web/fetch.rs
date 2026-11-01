@@ -86,7 +86,11 @@ impl WebFetchTool {
         if entry.stored.elapsed() >= self.cache_ttl {
             return None;
         }
-        Some((entry.fetched.clone(), entry.title.clone(), entry.text.clone()))
+        Some((
+            entry.fetched.clone(),
+            entry.title.clone(),
+            entry.text.clone(),
+        ))
     }
 
     /// Remember a page, dropping the oldest entry when the cache is full.
@@ -386,8 +390,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_scheme_or_host_comes_back_as_a_tool_error() {
-        let mut settings = WebSettings::default();
-        settings.allowed_domains = vec!["allowed.example".to_string()];
+        let settings = WebSettings {
+            allowed_domains: vec!["allowed.example".to_string()],
+            ..WebSettings::default()
+        };
         let tool = tool(&settings);
 
         let result = tool
@@ -399,7 +405,11 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not fetchable"), "{}", result.content);
+        assert!(
+            result.content.contains("not fetchable"),
+            "{}",
+            result.content
+        );
 
         let result = tool
             .execute(
@@ -476,8 +486,10 @@ mod tests {
 
     #[test]
     fn a_zero_ttl_disables_reuse_and_the_cache_stays_bounded() {
-        let mut settings = WebSettings::default();
-        settings.cache_ttl_secs = 0;
+        let settings = WebSettings {
+            cache_ttl_secs: 0,
+            ..WebSettings::default()
+        };
         let disabled = tool(&settings);
         let body = fetched("body", "text/plain", false);
         disabled.remember("https://example.com/page", &body, None, "body");

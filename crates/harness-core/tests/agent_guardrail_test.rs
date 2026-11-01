@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use futures_util::stream::BoxStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -483,13 +482,7 @@ async fn test_huge_tool_result_is_capped_in_dispatch() {
     let registry = Arc::new(DefaultToolRegistry::new());
     registry.register(Arc::new(HugeTool)).await.unwrap();
 
-    let agent = Agent::new(
-        provider,
-        memory,
-        notes,
-        registry,
-        AgentConfig::default(),
-    );
+    let agent = Agent::new(provider, memory, notes, registry, AgentConfig::default());
 
     let cancel = CancellationToken::new();
     let outcome = agent.run_turn("Run huge tool", cancel).await.unwrap();

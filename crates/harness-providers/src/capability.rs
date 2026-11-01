@@ -97,27 +97,6 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
     caps
 }
 
-/// Providers whose *route* is known to cache a stable prompt prefix.
-///
-/// Anthropic is deliberately absent even though the model family caches: this crate reaches
-/// Anthropic through the provider's OpenAI-compatible route (`/v1/chat/completions` — see the
-/// catalog's `default_base_url` and `AuthHeaderFormat::AnthropicApiKey`), and that route states
-/// plainly that "Prompt caching is not supported, but it is supported in the Anthropic SDKs"
-/// (docs.claude.com/en/api/openai-sdk). Claiming it here would light up a capability the wire
-/// cannot deliver: the ledger would never see a cache hit, and `cache_control` blocks would be
-/// silently ignored. Making it true means a native `/v1/messages` path with cache breakpoints,
-/// which is a different piece of work than a flag.
-const CACHING_PROVIDERS: &[&str] = &[
-    "openai",
-    "copilot",
-    "gemini",
-    "deepseek",
-    "antigravity",
-    "agy",
-    "google",
-    "supercode",
-];
-
 /// Resolve the capabilities of `model` as served by `provider`.
 pub fn resolve(provider: &str, model: &str) -> ModelCapabilities {
     let leaf = model
@@ -133,8 +112,10 @@ pub fn resolve(provider: &str, model: &str) -> ModelCapabilities {
 
     let mut caps = from_leaf(&leaf);
 
-    let provider_lower = provider.trim().to_lowercase();
-    if !CACHING_PROVIDERS.contains(&provider_lower.as_str()) {
+    // The model family caching is not the same claim as the *route* serving it caching. The
+    // route's answer lives with the provider descriptors (`catalog::route_caches_prompt_prefix`)
+    // so that a new provider is described in one place.
+    if !crate::catalog::route_caches_prompt_prefix(provider) {
         caps.prompt_cache = false;
     }
 
@@ -208,15 +189,41 @@ mod tests {
     fn caching_is_only_claimed_where_the_route_honours_it() {
         assert!(resolve("openai", "gpt-4o").prompt_cache);
         assert!(resolve("deepseek", "deepseek-chat").prompt_cache);
-        assert!(resolve("antigravity", "gemini-3.8-flash").prompt_cache);
-        assert!(resolve("agy", "gemini-2.5-pro").prompt_cache);
-        assert!(resolve("google", "gemini-2.5-flash").prompt_cache);
-        assert!(resolve("supercode", "gemini-2.5-pro").prompt_cache);
         // The Claude models cache, but the route this crate uses for them does not: Anthropic's
         // OpenAI-compatible layer documents prompt caching as unsupported.
         assert!(!resolve("anthropic", "claude-sonnet-4").prompt_cache);
         // Same model, aggregator route: the family caches, the route may not, so we do not claim it.
         assert!(!resolve("openrouter", "openai/gpt-4o").prompt_cache);
+    }
+
+    /// A route that reports cache hits must not be denied the flag for living under a different
+    /// id than the one that was written down. Antigravity reports `cachedContentTokenCount` and
+    /// Supercode reports `cachedTokens`; both were absent from the old list, so the status bar
+    /// said "no cache" for a provider whose ledger already recorded hits.
+    #[test]
+    fn every_route_that_reports_cache_reads_is_credited_with_them() {
+        for (provider, model) in [
+            ("antigravity", "gemini-3.8-flash"),
+            // Supercode serves several families; the point is that the *route* does not deny the
+            // claim its own usage payload already made by reporting `cachedTokens`.
+            ("supercode", "claude-sonnet-4"),
+            ("gemini", "gemini-2.5-flash"),
+        ] {
+            assert!(
+                resolve(provider, model).prompt_cache,
+                "{provider} reports cache reads, so the flag must not contradict the ledger"
+            );
+        }
+
+        // The alias is the same route, so it answers the same way — without a second list entry.
+        assert_eq!(
+            resolve("agy", "gemini-2.5-pro").prompt_cache,
+            resolve("antigravity", "gemini-2.5-pro").prompt_cache
+        );
+        assert_eq!(
+            resolve("kiro-ai", "claude-sonnet-4").prompt_cache,
+            resolve("kiro", "claude-sonnet-4").prompt_cache
+        );
     }
 
     #[test]

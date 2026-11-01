@@ -295,7 +295,12 @@ async fn test_forget_wildcard_memories() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
     engine
-        .save(&record("user.skills.list", "user.skills.list", "profile", "Rust, Python"))
+        .save(&record(
+            "user.skills.list",
+            "user.skills.list",
+            "profile",
+            "Rust, Python",
+        ))
         .await
         .unwrap();
     engine
@@ -303,7 +308,12 @@ async fn test_forget_wildcard_memories() {
         .await
         .unwrap();
     engine
-        .save(&record("project.luna", "project.luna", "profile", "Harness"))
+        .save(&record(
+            "project.luna",
+            "project.luna",
+            "profile",
+            "Harness",
+        ))
         .await
         .unwrap();
 
@@ -311,7 +321,11 @@ async fn test_forget_wildcard_memories() {
 
     // Wildcard forget "user.*"
     engine.forget("user.*").await.unwrap();
-    assert!(engine.get_record("user.skills.list").await.unwrap().is_none());
+    assert!(engine
+        .get_record("user.skills.list")
+        .await
+        .unwrap()
+        .is_none());
     assert!(engine.get_record("user.profile").await.unwrap().is_none());
     assert!(engine.get_record("project.luna").await.unwrap().is_some());
     assert_eq!(engine.retrieve("skills", 5).await.unwrap().len(), 1);
@@ -322,15 +336,30 @@ async fn test_forget_multiple_semicolon_delimited() {
     let engine = SqliteMemoryEngine::in_memory().unwrap();
 
     engine
-        .save(&record("luna.binary.location", "luna.binary.location", "profile", "/usr/bin/luna"))
+        .save(&record(
+            "luna.binary.location",
+            "luna.binary.location",
+            "profile",
+            "/usr/bin/luna",
+        ))
         .await
         .unwrap();
     engine
-        .save(&record("user.skills.list", "user.skills.list", "profile", "Coding"))
+        .save(&record(
+            "user.skills.list",
+            "user.skills.list",
+            "profile",
+            "Coding",
+        ))
         .await
         .unwrap();
     engine
-        .save(&record("env.luna.provider", "env.luna.provider", "profile", "antigravity"))
+        .save(&record(
+            "env.luna.provider",
+            "env.luna.provider",
+            "profile",
+            "antigravity",
+        ))
         .await
         .unwrap();
 
@@ -350,7 +379,12 @@ async fn test_update_memory_tool_partial_fields_preserves_existing() {
     use tokio_util::sync::CancellationToken;
 
     let engine = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
-    let mut initial = record("user.profile", "user.profile", "profile", "Initial preference");
+    let mut initial = record(
+        "user.profile",
+        "user.profile",
+        "profile",
+        "Initial preference",
+    );
     initial.name = Some("Daryll".to_string());
     initial.path = Some("/home/janelle".to_string());
     initial.category = MemoryCategory::UserProfile;
@@ -365,7 +399,10 @@ async fn test_update_memory_tool_partial_fields_preserves_existing() {
         "object": "Updated aesthetic preference: plain text"
     });
 
-    let res = update_tool.execute("call_1", &call_args, &cancel).await.unwrap();
+    let res = update_tool
+        .execute("call_1", &call_args, &cancel)
+        .await
+        .unwrap();
     assert!(!res.is_error);
 
     // Verify existing record's name, path, and category were preserved
@@ -387,7 +424,12 @@ async fn test_forget_memory_tool_all() {
         .await
         .unwrap();
     engine
-        .save(&record("project.luna", "project.luna", "profile", "Harness"))
+        .save(&record(
+            "project.luna",
+            "project.luna",
+            "profile",
+            "Harness",
+        ))
         .await
         .unwrap();
 
@@ -398,7 +440,10 @@ async fn test_forget_memory_tool_all() {
         "memory_id": "all"
     });
 
-    let res = forget_tool.execute("call_2", &call_args, &cancel).await.unwrap();
+    let res = forget_tool
+        .execute("call_2", &call_args, &cancel)
+        .await
+        .unwrap();
     assert!(!res.is_error);
 
     assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 0);

@@ -250,6 +250,7 @@ fn select_memory<R: BufRead, W: Write, P: Pacer>(
 }
 
 /// Phase 3: the handshake.
+#[allow(clippy::too_many_arguments)]
 fn confirmation<W: Write, P: Pacer>(
     writer: &mut Typewriter<'_, W, P>,
     persona: &Persona,
@@ -277,6 +278,7 @@ fn confirmation<W: Write, P: Pacer>(
 }
 
 /// The centered confirmation block, sized for the terminal it will land in.
+#[allow(clippy::too_many_arguments)]
 pub fn confirmation_lines(
     persona: &Persona,
     memory: MemoryMode,

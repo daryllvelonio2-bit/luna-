@@ -346,6 +346,8 @@ where
     }
 }
 
+pub type SteerQueueHandle = Arc<RwLock<Option<Arc<Mutex<VecDeque<String>>>>>>;
+
 pub struct DelegateTaskTool {
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,
@@ -356,7 +358,7 @@ pub struct DelegateTaskTool {
     tasks_state: Arc<RwLock<HashMap<String, SubagentTaskRecord>>>,
     notifier: Arc<RwLock<Option<SubagentCompletionNotifier>>>,
     event_notifier: Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
-    steer_handle: Arc<RwLock<Option<Arc<Mutex<VecDeque<String>>>>>>,
+    steer_handle: SteerQueueHandle,
 }
 
 impl DelegateTaskTool {
@@ -419,6 +421,7 @@ impl DelegateTaskTool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_subagent(
     provider: Arc<dyn ModelProvider>,
     memory: Arc<dyn MemoryEngine>,

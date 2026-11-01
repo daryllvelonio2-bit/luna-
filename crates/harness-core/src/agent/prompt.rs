@@ -144,10 +144,7 @@ mod tests {
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(
             lines,
-            vec![
-                "- mcp__a__ping: a tool",
-                "- mcp__z__do: z tool",
-            ],
+            vec!["- mcp__a__ping: a tool", "- mcp__z__do: z tool",],
             "got: {body}"
         );
     }

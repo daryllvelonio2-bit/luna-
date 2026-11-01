@@ -92,14 +92,13 @@ impl Tool for SaveMemoryTool {
             .and_then(|o| o.as_str())
             .unwrap_or_default()
             .trim();
-        let cat_str = args
-            .get("category")
-            .and_then(|c| c.as_str())
-            .unwrap_or(if subject.starts_with("user.") {
+        let cat_str = args.get("category").and_then(|c| c.as_str()).unwrap_or(
+            if subject.starts_with("user.") {
                 "user_profile"
             } else {
                 "fact"
-            });
+            },
+        );
         let confidence = args
             .get("confidence")
             .and_then(|c| c.as_f64())
@@ -190,13 +189,25 @@ impl Tool for SaveMemoryTool {
 fn derive_memory_id(subject: &str, predicate: &str) -> String {
     let s_sub = subject
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string();
     let s_pred = predicate
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string();

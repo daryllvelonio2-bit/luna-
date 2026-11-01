@@ -156,7 +156,10 @@ fn totals_lines(totals: &UsageTotals) -> Vec<String> {
 /// The live context: how much of the model's window the transcript fills.
 fn context_line(used: u32, max: u32) -> String {
     if max == 0 {
-        return format!("context          {} (window unknown)", format_tokens(used as u64));
+        return format!(
+            "context          {} (window unknown)",
+            format_tokens(used as u64)
+        );
     }
     let share = used as f64 * 100.0 / max as f64;
     format!(
@@ -217,7 +220,9 @@ mod tests {
         totals.unpriced_turns = totals.turns;
         let lines = totals_lines(&totals);
         assert!(
-            lines.iter().any(|line| line.contains("cost             unpriced")),
+            lines
+                .iter()
+                .any(|line| line.contains("cost             unpriced")),
             "lines: {lines:?}"
         );
         assert!(

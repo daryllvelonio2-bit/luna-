@@ -366,9 +366,8 @@ fn an_activity_row_never_exceeds_the_terminal_in_cells() {
     for width in [40usize, 80, 120] {
         for frame in 0..SPINNER_FRAMES.len() {
             let row = activity_line(frame, long, None, Duration::from_millis(3700), width);
-            let cells = dialoguer::console::measure_text_width(
-                &dialoguer::console::strip_ansi_codes(&row).to_string(),
-            );
+            let cells =
+                dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(&row));
             assert!(
                 cells <= width,
                 "width {width} frame {frame} rendered {cells} cells (> width, would \
@@ -869,17 +868,26 @@ fn parse_turns_from_history_preserves_steered_messages_without_turn_fragmentatio
     ];
 
     let turns = parse_turns_from_history(&history);
-    assert_eq!(turns.len(), 1, "steered message must not fragment turn into phantom turns");
+    assert_eq!(
+        turns.len(),
+        1,
+        "steered message must not fragment turn into phantom turns"
+    );
     assert_eq!(turns[0].user_query, "solve the bug");
     assert_eq!(turns[0].reply, "switched plan and resolved");
-    assert_eq!(turns[0].tool_items.len(), 2, "must include tool call and steer item");
+    assert_eq!(
+        turns[0].tool_items.len(),
+        2,
+        "must include tool call and steer item"
+    );
     assert!(
         plain(&turns[0].tool_items[0].call_formatted).contains("src/main.rs"),
         "first item should be tool call: {}",
         turns[0].tool_items[0].call_formatted
     );
     assert!(
-        plain(&turns[0].tool_items[1].call_formatted).contains("Steered into active turn: switch to alternate plan"),
+        plain(&turns[0].tool_items[1].call_formatted)
+            .contains("Steered into active turn: switch to alternate plan"),
         "second item should be steer process item: {}",
         turns[0].tool_items[1].call_formatted
     );
@@ -915,7 +923,8 @@ fn steer_process_items_are_not_counted_as_tools_in_header() {
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].tools.len(), 0);
     assert_eq!(turns[0].tool_items.len(), 1);
-    assert!(plain(&turns[0].tool_items[0].call_formatted).contains("Steered into active turn: redirect focus"));
+    assert!(plain(&turns[0].tool_items[0].call_formatted)
+        .contains("Steered into active turn: redirect focus"));
 }
 
 /// `colored` decides on escapes by whether stdout is a tty, which it never is under
@@ -1163,15 +1172,30 @@ async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     store.ensure_session("s_test").await.unwrap();
 
     // Turn 1
-    store.append("s_test", &Message::user("first question"), false).await.unwrap();
-    store.append("s_test", &Message::assistant("first answer"), false).await.unwrap();
+    store
+        .append("s_test", &Message::user("first question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_test", &Message::assistant("first answer"), false)
+        .await
+        .unwrap();
 
     // Turn 2
-    store.append("s_test", &Message::user("second question"), false).await.unwrap();
-    store.append("s_test", &Message::assistant("second answer"), false).await.unwrap();
+    store
+        .append("s_test", &Message::user("second question"), false)
+        .await
+        .unwrap();
+    store
+        .append("s_test", &Message::assistant("second answer"), false)
+        .await
+        .unwrap();
 
     // Compaction folds Turn 1 into a summary
-    store.record_compaction("s_test", &[1, 2], "User asked first question").await.unwrap();
+    store
+        .record_compaction("s_test", &[1, 2], "User asked first question")
+        .await
+        .unwrap();
 
     // Loading via replay_transcript (used by the CLI UI) preserves both turns with agent replies
     let replayed = store.replay_transcript("s_test", 200).await.unwrap();
@@ -1278,7 +1302,10 @@ fn parse_turns_from_history_cleans_historical_image_data_urls() {
 
     let turns = parse_turns_from_history(&history);
     assert_eq!(turns.len(), 1);
-    assert_eq!(turns[0].user_query, "[image: 948x1058] investigate this issue");
+    assert_eq!(
+        turns[0].user_query,
+        "[image: 948x1058] investigate this issue"
+    );
     assert_eq!(turns[0].reply, "I fixed the issue.");
 
     let rendered = right_aligned_user_message(&turns[0].user_query, 80);

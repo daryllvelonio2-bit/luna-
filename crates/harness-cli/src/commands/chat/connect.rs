@@ -448,7 +448,8 @@ async fn set_priority(
     if updated {
         // Ensure strategy is FillFirst or Never so the priority credential is used
         let current_strat = cred_manager.get_rotation_strategy(&provider).await;
-        if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never {
+        if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never
+        {
             let _ = cred_manager
                 .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
                 .await;

@@ -512,6 +512,9 @@ pub async fn stream_kiro_completion(
     tokio::spawn(async move {
         let mut byte_stream = resp.bytes_stream();
         let mut buffer = Vec::new();
+        // The account's own counts, carried by a metadata frame and attached to whichever
+        // completion frame follows it.
+        let mut last_usage: Option<TokenUsage> = None;
 
         while let Some(chunk_res) = byte_stream.next().await {
             match chunk_res {
@@ -545,6 +548,15 @@ pub async fn stream_kiro_completion(
                             if let Ok(data) =
                                 serde_json::from_slice::<serde_json::Value>(payload_bytes)
                             {
+                                // A metadata frame carries the account's own counts. Recording them
+                                // keeps this provider's rows in the ledger comparable with every
+                                // other route's; without it the turn is written from a character
+                                // estimate and the cost column is a guess. Absent means the route
+                                // said nothing, and the caller keeps its estimate.
+                                if let Some(usage) = metadata_token_usage(&data) {
+                                    last_usage = Some(usage);
+                                }
+
                                 if let Some(content) = data.get("content").and_then(|c| c.as_str())
                                 {
                                     if !content.is_empty() {
@@ -603,7 +615,7 @@ pub async fn stream_kiro_completion(
                                     let _ = tx
                                         .send(Ok(StreamEvent::Completed {
                                             finish_reason: Some(stop_reason.to_string()),
-                                            usage: None,
+                                            usage: last_usage.take(),
                                         }))
                                         .await;
                                 }
@@ -628,6 +640,61 @@ pub async fn stream_kiro_completion(
 
     let rx_stream = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx));
     Ok(rx_stream.boxed())
+}
+
+/// The counts a Kiro metadata frame reports, in any of the spellings this route is known to use.
+///
+/// `tokenUsage` nests the numbers; the camelCase names are what the wire carries and the
+/// snake_case ones are accepted because an aggregator in front of the route re-serializes them.
+/// Returns `None` when nothing countable is present — "said nothing" is not the same as zero, and
+/// a fabricated zero row would deflate every average built on it.
+fn metadata_token_usage(data: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = data.get("tokenUsage").or_else(|| data.get("token_usage"))?;
+
+    let count = |camel: &str, snake: &str| -> Option<u32> {
+        usage
+            .get(camel)
+            .or_else(|| usage.get(snake))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as u32)
+    };
+
+    let cached_tokens = count("cacheReadInputTokens", "cache_read_input_tokens").unwrap_or(0);
+    let uncached_input = count("uncachedInputTokens", "uncached_input_tokens");
+    let output = count("outputTokens", "output_tokens");
+    let total = count("totalTokens", "total_tokens");
+
+    // `uncachedInputTokens` excludes the cache read, so the prompt the model saw is their sum —
+    // the same relationship every other route's `prompt_tokens` describes. `totalTokens` is not
+    // used to cap it: a total that disagrees with the parts is the route's inconsistency, and
+    // silently trimming the input side to match would hide it behind a plausible number.
+    let prompt_tokens = match (uncached_input, total, output) {
+        (Some(uncached), _, _) => uncached.saturating_add(cached_tokens),
+        // Only a total was named: the input side is what is left once the reply is taken out.
+        (None, Some(total), Some(output)) => total.saturating_sub(output),
+        (None, Some(total), None) => {
+            if cached_tokens == 0 {
+                return None;
+            }
+            total
+        }
+        (None, None, _) => {
+            if cached_tokens == 0 {
+                return None;
+            }
+            cached_tokens
+        }
+    };
+
+    let completion_tokens =
+        output.unwrap_or_else(|| total.unwrap_or(0).saturating_sub(prompt_tokens));
+
+    Some(TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        cached_tokens,
+    })
 }
 
 pub async fn execute_kiro_completion(
@@ -658,7 +725,10 @@ pub async fn execute_kiro_completion(
         match ev_res? {
             StreamEvent::ContentDelta(d) => full_text.push_str(&d),
             StreamEvent::ReasoningDelta(r) => thought.push_str(&r),
-            StreamEvent::Completed { usage, .. } => final_usage = usage,
+            // A later completion frame does not always repeat the counts. Overwriting a real
+            // reading with a silent `None` would erase it and hand the ledger an estimate
+            // instead, so a frame that says nothing leaves what was already read alone.
+            StreamEvent::Completed { usage, .. } if usage.is_some() => final_usage = usage,
             _ => {}
         }
     }
@@ -690,4 +760,82 @@ pub async fn execute_kiro_completion(
             completion_tokens,
         ))),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_metadata_frame_yields_the_counts_it_reported() {
+        let usage = metadata_token_usage(&json!({
+            "tokenUsage": {
+                "uncachedInputTokens": 1_200,
+                "cacheReadInputTokens": 800,
+                "outputTokens": 300,
+                "totalTokens": 2_300,
+            }
+        }))
+        .expect("a frame naming the counts is a reading");
+
+        // `uncachedInputTokens` excludes the cache read, so the prompt is their sum — the same
+        // relationship `prompt_tokens` describes on every other route.
+        assert_eq!(usage.prompt_tokens, 2_000);
+        assert_eq!(usage.completion_tokens, 300);
+        assert_eq!(usage.cached_tokens, 800);
+    }
+
+    /// A route that contradicts itself must not have the contradiction hidden: the parts are what
+    /// the ledger records, and a total that disagrees with them is the route's problem to fix.
+    #[test]
+    fn a_total_that_disagrees_with_the_parts_does_not_trim_them() {
+        let usage = metadata_token_usage(&json!({
+            "tokenUsage": { "uncachedInputTokens": 1_200, "cacheReadInputTokens": 800, "totalTokens": 1_500 }
+        }))
+        .unwrap();
+
+        assert_eq!(usage.prompt_tokens, 2_000);
+    }
+
+    #[test]
+    fn the_snake_case_spelling_of_the_same_frame_parses_to_the_same_reading() {
+        let camel = metadata_token_usage(&json!({
+            "tokenUsage": { "uncachedInputTokens": 10, "cacheReadInputTokens": 5, "outputTokens": 2 }
+        }))
+        .unwrap();
+        let snake = metadata_token_usage(&json!({
+            "token_usage": { "uncached_input_tokens": 10, "cache_read_input_tokens": 5, "output_tokens": 2 }
+        }))
+        .unwrap();
+
+        assert_eq!(camel, snake);
+    }
+
+    #[test]
+    fn a_frame_that_names_only_a_total_still_gives_the_input_side() {
+        let usage = metadata_token_usage(&json!({
+            "tokenUsage": { "totalTokens": 1_000, "outputTokens": 400 }
+        }))
+        .unwrap();
+
+        assert_eq!(usage.prompt_tokens, 600);
+        assert_eq!(usage.completion_tokens, 400);
+    }
+
+    /// Silence is not zero. A frame carrying no counts must yield nothing so the caller keeps its
+    /// own estimate, rather than writing a zero row that deflates every average built on it.
+    #[test]
+    fn a_frame_without_counts_is_not_a_reading() {
+        assert!(metadata_token_usage(&json!({ "stopReason": "end_turn" })).is_none());
+        assert!(metadata_token_usage(&json!({ "tokenUsage": {} })).is_none());
+        assert!(metadata_token_usage(&json!({})).is_none());
+        // A cache read on its own is still worth recording: it is a real number the route named.
+        assert_eq!(
+            metadata_token_usage(&json!({ "tokenUsage": { "cacheReadInputTokens": 64 } }))
+                .unwrap()
+                .cached_tokens,
+            64
+        );
+    }
 }

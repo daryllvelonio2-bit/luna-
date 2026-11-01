@@ -103,7 +103,10 @@ pub(super) fn launch_turn(
         ui.draw_initial_box();
     } else {
         ui.begin_block(OutputBlockKind::User);
-        ui.emit_above(&right_aligned_user_message(&display_query, get_terminal_width()));
+        ui.emit_above(&right_aligned_user_message(
+            &display_query,
+            get_terminal_width(),
+        ));
     }
 
     *current_cancel = CancellationToken::new();
@@ -111,7 +114,10 @@ pub(super) fn launch_turn(
     let ag_ref = agent.clone();
     *current_query = display_query;
     *turn_start = std::time::Instant::now();
-    in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    in_flight_tools
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     *active_turn = Some(tokio::spawn(async move {
         let ag = ag_ref.lock().await;
         ag.run_turn(&q_with_images, cancel_child).await
@@ -141,7 +147,8 @@ pub(super) async fn cancel_running_turn(
     ui.set_turn_active(false);
     ui.stop_activity();
     ui.clear_live_state();
-    let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
+    let current_tools =
+        std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
 
     let record = TurnRecord {
         user_query: current_query.to_string(),
@@ -300,14 +307,20 @@ pub(super) async fn handle_composer_command(
             // Pushed straight onto the handle the agent drains. Taking the agent lock here would
             // block until the running turn released it, and the guidance would land after the turn
             // it was meant to steer — which is the one thing a steer must never do.
-            steer_handle.lock().unwrap_or_else(|e| e.into_inner()).push_back(text.clone());
+            steer_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(text.clone());
             if active_turn.is_some() {
                 let line = format!("{} Steered into active turn: {}", "⏩".cyan().bold(), text);
-                in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
-                    call_formatted: line.clone(),
-                    result_formatted: String::new(),
-                    diff_lines: Vec::new(),
-                });
+                in_flight_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(TurnProcessItem {
+                        call_formatted: line.clone(),
+                        result_formatted: String::new(),
+                        diff_lines: Vec::new(),
+                    });
                 ui.emit_above(&line);
                 if ui.is_attended {
                     ui.draw_initial_box();

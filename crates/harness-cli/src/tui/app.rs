@@ -131,10 +131,11 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new(model_name: String, workspace_name: String) -> Self {
-        let mut app = Self::default();
-        app.model_name = model_name;
-        app.workspace_name = workspace_name;
-        app
+        Self {
+            model_name,
+            workspace_name,
+            ..Self::default()
+        }
     }
 
     pub fn cycle_focus(&mut self) {

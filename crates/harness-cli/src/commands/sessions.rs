@@ -204,7 +204,9 @@ pub async fn handle_sessions_command(
                 .collect();
 
             let sel = dialoguer::Select::new()
-                .with_prompt("Select a session to resume (↑/↓ to move, Enter to select, Esc to cancel)")
+                .with_prompt(
+                    "Select a session to resume (↑/↓ to move, Enter to select, Esc to cancel)",
+                )
                 .items(&items)
                 .default(0)
                 .interact_opt()

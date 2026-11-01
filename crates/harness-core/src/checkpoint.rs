@@ -322,7 +322,10 @@ impl TurnSnapshot {
             }
         };
 
-        self.files.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+        self.files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(entry);
         // Written now, not at the end of the turn: a turn that dies must still be restorable.
         self.persist()
     }
@@ -334,8 +337,16 @@ impl TurnSnapshot {
             created_at: self.created_at.clone(),
             prompt: self.prompt.clone(),
             files: self.files.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            unrecorded: self.unrecorded.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            scan_note: self.scan_note.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            unrecorded: self
+                .unrecorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            scan_note: self
+                .scan_note
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -450,14 +461,21 @@ impl CheckpointController {
     /// The snapshot is finished (workspace rescan included) *before* it is dropped, so the manifest
     /// on disk is complete even though the turn's guard is what triggers this.
     pub fn finish(&self) {
-        let current = self.current.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(snapshot) = current {
             snapshot.finish();
         }
     }
 
     pub fn current(&self) -> Option<std::sync::Arc<TurnSnapshot>> {
-        self.current.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Capture the file a call is about to write, if it is a path-mutating tool.
