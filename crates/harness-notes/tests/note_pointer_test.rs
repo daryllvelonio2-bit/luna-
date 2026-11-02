@@ -152,3 +152,53 @@ async fn test_legacy_notes_db_import_and_rename() {
     // Clean up
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_path_traversal_prevention() {
+    let temp_dir = std::env::temp_dir().join(format!("luna-traversal-{}", uuid::Uuid::new_v4()));
+    let notes_dir = temp_dir.join("notes");
+    let outside_dir = temp_dir.join("outside");
+    std::fs::create_dir_all(&notes_dir).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+
+    let secret_file = outside_dir.join("secret.md");
+    std::fs::write(&secret_file, "super secret outside content").unwrap();
+
+    let engine = FileNotesEngine::new(notes_dir.clone(), None).unwrap();
+
+    // 1. read_note traversal must fail
+    let traversal_ids = [
+        "../outside/secret",
+        "../../../../etc/shadow",
+        "/etc/passwd",
+        "./secret",
+        ".secret",
+    ];
+
+    for id in traversal_ids {
+        assert!(
+            engine.read_note(id).await.is_err(),
+            "read_note should fail for traversal id '{}'",
+            id
+        );
+        assert!(
+            !engine.delete_note(id).await.unwrap_or(false),
+            "delete_note should not succeed for traversal id '{}'",
+            id
+        );
+        assert!(
+            engine.update_note(id, Some("Hacked"), None, None).await.is_err(),
+            "update_note should fail for traversal id '{}'",
+            id
+        );
+    }
+
+    // Ensure the external secret file was NOT deleted or overwritten
+    assert!(secret_file.exists());
+    assert_eq!(
+        std::fs::read_to_string(&secret_file).unwrap(),
+        "super secret outside content"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

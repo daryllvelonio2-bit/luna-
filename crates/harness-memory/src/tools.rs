@@ -321,7 +321,7 @@ impl Tool for UpdateMemoryTool {
             ));
         }
 
-        let existing = self.engine.get_record(old_id).await.unwrap_or(None);
+        let existing = self.engine.get_record(old_id).await?;
 
         let subject = args
             .get("subject")
@@ -427,7 +427,14 @@ impl Tool for UpdateMemoryTool {
         if let Some(ref ex) = existing {
             self.engine.update(&ex.id, &record).await?;
         } else {
-            self.engine.update(old_id, &record).await?;
+            // No existing record: create it (the tool promises creation when missing).
+            if record.object.is_empty() {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Cannot create a new memory without 'object' content (no existing record to preserve)",
+                ));
+            }
+            self.engine.save(&record).await?;
         }
 
         Ok(ToolResult::success(

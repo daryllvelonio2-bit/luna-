@@ -52,18 +52,15 @@ impl Tool for SandboxedPlugin {
     async fn execute(
         &self,
         call_id: &str,
-        args: &serde_json::Value,
+        _args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let payload = args.get("payload").and_then(|p| p.as_str()).unwrap_or("{}");
-        // In sandboxed execution: executes bytecode with memory cap
-        let result_json = json!({
-            "plugin": self.manifest.name,
-            "status": "executed",
-            "memory_limit_mb": self.manifest.max_memory_mb,
-            "echo": payload
-        });
-
-        Ok(ToolResult::success(call_id, result_json.to_string()))
+        Ok(ToolResult::error(
+            call_id,
+            format!(
+                "Wasm plugin '{}' execution failed: WebAssembly runtime is unsupported and not configured",
+                self.manifest.name
+            ),
+        ))
     }
 }

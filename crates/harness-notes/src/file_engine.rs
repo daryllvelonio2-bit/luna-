@@ -46,6 +46,30 @@ pub fn slugify(text: &str) -> String {
     }
 }
 
+/// Validates that an identifier is safe to use as a file stem inside the notes directory.
+///
+/// Refuses empty strings, traversal sequences, path separators (`/`, `\`), leading dots,
+/// and absolute paths.
+pub fn is_safe_note_id(id: &str) -> bool {
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('.')
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+    {
+        return false;
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        return false;
+    }
+    let mut components = p.components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
 pub struct FileNotesEngine {
     dir: PathBuf,
 }
@@ -56,6 +80,14 @@ impl FileNotesEngine {
         std::fs::create_dir_all(&dir).map_err(|e| {
             HarnessError::NotesError(format!(
                 "Failed to create notes directory '{}': {}",
+                dir.display(),
+                e
+            ))
+        })?;
+
+        let dir = dir.canonicalize().map_err(|e| {
+            HarnessError::NotesError(format!(
+                "Failed to canonicalize notes directory '{}': {}",
                 dir.display(),
                 e
             ))
@@ -199,11 +231,46 @@ impl FileNotesEngine {
         Ok(notes)
     }
 
+    /// Resolves the filesystem path for a note id, ensuring the resulting path is strictly
+    /// inside `self.dir`.
+    pub fn note_path(&self, id: &str) -> Result<PathBuf, HarnessError> {
+        let trimmed = id.trim();
+        if !is_safe_note_id(trimmed) {
+            return Err(HarnessError::NotesError(format!(
+                "Invalid note id '{}': must not contain path separators, start with '.', or escape notes directory",
+                id
+            )));
+        }
+        let target = self.dir.join(format!("{}.md", trimmed));
+        if target.exists() {
+            let canonical = target.canonicalize().map_err(|e| {
+                HarnessError::NotesError(format!(
+                    "Failed to canonicalize note path '{}': {}",
+                    target.display(),
+                    e
+                ))
+            })?;
+            if !canonical.starts_with(&self.dir) {
+                return Err(HarnessError::NotesError(format!(
+                    "Note path escapes notes directory '{}': {}",
+                    self.dir.display(),
+                    target.display()
+                )));
+            }
+            Ok(canonical)
+        } else {
+            Ok(target)
+        }
+    }
+
     /// Resolves a note by file stem (its id) or, failing that, by title.
     fn find(&self, id: &str) -> Result<Note, HarnessError> {
-        let direct = self.dir.join(format!("{}.md", id));
-        if direct.exists() {
-            return parse_note_file(&direct);
+        if is_safe_note_id(id) {
+            if let Ok(direct) = self.note_path(id) {
+                if direct.is_file() {
+                    return parse_note_file(&direct);
+                }
+            }
         }
 
         self.load_all()?
@@ -323,7 +390,6 @@ impl NotesEngine for FileNotesEngine {
         let new_pointer = PointerDistiller::distill(&new_title, &new_content);
         let new_tags = tags.map(|t| t.to_vec()).unwrap_or(current.tags);
 
-        let path = self.dir.join(format!("{}.md", current.id));
         let note = Note {
             id: current.id.clone(),
             title: new_title,
@@ -333,7 +399,7 @@ impl NotesEngine for FileNotesEngine {
             created_at: current.created_at,
             updated_at: Utc::now(),
         };
-        write_note(&self.dir, &note, false)?;
+        let path = write_note(&self.dir, &note, false)?;
 
         info!("Updated note '{}' ('{}')", note.id, path.display());
         Ok(note)
@@ -345,7 +411,7 @@ impl NotesEngine for FileNotesEngine {
             return Ok(false);
         };
 
-        let path = self.dir.join(format!("{}.md", note.id));
+        let path = self.note_path(&note.id)?;
         match std::fs::remove_file(&path) {
             Ok(()) => {
                 info!("Deleted note '{}'", note.id);
@@ -362,7 +428,30 @@ impl NotesEngine for FileNotesEngine {
 
 /// Writes a note to `<dir>/<id>.md`, optionally skipping an existing file (import path).
 fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, HarnessError> {
-    let path = dir.join(format!("{}.md", note.id));
+    if !is_safe_note_id(&note.id) {
+        return Err(HarnessError::NotesError(format!(
+            "Invalid note id '{}': must not contain path separators, start with '.', or escape notes directory",
+            note.id
+        )));
+    }
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let path = canonical_dir.join(format!("{}.md", note.id));
+    if path.exists() {
+        let canonical = path.canonicalize().map_err(|e| {
+            HarnessError::NotesError(format!(
+                "Failed to canonicalize note path '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        if !canonical.starts_with(&canonical_dir) {
+            return Err(HarnessError::NotesError(format!(
+                "Note path escapes notes directory '{}': {}",
+                canonical_dir.display(),
+                path.display()
+            )));
+        }
+    }
     if skip_existing && path.exists() {
         return Ok(path);
     }
@@ -480,7 +569,7 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
         .unwrap_or_else(Utc::now);
 
     let note = Note {
-        id: if id.trim().is_empty() {
+        id: if id.trim().is_empty() || !is_safe_note_id(&id) {
             fallback_id
         } else {
             id

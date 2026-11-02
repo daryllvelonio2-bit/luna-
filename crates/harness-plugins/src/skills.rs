@@ -129,6 +129,27 @@ impl Tool for SkillToolAdapter {
         })
     }
 
+    fn is_mutating(&self) -> bool {
+        // Any skill that executes external commands must be gated through approval
+        self.skill.command.is_some()
+    }
+
+    async fn preview(&self, args: &serde_json::Value) -> Option<harness_core::ToolPreview> {
+        self.skill.command.as_ref().map(|cmd| {
+            let skill_dir = self
+                .skill
+                .file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_string_lossy();
+            let cmd_str = cmd.replace("{skill_dir}", &skill_dir);
+            harness_core::ToolPreview {
+                target: Some(format!("sh -c '{}' with args {}", cmd_str, args)),
+                diff: None,
+            }
+        })
+    }
+
     async fn execute(
         &self,
         call_id: &str,
