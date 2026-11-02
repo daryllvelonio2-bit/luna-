@@ -104,6 +104,12 @@ impl EvalReport {
     }
 }
 
+/// How long one case may run before it is failed for not finishing.
+///
+/// Five minutes, because a live case is a real model turn plus the tools it calls: long enough for a
+/// slow provider, short enough that a hung one is reported rather than waited on.
+const CASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 const TOKEN_ACCOUNTING: &str =
     "offline: whitespace word counts, exact and reproducible; live: null, \
      the non-streaming provider path drops the API's usage field";
@@ -228,7 +234,16 @@ async fn run_case<P: ModelProvider + 'static>(
     provider_id: &str,
     model_id: &str,
 ) -> CaseReport {
-    let outcome = drive(scenario, provider).await;
+    // A case runs the real agent loop: a provider that stops answering, or a tool that never
+    // returns, leaves the suite sitting there with no output and no end. The timeout turns that
+    // into a failed case that names the reason.
+    let outcome = match tokio::time::timeout(CASE_TIMEOUT, drive(scenario, provider)).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err((
+            Vec::new(),
+            format!("the case did not finish within {}s", CASE_TIMEOUT.as_secs()),
+        )),
+    };
     let (status, reason, tool_calls) = match outcome {
         Ok((reason, calls)) => (CaseStatus::Pass, reason, calls),
         Err(failure) => (CaseStatus::Fail, failure.1, failure.0),

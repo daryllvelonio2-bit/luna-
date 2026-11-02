@@ -204,6 +204,19 @@ impl Scenario {
                     self.case, call.name
                 )));
             }
+            // Named and *registered* are different: a script that calls `read_file` in a case whose
+            // `tools:` list holds only `terminal` replays a call the agent cannot make, and the case
+            // fails at run time on "tool not found" — which reads as the agent being wrong rather
+            // than the script being wrong. Only checked when the case names its tools, so a case
+            // that registers none is still reported by the tools it does have.
+            if !self.tools.is_empty() && !self.tools.contains(&call.name) {
+                return Err(at(format!(
+                    "case '{}': script calls tool '{}', which this case does not register (tools: {})",
+                    self.case,
+                    call.name,
+                    self.tools.join(", ")
+                )));
+            }
         }
         for call in self.expect.tool_calls.iter() {
             if !BUILTIN_TOOLS.contains(&call.name.as_str()) {

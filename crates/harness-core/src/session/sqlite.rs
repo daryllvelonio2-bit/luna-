@@ -877,7 +877,7 @@ impl SessionStore for SqliteSessionStore {
         source_id: &str,
         new_title: Option<&str>,
     ) -> Result<String, HarnessError> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
 
         let (title, name, model, compact_model) = conn
             .query_row(
@@ -905,21 +905,34 @@ impl SessionStore for SqliteSessionStore {
         let new_id = format!("s{:x}", uuid::Uuid::new_v4().as_fields().0);
         let now = chrono::Utc::now().to_rfc3339();
 
-        conn.execute(
-            "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![new_id, now, now, forked_title, name, model, compact_model],
-        )
-        .map_err(|e| session_error("failed to create forked session record", e))?;
+        // One transaction, so a fork is all of it or none of it. Two statements used to mean a
+        // failure between them left a session row with no messages in it: a session that shows up in
+        // `luna sessions list` and answers nothing, with no trace of how it got there.
+        let transaction = conn
+            .transaction()
+            .map_err(|e| session_error("failed to open the fork transaction", e))?;
 
-        conn.execute(
-            "INSERT INTO messages (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at)
-             SELECT ?1, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at
-             FROM messages WHERE session_id = ?2
-             ORDER BY seq ASC",
-            params![new_id, source_id],
-        )
-        .map_err(|e| session_error("failed to copy messages for forked session", e))?;
+        transaction
+            .execute(
+                "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![new_id, now, now, forked_title, name, model, compact_model],
+            )
+            .map_err(|e| session_error("failed to create forked session record", e))?;
+
+        transaction
+            .execute(
+                "INSERT INTO messages (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at)
+                 SELECT ?1, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at
+                 FROM messages WHERE session_id = ?2
+                 ORDER BY seq ASC",
+                params![new_id, source_id],
+            )
+            .map_err(|e| session_error("failed to copy messages for forked session", e))?;
+
+        transaction
+            .commit()
+            .map_err(|e| session_error("failed to commit the fork", e))?;
 
         Ok(new_id)
     }

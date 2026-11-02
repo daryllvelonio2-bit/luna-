@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,13 @@ pub struct ModelDiscovery {
     /// Resolved `providers.<id>.*` config, applied when a provider's models endpoint is fetched.
     overrides: BTreeMap<String, ProviderOverride>,
 }
+
+/// How many providers are asked for their model list at once.
+///
+/// Four, the width the rest of the harness uses for independent calls: enough to hide the round-trip
+/// latency of a catalog, few enough that twenty configured providers do not open twenty sockets and
+/// collect twenty rate limits.
+const MAX_CONCURRENT_PROVIDER_REFRESHES: usize = 4;
 
 impl ModelDiscovery {
     pub fn new(
@@ -227,53 +235,67 @@ impl ModelDiscovery {
         providers
     }
 
+    /// Every provider's model list, refreshed.
+    ///
+    /// A provider that cannot be reached keeps its entry, carrying its error: a refresh that quietly
+    /// shortens the catalog is worse than one that names what it could not read.
     pub async fn refresh_all_models(
         &self,
         cred_manager: &CredentialManager,
     ) -> Vec<(String, Result<Vec<String>, HarnessError>)> {
-        let providers = self.get_all_target_providers(cred_manager).await;
-        let mut results = Vec::new();
+        // The list is settled first: which providers are worth asking is a decision, and asking them
+        // is a set of independent HTTPS calls. Reading them one after another means the catalog
+        // takes as long as the sum of every provider's `/models` — seconds each, a minute or more
+        // for a machine with every provider configured.
+        let mut targets = Vec::new();
         let mut seen_canonical = std::collections::HashSet::new();
-
-        for provider in providers {
+        for provider in self.get_all_target_providers(cred_manager).await {
             let canonical = crate::catalog::canonicalize_provider_id(&provider);
             if !seen_canonical.insert(canonical.to_string()) {
                 continue;
             }
-
             if crate::catalog::find_provider(&provider).is_none() {
                 continue;
             }
-
-            if provider == "kiro" || provider == "kiro-cli" {
-                let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
-            }
-
-            if provider == "supercode" {
-                let _ = crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
-            }
-
-            let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
-            let is_auto = matches!(
-                provider.as_str(),
-                "opencode"
-                    | "opencode-zen"
-                    | "antigravity"
-                    | "agy"
-                    | "kiro"
-                    | "kiro-cli"
-                    | "supercode"
-            );
-
-            if !has_creds && !is_auto {
-                continue;
-            }
-
-            let res = self.get_models(&provider, cred_manager, true).await;
-            results.push((provider, res));
+            targets.push(provider);
         }
 
-        results
+        // Bounded, not unbounded: a machine with twenty providers configured should not open twenty
+        // sockets at once, and the providers themselves rate limit.
+        futures_util::stream::iter(targets)
+            .map(|provider| async move {
+                if provider == "kiro" || provider == "kiro-cli" {
+                    let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
+                }
+
+                if provider == "supercode" {
+                    let _ =
+                        crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
+                }
+
+                let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
+                let is_auto = matches!(
+                    provider.as_str(),
+                    "opencode"
+                        | "opencode-zen"
+                        | "antigravity"
+                        | "agy"
+                        | "kiro"
+                        | "kiro-cli"
+                        | "supercode"
+                );
+
+                if !has_creds && !is_auto {
+                    return None;
+                }
+
+                let res = self.get_models(&provider, cred_manager, true).await;
+                Some((provider, res))
+            })
+            .buffered(MAX_CONCURRENT_PROVIDER_REFRESHES)
+            .filter_map(|result| async move { result })
+            .collect()
+            .await
     }
 
     async fn fetch_live_models(
