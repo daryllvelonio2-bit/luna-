@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod discord;
+pub(crate) mod outbound;
 pub mod telegram;
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,20 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::approval::approval_settings;
+
+/// The delay after `previous` consecutive poll failures: 1s, then double, capped at a minute.
+///
+/// A minute is the ceiling because an adapter that has been down for longer than that is one the
+/// operator needs to be reading about in the log rather than waiting to come back on its own.
+fn poll_backoff(previous: std::time::Duration) -> std::time::Duration {
+    const FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(60);
+    if previous.is_zero() {
+        FIRST
+    } else {
+        (previous * 2).min(MAX)
+    }
+}
 use super::chat::ChatAgent;
 use super::sessions::open_store;
 use adapter::PlatformAdapter;
@@ -165,7 +180,19 @@ pub async fn run_gateway(
             } else {
                 Vec::new()
             };
-            adapters.push(Box::new(DiscordAdapter::new(token, channel, allowed)));
+            // The cursor lives beside the session database: it is runtime state, and it has to
+            // outlive the process for a restart to resume rather than skip.
+            let cursor = config.paths.sessions_db.parent().map(|dir| {
+                let channel = if channel.is_empty() {
+                    "default"
+                } else {
+                    channel.as_str()
+                };
+                dir.join(format!("gateway-discord-{channel}.cursor"))
+            });
+            adapters.push(Box::new(DiscordAdapter::new(
+                token, channel, allowed, cursor,
+            )));
             info!("Discord platform adapter enabled");
         }
     }
@@ -203,13 +230,41 @@ pub async fn run_gateway(
         })
         .unwrap_or_else(|| "luna-verify".to_string());
 
+    let wa_secret = {
+        let name = if config.gateway.whatsapp_app_secret_env.is_empty() {
+            "WHATSAPP_APP_SECRET".to_string()
+        } else {
+            config.gateway.whatsapp_app_secret_env.clone()
+        };
+        std::env::var(&name)
+            .ok()
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| (name, secret))
+    };
+
     let port = options.port.unwrap_or(config.gateway.port);
 
     if requested_platform == "whatsapp" || requested_platform == "all" {
         if let (Some(token), Some(phone)) = (wa_token, wa_phone) {
-            let wa = WhatsAppAdapter::new(token, phone, wa_verify, port).await?;
+            // Fail closed. The webhook is a listening socket whose contents become prompts to an
+            // agent holding tools, and Meta signs every delivery with the app secret; without the
+            // secret there is no way to tell Meta's delivery from anyone else's, so the adapter is
+            // not started at all rather than started accepting them.
+            let Some((name, secret)) = wa_secret else {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "WhatsApp needs the Meta app secret to verify webhook signatures: set the {} \
+                     environment variable (the app secret from the Meta dashboard, not the verify \
+                     token). An unsigned webhook runs whatever reaches its port as a prompt.",
+                    if config.gateway.whatsapp_app_secret_env.is_empty() {
+                        "WHATSAPP_APP_SECRET".to_string()
+                    } else {
+                        config.gateway.whatsapp_app_secret_env.clone()
+                    }
+                )));
+            };
+            let wa = WhatsAppAdapter::new(token, phone, wa_verify, secret, port).await?;
             adapters.push(Box::new(wa));
-            info!("WhatsApp Cloud platform adapter enabled on port {port}");
+            info!("WhatsApp Cloud platform adapter enabled on port {port} (signed with ${name})");
         }
     }
 
@@ -241,6 +296,14 @@ pub async fn run_gateway(
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
 
+    // A poll that keeps failing is retried on a widening delay. Without it an adapter that is being
+    // rate limited is asked again every 500 ms — which is how it stays rate limited — and a token
+    // that has been revoked is retried forever at the same rate with one warning each time. The
+    // delay resets on the first answer, because that is what a recovered connection looks like.
+    let mut backoff: Vec<std::time::Duration> = vec![std::time::Duration::ZERO; adapters.len()];
+    let mut next_poll: Vec<tokio::time::Instant> =
+        vec![tokio::time::Instant::now(); adapters.len()];
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -248,11 +311,24 @@ pub async fn run_gateway(
                 break;
             }
             _ = interval.tick() => {
-                for adapter in &mut adapters {
+                for (index, adapter) in adapters.iter_mut().enumerate() {
+                    if tokio::time::Instant::now() < next_poll[index] {
+                        continue;
+                    }
                     let messages = match adapter.poll_messages().await {
-                        Ok(msgs) => msgs,
+                        Ok(msgs) => {
+                            backoff[index] = std::time::Duration::ZERO;
+                            msgs
+                        }
                         Err(e) => {
-                            warn!("Adapter {} poll error: {e}", adapter.name());
+                            backoff[index] = poll_backoff(backoff[index]);
+                            next_poll[index] = tokio::time::Instant::now() + backoff[index];
+                            warn!(
+                                "Adapter {} poll error ({}); retrying in {}s",
+                                adapter.name(),
+                                e,
+                                backoff[index].as_secs()
+                            );
                             continue;
                         }
                     };

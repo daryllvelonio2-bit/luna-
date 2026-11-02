@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 arboard = "3.4"
 base64 = "0.22"
+flate2 = "1"
+hmac = "0.12"
+sha2 = "0.10"
 harness-core = { workspace = true }
 harness-providers = { workspace = true }
 harness-memory = { workspace = true }

@@ -38,12 +38,84 @@ fn test_telegram_user_authorization() {
 #[test]
 fn test_discord_user_authorization() {
     let allowed = vec!["112233".to_string(), "daryll".to_string()];
-    let adapter = DiscordAdapter::new("fake_token".to_string(), "ch_1".to_string(), allowed);
+    let adapter = DiscordAdapter::new("fake_token".to_string(), "ch_1".to_string(), allowed, None);
 
     assert!(adapter.is_user_allowed("112233", Some("anon")));
     assert!(adapter.is_user_allowed("999999", Some("daryll")));
     assert!(adapter.is_user_allowed("999999", Some("@daryll")));
     assert!(!adapter.is_user_allowed("999999", Some("random_user")));
+}
+
+/// The cursor is what makes a restart resume. Without it the adapter re-seeded from the newest
+/// message and answered nothing, so every message sent while the gateway was down was skipped.
+#[test]
+fn test_discord_cursor_survives_a_restart() {
+    use super::discord::DiscordAdapter;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("gateway-discord-ch_1.cursor");
+
+    let first = DiscordAdapter::new(
+        "fake_token".to_string(),
+        "ch_1".to_string(),
+        Vec::new(),
+        Some(path.clone()),
+    );
+    assert!(
+        !first.is_seeded(),
+        "a first run has no cursor to resume from"
+    );
+    first.remember("4242");
+
+    let restarted = DiscordAdapter::new(
+        "fake_token".to_string(),
+        "ch_1".to_string(),
+        Vec::new(),
+        Some(path.clone()),
+    );
+    assert!(
+        restarted.is_seeded(),
+        "a restarted adapter resumes from the recorded id"
+    );
+    // The id is on disk, so the next run asks for what came after it.
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap().trim(),
+        "4242",
+        "the cursor file holds the newest id seen"
+    );
+    // Written through a temporary file, so the directory holds only the cursor itself.
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, vec!["gateway-discord-ch_1.cursor".to_string()]);
+}
+
+/// The splitter is shared, and its two failure modes were a panic on a non-boundary byte and an
+/// unbalanced code fence; both are asserted in `outbound`'s own tests.
+/// A poll that keeps failing is retried on a widening delay rather than every 500 ms, which is how
+/// an adapter being rate limited stays rate limited.
+#[test]
+fn test_a_failing_poll_is_retried_on_a_widening_delay() {
+    use super::poll_backoff;
+    use std::time::Duration;
+    assert_eq!(poll_backoff(Duration::ZERO), Duration::from_secs(1));
+    assert_eq!(poll_backoff(Duration::from_secs(1)), Duration::from_secs(2));
+    assert_eq!(
+        poll_backoff(Duration::from_secs(30)),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        poll_backoff(Duration::from_secs(60)),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn test_outbound_chunking_is_shared_by_both_adapters() {
+    use super::outbound::chunk_message;
+    let text = "a".repeat(25);
+    assert_eq!(chunk_message(&text, 10).len(), 3);
 }
 
 #[test]

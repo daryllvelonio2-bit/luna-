@@ -277,6 +277,10 @@ pub struct GatewaySettings {
     pub whatsapp_phone_number_id: String,
     /// WhatsApp webhook verification token.
     pub whatsapp_verify_token: String,
+    /// Name of the environment variable holding the Meta app secret, which is what signs webhook
+    /// deliveries. A secret in a config file is a secret in a backup and a shell history, so the
+    /// config names where to read it from instead. Defaults to `WHATSAPP_APP_SECRET`.
+    pub whatsapp_app_secret_env: String,
     /// Port for webhook servers (e.g. WhatsApp). Default 8080.
     pub port: u16,
     /// Whether gateway turns can execute mutating tool calls without asking.
@@ -296,6 +300,7 @@ impl Default for GatewaySettings {
             whatsapp_token: String::new(),
             whatsapp_phone_number_id: String::new(),
             whatsapp_verify_token: String::new(),
+            whatsapp_app_secret_env: String::new(),
             port: 8080,
             allow_mutating_tools: false,
         }

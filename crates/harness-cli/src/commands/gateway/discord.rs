@@ -1,12 +1,15 @@
 //! Discord platform adapter via Discord REST API.
 
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use harness_core::error::HarnessError;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 use super::adapter::{InboundMessage, PlatformAdapter};
+use super::outbound::{chunk_message, post_json, send_error};
 
 /// Discord channel polling bot adapter.
 pub struct DiscordAdapter {
@@ -15,11 +18,22 @@ pub struct DiscordAdapter {
     client: Client,
     last_message_id: Option<String>,
     allowed_users: Vec<String>,
-    seeded: bool,
+    /// Where the last id this adapter saw is kept. Restarting a gateway used to re-seed from the
+    /// newest message and return nothing, so everything said while it was down was skipped in
+    /// silence — the one failure mode of a chat bot a user cannot work around.
+    cursor: Option<PathBuf>,
 }
 
 impl DiscordAdapter {
-    pub fn new(token: String, channel_id: String, allowed_users: Vec<String>) -> Self {
+    /// `cursor` is where the last seen message id is remembered between runs; `None` keeps this
+    /// adapter's cursor in memory only, which is what the unit tests want.
+    pub fn new(
+        token: String,
+        channel_id: String,
+        allowed_users: Vec<String>,
+        cursor: Option<PathBuf>,
+    ) -> Self {
+        let last_message_id = cursor.as_deref().and_then(read_cursor);
         Self {
             token,
             channel_id,
@@ -27,9 +41,28 @@ impl DiscordAdapter {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
-            last_message_id: None,
+            // Seeded from the cursor: a restart resumes where the last run stopped instead of
+            // declaring everything it missed to be ancient history.
+            last_message_id,
             allowed_users,
-            seeded: false,
+            cursor,
+        }
+    }
+
+    /// Whether this adapter is past its first poll: it has an id to ask `after=` for.
+    pub(crate) fn is_seeded(&self) -> bool {
+        self.last_message_id.is_some()
+    }
+
+    /// Record the newest id seen, so the next run starts after it.
+    pub(crate) fn remember(&self, id: &str) {
+        if let Some(path) = &self.cursor {
+            if let Err(error) = write_cursor(path, id) {
+                warn!(
+                    "Cannot record the Discord cursor at {}: {error}",
+                    path.display()
+                );
+            }
         }
     }
 
@@ -52,6 +85,28 @@ impl DiscordAdapter {
     }
 }
 
+/// The id in a cursor file, if one was written.
+fn read_cursor(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = text.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Write `id` as the cursor, through a temporary file so a killed process cannot leave a half
+/// written id behind — the next run would then ask Discord for messages after a nonsense id.
+fn write_cursor(path: &Path, id: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, format!("{id}\n"))?;
+    std::fs::rename(&temporary, path)
+}
+
 #[async_trait]
 impl PlatformAdapter for DiscordAdapter {
     fn name(&self) -> &'static str {
@@ -65,50 +120,25 @@ impl PlatformAdapter for DiscordAdapter {
             chat_id
         };
         let url = format!("https://discord.com/api/v10/channels/{channel}/messages");
+        let what = format!("Discord message to channel {channel}");
+        let authorization = format!("Bot {}", self.token);
 
-        // Discord limit is 2000 characters per message. Chunk at 1900.
+        // Discord caps a message at 2000 characters; 1900 leaves room for the closing fence the
+        // splitter adds when a code block runs past a chunk.
         const MAX_LEN: usize = 1900;
-        let mut remaining = text;
-        while !remaining.is_empty() {
-            let chunk = if remaining.len() > MAX_LEN {
-                let split_at = remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN);
-                let (part, rest) = remaining.split_at(split_at);
-                remaining = rest.trim_start_matches('\n');
-                part
-            } else {
-                let part = remaining;
-                remaining = "";
-                part
-            };
 
-            let payload = json!({
-                "content": chunk,
-            });
-
-            let resp = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bot {}", self.token))
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => {
-                    debug!("Discord message sent to channel {channel}");
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let err_body = r.text().await.unwrap_or_default();
-                    error!("Discord send failed: HTTP {status} - {err_body}");
-                }
-                Err(e) => {
-                    error!("Discord send network error: {e}");
-                }
-            }
+        for chunk in chunk_message(text, MAX_LEN) {
+            let payload = json!({ "content": chunk });
+            post_json(
+                &self.client,
+                &url,
+                &[("Authorization", authorization.clone())],
+                &payload,
+                &what,
+            )
+            .await
+            .map_err(|failure| send_error("discord", &what, failure))?;
         }
-
         Ok(())
     }
 
@@ -157,13 +187,18 @@ impl PlatformAdapter for DiscordAdapter {
             return Ok(Vec::new());
         };
 
-        // If not seeded yet, record latest ID without replaying ancient messages
-        if !self.seeded {
-            self.seeded = true;
-            if let Some(first) = arr.first() {
-                if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
-                    self.last_message_id = Some(id.to_string());
-                }
+        // A first run with no cursor records the newest id and replays nothing: an adapter that
+        // delivered the last twenty messages of a channel it has never seen would answer questions
+        // asked before it existed. From then on the id comes from the cursor, so a restart
+        // continues instead of skipping.
+        if !self.is_seeded() {
+            if let Some(id) = arr
+                .first()
+                .and_then(|msg| msg.get("id"))
+                .and_then(|i| i.as_str())
+            {
+                self.last_message_id = Some(id.to_string());
+                self.remember(id);
             }
             return Ok(Vec::new());
         }
@@ -175,6 +210,7 @@ impl PlatformAdapter for DiscordAdapter {
                 continue;
             };
             self.last_message_id = Some(id.to_string());
+            self.remember(id);
 
             let author = msg.get("author");
             let is_bot = author

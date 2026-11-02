@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use harness_core::error::HarnessError;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 use super::adapter::{InboundMessage, PlatformAdapter};
+use super::outbound::{chunk_message, post_json, send_error};
 
 /// Telegram long-polling bot adapter.
 pub struct TelegramAdapter {
@@ -57,44 +58,36 @@ impl PlatformAdapter for TelegramAdapter {
 
     async fn send_message(&self, chat_id: &str, text: &str) -> Result<(), HarnessError> {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
+        let what = format!("Telegram message to {chat_id}");
 
-        // Telegram max message length is 4096 characters. Chunk if necessary.
+        // Telegram caps a message at 4096 characters; 4000 leaves room for the closing fence the
+        // splitter adds when a code block runs past a chunk.
         const MAX_LEN: usize = 4000;
-        let mut remaining = text;
-        while !remaining.is_empty() {
-            let chunk = if remaining.len() > MAX_LEN {
-                let split_at = remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN);
-                let (part, rest) = remaining.split_at(split_at);
-                remaining = rest.trim_start_matches('\n');
-                part
-            } else {
-                let part = remaining;
-                remaining = "";
-                part
-            };
 
-            // Attempt Markdown first, fall back to plain text if Telegram rejects parse format.
-            let payload_md = json!({
+        for chunk in chunk_message(text, MAX_LEN) {
+            // Markdown first, because the reply is written in it.
+            let markdown = json!({
                 "chat_id": chat_id,
                 "text": chunk,
                 "parse_mode": "Markdown",
             });
 
-            let res = self.client.post(&url).json(&payload_md).send().await;
-            match res {
-                Ok(resp) if resp.status().is_success() => {
-                    debug!("Telegram message sent to {chat_id}");
+            match post_json(&self.client, &url, &[], &markdown, &what).await {
+                Ok(()) => {}
+                // Telegram refuses a payload whose Markdown it cannot parse, and the text itself is
+                // fine — so it goes again unformatted. Reported, because a reply that quietly loses
+                // its formatting reads as a formatting bug rather than as the fallback it is.
+                Err(failure) if failure.rejected_the_payload() => {
+                    warn!(
+                        "{what} refused as Markdown ({}); sending it unformatted",
+                        failure.detail
+                    );
+                    let plain = json!({ "chat_id": chat_id, "text": chunk });
+                    post_json(&self.client, &url, &[], &plain, &what)
+                        .await
+                        .map_err(|failure| send_error("telegram", &what, failure))?;
                 }
-                _ => {
-                    // Fallback to unformatted plain text
-                    let payload_plain = json!({
-                        "chat_id": chat_id,
-                        "text": chunk,
-                    });
-                    if let Err(e) = self.client.post(&url).json(&payload_plain).send().await {
-                        error!("Failed to send plain Telegram message to {chat_id}: {e}");
-                    }
-                }
+                Err(failure) => return Err(send_error("telegram", &what, failure)),
             }
         }
         Ok(())
