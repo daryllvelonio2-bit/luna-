@@ -134,17 +134,75 @@ fn data_url_for_file(token: &str) -> Option<String> {
         return None;
     }
     if meta.len() > MAX_INLINE_IMAGE_BYTES {
-        tracing::debug!(
+        // A warning, not a debug line: the user asked for this image and the model did not get it,
+        // so "why did it not see my screenshot" has an answer in the log by default.
+        tracing::warn!(
             path = %path.display(),
             size = meta.len(),
-            "image path in prompt exceeds the inline budget; left as text"
+            budget = MAX_INLINE_IMAGE_BYTES,
+            "image is larger than the inline budget; sending the prompt without it"
         );
         return None;
     }
 
+    let key = InlineKey {
+        path: path.clone(),
+        modified: meta.modified().ok(),
+        len: meta.len(),
+    };
+    if let Some(data_url) = cached_inline(&key) {
+        return Some(data_url);
+    }
+
     let bytes = std::fs::read(&path).ok()?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:{};base64,{}", mime, encoded))
+    let data_url = format!("data:{};base64,{}", mime, encoded);
+    remember_inline(key, &data_url);
+    Some(data_url)
+}
+
+/// What an inlined image is keyed by: the file it came from, at the size and modification time it
+/// had when it was read. A file that changed is a different key, so a stale copy is never sent.
+#[derive(PartialEq, Eq, Hash)]
+struct InlineKey {
+    path: std::path::PathBuf,
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// The images inlined so far this process.
+///
+/// A prompt that names the same screenshot on every turn re-read and re-encoded it every time, and
+/// the encoded form is megabytes held in a `String` on each of those turns. Entries are dropped once
+/// [`MAX_CACHED_INLINES`] is reached, so a long-lived process cannot accumulate every image it has
+/// ever been shown.
+static INLINED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<InlineKey, String>>,
+> = std::sync::OnceLock::new();
+
+/// How many inlined images are kept before the cache is dropped wholesale.
+///
+/// Sixteen screenshots at the few hundred kilobytes deflate produces is a few megabytes held; each
+/// one is bounded by [`MAX_INLINE_IMAGE_BYTES`], so the cap is what keeps the ceiling real.
+const MAX_CACHED_INLINES: usize = 16;
+
+fn cached_inline(key: &InlineKey) -> Option<String> {
+    let cache = INLINED.get_or_init(Default::default);
+    let cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.get(key).cloned()
+}
+
+fn remember_inline(key: InlineKey, data_url: &str) {
+    let cache = INLINED.get_or_init(Default::default);
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MAX_CACHED_INLINES {
+        cache.clear();
+    }
+    cache.insert(key, data_url.to_string());
 }
 
 /// Files above this are left as text. A generated image is 1–4 MB; a 20 MB scan is not an image

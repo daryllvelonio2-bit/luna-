@@ -171,9 +171,13 @@ fn save_image_file(png: &[u8]) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Encode RGBA8 pixel data into a PNG file using only stdlib (zlib stored blocks).
-/// This produces a valid (uncompressed, filter-type-0) PNG. Correct but large; acceptable
-/// for screenshots since providers accept multi-MB payloads.
+/// Encode RGBA8 pixel data into a PNG file.
+///
+/// The IDAT is deflate-compressed. It used to be stored uncompressed — a valid PNG that is one
+/// byte per pixel, so a 1920x1080 screenshot came to 8 MB, which is over the `MAX_INLINE_IMAGE_BYTES`
+/// the prompt inliner sends images through. The image was then refused by the very code that was
+/// meant to send it and the prompt went off as text, with one debug line to say why. Screenshots
+/// compress heavily: the same shot is a few hundred kilobytes here.
 fn encode_png_rgba(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
     let expected = width * height * 4;
     if rgba.len() < expected {
@@ -192,7 +196,7 @@ fn encode_png_rgba(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>, 
         raw.extend_from_slice(&rgba[y * stride..(y + 1) * stride]);
     }
 
-    let compressed = zlib_store(&raw);
+    let compressed = zlib_compress(&raw)?;
 
     let mut out = Vec::new();
     out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -227,36 +231,17 @@ fn push_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
 }
 
-/// zlib stream with stored (uncompressed) DEFLATE blocks.
-fn zlib_store(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + data.len() / 65535 * 5 + 16);
-    out.push(0x78);
-    out.push(0x01);
-    let mut chunks = data.chunks(65535).peekable();
-    if data.is_empty() {
-        out.push(0x01);
-        out.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]);
-    }
-    while let Some(chunk) = chunks.next() {
-        let last = chunks.peek().is_none();
-        out.push(if last { 0x01 } else { 0x00 });
-        let len = chunk.len() as u16;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&(!len).to_le_bytes());
-        out.extend_from_slice(chunk);
-    }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
-    out
-}
+/// The zlib stream for a PNG's IDAT, deflate-compressed.
+fn zlib_compress(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
 
-fn adler32(data: &[u8]) -> u32 {
-    let mut a: u32 = 1;
-    let mut b: u32 = 0;
-    for &byte in data {
-        a = (a + byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .map_err(|error| format!("cannot compress the screenshot: {error}"))?;
+    encoder
+        .finish()
+        .map_err(|error| format!("cannot compress the screenshot: {error}"))
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -336,20 +321,15 @@ mod tests {
         );
         assert_eq!(&ihdr[8..], &[8, 6, 0, 0, 0], "8-bit RGBA, no interlace");
 
-        // Inflate the stored-block zlib stream and compare to the raw scanlines.
+        // Inflate the IDAT and compare to the raw scanlines. It is a real zlib stream — the reader
+        // is what a decoder would use, so a stream that only *looks* like one fails here.
         let idat = &chunks[1].1;
-        assert_eq!(&idat[..2], &[0x78, 0x01], "zlib header");
-        let body = &idat[2..idat.len() - 4];
         let mut inflated = Vec::new();
-        let mut i = 0usize;
-        while i < body.len() {
-            assert_eq!(body[i], 0x01, "every block is a final stored block here");
-            let len = u16::from_le_bytes(body[i + 1..i + 3].try_into().unwrap()) as usize;
-            inflated.extend_from_slice(&body[i + 5..i + 5 + len]);
-            i += 5 + len;
-        }
-        let stored_adler = u32::from_be_bytes(idat[idat.len() - 4..].try_into().unwrap());
-        assert_eq!(stored_adler, adler32(&inflated), "bad Adler-32");
+        std::io::Read::read_to_end(
+            &mut flate2::read::ZlibDecoder::new(&idat[..]),
+            &mut inflated,
+        )
+        .expect("inflate the IDAT");
 
         // Each row is filter byte 0 followed by that row's pixels, in order.
         let mut expected = Vec::new();
