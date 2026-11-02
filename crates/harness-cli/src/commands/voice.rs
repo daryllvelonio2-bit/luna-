@@ -30,6 +30,11 @@ impl WakeWordDetector for DefaultWakeWordDetector {
     }
 }
 
+/// The recogniser `luna voice` runs with, which is not a recogniser.
+///
+/// It answers every recording with the same sentence. The harness ships a voice loop and no speech
+/// model, and a stub that invents words is worse than one that says it cannot: the loop announces
+/// this at startup (see `run_voice_loop`) so nobody mistakes the demo for hearing them.
 pub struct DefaultSpeechToText;
 
 #[async_trait]
@@ -39,6 +44,8 @@ impl SpeechToText for DefaultSpeechToText {
     }
 }
 
+/// The synthesiser `luna voice` runs with, which produces silence: one block of zero samples per
+/// chunk of text. It is here so the loop can be exercised end to end, not to be listened to.
 pub struct DefaultTextToSpeech;
 
 #[async_trait]
@@ -80,6 +87,14 @@ pub async fn run_voice_loop(
     println!(
         "Wake word: {}\nListening on microphone...",
         "Luna".green().bold()
+    );
+    // Said before anything is listened to, because the alternative is a user talking to a program
+    // that answers every recording with the same sentence and concluding it works.
+    println!(
+        "{}",
+        "note: no speech model is wired into this build — every recording is answered with a fixed \
+         sentence and the reply is not spoken. This is the loop's demo path, not recognition."
+            .yellow()
     );
 
     let provider = Arc::new(GenericProviderClient::new(

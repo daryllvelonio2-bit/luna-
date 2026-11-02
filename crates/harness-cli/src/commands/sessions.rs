@@ -1,5 +1,7 @@
 //! `luna sessions list` and the session a chat run attaches to.
 
+use std::io::IsTerminal;
+
 use clap::Subcommand;
 use colored::Colorize;
 
@@ -25,6 +27,10 @@ pub enum SessionsCommand {
     Delete {
         /// Session id or name to delete
         session: String,
+        /// Delete without a terminal to confirm on. Required when stdin is not a terminal, so a
+        /// script that deletes a session says so rather than relying on nobody being asked.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -240,7 +246,15 @@ pub async fn handle_sessions_command(
             );
             Ok(None)
         }
-        SessionsCommand::Delete { session } => {
+        SessionsCommand::Delete { session, force } => {
+            // Fail closed for scripts: deletion is irreversible, and there is no prompt to answer
+            // when stdin is a pipe. `--force` is the way to say the deletion is intended.
+            if !force && !std::io::stdin().is_terminal() {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "refusing to delete session '{}' without --force: stdin is not a terminal, so nothing can confirm it",
+                    session
+                )));
+            }
             let store = open_store(config)?;
             let id = if store.get(&session).await.is_ok() {
                 session
@@ -289,6 +303,7 @@ mod tests {
         handle_sessions_command(
             SessionsCommand::Delete {
                 session: "work-session".to_string(),
+                force: true,
             },
             &config,
         )
@@ -304,6 +319,7 @@ mod tests {
         let err = handle_sessions_command(
             SessionsCommand::Delete {
                 session: "non-existent".to_string(),
+                force: true,
             },
             &config,
         )

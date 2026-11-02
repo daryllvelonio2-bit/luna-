@@ -31,7 +31,17 @@ pub struct DiffOptions {
     pub stat: bool,
     /// Every checkpointed turn of the session, not just one.
     pub all: bool,
+    /// How many turns `--all` reads. `None` uses [`DIFF_ALL_DEFAULT_LIMIT`].
+    pub limit: Option<usize>,
 }
+
+/// Turns `luna diff --all` reads when `--limit` is not given.
+///
+/// Reading every turn of a long session loads every snapshot diff into memory at once — a session
+/// with a thousand turns and a few large files is how this command runs a machine out of memory.
+/// The newest turns are the ones being asked about, so the default shows those and says how many
+/// were left out rather than quietly showing a subset.
+const DIFF_ALL_DEFAULT_LIMIT: usize = 200;
 
 pub async fn run_diff(config: &Config, opts: DiffOptions) -> Result<(), HarnessError> {
     let store = CheckpointStore::new(
@@ -74,7 +84,21 @@ pub async fn run_diff(config: &Config, opts: DiffOptions) -> Result<(), HarnessE
     }
 
     let turns: Vec<TurnDiff> = if opts.all {
-        store.diff_all(&session_id)?
+        let limit = opts.limit.unwrap_or(DIFF_ALL_DEFAULT_LIMIT);
+        let mut all = store.diff_all(&session_id)?;
+        let total = all.len();
+        if total > limit {
+            // Oldest first in the store: the newest `limit` turns are the ones to keep.
+            all.drain(..total - limit);
+            println!(
+                "{}",
+                format!(
+                    "showing the newest {limit} of {total} checkpointed turns (--limit <n> for more)"
+                )
+                .dimmed()
+            );
+        }
+        all
     } else {
         let seq = match opts.turn {
             Some(seq) => seq,

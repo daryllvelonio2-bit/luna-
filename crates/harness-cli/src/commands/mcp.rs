@@ -204,6 +204,14 @@ pub async fn format_mcp_tools(config: &Config) -> String {
     out
 }
 
+use futures_util::StreamExt as _;
+
+/// How many MCP servers `luna mcp tools` starts at once.
+///
+/// Four is the width the tool dispatcher uses for parallel calls, for the same reason: it hides the
+/// latency of several servers without turning one command into a process fork bomb.
+const MAX_CONCURRENT_MCP_STARTS: usize = 4;
+
 /// The live tool list: spawn each enabled server and read back its `tools/list`.
 async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError> {
     if json_out {
@@ -212,38 +220,45 @@ async fn list_tools(config: &Config, json_out: bool) -> Result<(), HarnessError>
             return Ok(());
         }
 
-        let mut report: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
-        for server in &config.mcp.servers {
-            if !server.enabled {
-                continue;
-            }
-            let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
-            let cwd = server.cwd.as_ref().map(|dir| {
-                std::path::PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy()))
-            });
-            let outcome = match McpStdioClient::spawn(
-                &server.command,
-                &args,
-                &server.env,
-                cwd.as_deref(),
-                config.mcp.startup_timeout_secs,
-                config.mcp.call_timeout_secs,
-            )
-            .await
-            {
-                Ok(client) => client.list_tools().await.map(|tools| {
-                    let allowed: std::collections::HashSet<&str> =
-                        server.tools.iter().map(|s| s.as_str()).collect();
-                    tools
-                        .into_iter()
-                        .filter(|t| allowed.is_empty() || allowed.contains(t.name.as_str()))
-                        .map(|t| format!("mcp__{}__{}", server.name, t.name))
-                        .collect::<Vec<_>>()
-                }),
-                Err(e) => Err(e),
-            };
-            report.push((server.name.clone(), outcome.map_err(|e| e.to_string())));
-        }
+        // The servers are independent processes, so they are read together: run one after another,
+        // the slowest holds up the list of every other one, and each stuck server costs its whole
+        // startup timeout before the next is even started. Bounded rather than unbounded, because
+        // these are child processes — thirty at once start none of them well.
+        let report: Vec<(String, Result<Vec<String>, String>)> =
+            futures_util::stream::iter(config.mcp.servers.iter().filter(|server| server.enabled))
+                .map(|server| async move {
+                    let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
+                    let cwd = server.cwd.as_ref().map(|dir| {
+                        std::path::PathBuf::from(harness_core::config::expand_tilde(
+                            &dir.to_string_lossy(),
+                        ))
+                    });
+                    let outcome = match McpStdioClient::spawn(
+                        &server.command,
+                        &args,
+                        &server.env,
+                        cwd.as_deref(),
+                        config.mcp.startup_timeout_secs,
+                        config.mcp.call_timeout_secs,
+                    )
+                    .await
+                    {
+                        Ok(client) => client.list_tools().await.map(|tools| {
+                            let allowed: std::collections::HashSet<&str> =
+                                server.tools.iter().map(|s| s.as_str()).collect();
+                            tools
+                                .into_iter()
+                                .filter(|t| allowed.is_empty() || allowed.contains(t.name.as_str()))
+                                .map(|t| format!("mcp__{}__{}", server.name, t.name))
+                                .collect::<Vec<_>>()
+                        }),
+                        Err(e) => Err(e),
+                    };
+                    (server.name.clone(), outcome.map_err(|e| e.to_string()))
+                })
+                .buffered(MAX_CONCURRENT_MCP_STARTS)
+                .collect()
+                .await;
 
         let servers: Vec<_> = report
             .iter()

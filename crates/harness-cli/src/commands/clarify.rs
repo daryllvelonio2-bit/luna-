@@ -166,7 +166,12 @@ impl Tool for ClarifyTool {
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
-                Err(HarnessError::Cancelled)
+                // Answered, not failed: the model is told the question went unanswered so it can
+                // stop and say so, rather than being handed a generic tool error it will retry.
+                Ok(ToolResult::error(
+                    call_id,
+                    "the question was cancelled before the user answered it",
+                ))
             }
             res = response_rx => {
                 match res {

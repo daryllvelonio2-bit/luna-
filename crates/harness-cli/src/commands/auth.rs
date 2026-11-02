@@ -311,13 +311,14 @@ pub async fn handle_auth_command(
                     detected.len()
                 );
                 for cred in detected {
+                    // Registered as a fallback, never as the key the pool hands out first, whatever
+                    // the detector claimed: an OpenCode credential is the metered free-tier token,
+                    // and putting it in front turns every request into a rate-limit wait while the
+                    // account key that could have answered sits in the same pool. Promote it by hand
+                    // if that is really what you want.
+                    let priority = false;
                     let id = cred_manager
-                        .add_credential(
-                            &cred.provider,
-                            &cred.label,
-                            &cred.api_key,
-                            cred.is_priority,
-                        )
+                        .add_credential(&cred.provider, &cred.label, &cred.api_key, priority)
                         .await?;
                     println!(
                         "  {} Registered credential for provider '{}' ({})",
@@ -329,10 +330,13 @@ pub async fn handle_auth_command(
                     // The metered free-tier token is registered as a fallback, never as the
                     // key the pool hands out first: a priority free token turns every request
                     // into a rate-limit wait even though the account key sits in the same pool.
+                    println!("    Set as priority: {}", "no (fallback)".yellow());
                     if cred.is_priority {
-                        println!("    Set as priority: {}", "yes".green());
-                    } else {
-                        println!("    Set as priority: {}", "no (fallback)".yellow());
+                        println!(
+                            "    {}",
+                            "the detector called it priority; registered as a fallback because OpenCode credentials are free-tier"
+                                .dimmed()
+                        );
                     }
                 }
             }

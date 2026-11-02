@@ -13,6 +13,7 @@ use harness_core::usage::{
     GroupBy, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals,
     SOURCE_CHAT,
 };
+use harness_core::HarnessError;
 use harness_providers::{CredentialManager, ModelDiscovery};
 
 /// What a finished turn contributes, resolved once from the config.
@@ -101,6 +102,15 @@ pub async fn run_usage(
     };
 
     if options.recent {
+        // `--recent` prints the turns themselves and `--by` groups them: a run that asks for both
+        // used to get the first and no word about the second, so the grouping the user asked for
+        // silently did not happen.
+        if options.by.is_some() {
+            return Err(HarnessError::ConfigurationError(
+                "--recent prints individual turns, so it cannot be grouped with --by; drop one of them"
+                    .to_string(),
+            ));
+        }
         let records = ledger.recent(&filter, options.limit).await?;
         if options.json {
             for record in &records {

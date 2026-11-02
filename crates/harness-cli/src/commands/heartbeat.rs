@@ -200,12 +200,15 @@ pub async fn run_cli_heartbeat(
     println!("  approval:   {:?}", config.tools.approval);
 
     if target == Some("ping") {
+        // The override the turns use, not `None`: a provider pointed at a custom `base_url` has its
+        // turns go there and a heartbeat that pinged the catalog's default would be reporting on an
+        // endpoint nothing else talks to.
         let print_provider = GenericProviderClient::new(
             provider_id,
             model_id,
             cred_manager.clone(),
             discovery.clone(),
-            None,
+            config.providers.get(provider_id),
         )?;
         let start = Instant::now();
         let msg = Message::user("ping");

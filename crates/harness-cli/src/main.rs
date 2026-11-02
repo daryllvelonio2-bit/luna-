@@ -153,6 +153,9 @@ enum Commands {
         /// Every checkpointed turn of the session
         #[arg(long)]
         all: bool,
+        /// How many turns `--all` reads (default 200, newest first)
+        #[arg(long)]
+        limit: Option<usize>,
         /// Counts only, no hunks
         #[arg(long)]
         stat: bool,
@@ -504,6 +507,7 @@ async fn main() -> Result<(), HarnessError> {
             session,
             turn,
             all,
+            limit,
             stat,
             json,
         }) => {
@@ -515,6 +519,7 @@ async fn main() -> Result<(), HarnessError> {
                     json,
                     stat,
                     all,
+                    limit,
                 },
             )
             .await?;

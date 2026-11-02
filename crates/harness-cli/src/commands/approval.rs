@@ -232,7 +232,9 @@ impl Approver for TerminalApprover {
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError> {
         let text = render_approval_box(request, 0, 72);
         print!("{}", text);
-        print!("Choose [y]es / [n]o: ");
+        // Every key this accepts is named: it took `a` as well, and a prompt that hides a key is a
+        // prompt a user cannot trust to describe the choice in front of them.
+        print!("Choose [y]es / [a]ccept / [n]o: ");
         let _ = io::stdout().flush();
 
         match read_line().await.trim().chars().next() {
