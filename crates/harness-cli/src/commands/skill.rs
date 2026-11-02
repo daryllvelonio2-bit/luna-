@@ -219,20 +219,27 @@ pub fn safe_skill_dir_name(name: &str) -> Result<String, HarnessError> {
     Ok(trimmed.to_string())
 }
 
+/// What a repository turned out to contain.
+pub struct SkillsFound {
+    /// One entry per skill name, with the directory it came from.
+    pub skills: Vec<(PathBuf, Skill)>,
+    /// Files named like a skill that are not one, so the caller can report them instead of saying
+    /// "0 skills found" over a repository full of broken frontmatter.
+    pub broken: Vec<String>,
+    /// Extra copies of a skill that ships once per agent, as `(name, path in the archive)`.
+    pub shadowed: Vec<(String, String)>,
+}
+
 /// Every skill under `root`, parsed as the loader would parse it, and one entry per name.
 ///
 /// Repositories that support several agents ship the same skill more than once — `skills/ponytail/`
-/// plus a copy under `.claude/`, `.codex/`, and so on. The loader keys skills by name, so installing
-/// both would copy the same skill over itself and report it twice. The shallowest copy wins (the
-/// vendor-neutral `skills/<name>/`), and `skipped` says which copies were passed over.
-///
-/// `skipped` also collects files named like a skill that are not one, so the caller can say so
-/// instead of reporting "0 skills found" over a repo full of broken frontmatter.
-pub fn find_skills(
-    root: &Path,
-    skipped: &mut Vec<String>,
-) -> Result<Vec<(PathBuf, Skill)>, HarnessError> {
+/// plus a copy under `.claude/`, `.openclaw/`, and so on. The loader keys skills by name, so
+/// installing both would copy the same skill over itself and report it twice: `ponytail` in this
+/// repository would arrive as "12 skills". The shallowest copy wins (the vendor-neutral
+/// `skills/<name>/`), and the others are reported as shadowed.
+pub fn find_skills(root: &Path) -> Result<SkillsFound, HarnessError> {
     let mut found = Vec::new();
+    let mut broken = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
@@ -246,7 +253,7 @@ pub fn find_skills(
             } else if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
                 match SkillLoader::parse_skill_file(&path) {
                     Ok(skill) => found.push((dir.clone(), skill)),
-                    Err(error) => skipped.push(format!("{}: {error}", relative_to(&path, root))),
+                    Err(error) => broken.push(format!("{}: {error}", relative_to(&path, root))),
                 }
             }
         }
@@ -260,20 +267,22 @@ pub fn find_skills(
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut seen = std::collections::HashSet::new();
-    let mut kept = Vec::new();
+    let mut skills = Vec::new();
+    let mut shadowed = Vec::new();
     for (dir, skill) in found {
         if seen.insert(skill.name.clone()) {
-            kept.push((dir, skill));
+            skills.push((dir, skill));
         } else {
-            skipped.push(format!(
-                "{}: another copy of '{}', not installed again",
-                relative_to(&dir, root),
-                skill.name
-            ));
+            shadowed.push((skill.name.clone(), relative_to(&dir, root)));
         }
     }
-    skipped.sort();
-    Ok(kept)
+    broken.sort();
+    shadowed.sort();
+    Ok(SkillsFound {
+        skills,
+        broken,
+        shadowed,
+    })
 }
 
 /// Unpack a `tar.gz` and return the single directory it holds.
@@ -460,30 +469,33 @@ async fn install(
     let root = extract_archive(&archive, &staging.0)?;
     let root = resolve_subpath(&root, &parsed.subpath)?;
 
-    let mut skipped = Vec::new();
-    let found = find_skills(&root, &mut skipped)?;
-    if found.is_empty() {
+    let found = find_skills(&root)?;
+    if found.skills.is_empty() {
         let where_ = parsed.subpath.as_deref().unwrap_or("the repository root");
         let mut message = format!(
             "no SKILL.md found under {where_} in {}/{}",
             parsed.owner, parsed.repo
         );
-        for problem in &skipped {
+        for problem in &found.broken {
             message.push_str(&format!("\n  {problem}"));
         }
         return Err(refuse(&message));
     }
 
     let selected: Vec<(PathBuf, Skill)> = if only.is_empty() {
-        found
+        found.skills
     } else {
         let missing: Vec<&str> = only
             .iter()
-            .filter(|name| !found.iter().any(|(_, skill)| &skill.name == *name))
+            .filter(|name| !found.skills.iter().any(|(_, skill)| &skill.name == *name))
             .map(String::as_str)
             .collect();
         if !missing.is_empty() {
-            let available: Vec<&str> = found.iter().map(|(_, skill)| skill.name.as_str()).collect();
+            let available: Vec<&str> = found
+                .skills
+                .iter()
+                .map(|(_, skill)| skill.name.as_str())
+                .collect();
             return Err(refuse(&format!(
                 "{} not in this source — it holds: {}",
                 missing.join(", "),
@@ -491,6 +503,7 @@ async fn install(
             )));
         }
         found
+            .skills
             .into_iter()
             .filter(|(_, skill)| only.contains(&skill.name))
             .collect()
@@ -513,6 +526,15 @@ async fn install(
         installed.push((name, target, skill.command.is_some()));
     }
 
+    // Copies that were passed over are reported for the skills that were actually installed: with
+    // `--skill ponytail-gain`, a variant of `ponytail-audit` is not this install's business.
+    let installed_names: Vec<&str> = installed.iter().map(|(name, _, _)| name.as_str()).collect();
+    let shadowed: Vec<&(String, String)> = found
+        .shadowed
+        .iter()
+        .filter(|(name, _)| installed_names.contains(&name.as_str()))
+        .collect();
+
     if json {
         let rows: Vec<serde_json::Value> = installed
             .iter()
@@ -526,7 +548,14 @@ async fn install(
             .collect();
         println!(
             "{}",
-            serde_json::json!({ "installed": rows, "skipped": skipped })
+            serde_json::json!({
+                "installed": rows,
+                "shadowed": shadowed
+                    .iter()
+                    .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
+                    .collect::<Vec<_>>(),
+                "broken": found.broken,
+            })
         );
         return Ok(());
     }
@@ -545,7 +574,21 @@ async fn install(
         };
         println!("  - {name}{}", note.dimmed());
     }
-    for problem in &skipped {
+    if !shadowed.is_empty() {
+        let count = if shadowed.len() == 1 {
+            "1 other copy was".to_string()
+        } else {
+            format!("{} other copies were", shadowed.len())
+        };
+        println!(
+            "  {}",
+            format!(
+                "{count} passed over — this repository ships a variant per agent, and the canonical one is installed"
+            )
+            .dimmed()
+        );
+    }
+    for problem in &found.broken {
         println!("  {}", format!("skipped — {problem}").dimmed());
     }
     println!("available now: `/skills` in a chat session, and `luna skill list` from the shell");
@@ -811,22 +854,29 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = extract_archive(&archive, temp.path()).unwrap();
 
-        let mut skipped = Vec::new();
-        let found = find_skills(&root, &mut skipped).unwrap();
-        let names: Vec<&str> = found.iter().map(|(_, skill)| skill.name.as_str()).collect();
+        let found = find_skills(&root).unwrap();
+        let names: Vec<&str> = found
+            .skills
+            .iter()
+            .map(|(_, skill)| skill.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec!["ponytail", "ponytail-debt"],
             "sorted, and the one without frontmatter is not a skill"
         );
         assert_eq!(
-            skipped.len(),
+            found.broken.len(),
             1,
             "the broken file is reported, not silently dropped"
         );
-        assert!(skipped[0].contains("SKILL.md"), "{skipped:?}");
+        assert!(found.broken[0].contains("SKILL.md"), "{:?}", found.broken);
         // The directory each skill came from, so the install copies the right one.
-        assert!(found[0].0.ends_with("skills/ponytail"), "{:?}", found[0].0);
+        assert!(
+            found.skills[0].0.ends_with("skills/ponytail"),
+            "{:?}",
+            found.skills[0].0
+        );
     }
 
     #[test]
@@ -847,9 +897,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = extract_archive(&archive, temp.path()).unwrap();
 
-        let mut skipped = Vec::new();
-        let found = find_skills(&root, &mut skipped).unwrap();
-        let names: Vec<&str> = found.iter().map(|(_, skill)| skill.name.as_str()).collect();
+        let found = find_skills(&root).unwrap();
+        let names: Vec<&str> = found
+            .skills
+            .iter()
+            .map(|(_, skill)| skill.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec!["ponytail", "ponytail-review"],
@@ -857,18 +910,24 @@ mod tests {
         );
         // The shallowest copy is the one that gets installed: the agent-specific ones are variants.
         assert!(
-            found[0].0.ends_with("skills/ponytail"),
+            found.skills[0].0.ends_with("skills/ponytail"),
             "the vendor-neutral copy wins: {:?}",
-            found[0].0
+            found.skills[0].0
         );
         assert_eq!(
-            skipped.len(),
+            found.shadowed.len(),
             2,
-            "both shadowed copies are reported: {skipped:?}"
+            "both shadowed copies are reported: {:?}",
+            found.shadowed
         );
-        assert!(skipped
-            .iter()
-            .all(|line| line.contains("another copy of 'ponytail'")));
+        assert!(
+            found
+                .shadowed
+                .iter()
+                .all(|(name, path)| name == "ponytail" && path.starts_with('.')),
+            "each is named with the agent directory it came from: {:?}",
+            found.shadowed
+        );
     }
 
     #[test]
@@ -877,9 +936,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let staging = temp.path().join(".incoming");
         let root = extract_archive(&archive, &staging).unwrap();
-        let mut skipped = Vec::new();
-        let found = find_skills(&root, &mut skipped).unwrap();
-        let (dir, skill) = &found[0];
+        let found = find_skills(&root).unwrap();
+        let (dir, skill) = &found.skills[0];
 
         let skills_dir = temp.path().join("skills");
         let name = safe_skill_dir_name(&skill.name).unwrap();
@@ -937,12 +995,12 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let root = extract_archive(&archive, &temp.path().join("incoming")).unwrap();
-        let mut skipped = Vec::new();
-        let found = find_skills(&root, &mut skipped).unwrap();
+        let found = find_skills(&root).unwrap();
         assert_eq!(
-            found.len(),
+            found.skills.len(),
             1,
-            "found in the staging root itself: {skipped:?}"
+            "found in the staging root itself: {:?}",
+            found.broken
         );
 
         // A skill directory carries more than its SKILL.md; that is the point of copying a tree.
