@@ -13,6 +13,7 @@ path = "src/main.rs"
 arboard = "3.4"
 base64 = "0.22"
 flate2 = "1"
+tar = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
 harness-core = { workspace = true }

@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod models;
 pub mod prompt_images;
 pub mod sessions;
+pub mod skill;
 pub mod skills;
 pub mod supervisor;
 pub mod usage;

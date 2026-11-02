@@ -16,6 +16,7 @@ use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
 use commands::models::{handle_models_command, ModelsCommand};
 use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
+use commands::skill::{handle_skill_command, SkillCommand};
 use commands::supervisor::run_supervisor_loop;
 use commands::voice::run_voice_loop;
 use eval::command::{handle_eval_command, EvalCommand};
@@ -167,6 +168,11 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         subcommand: Option<SessionsCommand>,
+    },
+    /// Install a skill from GitHub, or list the skills the loader picks up
+    Skill {
+        #[command(subcommand)]
+        subcommand: SkillCommand,
     },
     /// Manage multi-provider credentials and key rotation
     Auth {
@@ -542,6 +548,9 @@ async fn main() -> Result<(), HarnessError> {
                 )
                 .await?;
             }
+        }
+        Some(Commands::Skill { subcommand }) => {
+            handle_skill_command(subcommand, &config).await?;
         }
         Some(Commands::Supervisor { args }) => {
             run_supervisor_loop(args).await?;

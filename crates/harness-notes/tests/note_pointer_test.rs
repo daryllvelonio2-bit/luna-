@@ -187,7 +187,10 @@ async fn test_path_traversal_prevention() {
             id
         );
         assert!(
-            engine.update_note(id, Some("Hacked"), None, None).await.is_err(),
+            engine
+                .update_note(id, Some("Hacked"), None, None)
+                .await
+                .is_err(),
             "update_note should fail for traversal id '{}'",
             id
         );
