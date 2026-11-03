@@ -741,19 +741,22 @@ impl SessionStore for SqliteSessionStore {
     }
 
     async fn replay(&self, session_id: &str, limit: usize) -> Result<ReplayOutcome, HarnessError> {
-        let conn = self.conn.lock().await;
-        let total = count_live(&conn, session_id)?;
-        // Summaries are never dropped by the bound: they are the only trace of the turns they
-        // replaced, and there is at most a handful of them.
-        let mut history = query_summary_rows(&conn, session_id)?;
-        history.extend(query_ordinary_rows(&conn, session_id, Some(limit), false)?);
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let total = count_live(conn, &session_id)?;
+            // Summaries are never dropped by the bound: they are the only trace of the turns they
+            // replaced, and there is at most a handful of them.
+            let mut history = query_summary_rows(conn, &session_id)?;
+            history.extend(query_ordinary_rows(conn, &session_id, Some(limit), false)?);
 
-        let replayed = history.len();
-        Ok(ReplayOutcome {
-            history,
-            total,
-            replayed,
+            let replayed = history.len();
+            Ok(ReplayOutcome {
+                history,
+                total,
+                replayed,
+            })
         })
+        .await
     }
 
     async fn replay_transcript(
@@ -761,15 +764,18 @@ impl SessionStore for SqliteSessionStore {
         session_id: &str,
         limit: usize,
     ) -> Result<ReplayOutcome, HarnessError> {
-        let conn = self.conn.lock().await;
-        let total = count_ordinary(&conn, session_id)?;
-        let history = query_ordinary_rows(&conn, session_id, Some(limit), true)?;
-        let replayed = history.len();
-        Ok(ReplayOutcome {
-            history,
-            total,
-            replayed,
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            let total = count_ordinary(conn, &session_id)?;
+            let history = query_ordinary_rows(conn, &session_id, Some(limit), true)?;
+            let replayed = history.len();
+            Ok(ReplayOutcome {
+                history,
+                total,
+                replayed,
+            })
         })
+        .await
     }
 
     async fn record_compaction(
@@ -778,133 +784,150 @@ impl SessionStore for SqliteSessionStore {
         folded: &[i64],
         summary: &str,
     ) -> Result<i64, HarnessError> {
-        let mut conn = self.conn.lock().await;
-        let transaction = conn
-            .transaction()
-            .map_err(|error| session_error("failed to open a compaction transaction", error))?;
+        let session_id = session_id.to_string();
+        let folded = folded.to_vec();
+        let summary = summary.to_string();
+        self.with_conn(move |conn| {
+            let transaction = conn
+                .transaction()
+                .map_err(|error| session_error("failed to open a compaction transaction", error))?;
 
-        let seq: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| session_error("failed to allocate a summary sequence", error))?;
+            let seq: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| session_error("failed to allocate a summary sequence", error))?;
 
-        let timestamp = now();
-        transaction
-            .execute(
-                "INSERT INTO messages
-                    (session_id, seq, role, content, is_summary, created_at)
-                 VALUES (?1, ?2, 'system', ?3, 1, ?4)",
-                params![session_id, seq, summary, timestamp],
-            )
-            .map_err(|error| session_error("failed to write the summary row", error))?;
-        let _summary_id = transaction.last_insert_rowid();
-
-        if !folded.is_empty() {
-            let placeholders = vec!["?"; folded.len()].join(",");
-            let sql = format!(
-                "UPDATE messages SET compacted_at = ? WHERE id IN ({}) AND compacted_at IS NULL",
-                placeholders
-            );
-            let mut values = vec![Value::Text(timestamp.clone())];
-            values.extend(folded.iter().map(|id| Value::Integer(*id)));
+            let timestamp = now();
             transaction
-                .execute(&sql, params_from_iter(values.iter()))
-                .map_err(|error| session_error("failed to mark the compacted rows", error))?;
-        }
+                .execute(
+                    "INSERT INTO messages
+                        (session_id, seq, role, content, is_summary, created_at)
+                     VALUES (?1, ?2, 'system', ?3, 1, ?4)",
+                    params![session_id, seq, summary, timestamp],
+                )
+                .map_err(|error| session_error("failed to write the summary row", error))?;
+            let _summary_id = transaction.last_insert_rowid();
 
-        // Every stored size report describes a request made against the transcript this fold just
-        // replaced, so none of them may be believed again — see `clear_usage_reports`. Cleared in
-        // the same transaction as the fold, so a crash cannot leave a fold the bar has not been
-        // told about.
-        transaction
-            .execute(
+            if !folded.is_empty() {
+                let placeholders = vec!["?"; folded.len()].join(",");
+                let sql = format!(
+                    "UPDATE messages SET compacted_at = ? WHERE id IN ({}) AND compacted_at IS NULL",
+                    placeholders
+                );
+                let mut values = vec![Value::Text(timestamp.clone())];
+                values.extend(folded.iter().map(|id| Value::Integer(*id)));
+                transaction
+                    .execute(&sql, params_from_iter(values.iter()))
+                    .map_err(|error| session_error("failed to mark the compacted rows", error))?;
+            }
+
+            // Every stored size report describes a request made against the transcript this fold just
+            // replaced, so none of them may be believed again — see `clear_usage_reports`. Cleared in
+            // the same transaction as the fold, so a crash cannot leave a fold the bar has not been
+            // told about.
+            transaction
+                .execute(
+                    "UPDATE messages SET usage_json = NULL WHERE session_id = ?1",
+                    params![session_id],
+                )
+                .map_err(|error| session_error("failed to clear the retired size reports", error))?;
+
+            transaction
+                .execute(
+                    "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                    params![timestamp, session_id],
+                )
+                .map_err(|error| session_error("failed to touch the session", error))?;
+            transaction
+                .commit()
+                .map_err(|error| session_error("failed to commit the compaction", error))?;
+
+            debug!(
+                "Recorded a summary for session '{}' folding {} messages (seq {})",
+                session_id,
+                folded.len(),
+                seq
+            );
+            Ok(seq)
+        })
+        .await
+    }
+
+    async fn clear_usage_reports(&self, session_id: &str) -> Result<(), HarnessError> {
+        let session_id = session_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
                 "UPDATE messages SET usage_json = NULL WHERE session_id = ?1",
                 params![session_id],
             )
             .map_err(|error| session_error("failed to clear the retired size reports", error))?;
-
-        transaction
-            .execute(
-                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-                params![timestamp, session_id],
-            )
-            .map_err(|error| session_error("failed to touch the session", error))?;
-        transaction
-            .commit()
-            .map_err(|error| session_error("failed to commit the compaction", error))?;
-
-        debug!(
-            "Recorded a summary for session '{}' folding {} messages (seq {})",
-            session_id,
-            folded.len(),
-            seq
-        );
-        Ok(seq)
-    }
-
-    async fn clear_usage_reports(&self, session_id: &str) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "UPDATE messages SET usage_json = NULL WHERE session_id = ?1",
-            params![session_id],
-        )
-        .map_err(|error| session_error("failed to clear the retired size reports", error))?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn list(&self) -> Result<Vec<SessionRecord>, HarnessError> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare("SELECT id FROM sessions ORDER BY updated_at DESC")
-            .map_err(|error| session_error("failed to list sessions", error))?;
-        let ids = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| session_error("failed to list sessions", error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| session_error("failed to list sessions", error))?;
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM sessions ORDER BY updated_at DESC")
+                .map_err(|error| session_error("failed to list sessions", error))?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| session_error("failed to list sessions", error))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| session_error("failed to list sessions", error))?;
 
-        ids.iter().map(|id| read_session(&conn, id)).collect()
+            ids.iter().map(|id| read_session(conn, id)).collect()
+        })
+        .await
     }
 
     async fn most_recent(&self) -> Result<Option<String>, HarnessError> {
-        let conn = self.conn.lock().await;
-        conn.query_row(
-            "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .map(Some)
-        .or_else(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(session_error(
-                "failed to read the most recent session",
-                other,
-            )),
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(session_error(
+                    "failed to read the most recent session",
+                    other,
+                )),
+            })
         })
+        .await
     }
 
     async fn delete_session(&self, id: &str) -> Result<bool, HarnessError> {
-        let conn = self.conn.lock().await;
-        // `messages.session_id` is declared `REFERENCES sessions(id) ON DELETE CASCADE` and the
-        // schema enables foreign keys, so removing the session row is enough to drop its history
-        // without a second statement that could half-succeed.
-        let removed = conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id])
-            .map_err(|error| session_error("failed to delete the session", error))?;
-        Ok(removed > 0)
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            // `messages.session_id` is declared `REFERENCES sessions(id) ON DELETE CASCADE` and the
+            // schema enables foreign keys, so removing the session row is enough to drop its history
+            // without a second statement that could half-succeed.
+            let removed = conn
+                .execute("DELETE FROM sessions WHERE id = ?1", params![id])
+                .map_err(|error| session_error("failed to delete the session", error))?;
+            Ok(removed > 0)
+        })
+        .await
     }
 
     async fn delete_all_sessions(&self) -> Result<usize, HarnessError> {
-        let conn = self.conn.lock().await;
-        // One statement, one implicit transaction: the cascade drops every message row, so the
-        // store cannot be left holding messages whose session is already gone.
-        let removed = conn
-            .execute("DELETE FROM sessions", [])
-            .map_err(|error| session_error("failed to delete all sessions", error))?;
-        Ok(removed)
+        self.with_conn(|conn| {
+            // One statement, one implicit transaction: the cascade drops every message row, so the
+            // store cannot be left holding messages whose session is already gone.
+            let removed = conn
+                .execute("DELETE FROM sessions", [])
+                .map_err(|error| session_error("failed to delete all sessions", error))?;
+            Ok(removed)
+        })
+        .await
     }
 
     async fn fork_session(
@@ -912,63 +935,66 @@ impl SessionStore for SqliteSessionStore {
         source_id: &str,
         new_title: Option<&str>,
     ) -> Result<String, HarnessError> {
-        let mut conn = self.conn.lock().await;
+        let source_id = source_id.to_string();
+        let new_title = new_title.map(str::to_string);
+        self.with_conn(move |conn| {
+            let (title, name, model, compact_model) = conn
+                .query_row(
+                    "SELECT title, name, model, compact_model FROM sessions WHERE id = ?1",
+                    params![source_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|e| session_error(&format!("source session '{source_id}' not found"), e))?;
 
-        let (title, name, model, compact_model) = conn
-            .query_row(
-                "SELECT title, name, model, compact_model FROM sessions WHERE id = ?1",
-                params![source_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .map_err(|e| session_error(&format!("source session '{source_id}' not found"), e))?;
+            let forked_title = new_title.unwrap_or_else(|| {
+                if title.is_empty() {
+                    format!("Fork of {}", source_id)
+                } else {
+                    format!("Fork of {}", title)
+                }
+            });
 
-        let forked_title = new_title.map(str::to_string).unwrap_or_else(|| {
-            if title.is_empty() {
-                format!("Fork of {}", source_id)
-            } else {
-                format!("Fork of {}", title)
-            }
-        });
+            let new_id = format!("s{:x}", uuid::Uuid::new_v4().as_fields().0);
+            let now = chrono::Utc::now().to_rfc3339();
 
-        let new_id = format!("s{:x}", uuid::Uuid::new_v4().as_fields().0);
-        let now = chrono::Utc::now().to_rfc3339();
+            // One transaction, so a fork is all of it or none of it. Two statements used to mean a
+            // failure between them left a session row with no messages in it: a session that shows up in
+            // `luna sessions list` and answers nothing, with no trace of how it got there.
+            let transaction = conn
+                .transaction()
+                .map_err(|e| session_error("failed to open the fork transaction", e))?;
 
-        // One transaction, so a fork is all of it or none of it. Two statements used to mean a
-        // failure between them left a session row with no messages in it: a session that shows up in
-        // `luna sessions list` and answers nothing, with no trace of how it got there.
-        let transaction = conn
-            .transaction()
-            .map_err(|e| session_error("failed to open the fork transaction", e))?;
+            transaction
+                .execute(
+                    "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![new_id, now, now, forked_title, name, model, compact_model],
+                )
+                .map_err(|e| session_error("failed to create forked session record", e))?;
 
-        transaction
-            .execute(
-                "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![new_id, now, now, forked_title, name, model, compact_model],
-            )
-            .map_err(|e| session_error("failed to create forked session record", e))?;
+            transaction
+                .execute(
+                    "INSERT INTO messages (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at)
+                     SELECT ?1, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at
+                     FROM messages WHERE session_id = ?2
+                     ORDER BY seq ASC",
+                    params![new_id, source_id],
+                )
+                .map_err(|e| session_error("failed to copy messages for forked session", e))?;
 
-        transaction
-            .execute(
-                "INSERT INTO messages (session_id, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at)
-                 SELECT ?1, seq, role, content, tool_calls_json, tool_result_json, usage_json, is_summary, compacted_at, created_at
-                 FROM messages WHERE session_id = ?2
-                 ORDER BY seq ASC",
-                params![new_id, source_id],
-            )
-            .map_err(|e| session_error("failed to copy messages for forked session", e))?;
+            transaction
+                .commit()
+                .map_err(|e| session_error("failed to commit the fork", e))?;
 
-        transaction
-            .commit()
-            .map_err(|e| session_error("failed to commit the fork", e))?;
-
-        Ok(new_id)
+            Ok(new_id)
+        })
+        .await
     }
 }
