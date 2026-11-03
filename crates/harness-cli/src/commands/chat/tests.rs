@@ -87,6 +87,121 @@ fn a_fold_holds_everything_back() {
 }
 
 #[test]
+fn slash_commands_includes_workers() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/worker"),
+        "/worker command must be registered in SLASH_COMMANDS"
+    );
+}
+
+#[test]
+fn command_entries_lists_configured_workers_as_invokable_commands() {
+    use super::commands::command_entries;
+    use harness_core::{Config, WorkerProfile};
+
+    let mut config = Config::default();
+    config.workers.insert(
+        "carbon".to_string(),
+        WorkerProfile {
+            provider: "nvidia".to_string(),
+            model: "tiny-model".to_string(),
+            reasoning_effort: None,
+        },
+    );
+
+    let entries = command_entries(&config, &[]);
+    let carbon = entries
+        .iter()
+        .find(|entry| entry.name == "/carbon")
+        .expect("a worker shows up as its own slash command");
+    assert!(carbon.details.contains("tiny-model"), "{}", carbon.details);
+    assert!(entries.iter().any(|entry| entry.name == "/worker"));
+}
+
+#[test]
+fn command_entries_lists_installed_skills_as_invokable_commands() {
+    use super::commands::command_entries;
+    use harness_core::Config;
+    use harness_plugins::Skill;
+
+    let config = Config::default();
+    let skill = |name: &str, description: &str| Skill {
+        name: name.to_string(),
+        description: description.to_string(),
+        instructions: "Do the thing.".to_string(),
+        file_path: std::path::PathBuf::from(format!("{name}/SKILL.md")),
+        command: None,
+        timeout_secs: None,
+        parameters: None,
+    };
+    let skills = vec![
+        skill("review", "Review a diff carefully."),
+        // A skill cannot steal a built-in command name.
+        skill("model", "Not a real command."),
+        // Nor one with whitespace, which cannot be a slash command.
+        skill("two words", "Unreachable."),
+    ];
+
+    let entries = command_entries(&config, &skills);
+    let review = entries
+        .iter()
+        .find(|entry| entry.name == "/review")
+        .expect("an installed skill shows up as its own slash command");
+    assert!(review.details.contains("Skill"), "{}", review.details);
+    assert!(review.details.contains("Review a diff carefully."));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.name == "/model")
+            .count(),
+        1,
+        "the built-in /model must not be duplicated by a skill"
+    );
+    assert!(!entries.iter().any(|entry| entry.name == "/two words"));
+}
+
+#[test]
+fn built_in_commands_shadow_a_worker_with_the_same_name() {
+    use super::commands::command_entries;
+    use harness_core::{Config, WorkerProfile};
+
+    let mut config = Config::default();
+    config.workers.insert(
+        "model".to_string(),
+        WorkerProfile {
+            provider: "nvidia".to_string(),
+            model: "tiny-model".to_string(),
+            reasoning_effort: None,
+        },
+    );
+
+    let entries = command_entries(&config, &[]);
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry.name == "/model")
+            .count()
+            == 1,
+        "the built-in /model must not be duplicated by a worker"
+    );
+
+    config.workers.insert(
+        "provider".to_string(),
+        WorkerProfile {
+            provider: "nvidia".to_string(),
+            model: "tiny-model".to_string(),
+            reasoning_effort: None,
+        },
+    );
+    let entries = command_entries(&config, &[]);
+    assert!(
+        !entries.iter().any(|entry| entry.name == "/provider"),
+        "an alias of a built-in command must not be listed as a worker"
+    );
+}
+
+#[test]
 fn slash_commands_includes_sessions_picker() {
     use super::commands::SLASH_COMMANDS;
     assert!(
@@ -355,7 +470,7 @@ async fn handle_thinking_switch_sets_effort() {
 
 #[tokio::test]
 async fn execute_slash_command_plan_toggle_and_unrecognized() {
-    use super::commands::execute_slash_command;
+    use super::commands::{execute_slash_command, SlashOutcome};
     use super::ui::ChatUi;
     use harness_core::{
         tools::TodoScope, Agent, AgentConfig, Config, DefaultToolRegistry, SqliteSessionStore,
@@ -425,13 +540,15 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &mut process_expanded,
         &todo_scope,
         None,
+        &[],
         &plan_mode,
+        None,
         None,
         None,
     )
     .await
     .unwrap();
-    assert!(!res);
+    assert!(matches!(res, SlashOutcome::Continue));
     assert!(plan_mode.load(Ordering::SeqCst));
 
     // /plan again toggles it off
@@ -453,7 +570,9 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &mut process_expanded,
         &todo_scope,
         None,
+        &[],
         &plan_mode,
+        None,
         None,
         None,
     )
@@ -480,13 +599,15 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &mut process_expanded,
         &todo_scope,
         None,
+        &[],
         &plan_mode,
+        None,
         None,
         None,
     )
     .await
     .unwrap();
-    assert!(!help_res);
+    assert!(matches!(help_res, SlashOutcome::Continue));
 
     // 3. Unrecognized command returns Ok(false) without breaking
     let unrec_res = execute_slash_command(
@@ -507,11 +628,13 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &mut process_expanded,
         &todo_scope,
         None,
+        &[],
         &plan_mode,
+        None,
         None,
         None,
     )
     .await
     .unwrap();
-    assert!(!unrec_res);
+    assert!(matches!(unrec_res, SlashOutcome::Continue));
 }

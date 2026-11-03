@@ -71,6 +71,8 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
         || leaf.contains("o4")
         || leaf.contains("gpt-5")
         || leaf.contains("deepseek-r1")
+        || leaf.contains("deepseek-v4")
+        || leaf.contains("deepseek-v4.1")
         || leaf.contains("reasoner")
         || leaf.contains("reasoning")
         || leaf.contains("-thinking")

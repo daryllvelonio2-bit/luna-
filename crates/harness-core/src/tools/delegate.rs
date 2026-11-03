@@ -14,14 +14,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::{Agent, AgentEvent, SessionBinding};
-use crate::approval::{ApprovalSettings, NonInteractive};
-use crate::config::Config;
+use crate::approval::{ApprovalSettings, Approver, NonInteractive};
+use crate::config::{Config, WorkerProfile};
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
 use crate::session::{SessionStore, SqliteSessionStore};
 use crate::traits::{MemoryEngine, ModelProvider, NotesEngine, Tool, ToolRegistry};
 use crate::types::{
-    CompletionOptions, MemoryRecord, Message, Note, StreamEvent, ToolDefinition, ToolResult,
+    CompletionOptions, MemoryRecord, Message, Note, ReasoningEffort, StreamEvent, ToolDefinition,
+    ToolResult,
 };
 
 /// A subagent fails only after this long without any model or tool activity.
@@ -270,6 +271,10 @@ pub type SubagentCompletionNotifier = Arc<dyn Fn(&SubagentTaskRecord) + Send + S
 pub struct SubagentTaskSpec {
     pub goal: String,
     pub context: Option<String>,
+    /// Overrides the prompt sent to the child when set. Workers use it to attach images to the
+    /// task without those data URLs leaking into the goal shown in the subagent list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// Monotonic milliseconds used by the inactivity watchdog.
@@ -342,6 +347,51 @@ fn current_event_notifier(
     slot.try_read().ok().and_then(|guard| guard.clone())
 }
 
+/// Publish a finished child: store the record, emit the lifecycle event, call the completion
+/// notifier, and drop a notice into the main conversation's steer queue.
+///
+/// Shared by delegated children and workers so both show up in the existing subagent UI and both
+/// report their result back the same way.
+async fn record_subagent_finish(
+    tasks_state: &Arc<RwLock<HashMap<String, SubagentTaskRecord>>>,
+    notifier: &Arc<RwLock<Option<SubagentCompletionNotifier>>>,
+    event_notifier: Option<&SubagentTaskEventNotifier>,
+    steer_handle: &SteerQueueHandle,
+    record: SubagentTaskRecord,
+) {
+    let status = record.status.clone();
+    let id = record.id.clone();
+    let goal = record.goal.clone();
+
+    tasks_state.write().await.insert(id.clone(), record.clone());
+
+    notify_subagent_event(
+        event_notifier,
+        SubagentTaskEvent::Finished {
+            record: record.clone(),
+        },
+    );
+
+    if let Some(ref cb) = *notifier.read().await {
+        cb(&record);
+    }
+
+    if let Some(ref steer) = *steer_handle.read().await {
+        let (status_label, output_text) = match &status {
+            SubagentStatus::Completed { reply, .. } => ("completed", reply.as_str()),
+            SubagentStatus::Failed { error, .. } => ("failed", error.as_str()),
+            _ => ("finished", ""),
+        };
+        let steer_notice = format!(
+            "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
+            id, goal, status_label, output_text
+        );
+        if let Ok(mut steer_q) = steer.lock() {
+            steer_q.push_back(steer_notice);
+        }
+    }
+}
+
 /// Await a child turn until it finishes or stops making progress.
 ///
 /// The old implementation put a wall-clock timeout around the whole turn, so a healthy child
@@ -403,6 +453,9 @@ pub struct DelegateTaskTool {
     event_notifier: Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
     steer_handle: SteerQueueHandle,
     cancels: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    /// The interactive chat's approval gate, used by workers so their writes ask the same human
+    /// as the main turn. Regular delegated children keep the fail-closed `NonInteractive` gate.
+    worker_approver: Arc<RwLock<Option<Arc<dyn Approver>>>>,
 }
 
 impl DelegateTaskTool {
@@ -425,6 +478,7 @@ impl DelegateTaskTool {
             event_notifier: Arc::new(RwLock::new(None)),
             steer_handle: Arc::new(RwLock::new(None)),
             cancels: Arc::new(RwLock::new(HashMap::new())),
+            worker_approver: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -449,6 +503,145 @@ impl DelegateTaskTool {
         if let Ok(mut lock) = self.steer_handle.try_write() {
             *lock = Some(steer_handle);
         }
+    }
+
+    /// Give workers the chat's approval gate. Without this a worker falls back to the same
+    /// fail-closed gate as a delegated child and cannot mutate anything under `approval = ask`.
+    pub fn set_worker_approver(&self, approver: Arc<dyn Approver>) {
+        if let Ok(mut lock) = self.worker_approver.try_write() {
+            *lock = Some(approver);
+        }
+    }
+
+    /// Run a saved worker profile against a fork of `source_session_id`.
+    ///
+    /// The fork is the point: the worker replays the conversation as it stood when it was invoked,
+    /// so "fix this issue" means the same thing to it as it does to the main session. The child is
+    /// named `worker:<name>`, which is what hides it from the resumable session picker.
+    ///
+    /// `provider` must already be bound to the profile's model — the CLI builds it from the same
+    /// credential manager and catalog as the main provider.
+    pub async fn spawn_worker(
+        &self,
+        name: &str,
+        task: &str,
+        prompt: Option<&str>,
+        source_session_id: &str,
+        provider: Arc<dyn ModelProvider>,
+        profile: &WorkerProfile,
+    ) -> Result<String, HarnessError> {
+        let store = self.store.clone().ok_or_else(|| {
+            HarnessError::SessionError(
+                "worker needs a session store to fork the current conversation".to_string(),
+            )
+        })?;
+
+        let label = format!("worker:{name}");
+        let child_id = store.fork_session(source_session_id, Some(&label)).await?;
+        store.set_name(&child_id, &label).await?;
+        store
+            .set_model(&child_id, &profile.provider, &profile.model)
+            .await?;
+
+        let config = self.config.read().await.clone();
+        let started_at = Utc::now();
+        let log_path = config
+            .paths
+            .jobs_dir
+            .join(format!("{child_id}.log"))
+            .to_string_lossy()
+            .to_string();
+        let record = SubagentTaskRecord {
+            id: child_id.clone(),
+            goal: task.to_string(),
+            context: Some(format!("worker profile: {label}")),
+            status: SubagentStatus::Running,
+            started_at,
+            log_path: Some(log_path.clone()),
+        };
+        self.tasks_state
+            .write()
+            .await
+            .insert(child_id.clone(), record);
+
+        let event_notifier = current_event_notifier(&self.event_notifier);
+        notify_subagent_event(
+            event_notifier.as_ref(),
+            SubagentTaskEvent::Started {
+                id: child_id.clone(),
+                goal: task.to_string(),
+            },
+        );
+
+        let cancel = CancellationToken::new();
+        self.cancels
+            .write()
+            .await
+            .insert(child_id.clone(), cancel.clone());
+
+        let memory = self.memory.clone();
+        let notes = self.notes.clone();
+        let tasks_state = self.tasks_state.clone();
+        let cancels = self.cancels.clone();
+        let notifier = self.notifier.clone();
+        let steer_handle = self.steer_handle.clone();
+        let approver = self
+            .worker_approver
+            .try_read()
+            .ok()
+            .and_then(|lock| lock.clone());
+        let effort = profile.reasoning_effort;
+        let cid = child_id.clone();
+        let goal = task.to_string();
+        let prompt = prompt.map(str::to_string);
+
+        tokio::spawn(async move {
+            let (id, goal, res) = run_single_subagent(
+                provider,
+                memory,
+                notes,
+                Some(store),
+                config,
+                cid.clone(),
+                SubagentTaskSpec {
+                    goal: goal.clone(),
+                    context: None,
+                    prompt,
+                },
+                cancel,
+                event_notifier.clone(),
+                approver,
+                effort,
+            )
+            .await;
+
+            cancels.write().await.remove(&cid);
+
+            let finished_at = Utc::now();
+            let status = match res {
+                Ok(reply) => SubagentStatus::Completed { reply, finished_at },
+                Err(error) => SubagentStatus::Failed { error, finished_at },
+            };
+            let finished_record = SubagentTaskRecord {
+                id,
+                goal,
+                context: Some(format!("worker profile: {label}")),
+                status,
+                started_at,
+                log_path: Some(log_path),
+            };
+
+            record_subagent_finish(
+                &tasks_state,
+                &notifier,
+                event_notifier.as_ref(),
+                &steer_handle,
+                finished_record,
+            )
+            .await;
+        });
+
+        Ok(child_id)
     }
 
     pub fn with_notifier(self, notifier: SubagentCompletionNotifier) -> Self {
@@ -498,6 +691,8 @@ async fn run_single_subagent(
     task: SubagentTaskSpec,
     sub_cancel: CancellationToken,
     event_notifier: Option<SubagentTaskEventNotifier>,
+    approver: Option<Arc<dyn Approver>>,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> (String, String, Result<String, String>) {
     let child_registry = Arc::new(DefaultToolRegistry::new());
     let read_cache = crate::tools::ReadCache::new();
@@ -560,17 +755,17 @@ async fn run_single_subagent(
 
     let observer_tracker = tracker.clone();
     let log_obs = logger.clone();
+    let approver: Arc<dyn Approver> = approver.unwrap_or_else(|| {
+        Arc::new(NonInteractive::new(
+            "delegated subagent: interactive approval is unavailable in background execution",
+        ))
+    });
     let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
         .with_permissions(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
                 .unwrap_or_default(),
         )
-        .with_approval(
-            Arc::new(NonInteractive::new(
-                "delegated subagent: interactive approval is unavailable in background execution",
-            )),
-            ApprovalSettings::default(),
-        )
+        .with_approval(approver, ApprovalSettings::default())
         .with_observer(Arc::new(move |event| match event {
             AgentEvent::ReasoningDelta(delta) => {
                 log_obs.append(&delta);
@@ -595,18 +790,25 @@ async fn run_single_subagent(
             }
         }));
 
+    if let Some(effort) = reasoning_effort {
+        agent.set_reasoning_effort(Some(effort));
+    }
+
     if let Some(s) = store {
         let _ = s.ensure_session(&child_session_id).await;
         agent = agent.with_session(SessionBinding {
             store: s,
             session_id: child_session_id.clone(),
-            resume_max_messages: 50,
+            resume_max_messages: config.session.resume_max_messages,
         });
     }
 
-    let prompt = match &task.context {
-        Some(ctx) => format!("GOAL: {}\n\nCONTEXT:\n{}", task.goal, ctx),
-        None => format!("GOAL: {}", task.goal),
+    let prompt = match &task.prompt {
+        Some(prompt) => prompt.clone(),
+        None => match &task.context {
+            Some(ctx) => format!("GOAL: {}\n\nCONTEXT:\n{}", task.goal, ctx),
+            None => format!("GOAL: {}", task.goal),
+        },
     };
 
     let run_future = agent.run_turn(&prompt, sub_cancel.clone());
@@ -1003,6 +1205,8 @@ impl Tool for DelegateTaskTool {
                                 task,
                                 sub_cancel,
                                 child_event_notifier,
+                                None,
+                                None,
                             )
                             .await;
                             (sub_idx, id, goal, res, started_at, context)
@@ -1151,9 +1355,12 @@ impl Tool for DelegateTaskTool {
                             SubagentTaskSpec {
                                 goal: goal_str,
                                 context: ctx_opt.clone(),
+                                prompt: None,
                             },
                             sub_cancel,
                             child_event_notifier,
+                            None,
+                            None,
                         )
                         .await;
 
@@ -1169,45 +1376,19 @@ impl Tool for DelegateTaskTool {
                             id: id.clone(),
                             goal: goal.clone(),
                             context: ctx_opt,
-                            status: status.clone(),
+                            status,
                             started_at: now,
                             log_path: Some(log_path_task),
                         };
 
-                        tasks_state
-                            .write()
-                            .await
-                            .insert(id.clone(), finished_record.clone());
-
-                        notify_subagent_event(
+                        record_subagent_finish(
+                            &tasks_state,
+                            &notifier,
                             finish_event_notifier.as_ref(),
-                            SubagentTaskEvent::Finished {
-                                record: finished_record.clone(),
-                            },
-                        );
-
-                        // Invoke notifier callback if registered
-                        if let Some(ref cb) = *notifier.read().await {
-                            cb(&finished_record);
-                        }
-
-                        // Send steer notice into agent loop
-                        if let Some(ref steer) = *steer_handle.read().await {
-                            let (status_label, output_text) = match &status {
-                                SubagentStatus::Completed { reply, .. } => {
-                                    ("completed", reply.as_str())
-                                }
-                                SubagentStatus::Failed { error, .. } => ("failed", error.as_str()),
-                                _ => ("finished", ""),
-                            };
-                            let steer_notice = format!(
-                                "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
-                                id, goal, status_label, output_text
-                            );
-                            if let Ok(mut steer_q) = steer.lock() {
-                                steer_q.push_back(steer_notice);
-                            }
-                        }
+                            &steer_handle,
+                            finished_record,
+                        )
+                        .await;
                     });
                 }
 

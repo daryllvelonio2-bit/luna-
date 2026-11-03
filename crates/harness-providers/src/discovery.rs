@@ -216,6 +216,7 @@ impl ModelDiscovery {
         }
         for p in [
             "opencode",
+            "opencode-cli",
             "opencode-zen",
             "antigravity",
             "kiro",
@@ -277,6 +278,7 @@ impl ModelDiscovery {
                 let is_auto = matches!(
                     provider.as_str(),
                     "opencode"
+                        | "opencode-cli"
                         | "opencode-zen"
                         | "antigravity"
                         | "agy"
@@ -328,6 +330,12 @@ impl ModelDiscovery {
         if provider_id == "antigravity" || provider_id == "agy" {
             let (bearer, _) = crate::antigravity::extract_bearer_token(api_key);
             return crate::antigravity::fetch_antigravity_models(&http_client, &bearer)
+                .await
+                .map(names_only);
+        }
+
+        if provider_id == "opencode-cli" || provider_id == "opencode-headless" {
+            return crate::opencode::fetch_opencode_cli_models()
                 .await
                 .map(names_only);
         }

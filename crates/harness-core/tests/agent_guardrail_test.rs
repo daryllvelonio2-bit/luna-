@@ -319,6 +319,177 @@ async fn test_agent_handles_empty_response_without_getting_stuck() {
     assert!(err.to_string().contains("empty response") || err.to_string().contains("overloaded"));
 }
 
+/// A stream that ends on the output cap without one usable part: the shape Code Assist produces
+/// when thinking spends the whole `maxOutputTokens` — a 200 response, a `MAX_TOKENS` finish, and
+/// nothing the turn loop can use.
+struct TruncatedStreamProvider {
+    completions: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for TruncatedStreamProvider {
+    fn provider_id(&self) -> &str {
+        "truncated-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        self.completions.fetch_add(1, Ordering::SeqCst);
+        Ok(Message::assistant("the buffered path must not be asked"))
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<
+        futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>,
+        HarnessError,
+    > {
+        Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+            StreamEvent::Completed {
+                finish_reason: Some("max_tokens".to_string()),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 4096,
+                    total_tokens: 4106,
+                    cached_tokens: 0,
+                }),
+            },
+        )])))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+/// A cap the thinking consumed is not the transient empty shape: re-sending the identical request
+/// returns the identical nothing, so the turn must fail once, with the condition named.
+#[tokio::test]
+async fn a_reply_cut_off_at_the_output_cap_is_not_retried_as_an_empty_answer() {
+    let provider = Arc::new(TruncatedStreamProvider {
+        completions: AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig::default(),
+    );
+
+    let error = agent
+        .run_task("Hello", CancellationToken::new())
+        .await
+        .expect_err("a truncated reply is not an answer");
+    assert!(
+        error.to_string().contains("output-token limit"),
+        "the condition has to be named: {error}"
+    );
+    assert!(!error.is_retryable(), "{error}");
+    assert_eq!(
+        provider.completions.load(Ordering::SeqCst),
+        0,
+        "the buffered path must not re-send the request that just hit the cap"
+    );
+}
+
+/// A stream that reaches the end of the request — it reports usage — but carries no answer.
+struct UsageOnlyStreamProvider {
+    streams: AtomicUsize,
+    completions: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for UsageOnlyStreamProvider {
+    fn provider_id(&self) -> &str {
+        "usage-only-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        self.completions.fetch_add(1, Ordering::SeqCst);
+        Ok(Message::assistant("the duplicate request answered"))
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<
+        futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>,
+        HarnessError,
+    > {
+        self.streams.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+            StreamEvent::Completed {
+                finish_reason: None,
+                usage: Some(TokenUsage::estimated(10, 0)),
+            },
+        )])))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+/// A usage frame says the model ran and answered with nothing. Re-posting the identical request
+/// through the buffered path at that moment is a duplicate, not a recovery: the retry loop owns the
+/// second attempt, and it is the one that backs off first.
+#[tokio::test]
+async fn an_empty_stream_that_reached_the_model_is_not_reposted() {
+    let provider = Arc::new(UsageOnlyStreamProvider {
+        streams: AtomicUsize::new(0),
+        completions: AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig::default(),
+    );
+
+    let error = agent
+        .run_task("Hello", CancellationToken::new())
+        .await
+        .expect_err("an empty answer is not a reply");
+    assert!(
+        error.to_string().contains("empty response"),
+        "the shape stays diagnosable: {error}"
+    );
+    assert_eq!(
+        provider.completions.load(Ordering::SeqCst),
+        0,
+        "the buffered path must not re-post a request the model already answered with nothing"
+    );
+    assert_eq!(
+        provider.streams.load(Ordering::SeqCst),
+        4,
+        "one attempt per try, all owned by the retry loop"
+    );
+}
+
 struct SteeringMockProvider {
     steer_observed: Arc<std::sync::atomic::AtomicBool>,
 }

@@ -398,6 +398,10 @@ pub async fn execute_antigravity_completion(
     tools: &[ToolDefinition],
     options: &CompletionOptions,
 ) -> Result<Message, HarnessError> {
+    // Measured across the POST too: the wait before the first frame is where a long prompt is
+    // spent, and timing only the drain reported "ended after 0s" for a request that took a minute.
+    let started = std::time::Instant::now();
+
     // Draining the streaming path keeps one parser for both: the buffered call and the live one
     // classify thought chunks, text and function calls identically.
     let mut stream = stream_antigravity_completion(
@@ -411,11 +415,11 @@ pub async fn execute_antigravity_completion(
     )
     .await?;
 
-    let started = std::time::Instant::now();
     let mut full_text = String::new();
     let mut thought_buf = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage = None;
+    let mut finish_reason = None;
 
     while let Some(event) = stream.next().await {
         match event? {
@@ -442,10 +446,14 @@ pub async fn execute_antigravity_completion(
                 }
             }
             StreamEvent::Completed {
-                usage: event_usage, ..
+                usage: event_usage,
+                finish_reason: event_finish,
             } => {
                 if event_usage.is_some() {
                     usage = event_usage;
+                }
+                if event_finish.is_some() {
+                    finish_reason = event_finish;
                 }
             }
         }
@@ -482,6 +490,17 @@ pub async fn execute_antigravity_completion(
 
     let elapsed = started.elapsed();
     if full_text.trim().is_empty() && tool_calls.is_empty() {
+        // The model spent the whole output budget before writing anything. Retrying the same
+        // request with the same cap is the same nothing, so this must not look transient.
+        if matches!(
+            finish_reason.as_deref(),
+            Some("max_tokens") | Some("length")
+        ) {
+            return Err(HarnessError::output_limit_exhausted(
+                "antigravity",
+                options.max_tokens,
+            ));
+        }
         if let Some(r) = reasoning {
             return Ok(Message {
                 role: Role::Assistant,

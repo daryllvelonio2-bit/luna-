@@ -106,43 +106,10 @@ pub async fn show_background_task_viewer(
             header_lines.push(divider.clone());
         }
 
-        // 3. Task Metadata Card
-        let is_subagent = task.id.starts_with("sub_");
-        let status_badge = format_process_status(&task.status);
-        header_lines.push(format!(
-            "  {} {}",
-            if is_subagent {
-                "Goal:".bold()
-            } else {
-                "Command:".bold()
-            },
-            dialoguer::console::truncate_str(&task.command, width.saturating_sub(12), "…")
-        ));
-        header_lines.push(format!(
-            "  {} {}   {} {}",
-            "Status:".bold(),
-            status_badge,
-            "Elapsed:".dimmed(),
-            format!("{}s", task.elapsed_secs).dimmed()
-        ));
-        if is_subagent {
-            header_lines.push(format!(
-                "  {} {}",
-                "Type:".dimmed(),
-                "delegated subagent".dimmed()
-            ));
-        } else {
-            header_lines.push(format!(
-                "  {} {}",
-                "Workdir:".dimmed(),
-                dialoguer::console::truncate_str(&task.workdir, width.saturating_sub(12), "…")
-            ));
-        }
-        header_lines.push(format!(
-            "  {} {}",
-            "Log:".dimmed(),
-            dialoguer::console::truncate_str(&task.log_path, width.saturating_sub(12), "…")
-        ));
+        // 3. One compact summary line. The old metadata card spent five rows on goal, status,
+        // type and log path; the status and what the task is doing fit on one, leaving the rest
+        // of the screen for the log itself.
+        header_lines.push(format_task_summary(task, width));
         header_lines.push(divider.clone());
 
         // 4. Output / Logs Content
@@ -165,6 +132,18 @@ pub async fn show_background_task_viewer(
                         .to_string(),
                 );
             }
+        }
+
+        // The log ends when the child stops writing, not when its last tool call returned. A
+        // finished task therefore gets an explicit terminal marker, so the last "▶ Tool Call"
+        // line cannot read as work that is still in flight.
+        if task.status != "running" {
+            content_lines.push(String::new());
+            content_lines.push(format!(
+                "  {}  {}",
+                format_process_status(&task.status),
+                format!("finished after {}s", task.elapsed_secs).dimmed()
+            ));
         }
 
         let footer_lines_count = 2;
@@ -390,7 +369,10 @@ pub(crate) async fn collect_tasks(
     // Delegated Subagents
     if let Some(dt) = delegate_tool {
         for sub in dt.list_tasks().await {
-            let elapsed_secs = (chrono::Utc::now() - sub.started_at).num_seconds().max(0) as u64;
+            // A finished task's elapsed time is frozen at its finish; reading `Utc::now()` made a
+            // completed child look like it was still running (the timer kept climbing) even
+            // though its status said COMPLETED.
+            let elapsed_secs = task_elapsed_secs(&sub.status, sub.started_at, chrono::Utc::now());
             let status = match &sub.status {
                 harness_core::tools::delegate::SubagentStatus::Running => "running".to_string(),
                 harness_core::tools::delegate::SubagentStatus::Completed { .. } => {
@@ -400,10 +382,21 @@ pub(crate) async fn collect_tasks(
                     format!("failed: {error}")
                 }
             };
+            // Worker records are recognizable by the marker `spawn_worker` puts in their context;
+            // their ids are ordinary forked session ids, not the `sub_*` shape.
+            let is_worker = sub
+                .context
+                .as_deref()
+                .is_some_and(|context| context.starts_with("worker profile:"));
+            let kind = if is_worker { "worker" } else { "subagent" };
             tasks.push(JobSummary {
                 id: sub.id.clone(),
-                command: format!("subagent: {}", sub.goal),
-                workdir: "delegated subagent".to_string(),
+                command: format!("{kind}: {}", sub.goal),
+                workdir: if is_worker {
+                    "worker (forked conversation)".to_string()
+                } else {
+                    "delegated subagent".to_string()
+                },
                 status,
                 elapsed_secs,
                 log_path: sub.log_path.unwrap_or_else(|| format!("{}.log", sub.id)),
@@ -412,6 +405,53 @@ pub(crate) async fn collect_tasks(
     }
 
     tasks
+}
+
+/// A delegated child or worker runs as an agent turn, not a shell job.
+fn task_is_subagent(task: &JobSummary) -> bool {
+    task.id.starts_with("sub_")
+        || task.command.starts_with("worker:")
+        || task.command.starts_with("subagent:")
+}
+
+/// How long the task ran: `now` while it runs, and the recorded finish time once it stops.
+fn task_elapsed_secs(
+    status: &harness_core::tools::delegate::SubagentStatus,
+    started_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    let ended_at = match status {
+        harness_core::tools::delegate::SubagentStatus::Running => now,
+        harness_core::tools::delegate::SubagentStatus::Completed { finished_at, .. }
+        | harness_core::tools::delegate::SubagentStatus::Failed { finished_at, .. } => *finished_at,
+    };
+    (ended_at - started_at).num_seconds().max(0) as u64
+}
+
+/// The one-line header for the selected task: status, elapsed time, kind, and its subject.
+///
+/// Deliberately compact: the screen is for the log, so the old five-row metadata card
+/// (goal/status/type/log) is collapsed to this.
+fn format_task_summary(task: &JobSummary, width: usize) -> String {
+    let kind = if task.command.starts_with("worker:") {
+        "worker"
+    } else if task_is_subagent(task) {
+        "subagent"
+    } else {
+        "job"
+    };
+    let subject = task
+        .command
+        .strip_prefix("worker: ")
+        .or_else(|| task.command.strip_prefix("subagent: "))
+        .unwrap_or(&task.command);
+    format!(
+        "  {}  {}  {}  {}",
+        format_process_status(&task.status),
+        format!("{}s", task.elapsed_secs).dimmed(),
+        kind.dimmed(),
+        dialoguer::console::truncate_str(subject, width.saturating_sub(34), "…")
+    )
 }
 
 fn format_process_status(status: &str) -> colored::ColoredString {
@@ -425,5 +465,63 @@ fn format_process_status(status: &str) -> colored::ColoredString {
         "✖ KILLED".dimmed()
     } else {
         status.normal()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(command: &str, status: &str) -> JobSummary {
+        JobSummary {
+            id: "s41253240".to_string(),
+            command: command.to_string(),
+            workdir: "worker (forked conversation)".to_string(),
+            status: status.to_string(),
+            elapsed_secs: 485,
+            log_path: "/home/janelle/.luna/jobs/s41253240.log".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_task_header_is_one_compact_status_line() {
+        let line = dialoguer::console::strip_ansi_codes(&format_task_summary(
+            &task("worker: fix the failing analytics tests", "completed"),
+            100,
+        ))
+        .to_string();
+
+        assert_eq!(line.matches('\n').count(), 0, "the header is one row");
+        assert!(line.contains("COMPLETED"), "{line}");
+        assert!(line.contains("485s"), "{line}");
+        assert!(line.contains("worker"), "{line}");
+        assert!(line.contains("fix the failing analytics tests"), "{line}");
+        for removed in ["Goal:", "Status:", "Type:", "Log:"] {
+            assert!(
+                !line.contains(removed),
+                "the old metadata card label {removed} is gone: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_tasks_elapsed_time_stops_at_its_finish() {
+        use harness_core::tools::delegate::SubagentStatus;
+
+        let started_at = chrono::Utc::now();
+        let finished_at = started_at + chrono::Duration::seconds(10);
+        let now = started_at + chrono::Duration::seconds(500);
+
+        let completed = SubagentStatus::Completed {
+            reply: "done".to_string(),
+            finished_at,
+        };
+        assert_eq!(task_elapsed_secs(&completed, started_at, now), 10);
+
+        // A running task keeps counting; only finish freezes the clock.
+        assert_eq!(
+            task_elapsed_secs(&SubagentStatus::Running, started_at, now),
+            500
+        );
     }
 }

@@ -4,12 +4,12 @@
 //! `dialoguer` themselves, so a picker on the alternate path (the `/connect` flow, the model
 //! switch) looks and behaves exactly like the slash-command menu.
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use colored::Colorize;
 use tokio::sync::mpsc;
 
-use super::{SlashCommand, SLASH_COMMANDS};
+use super::CommandEntry;
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::render::PROMPT;
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
@@ -21,6 +21,10 @@ use harness_providers::{
 pub(crate) async fn select_slash_command(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
+    entries: &[CommandEntry],
+    // The menu owns the keyboard while it is open, so Ctrl+V has to be handled here as well;
+    // otherwise pasting a screenshot after typing `/worker` silently does nothing.
+    pending_images: &Arc<Mutex<Vec<String>>>,
 ) -> Option<String> {
     if !ui.is_attended {
         return None;
@@ -31,17 +35,19 @@ pub(crate) async fn select_slash_command(
 
     let mut selected: usize = 0;
 
-    let get_filtered = |filter: &str| -> Vec<(usize, &'static SlashCommand)> {
-        let f = filter
-            .strip_prefix('/')
-            .unwrap_or(filter)
-            .trim()
-            .to_lowercase();
+    let get_filtered = |filter: &str| -> Vec<(usize, &CommandEntry)> {
+        let raw = filter.strip_prefix('/').unwrap_or(filter);
+        // Once the user has typed past the command name, the menu has done its job. Keeping it
+        // open while they write the argument covered the very lines they were typing into.
+        if raw.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let f = raw.trim().to_lowercase();
         if f.is_empty() {
-            return SLASH_COMMANDS.iter().enumerate().collect();
+            return entries.iter().enumerate().collect();
         }
         let f_cmd = f.split_whitespace().next().unwrap_or(&f);
-        let mut matches: Vec<(usize, &'static SlashCommand)> = SLASH_COMMANDS
+        let mut matches: Vec<(usize, &CommandEntry)> = entries
             .iter()
             .enumerate()
             .filter(|(_, cmd)| {
@@ -180,12 +186,11 @@ pub(crate) async fn select_slash_command(
     print!("\x1b[{}A\r{}", BOX_ROWS + 2, ui.prompt_row(&buf));
     let _ = io::stdout().flush();
 
-    let draw_menu = |sel: usize, filt: &str, buf_str: &str| {
-        let lines = render_box(sel, filt);
+    let erase_menu = |buf_str: &str| {
         print!("\x1b[2B\r");
-        for (i, line) in lines.iter().enumerate() {
-            print!("\x1b[2K{}", line);
-            if i + 1 < lines.len() {
+        for i in 0..BOX_ROWS {
+            print!("\x1b[2K");
+            if i + 1 < BOX_ROWS {
                 print!("\x1b[1B\r");
             }
         }
@@ -193,11 +198,19 @@ pub(crate) async fn select_slash_command(
         let _ = io::stdout().flush();
     };
 
-    let erase_menu = |buf_str: &str| {
+    let draw_menu = |sel: usize, filt: &str, buf_str: &str| {
+        // The argument starts after the first space: hide the menu instead of replacing it with
+        // an empty "(no matching commands)" box that still covers the transcript.
+        let raw = filt.strip_prefix('/').unwrap_or(filt);
+        if raw.contains(char::is_whitespace) {
+            erase_menu(buf_str);
+            return;
+        }
+        let lines = render_box(sel, filt);
         print!("\x1b[2B\r");
-        for i in 0..BOX_ROWS {
-            print!("\x1b[2K");
-            if i + 1 < BOX_ROWS {
+        for (i, line) in lines.iter().enumerate() {
+            print!("\x1b[2K{}", line);
+            if i + 1 < lines.len() {
                 print!("\x1b[1B\r");
             }
         }
@@ -240,9 +253,9 @@ pub(crate) async fn select_slash_command(
             }
             AppKey::Enter => {
                 if !filtered.is_empty() && selected < filtered.len() {
-                    let cmd_name = filtered[selected].1.name;
+                    let cmd_name = &filtered[selected].1.name;
                     let trimmed = filter_str.trim();
-                    if let Some(rest) = trimmed.strip_prefix(cmd_name) {
+                    if let Some(rest) = trimmed.strip_prefix(cmd_name.as_str()) {
                         let rest = rest.trim();
                         if !rest.is_empty() {
                             result = Some(format!("{} {}", cmd_name, rest));
@@ -268,10 +281,10 @@ pub(crate) async fn select_slash_command(
             }
             AppKey::Tab => {
                 if !filtered.is_empty() && selected < filtered.len() {
-                    let cmd = filtered[selected].1.name;
+                    let cmd = &filtered[selected].1.name;
                     let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
                     b.clear();
-                    b.push_str(cmd);
+                    b.push_str(cmd.as_str());
                     b.push(' ');
                     drop(b);
                     break;
@@ -279,6 +292,11 @@ pub(crate) async fn select_slash_command(
             }
             AppKey::Escape | AppKey::CtrlC | AppKey::Ctrl('c') => {
                 ui.input_buf
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                // Cancel means cancel: drop anything Ctrl+V attached while the menu was open.
+                pending_images
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clear();
@@ -297,6 +315,53 @@ pub(crate) async fn select_slash_command(
                 } else {
                     selected = 0;
                     draw_menu(selected, &new_buf, &new_buf);
+                }
+            }
+            AppKey::Ctrl('v') => {
+                // Mirror the composer: the marker is the visible attachment, and Esc removes it
+                // along with the pending image. Nothing is printed into the transcript, so there
+                // is no stale "attached" line left behind after cancelling.
+                match crate::commands::clipboard_image::read_clipboard_image() {
+                    Ok(Some(img)) => {
+                        let data_url = img.data_url();
+                        let marker = format!("[image: {}x{}]", img.width, img.height);
+                        {
+                            let mut b = ui.input_buf.lock().unwrap_or_else(|e| e.into_inner());
+                            if !b.is_empty() && !b.ends_with(' ') {
+                                b.push(' ');
+                            }
+                            b.push_str(&marker);
+                            b.push(' ');
+                        }
+                        pending_images
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(data_url);
+                        ui.redraw_input_line();
+                        let new_buf = ui
+                            .input_buf
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        draw_menu(selected, &new_buf, &new_buf);
+                    }
+                    Ok(None) => {
+                        ui.emit_above(&format!(
+                            "{} Clipboard holds no image (nothing to paste)",
+                            "•".dimmed()
+                        ));
+                        ui.redraw_input_line();
+                        draw_menu(selected, &filter_str, &filter_str);
+                    }
+                    Err(e) => {
+                        ui.emit_above(&format!(
+                            "{} Screenshot paste failed: {}",
+                            "✖".red().bold(),
+                            e
+                        ));
+                        ui.redraw_input_line();
+                        draw_menu(selected, &filter_str, &filter_str);
+                    }
                 }
             }
             AppKey::Char(c) if c != '\n' && c != '\r' && !c.is_control() => {
@@ -610,14 +675,18 @@ pub(super) async fn pick_provider_and_model(
 ) -> Result<Option<(String, String)>, HarnessError> {
     let catalog = get_provider_catalog();
     let loaded = cred_manager.get_loaded_providers().await;
+    let has_opencode_daemon = harness_providers::read_opencode_service_info().is_some();
+    let has_opencode_cli = harness_providers::find_opencode_binary().is_ok();
 
-    // Only list providers that have wired credentials (or currently active)
+    // Only list providers that have wired credentials (or currently active, or daemon/cli detected)
     let available_catalog: Vec<_> = {
         let configured: Vec<_> = catalog
             .into_iter()
             .filter(|p| {
                 loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
                     || p.id.eq_ignore_ascii_case(current_provider)
+                    || (p.id == "opencode" && has_opencode_daemon)
+                    || (p.id == "opencode-cli" && has_opencode_cli)
             })
             .collect();
         if configured.is_empty() {
@@ -636,7 +705,35 @@ pub(super) async fn pick_provider_and_model(
         if loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id)) {
             tags.push("configured".to_string());
         }
-        if p.id.eq_ignore_ascii_case("antigravity") || p.id.eq_ignore_ascii_case("agy") {
+        if p.id.eq_ignore_ascii_case("opencode") {
+            if has_opencode_daemon {
+                tags.push("daemon".to_string());
+            }
+            let oc_creds = cred_manager.get_credentials("opencode").await;
+            if let Some(primary) = oc_creds
+                .iter()
+                .find(|c| c.is_priority && !c.is_temporarily_disabled)
+                .or_else(|| oc_creds.iter().find(|c| !c.is_temporarily_disabled))
+            {
+                if !primary.label.is_empty() {
+                    tags.push(primary.label.clone());
+                }
+            }
+        } else if p.id.eq_ignore_ascii_case("opencode-cli") {
+            if has_opencode_cli {
+                tags.push("cli".to_string());
+            }
+            let cli_creds = cred_manager.get_credentials("opencode-cli").await;
+            if let Some(primary) = cli_creds
+                .iter()
+                .find(|c| c.is_priority && !c.is_temporarily_disabled)
+                .or_else(|| cli_creds.iter().find(|c| !c.is_temporarily_disabled))
+            {
+                if !primary.label.is_empty() {
+                    tags.push(primary.label.clone());
+                }
+            }
+        } else if p.id.eq_ignore_ascii_case("antigravity") || p.id.eq_ignore_ascii_case("agy") {
             let agy_creds = cred_manager.get_credentials("antigravity").await;
             if let Some(primary) = agy_creds
                 .iter()
@@ -685,6 +782,43 @@ pub(super) async fn pick_provider_and_model(
     };
 
     let chosen_provider = available_catalog[sel].id.clone();
+
+    // If the chosen provider has multiple credentials in the pool, allow choosing which one to prioritize
+    let provider_creds = cred_manager.get_credentials(&chosen_provider).await;
+    if provider_creds.len() > 1 {
+        let mut cred_items = Vec::new();
+        let mut default_cred_idx = 0;
+        for (i, c) in provider_creds.iter().enumerate() {
+            let pri_str = if c.is_priority { " (priority)" } else { "" };
+            cred_items.push(format!("{:<22}{}", c.label, pri_str));
+            if c.is_priority {
+                default_cred_idx = i;
+            }
+        }
+        cred_items.push("[Keep current rotation]".to_string());
+
+        if let Some(ref mut rx) = key_rx {
+            while rx.try_recv().is_ok() {}
+            if let Some(cred_sel) = select_from_rx(
+                rx,
+                ui,
+                &format!("Select Credential [{}]", chosen_provider),
+                &cred_items,
+                default_cred_idx,
+                true,
+                true,
+            )
+            .await
+            {
+                if cred_sel < provider_creds.len() {
+                    let target = &provider_creds[cred_sel];
+                    let _ = cred_manager
+                        .set_priority_credential(&chosen_provider, &target.id)
+                        .await;
+                }
+            }
+        }
+    }
 
     // Fetch models for chosen provider
     let mut models = discovery

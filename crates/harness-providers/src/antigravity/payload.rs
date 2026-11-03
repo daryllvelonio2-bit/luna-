@@ -15,26 +15,28 @@ pub(super) fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEv
     let mut events = Vec::new();
 
     if let Some(meta) = resp_data.get("usageMetadata") {
-        let prompt_tokens = meta
-            .get("promptTokenCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let completion_tokens = meta
-            .get("candidatesTokenCount")
-            .and_then(|v| v.as_u64())
+        let count = |key: &str| meta.get(key).and_then(|v| v.as_u64());
+        // Thinking is output: Gemini reports it apart from `candidatesTokenCount` but counts it in
+        // `totalTokenCount`, and a reply cut off by the output cap can carry only the total and the
+        // thought count. Reading just `promptTokenCount`/`candidatesTokenCount` turns those frames
+        // into a report of zero tokens, which is the opposite of what a diagnosis needs.
+        let thoughts = count("thoughtsTokenCount").unwrap_or(0);
+        let completion_tokens = count("candidatesTokenCount").unwrap_or(0) + thoughts;
+        let total_tokens = count("totalTokenCount");
+        let prompt_tokens = count("promptTokenCount")
+            .or_else(|| total_tokens.map(|total| total.saturating_sub(completion_tokens)))
             .unwrap_or(0) as u32;
         // Gemini counts cache hits *inside* `promptTokenCount` and reports them separately here,
         // which is exactly the relationship `TokenUsage::cached_tokens` describes.
-        let cached_tokens = meta
-            .get("cachedContentTokenCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let cached_tokens = count("cachedContentTokenCount").unwrap_or(0) as u32;
         events.push(StreamEvent::Completed {
             finish_reason: None,
             usage: Some(TokenUsage {
                 prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
+                completion_tokens: completion_tokens as u32,
+                total_tokens: total_tokens
+                    .map(|total| total as u32)
+                    .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens as u32)),
                 cached_tokens,
             }),
         });
@@ -150,6 +152,25 @@ fn split_data_url(s: &str) -> Option<(&str, &str)> {
     let data = after.strip_prefix("base64,")?;
     // An empty payload is a malformed embed rather than a zero-byte image.
     (!mime.is_empty() && !data.is_empty()).then_some((mime, data))
+}
+
+/// The thinking allowance an effort setting buys, in output tokens.
+fn thinking_budget(effort: ReasoningEffort) -> u32 {
+    match effort {
+        ReasoningEffort::Minimal => 1024,
+        ReasoningEffort::Low => 2048,
+        ReasoningEffort::Medium => 8192,
+        ReasoningEffort::High => 16384,
+        ReasoningEffort::Xhigh | ReasoningEffort::Max => 32768,
+    }
+}
+
+/// Whether this backend model charges its thinking to `maxOutputTokens`.
+///
+/// Gemini does, and so does any `-thinking` model on Code Assist. The Claude and GPT-OSS entries
+/// in the same catalogue do not: for them `maxOutputTokens` is the answer's own allowance.
+fn counts_thinking_against_output(model: &str) -> bool {
+    model.contains("gemini") || model.contains("thinking")
 }
 
 /// Build the Code Assist payload for one turn: messages translated to `contents`, tools to
@@ -434,29 +455,33 @@ pub(super) fn build_antigravity_payload(
     if let Some(temp) = options.temperature {
         gen_config["temperature"] = json!(temp);
     }
-    if let Some(max_tok) = options.max_tokens {
-        gen_config["maxOutputTokens"] = json!(max_tok);
-    }
     if let Some(top_p) = options.top_p {
         gen_config["topP"] = json!(top_p);
     }
-    if let Some(effort) = options.reasoning_effort {
-        match effort {
-            ReasoningEffort::Minimal => {
-                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 1024 })
-            }
-            ReasoningEffort::Low => {
-                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 2048 })
-            }
-            ReasoningEffort::Medium => {
-                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 8192 })
-            }
-            ReasoningEffort::High => {
-                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 16384 })
-            }
-            ReasoningEffort::Xhigh | ReasoningEffort::Max => {
-                gen_config["thinkingConfig"] = json!({ "thinkingBudget": 32768 })
-            }
+
+    let resolved_model = resolve_antigravity_model(model, options.reasoning_effort.as_ref());
+    let budget = options.reasoning_effort.map(thinking_budget);
+    if let Some(budget) = budget {
+        gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+    }
+    // Thinking is charged to `maxOutputTokens`, not beside it. A cap meant for the visible answer
+    // therefore has to carry the thinking allowance too, or a hard turn spends the whole budget in
+    // its head and comes back as `finishReason=MAX_TOKENS` with no parts at all — an empty answer
+    // that a retry of the identical request reproduces exactly. Reproduced against Code Assist:
+    // `maxOutputTokens=4096` on a long tool-heavy turn returned one frame with
+    // `thoughtsTokenCount=3932`, `MAX_TOKENS`, and no text.
+    //
+    // With no declared effort Gemini thinks dynamically and publishes no budget to reserve, so the
+    // cap is left off entirely: `max_tokens` bounds the answer, and that bound cannot be expressed
+    // as a bound on thinking-plus-answer without knowing the former.
+    if let Some(max_tok) = options.max_tokens {
+        let cap = match (counts_thinking_against_output(&resolved_model), budget) {
+            (true, Some(budget)) => Some(max_tok.saturating_add(budget)),
+            (true, None) => None,
+            (false, _) => Some(max_tok),
+        };
+        if let Some(cap) = cap {
+            gen_config["maxOutputTokens"] = json!(cap);
         }
     }
     if gen_config
@@ -469,7 +494,7 @@ pub(super) fn build_antigravity_payload(
 
     json!({
         "project": DEFAULT_PROJECT,
-        "model": resolve_antigravity_model(model, options.reasoning_effort.as_ref()),
+        "model": resolved_model,
         "request": req_obj
     })
 }

@@ -32,6 +32,7 @@ pub mod web;
 use crate::agent::AgentConfig;
 use crate::approval::{ApprovalMode, DEFAULT_APPROVAL_TIMEOUT_SECS};
 use crate::error::HarnessError;
+use crate::types::ReasoningEffort;
 pub use web::{
     web_tools_blocked_reason, SearchBackend, WebSettings, DEFAULT_WEB_USER_AGENT, SEARCH_BACKENDS,
     WEB_CACHE_CEILING_SECS, WEB_FETCH_MAX_BYTES_CEILING, WEB_FETCH_MAX_CHARS_CEILING,
@@ -95,6 +96,12 @@ pub struct Config {
     /// Model Context Protocol servers whose tools are exposed to the agent.
     #[serde(default)]
     pub mcp: McpSettings,
+    /// Named background workers, invoked in chat as `/<name> <task>`.
+    ///
+    /// A worker is a saved provider/model pair: `/worker carbon` writes one, and
+    /// `/carbon fix this` runs it on a fork of the current conversation.
+    #[serde(default)]
+    pub workers: BTreeMap<String, WorkerProfile>,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -145,6 +152,7 @@ impl Default for Config {
             auto_compact_turns: AUTO_COMPACT_DEFAULT_TURNS,
             gateway: GatewaySettings::default(),
             mcp: McpSettings::default(),
+            workers: BTreeMap::new(),
         }
     }
 }
@@ -198,8 +206,63 @@ impl Config {
         }
         self.mcp.validate()?;
         self.tools.web.validate()?;
+        for (name, worker) in &self.workers {
+            validate_worker_name(name)?;
+            if worker.provider.trim().is_empty() {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "workers.{name}.provider must not be empty"
+                )));
+            }
+            if worker.model.trim().is_empty() {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "workers.{name}.model must not be empty"
+                )));
+            }
+        }
         Ok(())
     }
+}
+
+/// Longest worker name accepted as a slash command (`/carbon` -> `carbon`).
+pub const WORKER_NAME_MAX_CHARS: usize = 32;
+
+/// A saved provider/model pair for a background worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerProfile {
+    pub provider: String,
+    pub model: String,
+    /// Reasoning effort to ask for. `None` inherits the session's current effort when the
+    /// worker is invoked, so a worker profile does not silently turn thinking off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Validate a worker name as a slash command: lowercase letters, digits, `-` and `_`, starting
+/// with a letter, and short enough to fit the slash menu.
+pub fn validate_worker_name(name: &str) -> Result<(), HarnessError> {
+    if name.is_empty() {
+        return Err(HarnessError::ConfigurationError(
+            "worker name must not be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > WORKER_NAME_MAX_CHARS {
+        return Err(HarnessError::ConfigurationError(format!(
+            "worker name '{name}' is longer than {WORKER_NAME_MAX_CHARS} characters"
+        )));
+    }
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_lowercase()) {
+        return Err(HarnessError::ConfigurationError(format!(
+            "worker name '{name}' must start with a letter"
+        )));
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Err(HarnessError::ConfigurationError(format!(
+            "worker name '{name}' may only contain lowercase letters, digits, '-' and '_'"
+        )));
+    }
+    Ok(())
 }
 
 impl McpSettings {
@@ -1048,6 +1111,68 @@ pub fn set_in_file(layers: &Layers, key: &str, raw: &str) -> Result<PathBuf, Har
 
     write_file_value(&path, &root)?;
     Ok(path)
+}
+
+/// Write one named worker profile into the config file.
+///
+/// Dynamic map keys (`workers.<name>.*`) are not part of the static flat schema behind
+/// [`set_in_file`], so this writes the map entry directly and then validates the merged file as a
+/// whole before touching it. A typo in a neighbouring key still fails the write.
+pub fn set_worker_in_file(
+    layers: &Layers,
+    name: &str,
+    profile: &WorkerProfile,
+) -> Result<PathBuf, HarnessError> {
+    validate_worker_name(name)?;
+    let path = layers.file.clone().ok_or_else(|| {
+        HarnessError::ConfigurationError(
+            "no config file location: set LUNA_CONFIG or HOME".to_string(),
+        )
+    })?;
+
+    let mut root = read_file_value(&path)?.unwrap_or_else(|| Value::Mapping(Mapping::new()));
+    let value = to_value(profile)?;
+    set_path(&mut root, &format!("workers.{name}"), value)?;
+
+    let mut check = to_value(&layers.defaults)?;
+    deep_merge(&mut check, root.clone());
+    let check_cfg: Config = from_value(&check)?;
+    check_cfg.validate()?;
+
+    write_file_value(&path, &root)?;
+    Ok(path)
+}
+
+/// Remove one named worker profile from the config file.
+///
+/// Returns `Some(path)` when an entry was removed and the file rewritten, `None` when the worker
+/// was not present or the file does not exist.
+pub fn remove_worker_from_file(
+    layers: &Layers,
+    name: &str,
+) -> Result<Option<PathBuf>, HarnessError> {
+    let path = match &layers.file {
+        Some(path) => path.clone(),
+        None => return Ok(None),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut root = match read_file_value(&path)? {
+        Some(root) => root,
+        None => return Ok(None),
+    };
+    if !remove_path(&mut root, &format!("workers.{name}")) {
+        return Ok(None);
+    }
+
+    let mut check = to_value(&layers.defaults)?;
+    deep_merge(&mut check, root.clone());
+    let check_cfg: Config = from_value(&check)?;
+    check_cfg.validate()?;
+
+    write_file_value(&path, &root)?;
+    Ok(Some(path))
 }
 
 /// Remove `key` from the config file if present.

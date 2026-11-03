@@ -517,3 +517,75 @@ fn set_in_file_persists_compaction_model_and_provider() {
         Some("gemini-3.5-flash-lite")
     );
 }
+
+#[test]
+fn worker_profiles_round_trip_through_the_config_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layers = layers(Some(config_path(&tmp)));
+
+    set_worker_in_file(
+        &layers,
+        "carbon",
+        &WorkerProfile {
+            provider: "nvidia".to_string(),
+            model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning".to_string(),
+            reasoning_effort: Some(harness_core::ReasoningEffort::Low),
+        },
+    )
+    .unwrap();
+
+    let cfg = resolve(&layers).unwrap().into_config();
+    let carbon = cfg.workers.get("carbon").expect("worker persisted");
+    assert_eq!(carbon.provider, "nvidia");
+    assert_eq!(
+        carbon.model,
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    );
+    assert_eq!(
+        carbon.reasoning_effort,
+        Some(harness_core::ReasoningEffort::Low)
+    );
+
+    let removed = remove_worker_from_file(&layers, "carbon").unwrap();
+    assert!(removed.is_some());
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert!(cfg.workers.is_empty(), "the entry is gone from the file");
+}
+
+#[test]
+fn worker_names_are_validated() {
+    for valid in ["carbon", "c2", "fast-worker", "tiny_worker"] {
+        assert!(
+            validate_worker_name(valid).is_ok(),
+            "{valid} should be accepted"
+        );
+    }
+    for invalid in ["", "Carbon", "2fast", "has space", "dotted.name"] {
+        assert!(
+            validate_worker_name(invalid).is_err(),
+            "{invalid} should be rejected"
+        );
+    }
+    assert!(validate_worker_name(&"a".repeat(WORKER_NAME_MAX_CHARS + 1)).is_err());
+}
+
+#[test]
+fn worker_profiles_require_a_provider_and_model() {
+    let mut cfg = Config::default();
+    cfg.workers.insert(
+        "carbon".to_string(),
+        WorkerProfile {
+            provider: " ".to_string(),
+            model: "m".to_string(),
+            reasoning_effort: None,
+        },
+    );
+    assert!(cfg.validate().is_err());
+
+    cfg.workers.get_mut("carbon").unwrap().provider = "nvidia".to_string();
+    cfg.workers.get_mut("carbon").unwrap().model = String::new();
+    assert!(cfg.validate().is_err());
+
+    cfg.workers.get_mut("carbon").unwrap().model = "m".to_string();
+    assert!(cfg.validate().is_ok());
+}

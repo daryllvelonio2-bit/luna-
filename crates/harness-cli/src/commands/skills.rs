@@ -8,6 +8,25 @@
 
 use harness_plugins::Skill;
 
+/// Render a `/<skill-name> [input]` invocation as the prompt for a normal turn.
+///
+/// The instructions are inlined rather than left to `skill_view`: the user explicitly asked for
+/// this skill, so making the model fetch it first is a round-trip that can fail. `None` means the
+/// command does not name an installed skill, so the caller keeps its normal slash handling.
+pub fn invocation_prompt(cmd: &str, skills: &[Skill]) -> Option<String> {
+    let mut parts = cmd.trim().splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").strip_prefix('/')?;
+    let input = parts.next().unwrap_or("").trim();
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name.eq_ignore_ascii_case(name))?;
+
+    Some(format!(
+        "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
+        skill.name, skill.instructions, input
+    ))
+}
+
 /// One `- name` line per skill, in load order.
 ///
 /// `None` when nothing is installed, so a caller can tell "no skills" from "an empty list".
@@ -57,6 +76,30 @@ mod tests {
         let readout = readout(&skills).expect("two skills");
         assert_eq!(readout, "- blender-design\n- browser");
         assert_eq!(readout.lines().count(), 2, "one line per skill: {readout}");
+    }
+
+    #[test]
+    fn an_invocation_inlines_the_skill_instructions_and_input() {
+        let mut review = skill("review", "Review a diff carefully.");
+        review.instructions = "Read every hunk before commenting.".to_string();
+        let skills = vec![review];
+
+        let prompt = invocation_prompt("/review the parser change", &skills)
+            .expect("a matching skill is invokable");
+        assert!(prompt.contains("SKILL: review"), "{prompt}");
+        assert!(
+            prompt.contains("Read every hunk before commenting."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("USER INPUT:\nthe parser change"),
+            "{prompt}"
+        );
+
+        // Case-insensitive, and a bare invocation still applies the skill.
+        assert!(invocation_prompt("/REVIEW", &skills).is_some());
+        assert!(invocation_prompt("/unknown thing", &skills).is_none());
+        assert!(invocation_prompt("review without slash", &skills).is_none());
     }
 
     #[test]

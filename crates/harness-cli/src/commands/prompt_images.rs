@@ -45,6 +45,49 @@ pub fn strip_image_saved_paths(text: &str) -> String {
     out
 }
 
+/// Drop leading `[image...]` attachment markers so a pasted screenshot ahead of the command does
+/// not stop `/worker ...` from being recognized as a command. The markers stay in the text that is
+/// sent and displayed; this is only for command detection.
+pub fn strip_leading_image_markers(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while let Some(after) = rest.strip_prefix("[image") {
+        let Some(end) = after.find(']') else {
+            break;
+        };
+        rest = after[end + 1..].trim_start();
+    }
+    rest
+}
+
+/// Remove `[image...]` attachment markers from `text`, leaving the rest of the prompt intact.
+/// Used when the user cancels a draft: the pixels are dropped from `pending_images`, so the marker
+/// must not linger as a promise of an attachment that is no longer there.
+pub fn remove_image_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[image") {
+        out.push_str(&rest[..start]);
+        let marker_rest = &rest[start..];
+        match marker_rest.find(']') {
+            Some(end) => {
+                rest = &marker_rest[end + 1..];
+                // The attach path puts one space on each side; drop the second one too.
+                if out.ends_with(' ') && rest.starts_with(' ') {
+                    rest = &rest[1..];
+                } else if out.is_empty() {
+                    rest = rest.trim_start();
+                }
+            }
+            None => {
+                out.push_str(marker_rest);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
 /// Inline every image path in `prompt` as a data URL, on its own line.
 ///
 /// Each path is replaced in place; the resulting line is what the provider layer turns into an
@@ -301,6 +344,36 @@ mod tests {
         // panic and leaves non-existent tilde paths alone.
         let prompt = "check ~/definitely/not/here.png now";
         assert_eq!(inline_image_paths(prompt), prompt);
+    }
+
+    #[test]
+    fn removing_image_markers_leaves_the_prompt_text() {
+        assert_eq!(remove_image_markers("[image: 10x10] hello"), "hello");
+        assert_eq!(
+            remove_image_markers("hello [image: 10x10] world"),
+            "hello world"
+        );
+        assert_eq!(remove_image_markers("hello [image: 10x10]"), "hello");
+        assert_eq!(remove_image_markers("[image: 1x1] [image: 2x2] x"), "x");
+        assert_eq!(remove_image_markers("no markers"), "no markers");
+    }
+
+    #[test]
+    fn leading_image_markers_are_skipped_for_command_detection() {
+        assert_eq!(
+            strip_leading_image_markers("[image: 1920x1080] /carbon fix this"),
+            "/carbon fix this"
+        );
+        assert_eq!(
+            strip_leading_image_markers("  [image] [image: 10x10 saved to /a.png]  /worker"),
+            "/worker"
+        );
+        // A marker after the text is not leading and must stay part of the text.
+        assert_eq!(
+            strip_leading_image_markers("/carbon [image: 10x10] fix"),
+            "/carbon [image: 10x10] fix"
+        );
+        assert_eq!(strip_leading_image_markers("plain prompt"), "plain prompt");
     }
 
     #[test]

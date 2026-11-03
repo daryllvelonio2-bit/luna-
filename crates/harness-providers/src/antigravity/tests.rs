@@ -2,7 +2,9 @@
 // modules' items and binds the two payload translations outright.
 use super::*;
 
-use harness_core::{CompletionOptions, Message, ReasoningEffort, Role, ToolCall, ToolResult};
+use harness_core::{
+    CompletionOptions, Message, ReasoningEffort, Role, StreamEvent, ToolCall, ToolResult,
+};
 use serde_json::json;
 
 #[test]
@@ -687,4 +689,108 @@ fn an_empty_answer_says_what_was_asked_and_what_to_do() {
     let bare = no_answer_error(std::time::Duration::from_secs(3), 2, 0, None).to_string();
     assert!(bare.contains("2 messages and 0 tools"), "{bare}");
     assert!(!bare.contains("prompt tokens"), "{bare}");
+}
+
+/// Gemini charges thinking to `maxOutputTokens`, so a cap meant for the answer has to carry the
+/// thinking allowance too. Without this, a hard turn spends the whole 4096 in its head and the
+/// stream ends at `MAX_TOKENS` with nothing in it — the empty answer that no retry can fix.
+#[test]
+fn a_thinking_budget_is_added_to_the_output_cap() {
+    let options = CompletionOptions {
+        max_tokens: Some(4096),
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..CompletionOptions::default()
+    };
+    let payload = build_antigravity_payload(
+        &[Message::user("continue")],
+        &[],
+        &options,
+        "gemini-3.8-flash",
+    );
+    let generation = &payload["request"]["generationConfig"];
+    assert_eq!(generation["thinkingConfig"]["thinkingBudget"], json!(16384));
+    assert_eq!(
+        generation["maxOutputTokens"],
+        json!(4096 + 16384),
+        "the answer keeps its own allowance beside the thinking budget"
+    );
+}
+
+/// With no declared effort Gemini thinks dynamically and reports no budget to reserve, so the cap
+/// is left off rather than handed a number its thinking can consume whole.
+#[test]
+fn dynamic_thinking_is_not_given_a_cap_it_can_eat() {
+    let options = CompletionOptions {
+        max_tokens: Some(4096),
+        reasoning_effort: None,
+        ..CompletionOptions::default()
+    };
+    let payload = build_antigravity_payload(
+        &[Message::user("continue")],
+        &[],
+        &options,
+        "gemini-3.8-flash",
+    );
+    let generation = &payload["request"]["generationConfig"];
+    assert!(
+        generation.get("maxOutputTokens").is_none(),
+        "a cap that thinking can spend whole is what produced the empty answer: {generation:?}"
+    );
+}
+
+/// Claude on Code Assist does not charge thinking to `maxOutputTokens`, so its answer cap is sent
+/// as given.
+#[test]
+fn a_non_thinking_model_keeps_the_plain_output_cap() {
+    let options = CompletionOptions {
+        max_tokens: Some(4096),
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..CompletionOptions::default()
+    };
+    let payload = build_antigravity_payload(
+        &[Message::user("continue")],
+        &[],
+        &options,
+        "claude-sonnet-4-6",
+    );
+    let generation = &payload["request"]["generationConfig"];
+    assert_eq!(generation["maxOutputTokens"], json!(4096));
+}
+
+/// A reply cut off by the output cap still says what it spent: the frame carries the finish
+/// reason and a usage block that omits `promptTokenCount`, which used to be read as zero tokens.
+#[test]
+fn a_truncated_frame_reports_the_limit_and_the_tokens_it_spent() {
+    let frame = json!({
+        "candidates": [{
+            "finishReason": "MAX_TOKENS",
+            "content": { "parts": [{ "text": "" }] }
+        }],
+        "usageMetadata": {
+            "totalTokenCount": 140_892,
+            "thoughtsTokenCount": 3_932
+        }
+    });
+
+    let events = parse_antigravity_chunk(&frame);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Completed { finish_reason: Some(reason), .. } if reason == "max_tokens"
+        )),
+        "the limit is what explains the empty answer: {events:?}"
+    );
+
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Completed {
+                usage: Some(usage), ..
+            } => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("the frame carries usage");
+    assert_eq!(usage.prompt_tokens, 136_960, "total minus thinking");
+    assert_eq!(usage.completion_tokens, 3_932);
+    assert_eq!(usage.total_tokens, 140_892);
 }

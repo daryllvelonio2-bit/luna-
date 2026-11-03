@@ -43,11 +43,11 @@ pub mod viewer;
 mod tests;
 
 use commands::{
-    execute_slash_command, handle_auto_compact_command, handle_compact_command,
+    command_entries, execute_slash_command, handle_auto_compact_command, handle_compact_command,
     handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
     handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
     handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
-    handle_thinking_switch, handle_usage_command, select_slash_command, SLASH_COMMANDS,
+    handle_thinking_switch, handle_usage_command, select_slash_command, SlashOutcome,
 };
 use keys::AppKey;
 use render::{
@@ -365,17 +365,26 @@ pub async fn run_interactive_chat(
     // terminal, and the procedure itself is `skill_view`'s job.
     let skills_readout = crate::commands::skills::readout(&all_skills);
 
-    if !all_skills.is_empty() {
-        let skills_arc = Arc::new(all_skills);
+    // Skills are shared with the `skill_view` / `skills_list` tools and borrowed as a slice for
+    // the command surface, so `/<skill-name>` can dispatch from the slash menu.
+    let skills_arc = if all_skills.is_empty() {
+        None
+    } else {
+        Some(Arc::new(all_skills))
+    };
+    if let Some(skills_arc) = &skills_arc {
         registry
             .register(Arc::new(harness_plugins::SkillViewTool::new(
                 skills_arc.clone(),
             )))
             .await?;
         registry
-            .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
+            .register(Arc::new(harness_plugins::SkillsListTool::new(
+                skills_arc.clone(),
+            )))
             .await?;
     }
+    let skills: &[harness_plugins::Skill] = skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
 
     let bg_queue = Arc::new(
         harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
@@ -471,13 +480,17 @@ pub async fn run_interactive_chat(
         .with_permissions(harness_core::PermissionEngine::validate(
             config.tools.permissions.clone(),
         )?)
-        .with_approval(approver, approval_settings(&config))
+        .with_approval(approver.clone(), approval_settings(&config))
         .with_session(SessionBinding {
             store: store.clone(),
             session_id: session_id.clone(),
             resume_max_messages: config.session.resume_max_messages,
         });
     let mut agent = agent;
+    // Workers run in the background but must ask the same human as the main turn: hand the chat
+    // approver to the delegate tool so `/<name>` edits prompt (and honor Shift+Tab yolo) exactly
+    // like a main-model edit.
+    delegate_tool.set_worker_approver(approver.clone());
     // Attach the independent writer when the config asked for it; `None` leaves the session the
     // only writer, which is the original behaviour.
     agent.set_background_saver(memory_saver.map(|saver| saver as Arc<dyn BackgroundSaver>));
@@ -701,6 +714,10 @@ pub async fn run_interactive_chat(
     let store_delegate = store.clone();
     let session_id_delegate = session_id.clone();
     delegate_tool.set_notifier(Arc::new(move |record| {
+        // Safety net: the live row is normally removed by the Finished event. If that event was
+        // missed for any reason, the completion callback still clears it, so a finished child
+        // never leaves its last action sitting above the composer.
+        ui_delegate.finish_delegate_task(&record.id);
         let is_ok = matches!(
             record.status,
             harness_core::tools::delegate::SubagentStatus::Completed { .. }
@@ -871,7 +888,7 @@ pub async fn run_interactive_chat(
                 continue;
             }
             if query == "/" || query.eq_ignore_ascii_case("/help") {
-                for cmd in SLASH_COMMANDS {
+                for cmd in command_entries(&config, skills) {
                     println!("  {:<12} {}", cmd.name.cyan(), cmd.details.dimmed());
                 }
                 continue;
@@ -1137,6 +1154,10 @@ pub async fn run_interactive_chat(
                 .await?;
                 continue;
             }
+            // A skill invocation is a prompt, not a command: expand it here and let the normal
+            // turn path below run it, exactly as if the user had typed the instructions.
+            let skill_prompt = crate::commands::skills::invocation_prompt(query, skills);
+            let query = skill_prompt.as_deref().unwrap_or(query);
             if query.starts_with('/') {
                 eprintln!(
                     "{} Unrecognized command '{}'. Type /help for available commands.",
@@ -1542,12 +1563,6 @@ pub async fn run_interactive_chat(
                                 let mut attachments = pending_images.lock().unwrap_or_else(|e| e.into_inner());
                                 attachments.push(data_url);
                                 ui.redraw_input_line();
-                                ui.emit_above(&format!(
-                                    "{} Screenshot attached ({}×{}) — press Enter to send",
-                                    "📷".cyan().bold(),
-                                    img.width,
-                                    img.height
-                                ));
                             }
                             Ok(None) => {
                                 ui.emit_above(&format!(
@@ -1589,7 +1604,9 @@ pub async fn run_interactive_chat(
                     AppKey::Char('/') if ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).is_empty() => {
                         ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).push('/');
                         ui.redraw_input_line();
-                        if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
+                        if let Some(cmd) =
+                            select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills), &pending_images).await
+                        {
                             ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                             ui.redraw_input_line();
                             // The menu can name a composer command too — picking `/interrupt`
@@ -1631,7 +1648,7 @@ pub async fn run_interactive_chat(
                                 .await;
                                 continue;
                             }
-                            if execute_slash_command(
+                            match execute_slash_command(
                                 &cmd,
                                 &mut key_rx,
                                 &ui,
@@ -1649,13 +1666,31 @@ pub async fn run_interactive_chat(
                                 &mut process_expanded,
                                 &todo_scope,
                                 skills_readout.as_deref(),
+                                skills,
                                 &plan_mode,
                                 Some(bg_queue.as_ref()),
                                 Some(delegate_tool.as_ref()),
+                                Some(&pending_images),
                             )
                             .await?
                             {
-                                break;
+                                SlashOutcome::Exit => break,
+                                SlashOutcome::Turn { prompt, display } => launch_turn(
+                                    &prompt,
+                                    Some(&display),
+                                    &ui,
+                                    &turns,
+                                    process_expanded,
+                                    &pending_images,
+                                    &plan_mode,
+                                    &agent,
+                                    &in_flight_tools,
+                                    &mut current_cancel,
+                                    &mut current_query,
+                                    &mut turn_start,
+                                    &mut active_turn,
+                                ),
+                                SlashOutcome::Continue => {}
                             }
                         }
                     }
@@ -1721,8 +1756,17 @@ pub async fn run_interactive_chat(
                             prompt_history.push(query.clone());
                         }
 
-                        if query == "/" || query.eq_ignore_ascii_case("/help") {
-                            if let Some(cmd) = select_slash_command(&mut key_rx, &ui).await {
+                        // A screenshot pasted before the command leaves an `[image: ...]` marker at
+                        // the front of the line. It is an attachment, not command text, so command
+                        // detection looks past it; the full text is still what gets sent.
+                        let command_query =
+                            crate::commands::prompt_images::strip_leading_image_markers(&query);
+
+                        if command_query == "/" || command_query.eq_ignore_ascii_case("/help") {
+                            if let Some(cmd) =
+                                select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills), &pending_images)
+                                    .await
+                            {
                                 ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                                 ui.redraw_input_line();
                                 if handle_composer_command(
@@ -1761,7 +1805,7 @@ pub async fn run_interactive_chat(
                                     .await;
                                     continue;
                                 }
-                                if execute_slash_command(
+                                match execute_slash_command(
                                     &cmd,
                                     &mut key_rx,
                                     &ui,
@@ -1779,13 +1823,31 @@ pub async fn run_interactive_chat(
                                     &mut process_expanded,
                                     &todo_scope,
                                     skills_readout.as_deref(),
+                                    skills,
                                     &plan_mode,
                                     Some(bg_queue.as_ref()),
                                     Some(delegate_tool.as_ref()),
+                                    Some(&pending_images),
                                 )
                                 .await?
                                 {
-                                    break;
+                                    SlashOutcome::Exit => break,
+                                    SlashOutcome::Turn { prompt, display } => launch_turn(
+                                        &prompt,
+                                        Some(&display),
+                                        &ui,
+                                        &turns,
+                                        process_expanded,
+                                        &pending_images,
+                                        &plan_mode,
+                                        &agent,
+                                        &in_flight_tools,
+                                        &mut current_cancel,
+                                        &mut current_query,
+                                        &mut turn_start,
+                                        &mut active_turn,
+                                    ),
+                                    SlashOutcome::Continue => {}
                                 }
                             }
                             continue;
@@ -1796,7 +1858,7 @@ pub async fn run_interactive_chat(
                         // the command menu sees them: the menu carries the bare name only, and
                         // these are only useful with their argument.
                         if handle_composer_command(
-                            &query,
+                            command_query,
                             &mut queue,
                             &steer_handle,
                             &ui,
@@ -1815,7 +1877,10 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        if query == "/jobs" || query == "/tasks" || query == "/subagents" {
+                        if command_query == "/jobs"
+                            || command_query == "/tasks"
+                            || command_query == "/subagents"
+                        {
                             show_background_task_viewer(
                                 &mut key_rx,
                                 Some(bg_queue.as_ref()),
@@ -1828,12 +1893,12 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        if query.starts_with('/')
-                            || query.eq_ignore_ascii_case("exit")
-                            || query.eq_ignore_ascii_case("quit")
+                        if command_query.starts_with('/')
+                            || command_query.eq_ignore_ascii_case("exit")
+                            || command_query.eq_ignore_ascii_case("quit")
                         {
-                            if execute_slash_command(
-                                &query,
+                            match execute_slash_command(
+                                command_query,
                                 &mut key_rx,
                                 &ui,
                                 &mut config,
@@ -1850,13 +1915,31 @@ pub async fn run_interactive_chat(
                                 &mut process_expanded,
                                 &todo_scope,
                                 skills_readout.as_deref(),
+                                skills,
                                 &plan_mode,
                                 Some(bg_queue.as_ref()),
                                 Some(delegate_tool.as_ref()),
+                                Some(&pending_images),
                             )
                             .await?
                             {
-                                break;
+                                SlashOutcome::Exit => break,
+                                SlashOutcome::Turn { prompt, display } => launch_turn(
+                                    &prompt,
+                                    Some(&display),
+                                    &ui,
+                                    &turns,
+                                    process_expanded,
+                                    &pending_images,
+                                    &plan_mode,
+                                    &agent,
+                                    &in_flight_tools,
+                                    &mut current_cancel,
+                                    &mut current_query,
+                                    &mut turn_start,
+                                    &mut active_turn,
+                                ),
+                                SlashOutcome::Continue => {}
                             }
                             continue;
                         }
@@ -1920,6 +2003,7 @@ pub async fn run_interactive_chat(
 
                         launch_turn(
                             &query,
+                            None,
                             &ui,
                             &turns,
                             process_expanded,
@@ -1961,7 +2045,7 @@ pub async fn run_interactive_chat(
                         }
                     }
                     AppKey::Escape => {
-                        cancel_running_turn(
+                        let cancelled = cancel_running_turn(
                             &mut active_turn,
                             &current_cancel,
                             &ui,
@@ -1979,6 +2063,29 @@ pub async fn run_interactive_chat(
                             ),
                         )
                         .await;
+                        if !cancelled {
+                            // Nothing was running, so Esc is cancelling the draft. Attachments
+                            // belong to the draft; drop them and their markers together.
+                            let had_images = {
+                                let mut guard = pending_images
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                let had = !guard.is_empty();
+                                guard.clear();
+                                had
+                            };
+                            if had_images {
+                                let mut b = ui
+                                    .input_buf
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                let cleaned =
+                                    crate::commands::prompt_images::remove_image_markers(&b);
+                                *b = cleaned;
+                                drop(b);
+                                ui.redraw_input_line();
+                            }
+                        }
                     }
                     _ => {}
                 }

@@ -15,6 +15,25 @@ use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
 use crate::traits::*;
 use crate::types::*;
 
+/// Whether a finish reason means the model ran out of output budget rather than finished.
+///
+/// Gemini spells it `max_tokens` and the OpenAI-compatible routes spell it `length`. Either way
+/// the answer was cut off, not withheld, and the same request with the same cap hits it again.
+fn is_output_limit(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        reason.eq_ignore_ascii_case("max_tokens") || reason.eq_ignore_ascii_case("length")
+    })
+}
+
+/// The turn-loop error for a model that answered with nothing at all.
+fn empty_answer_error(provider: &str) -> HarnessError {
+    HarnessError::ProviderError {
+        provider: provider.to_string(),
+        message: "Model returned an empty response. The model may be overloaded or unavailable."
+            .to_string(),
+    }
+}
+
 impl<P, M, N, R> Agent<P, M, N, R>
 where
     P: ModelProvider + 'static,
@@ -399,6 +418,7 @@ where
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut usage = None;
+        let mut finish_reason: Option<String> = None;
         // Tool-call fragments arrive keyed by the index the provider assigned them.
         let mut calls: Vec<(usize, ToolCall)> = Vec::new();
 
@@ -479,10 +499,16 @@ where
                     }
                 }
                 StreamEvent::Completed {
-                    usage: event_usage, ..
+                    usage: event_usage,
+                    finish_reason: event_finish,
                 } => {
                     if event_usage.is_some() {
                         usage = event_usage;
+                    }
+                    // Keep the last reason that names one: the usage frame that closes a Code
+                    // Assist stream carries none and must not erase `MAX_TOKENS`.
+                    if event_finish.is_some() {
+                        finish_reason = event_finish;
                     }
                 }
             }
@@ -507,6 +533,34 @@ where
             .collect();
 
         if content.trim().is_empty() && tool_calls.is_empty() {
+            // A reply cut off by the output cap is not the transient empty shape the buffered
+            // retry exists for: the identical request with the identical cap returns the identical
+            // nothing, and re-sending it doubles the wait for a diagnosis. Reproduced against Code
+            // Assist: `maxOutputTokens=4096` on a long tool-heavy turn spent 3,932 tokens thinking
+            // and returned one `MAX_TOKENS` frame with no text.
+            if is_output_limit(finish_reason.as_deref()) {
+                return Err(HarnessError::output_limit_exhausted(
+                    self.provider.provider_id(),
+                    options.max_tokens,
+                ));
+            }
+            // A usage or finish frame means the stream ran to the end and the model answered with
+            // nothing. Posting the identical request again through the buffered path asks the same
+            // question at the same moment; the turn loop's backed-off retry is the attempt that can
+            // actually differ, and it no longer has to wait out a duplicate first.
+            if usage.is_some() || finish_reason.is_some() {
+                if reasoning.is_empty() {
+                    return Err(empty_answer_error(self.provider.provider_id()));
+                }
+                return Ok(Message {
+                    role: Role::Assistant,
+                    content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
+                    reasoning: Some(reasoning),
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage,
+                });
+            }
             debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
             let buffered = self.provider.complete(messages, tools, options).await?;
             if buffered.content.as_deref().unwrap_or("").trim().is_empty()
@@ -526,10 +580,7 @@ where
                         usage,
                     });
                 }
-                return Err(HarnessError::ProviderError {
-                    provider: self.provider.provider_id().to_string(),
-                    message: "Model returned an empty response. The model may be overloaded or unavailable.".to_string(),
-                });
+                return Err(empty_answer_error(self.provider.provider_id()));
             }
             return Ok(buffered);
         }

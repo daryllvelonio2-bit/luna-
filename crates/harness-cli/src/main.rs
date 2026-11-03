@@ -289,6 +289,12 @@ async fn main() -> Result<(), HarnessError> {
         layers
             .flags
             .insert("model.provider".to_string(), provider.clone());
+        if chat_model.is_none() {
+            layers.flags.insert(
+                "model.default".to_string(),
+                harness_providers::catalog::get_default_model(provider).to_string(),
+            );
+        }
     }
     if let Some(model) = chat_model {
         layers

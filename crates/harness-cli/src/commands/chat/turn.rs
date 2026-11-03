@@ -53,6 +53,9 @@ pub(super) fn submission(_line: &str, turn_active: bool, compacting: bool) -> Su
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_turn(
     query: &str,
+    // What the transcript shows for this turn when it differs from what is sent. Skill invocations
+    // send the full instructions but should echo the command the user typed, not the procedure.
+    display: Option<&str>,
     ui: &ChatUi,
     turns: &[TurnRecord],
     process_expanded: bool,
@@ -90,7 +93,8 @@ pub(super) fn launch_turn(
     // before the box is drawn so the busy line is what the user sees while it runs.
     ui.set_turn_active(true);
 
-    let display_query = crate::commands::prompt_images::strip_image_saved_paths(query);
+    let display_query =
+        crate::commands::prompt_images::strip_image_saved_paths(display.unwrap_or(query));
 
     if ui.is_attended {
         crate::commands::clear_screen();
@@ -206,6 +210,7 @@ pub(super) fn drain_queue(
     ui.set_queue_depth(queue.len());
     launch_turn(
         &next_query,
+        None,
         ui,
         turns,
         process_expanded,

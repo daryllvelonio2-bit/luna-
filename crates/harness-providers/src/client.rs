@@ -558,88 +558,14 @@ impl ModelProvider for GenericProviderClient {
             return res;
         }
 
+        if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
+            return crate::opencode::execute_opencode_completion_cli(&model, messages, tools, options)
+                .await;
+        }
+
         if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
-            let mut stream = self.stream(messages, tools, options).await?;
-            let mut content = String::new();
-            let mut reasoning = String::new();
-            let mut usage = None;
-            // Call fragments arrive one field at a time, so each call is accumulated into the shape
-            // it is finally returned in: text fields appended, `arguments` held as the raw JSON
-            // fragment string until the stream ends, and the signature kept verbatim.
-            let mut tool_builders: std::collections::BTreeMap<usize, ToolCall> =
-                std::collections::BTreeMap::new();
-
-            while let Some(ev_res) = stream.next().await {
-                match ev_res? {
-                    StreamEvent::ContentDelta(d) => content.push_str(&d),
-                    StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
-                    StreamEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta,
-                        signature,
-                    } => {
-                        let entry = tool_builders.entry(index).or_insert_with(|| ToolCall {
-                            id: String::new(),
-                            name: String::new(),
-                            arguments: serde_json::Value::String(String::new()),
-                            signature: None,
-                        });
-                        if let Some(i) = id {
-                            entry.id.push_str(&i);
-                        }
-                        if let Some(n) = name {
-                            entry.name.push_str(&n);
-                        }
-                        if let Some(signature) = signature {
-                            entry.signature = Some(signature);
-                        }
-                        if let Some(fragment) = arguments_delta {
-                            let mut raw = match entry.arguments.take() {
-                                serde_json::Value::String(raw) => raw,
-                                _ => String::new(),
-                            };
-                            raw.push_str(&fragment);
-                            entry.arguments = serde_json::Value::String(raw);
-                        }
-                    }
-                    StreamEvent::Completed { usage: u, .. } => {
-                        usage = u;
-                    }
-                }
-            }
-
-            let tool_calls: Vec<ToolCall> = tool_builders
-                .into_values()
-                .filter(|call| !call.name.is_empty())
-                .map(|mut call| {
-                    call.arguments = match call.arguments {
-                        serde_json::Value::String(raw) => {
-                            serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
-                        }
-                        other => other,
-                    };
-                    call
-                })
-                .collect();
-
-            return Ok(Message {
-                role: Role::Assistant,
-                content: if content.is_empty() {
-                    None
-                } else {
-                    Some(content)
-                },
-                reasoning: if reasoning.is_empty() {
-                    None
-                } else {
-                    Some(reasoning)
-                },
-                tool_calls,
-                tool_result: None,
-                usage,
-            });
+            return crate::opencode::execute_opencode_completion(&model, messages, tools, options)
+                .await;
         }
 
         let mut body = json!({
@@ -1001,6 +927,16 @@ impl ModelProvider for GenericProviderClient {
             return res;
         }
 
+        if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
+            return crate::opencode::stream_opencode_completion_cli(&model, messages, tools, options)
+                .await;
+        }
+
+        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
+            return crate::opencode::stream_opencode_completion(&model, messages, tools, options)
+                .await;
+        }
+
         let mut body = json!({
             "model": model,
             "messages": self.serialize_messages(messages, model.as_str()),
@@ -1015,10 +951,6 @@ impl ModelProvider for GenericProviderClient {
             if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
                 body["reasoning_effort"] = json!(s);
             }
-        }
-
-        if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
-            crate::opencode::ensure_compat_tools(&mut body);
         }
 
         // One request may be re-sent with another credential: a rate-limited or revoked key is

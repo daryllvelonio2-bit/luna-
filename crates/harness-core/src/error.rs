@@ -70,6 +70,28 @@ impl From<serde_json::Error> for HarnessError {
 }
 
 impl HarnessError {
+    /// The error for an answer that never started because the model spent the whole output budget.
+    ///
+    /// On routes where thinking is charged to the same `max_tokens` allowance (Gemini, and any
+    /// reasoning model behind an OpenAI-compatible endpoint), a hard turn can spend every token in
+    /// its head and return `finishReason=MAX_TOKENS` with no text, no tool call and — when thoughts
+    /// are not echoed — no reasoning either. That body is indistinguishable from a transient empty
+    /// response, so the turn loop retried it until the budget ran out. Naming the condition is what
+    /// makes the second attempt unnecessary: the same request with the same cap will do it again.
+    pub fn output_limit_exhausted(provider: &str, max_tokens: Option<u32>) -> Self {
+        Self::ProviderError {
+            provider: provider.to_string(),
+            message: format!(
+                "The model hit its output-token limit before writing an answer{}. Thinking counts \
+                 against the same budget on this route, so retrying the same request will do it \
+                 again: raise max_tokens or lower the reasoning effort.",
+                max_tokens
+                    .map(|tokens| format!(" (max_tokens={tokens})"))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+
     /// Returns true if this error represents a rate limit, quota exhaustion, or overloaded model/server.
     pub fn is_overloaded(&self) -> bool {
         match self {
@@ -105,6 +127,7 @@ impl HarnessError {
                     || lower.contains("connection closed")
                     || lower.contains("broken pipe")
                     || lower.contains("empty response")
+                    || lower.contains("returned no answer")
                     || lower.contains("sse stream error")
                     || lower.contains("transport error")
                     || lower.contains("error decoding response body")
@@ -119,5 +142,36 @@ impl HarnessError {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HarnessError;
+
+    /// An empty answer is a transient shape of a request that got nothing back, so the turn loop
+    /// may retry it. The provider's message changed once and silently lost this property.
+    #[test]
+    fn an_empty_answer_is_retryable() {
+        let empty = HarnessError::ProviderError {
+            provider: "antigravity".to_string(),
+            message: "Code Assist returned no answer: the stream ended after 0s without text, \
+                      tool calls or reasoning"
+                .to_string(),
+        };
+        assert!(empty.is_retryable(), "{empty}");
+    }
+
+    /// An answer that never started because thinking ate the output budget is not transient: the
+    /// same request with the same cap produces the same nothing.
+    #[test]
+    fn an_exhausted_output_budget_is_not_retryable() {
+        let exhausted = HarnessError::output_limit_exhausted("antigravity", Some(4096));
+        assert!(!exhausted.is_retryable(), "{exhausted}");
+        assert!(exhausted.to_string().contains("max_tokens=4096"));
+        assert!(
+            exhausted.to_string().contains("output-token limit"),
+            "{exhausted}"
+        );
     }
 }

@@ -34,7 +34,7 @@ pub use checkpoint::{
 pub use config::{
     resolve, CheckpointSettings, Config, HooksSettings, Layers, MemoryMode, MemorySettings,
     ModelSettings, PathsSettings, PersonaSettings, ProviderOverride, Resolved, SessionSettings,
-    Source, ToolsSettings,
+    Source, ToolsSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
 };
 pub use error::HarnessError;
 pub use hooks::{

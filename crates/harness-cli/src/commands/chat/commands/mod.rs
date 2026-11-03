@@ -28,6 +28,7 @@ mod picker;
 use picker::pick_provider_and_model;
 pub(crate) use picker::{input_from_rx, select_from_rx, select_slash_command};
 mod usage;
+mod worker;
 pub(crate) use usage::handle_usage_command;
 
 mod dir;
@@ -68,6 +69,77 @@ pub(crate) async fn handle_fork_command(
 pub struct SlashCommand {
     pub name: &'static str,
     pub details: &'static str,
+}
+
+/// One row in the slash menu: a built-in command or a configured worker.
+///
+/// Built-ins are `&'static str`, workers are owned, so the menu works on owned rows uniformly.
+#[derive(Clone)]
+pub struct CommandEntry {
+    pub name: String,
+    pub details: String,
+}
+
+/// The built-in command table plus every configured worker, as `/<name>`.
+///
+/// A worker whose name collides with a built-in never appears: the dispatcher gives built-ins
+/// priority, so listing it as a worker would be a lie.
+pub fn command_entries(config: &Config, skills: &[harness_plugins::Skill]) -> Vec<CommandEntry> {
+    let mut entries: Vec<CommandEntry> = SLASH_COMMANDS
+        .iter()
+        .map(|command| CommandEntry {
+            name: command.name.to_string(),
+            details: command.details.to_string(),
+        })
+        .collect();
+
+    for (name, worker) in &config.workers {
+        let command = format!("/{name}");
+        if entries
+            .iter()
+            .any(|entry| entry.name.eq_ignore_ascii_case(&command))
+            || worker::RESERVED_COMMAND_NAMES.contains(&command.as_str())
+        {
+            continue;
+        }
+        entries.push(CommandEntry {
+            name: command,
+            details: format!("Worker · {} ({})", worker.model, worker.provider),
+        });
+    }
+
+    // Installed skills are invokable too: `/<skill-name> [input]` runs the skill's instructions as
+    // the next turn. Built-ins and workers keep their names; a skill cannot shadow them.
+    for skill in skills {
+        let command = format!("/{}", skill.name);
+        if skill.name.is_empty()
+            || skill.name.contains(char::is_whitespace)
+            || skill.name.contains('/')
+            || entries
+                .iter()
+                .any(|entry| entry.name.eq_ignore_ascii_case(&command))
+        {
+            continue;
+        }
+        entries.push(CommandEntry {
+            name: command,
+            details: skill_command_details(&skill.description),
+        });
+    }
+
+    entries
+}
+
+/// Keep the slash menu and `/help` scannable: skill descriptions are written for the model and can
+/// run to a paragraph, so the command list shows only the first line, capped.
+fn skill_command_details(description: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let first_line = description.lines().next().unwrap_or("").trim();
+    let mut text: String = first_line.chars().take(MAX_CHARS).collect();
+    if first_line.chars().count() > MAX_CHARS {
+        text.push('…');
+    }
+    format!("Skill · {text}")
 }
 
 /// Draw the transcript.
@@ -215,10 +287,24 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Delete current session and start a fresh one",
     },
     SlashCommand {
+        name: "/worker",
+        details: "Create, list, or delete named workers invoked as /<name> <task>",
+    },
+    SlashCommand {
         name: "/exit",
         details: "Exit Luna chat session",
     },
 ];
+
+/// What the dispatcher wants the chat loop to do after a slash command.
+pub(crate) enum SlashOutcome {
+    /// Command handled; keep the loop running.
+    Continue,
+    /// The user asked to leave the chat.
+    Exit,
+    /// A skill invocation: run this prompt as a normal turn, echoing `display` in the transcript.
+    Turn { prompt: String, display: String },
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_slash_command(
@@ -241,10 +327,15 @@ pub(crate) async fn execute_slash_command(
     // The rendered skill list (`None` when none are installed); `/skills` prints it or explains
     // where skills would go, instead of falling through the match and saying nothing.
     skills_readout: Option<&str>,
+    // Installed skills, so `/<skill-name>` can appear in help and dispatch as a turn.
+    skills: &[harness_plugins::Skill],
     plan_mode: &Arc<std::sync::atomic::AtomicBool>,
     bg_queue: Option<&harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
-) -> Result<bool, HarnessError> {
+    // Clipboard images waiting to ride the next prompt. Worker invocations consume them the same
+    // way a normal turn does, so `/carbon look at this` can carry a pasted screenshot.
+    pending_images: Option<&Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<SlashOutcome, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
     let arg = parts
@@ -277,7 +368,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/compact-model" => {
             ui.redraw_input_line();
@@ -304,7 +395,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/reasoning" => {
             ui.redraw_input_line();
@@ -315,7 +406,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/thinking" | "/think" => {
             ui.redraw_input_line();
@@ -326,7 +417,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/connect" => {
             ui.redraw_input_line();
@@ -346,7 +437,7 @@ pub(crate) async fn execute_slash_command(
                 cred_manager,
             )
             .await;
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/name" => {
             if let Some(a) = arg {
@@ -364,7 +455,7 @@ pub(crate) async fn execute_slash_command(
                 }
                 ui.redraw_input_line();
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/dir" | "/workspace" => {
             if let Err(e) = handle_dir_command(key_rx, ui, config, agent, arg).await {
@@ -374,7 +465,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/sessions" | "/session" => {
             ui.redraw_input_line();
@@ -404,7 +495,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/summarize" => {
             turns.clear();
@@ -429,19 +520,19 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/rewind" => {
             if let Err(e) = handle_rewind_command(ui, agent, session_id, arg).await {
                 ui.emit_above(&format!("{} Failed to rewind: {}", "✖".red().bold(), e));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/diff" => {
             if let Err(e) = handle_diff_command(ui, agent, session_id, arg).await {
                 ui.emit_above(&format!("{} Failed to diff: {}", "✖".red().bold(), e));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/compact" => {
             if let Err(e) =
@@ -453,7 +544,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/auto-compact" => {
             // The wizard reads the composer's own keys, so it is handed the channel the menu and
@@ -465,7 +556,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/new" => {
             turns.clear();
@@ -531,7 +622,7 @@ pub(crate) async fn execute_slash_command(
                     ));
                 }
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/expand" => {
             *process_expanded = true;
@@ -540,7 +631,7 @@ pub(crate) async fn execute_slash_command(
                 draw_transcript(turns, *process_expanded);
                 ui.draw_initial_box();
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/collapse" => {
             *process_expanded = false;
@@ -549,18 +640,18 @@ pub(crate) async fn execute_slash_command(
                 draw_transcript(turns, *process_expanded);
                 ui.draw_initial_box();
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/fork" => {
             handle_fork_command(ui, store, session_id, todo_scope, config, arg).await?;
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/todo" => {
             // The same fold Ctrl+Shift+O does, for the terminals that cannot tell the
             // two apart. The panel is chrome, so it is redrawn in place.
             ui.toggle_todo_collapsed();
             todo::refresh_panel(ui, todo_scope);
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/clear" => {
             turns.clear();
@@ -568,7 +659,7 @@ pub(crate) async fn execute_slash_command(
             ui.set_todo_panel(None);
             crate::commands::clear_screen();
             ui.draw_initial_box();
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         // `/steer`, `/queue` and `/interrupt` are not matched here: they act on the chat loop's own
         // state — the pending queue, the steer handle, the cancellation token of the turn in flight
@@ -592,7 +683,7 @@ pub(crate) async fn execute_slash_command(
                     ));
                 }
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/mcp" => {
             let sub = arg.unwrap_or("").trim();
@@ -612,7 +703,7 @@ pub(crate) async fn execute_slash_command(
                     ui.emit_above(&format!("\n{}", tools.trim_end()));
                 }
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/heartbeat" | "/hb" => {
             crate::commands::heartbeat::handle_chat_heartbeat(
@@ -629,7 +720,7 @@ pub(crate) async fn execute_slash_command(
             if ui.is_attended {
                 ui.draw_initial_box();
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/usage" => {
             if let Err(e) = handle_usage_command(
@@ -644,7 +735,7 @@ pub(crate) async fn execute_slash_command(
             {
                 ui.emit_above(&format!("{} Failed to read usage: {}", "✖".red().bold(), e));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/delete" => {
             turns.clear();
@@ -667,7 +758,7 @@ pub(crate) async fn execute_slash_command(
                     e
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/plan" => {
             let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
@@ -685,7 +776,7 @@ pub(crate) async fn execute_slash_command(
                     "OFF".dimmed()
                 }
             ));
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/tasks" | "/jobs" | "/subagents" => {
             super::viewer::show_background_task_viewer(
@@ -697,11 +788,11 @@ pub(crate) async fn execute_slash_command(
                 *process_expanded,
             )
             .await;
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
         "/help" | "/commands" | "/?" => {
             let mut help_text = String::from("\nAvailable commands:\n");
-            for cmd in SLASH_COMMANDS {
+            for cmd in command_entries(config, skills) {
                 help_text.push_str(&format!(
                     "  {:<16} {}\n",
                     cmd.name.cyan(),
@@ -709,14 +800,76 @@ pub(crate) async fn execute_slash_command(
                 ));
             }
             ui.emit_above(&help_text);
-            Ok(false)
+            Ok(SlashOutcome::Continue)
+        }
+        "/worker" => {
+            ui.redraw_input_line();
+            if let Err(e) = worker::handle_worker_command(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                current_provider,
+                current_model,
+                arg,
+            )
+            .await
+            {
+                ui.emit_above(&format!("{} Worker setup failed: {}", "✖".red().bold(), e));
+            }
+            Ok(SlashOutcome::Continue)
         }
         "exit" | "quit" | "/exit" | "/quit" => {
             ui.clear_box_on_exit();
             clear_on_exit();
-            Ok(true)
+            Ok(SlashOutcome::Exit)
         }
         _ => {
+            if let Some(worker_name) = name.strip_prefix('/') {
+                let worker_name = worker_name.to_ascii_lowercase();
+                if config.workers.contains_key(&worker_name) {
+                    match arg {
+                        Some(task) => {
+                            if let Err(e) = worker::handle_worker_invocation(
+                                &worker_name,
+                                task,
+                                ui,
+                                config,
+                                cred_manager,
+                                discovery,
+                                agent,
+                                session_id,
+                                delegate_tool,
+                                pending_images,
+                            )
+                            .await
+                            {
+                                ui.emit_above(&format!(
+                                    "{} Worker {} failed to start: {}",
+                                    "✖".red().bold(),
+                                    worker_name.cyan().bold(),
+                                    e
+                                ));
+                            }
+                        }
+                        None => ui.emit_above(&format!(
+                            "{} Usage: {}",
+                            "•".cyan(),
+                            format!("/{worker_name} <task>").yellow()
+                        )),
+                    }
+                    return Ok(SlashOutcome::Continue);
+                }
+            }
+            // An installed skill is a command too. The caller turns this prompt into a normal
+            // turn, so the skill runs with the session's tools, history, and approvals.
+            if let Some(prompt) = crate::commands::skills::invocation_prompt(cmd, skills) {
+                return Ok(SlashOutcome::Turn {
+                    prompt,
+                    display: cmd.trim().to_string(),
+                });
+            }
             if name.starts_with('/') {
                 ui.emit_above(&format!(
                     "{} Unrecognized command '{}'. Type {} for available commands.",
@@ -725,7 +878,7 @@ pub(crate) async fn execute_slash_command(
                     "/help".cyan()
                 ));
             }
-            Ok(false)
+            Ok(SlashOutcome::Continue)
         }
     }
 }
@@ -1512,7 +1665,12 @@ pub(crate) async fn handle_sessions_switch(
             )));
         }
     } else {
-        let sessions = store.list().await?;
+        let sessions: Vec<_> = store
+            .list()
+            .await?
+            .into_iter()
+            .filter(|session| !session.name.starts_with("worker:"))
+            .collect();
         if sessions.is_empty() {
             ui.emit_above(&format!("{} No saved sessions found", "•".cyan()));
             return Ok(());

@@ -28,6 +28,8 @@ pub use client::{build_http_client, GenericProviderClient};
 pub use discovery::{ModelDiscovery, ModelListing};
 pub use opencode::{
     detect_opencode_credentials, detect_opencode_credentials_in, ensure_compat_tools,
-    get_or_create_opencode_session_id, new_opencode_request_id, new_opencode_session_id,
-    DetectedOpencodeCredential,
+    execute_opencode_completion, fetch_opencode_cli_models, fetch_opencode_models,
+    find_opencode_binary, format_messages_for_opencode, get_or_create_opencode_session_id,
+    new_opencode_request_id, new_opencode_session_id, normalize_opencode_model,
+    read_opencode_service_info, stream_opencode_completion, DetectedOpencodeCredential,
 };

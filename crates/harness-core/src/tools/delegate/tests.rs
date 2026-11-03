@@ -221,6 +221,106 @@ async fn a_background_child_reports_start_progress_and_finish() {
     assert!(seen.contains(&"finished".to_string()), "{seen:?}");
 }
 
+#[tokio::test]
+async fn a_worker_forks_the_conversation_and_reports_as_a_subagent() {
+    let tmp = tempfile::tempdir().expect("temporary directory");
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+    config.paths.todos_dir = tmp.path().join("todos");
+    config.paths.jobs_dir = tmp.path().join("jobs");
+
+    let store = Arc::new(
+        SqliteSessionStore::new(Some(tmp.path().join("sessions.db"))).expect("open session store"),
+    );
+    let source_id = store.ensure_session("s_source").await.unwrap().id;
+    store
+        .append(
+            &source_id,
+            &Message::user("the bug is in src/parser.rs"),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let delegate = DelegateTaskTool::new(
+        Arc::new(EchoProvider),
+        Arc::new(EmptyMemory),
+        Arc::new(EmptyNotes),
+        Some(store.clone()),
+        config,
+    );
+    let seen = Arc::new(Mutex::new(Vec::<SubagentTaskEvent>::new()));
+    let seen_by_callback = seen.clone();
+    delegate.set_event_notifier(Arc::new(move |event| {
+        seen_by_callback.lock().unwrap().push(event);
+    }));
+
+    let profile = WorkerProfile {
+        provider: "nvidia".to_string(),
+        model: "tiny-model".to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+    };
+    let child_id = delegate
+        .spawn_worker(
+            "carbon",
+            "fix the failing parser test",
+            None,
+            &source_id,
+            Arc::new(EchoProvider),
+            &profile,
+        )
+        .await
+        .expect("worker spawns");
+
+    // The fork is seeded from the source conversation and carries the worker identity + model.
+    let record = store.get(&child_id).await.unwrap();
+    assert_eq!(record.name, "worker:carbon");
+    assert_eq!(
+        record.model,
+        Some(("nvidia".to_string(), "tiny-model".to_string()))
+    );
+    let replay = store.replay(&child_id, 100).await.unwrap();
+    let history = replay
+        .history
+        .iter()
+        .filter_map(|stored| stored.message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("the bug is in src/parser.rs"),
+        "worker replays the caller's conversation: {history}"
+    );
+
+    let mut finished = false;
+    for _ in 0..300 {
+        let done = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, SubagentTaskEvent::Finished { .. }));
+        if done {
+            finished = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(finished, "worker must report a finish event");
+
+    let record = delegate
+        .list_tasks()
+        .await
+        .into_iter()
+        .find(|task| task.id == child_id)
+        .expect("worker is recorded as a subagent task");
+    assert!(
+        record
+            .context
+            .as_deref()
+            .is_some_and(|context| context.starts_with("worker profile:")),
+        "the record is marked as a worker for the viewer"
+    );
+}
+
 #[test]
 fn test_delegate_tool_mutating_calls() {
     let dummy = DelegateTaskTool::new(
