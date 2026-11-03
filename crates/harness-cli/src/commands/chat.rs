@@ -995,11 +995,7 @@ pub async fn run_interactive_chat(
                 } else {
                     query.strip_prefix("/think").unwrap().trim()
                 };
-                let arg_opt = if stripped.is_empty() {
-                    None
-                } else {
-                    Some(stripped)
-                };
+                let arg_opt = if stripped.is_empty() { None } else { Some(stripped) };
                 handle_thinking_switch(None, &ui, &agent, arg_opt).await?;
                 continue;
             }
