@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::dispatch::DispatchState;
-use super::{retry_delay_secs, retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome};
+use super::{retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome};
 use crate::error::HarnessError;
 use crate::hooks::HookEvent;
 use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};

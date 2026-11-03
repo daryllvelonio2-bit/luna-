@@ -104,7 +104,7 @@ pub fn retry_delay_secs(error: &HarnessError, attempt: u32) -> u64 {
 pub fn retry_delay_with_jitter(error: &HarnessError, attempt: u32) -> std::time::Duration {
     let base_secs = retry_delay_secs(error, attempt);
     // Add jitter bounded between 100ms and 1500ms
-    let max_jitter_ms = ((base_secs * 250).clamp(100, 1500)) as u64;
+    let max_jitter_ms = (base_secs * 250).clamp(100, 1500);
     let jitter_ms = rand::random::<u64>() % max_jitter_ms;
     std::time::Duration::from_millis(base_secs * 1000 + jitter_ms)
 }

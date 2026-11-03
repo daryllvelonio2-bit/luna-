@@ -730,9 +730,9 @@ impl ModelProvider for GenericProviderClient {
             }
 
             if !status.is_success() {
-                // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it
-                // and let another key serve the request when the pool holds one.
-                if matches!(status.as_u16(), 401 | 403)
+                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
+                // so retire it and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403 | 503)
                     && self
                         .fail_over_to_another_credential(&secret, failover_attempts)
                         .await
@@ -740,7 +740,7 @@ impl ModelProvider for GenericProviderClient {
                     failover_attempts += 1;
                     warn!(
                         provider = %self.provider_id,
-                        "Provider rejected this credential; serving the request with another key"
+                        "Provider rejected or overloaded on this credential; serving the request with another key"
                     );
                     continue;
                 }
@@ -1083,9 +1083,9 @@ impl ModelProvider for GenericProviderClient {
                 });
             }
             if !status.is_success() {
-                // 401/403: the key itself is dead (revoked, quota-cancelled account), so retire it
-                // and let another key serve the request when the pool holds one.
-                if matches!(status.as_u16(), 401 | 403)
+                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
+                // so retire it and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403 | 503)
                     && self
                         .fail_over_to_another_credential(&secret, failover_attempts)
                         .await
@@ -1093,7 +1093,7 @@ impl ModelProvider for GenericProviderClient {
                     failover_attempts += 1;
                     warn!(
                         provider = %self.provider_id,
-                        "Provider rejected this credential; serving the request with another key"
+                        "Provider rejected or overloaded on this credential; serving the request with another key"
                     );
                     continue;
                 }
