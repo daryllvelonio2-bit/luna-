@@ -456,6 +456,7 @@ pub async fn execute_antigravity_completion(
                     finish_reason = event_finish;
                 }
             }
+            _ => {}
         }
     }
 

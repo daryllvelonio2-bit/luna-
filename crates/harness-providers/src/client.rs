@@ -559,8 +559,10 @@ impl ModelProvider for GenericProviderClient {
         }
 
         if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
-            return crate::opencode::execute_opencode_completion_cli(&model, messages, tools, options)
-                .await;
+            return crate::opencode::execute_opencode_completion_cli(
+                &model, messages, tools, options,
+            )
+            .await;
         }
 
         if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {
@@ -928,8 +930,10 @@ impl ModelProvider for GenericProviderClient {
         }
 
         if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
-            return crate::opencode::stream_opencode_completion_cli(&model, messages, tools, options)
-                .await;
+            return crate::opencode::stream_opencode_completion_cli(
+                &model, messages, tools, options,
+            )
+            .await;
         }
 
         if self.provider_id.starts_with("opencode") || self.base_url.contains("opencode.ai") {

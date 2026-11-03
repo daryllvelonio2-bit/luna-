@@ -54,12 +54,36 @@ pub async fn show_background_task_viewer(
         let divider = "─".repeat(width).dimmed().to_string();
         let mut header_lines = Vec::new();
 
+        // Read the log once per frame: it is both the body of the view and the source of the
+        // progress figures (line count, size, and how recently the task last wrote).
+        let log = std::fs::read_to_string(&task.log_path);
+        let (log_lines, log_bytes) = match &log {
+            Ok(text) => (text.lines().count(), text.len()),
+            Err(_) => (0, 0),
+        };
+        let updated_secs = std::fs::metadata(&task.log_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .map(|age| age.as_secs_f64())
+            .unwrap_or(0.0);
+        let progress = if task.status == "running" {
+            format!(
+                "{} lines · {} · updated {:.1}s ago",
+                log_lines,
+                format_bytes(log_bytes),
+                updated_secs
+            )
+        } else {
+            format!("{} lines · {}", log_lines, format_bytes(log_bytes))
+        };
+
         // 1. Top bar: Summary & Controls
         let running_count = all_tasks.iter().filter(|t| t.status == "running").count();
         let header_left = format!(
             "{} {} {}",
             "●".cyan().bold(),
-            "BACKGROUND TASKS".bold(),
+            "BACKGROUND OUTPUT".bold(),
             format!("[{} active • {} total]", running_count, all_tasks.len()).dimmed()
         );
         let header_right = "[Tab: next • x: kill • q: close]".dimmed().to_string();
@@ -107,14 +131,14 @@ pub async fn show_background_task_viewer(
         }
 
         // 3. One compact summary line. The old metadata card spent five rows on goal, status,
-        // type and log path; the status and what the task is doing fit on one, leaving the rest
-        // of the screen for the log itself.
-        header_lines.push(format_task_summary(task, width));
+        // type and log path; status, progress and what the task is doing fit on one, leaving the
+        // rest of the screen for the log itself.
+        header_lines.push(format_task_summary(task, width, &progress));
         header_lines.push(divider.clone());
 
         // 4. Output / Logs Content
         let mut content_lines = Vec::new();
-        match std::fs::read_to_string(&task.log_path) {
+        match &log {
             Ok(s) => {
                 let lines: Vec<&str> = s.lines().collect();
                 if lines.is_empty() {
@@ -335,6 +359,8 @@ pub async fn show_background_task_viewer(
                     | AppKey::Char('Q')
                     | AppKey::CtrlC
                     | AppKey::Ctrl('c')
+                    | AppKey::CtrlShiftB
+                    | AppKey::Ctrl('b')
                     | AppKey::Char('\x02') => {
                         break;
                     }
@@ -432,7 +458,7 @@ fn task_elapsed_secs(
 ///
 /// Deliberately compact: the screen is for the log, so the old five-row metadata card
 /// (goal/status/type/log) is collapsed to this.
-fn format_task_summary(task: &JobSummary, width: usize) -> String {
+fn format_task_summary(task: &JobSummary, width: usize, progress: &str) -> String {
     let kind = if task.command.starts_with("worker:") {
         "worker"
     } else if task_is_subagent(task) {
@@ -445,13 +471,42 @@ fn format_task_summary(task: &JobSummary, width: usize) -> String {
         .strip_prefix("worker: ")
         .or_else(|| task.command.strip_prefix("subagent: "))
         .unwrap_or(&task.command);
-    format!(
-        "  {}  {}  {}  {}",
+    let lead = format!(
+        "  {}  {}  {}  ",
         format_process_status(&task.status),
         format!("{}s", task.elapsed_secs).dimmed(),
-        kind.dimmed(),
-        dialoguer::console::truncate_str(subject, width.saturating_sub(34), "…")
+        kind.dimmed()
+    );
+    let lead_len = dialoguer::console::strip_ansi_codes(&lead).chars().count();
+    let progress = if progress.is_empty() {
+        String::new()
+    } else {
+        format!("{}  ", progress.dimmed())
+    };
+    let progress_len = dialoguer::console::strip_ansi_codes(&progress)
+        .chars()
+        .count();
+    let subject_width = width.saturating_sub(lead_len + progress_len + 1);
+    format!(
+        "{}{}{}",
+        lead,
+        progress,
+        dialoguer::console::truncate_str(subject, subject_width, "…")
     )
+}
+
+/// Compact log sizes for the progress line; a task's progress is easier to read as "1.2 KiB"
+/// than as a raw byte count.
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    if bytes as f64 >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes as f64 >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn format_process_status(status: &str) -> colored::ColoredString {
@@ -488,6 +543,7 @@ mod tests {
         let line = dialoguer::console::strip_ansi_codes(&format_task_summary(
             &task("worker: fix the failing analytics tests", "completed"),
             100,
+            "42 lines · 3.1 KiB",
         ))
         .to_string();
 
@@ -495,6 +551,7 @@ mod tests {
         assert!(line.contains("COMPLETED"), "{line}");
         assert!(line.contains("485s"), "{line}");
         assert!(line.contains("worker"), "{line}");
+        assert!(line.contains("42 lines · 3.1 KiB"), "{line}");
         assert!(line.contains("fix the failing analytics tests"), "{line}");
         for removed in ["Goal:", "Status:", "Type:", "Log:"] {
             assert!(
@@ -502,6 +559,13 @@ mod tests {
                 "the old metadata card label {removed} is gone: {line}"
             );
         }
+    }
+
+    #[test]
+    fn log_sizes_stay_compact() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub enum AppKey {
     F(u8),
     /// Ctrl+Shift+O — the key that folds the todo panel.
     CtrlShiftO,
+    /// Ctrl+Shift+B — open the live background-task output viewer.
+    CtrlShiftB,
     /// Any other control combination, as the letter it modifies.
     Ctrl(char),
     /// A sequence this decoder does not recognise; it is consumed and ignored.
@@ -277,6 +279,7 @@ fn kitty_csi_u(parts: &[&str]) -> AppKey {
         Some(code @ 57364..=57375) => AppKey::F((code - 57364 + 1) as u8),
         Some(code) => match char::from_u32(code) {
             Some('o') | Some('O') if ctrl && shift => AppKey::CtrlShiftO,
+            Some('b') | Some('B') if ctrl && shift => AppKey::CtrlShiftB,
             // Ctrl+letter: the letter, with the control bit. Kitty reports these in
             // CSI-u form, and losing the control bit would type the letter instead.
             Some(ch) if ctrl => {
@@ -318,6 +321,7 @@ fn modified_key(code: &str, modifiers: &str) -> AppKey {
         99 if ctrl => AppKey::CtrlC,
         _ => match char::from_u32(code) {
             Some('o') | Some('O') if ctrl && shift => AppKey::CtrlShiftO,
+            Some('b') | Some('B') if ctrl && shift => AppKey::CtrlShiftB,
             Some(ch) if ctrl => {
                 let letter = ch.to_ascii_lowercase();
                 if letter.is_ascii_alphabetic() {
@@ -453,6 +457,16 @@ mod tests {
         assert_eq!(key(b"\x1b[111;5u"), AppKey::Ctrl('o'));
         // The shifted key on its own is just the capital letter.
         assert_eq!(key(b"\x1b[111;2u"), AppKey::Char('O'));
+    }
+
+    /// Ctrl+Shift+B opens the background output viewer; it must not be swallowed as plain Ctrl+B.
+    #[test]
+    fn kitty_reports_ctrl_shift_b_apart_from_ctrl_b() {
+        assert_eq!(key(b"\x1b[98;6u"), AppKey::CtrlShiftB);
+        assert_eq!(key(b"\x1b[27;6;98~"), AppKey::CtrlShiftB);
+        assert_eq!(key(b"\x1b[98;5u"), AppKey::Ctrl('b'));
+        // A terminal without the protocol still sends the legacy ctrl+b byte.
+        assert_eq!(key(b"\x02"), AppKey::Ctrl('b'));
     }
 
     /// Kitty's "disambiguate escape codes" mode moves the ctrl family out of the legacy

@@ -1533,8 +1533,8 @@ pub async fn run_interactive_chat(
                         ui.toggle_todo_collapsed();
                         continue;
                     }
-                    AppKey::Ctrl('b') => {
-                        // Ctrl+B: inspect background tasks
+                    AppKey::CtrlShiftB | AppKey::Ctrl('b') => {
+                        // Ctrl+Shift+B (or Ctrl+B) opens the live background-task output viewer.
                         show_background_task_viewer(
                             &mut key_rx,
                             Some(bg_queue.as_ref()),

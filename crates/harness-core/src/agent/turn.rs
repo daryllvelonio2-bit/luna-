@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::dispatch::DispatchState;
-use super::{retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome};
+use super::{retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome, TurnToolCall};
 use crate::error::HarnessError;
 use crate::hooks::HookEvent;
 use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
@@ -183,14 +183,20 @@ where
             let mut response = None;
             for attempt in 0..=max_retries {
                 match self
-                    .stream_completion(&messages, &tools, &options, &cancel_token)
+                    .stream_completion(
+                        &messages,
+                        &tools,
+                        &options,
+                        &mut executed_tools,
+                        &cancel_token,
+                    )
                     .await
                 {
                     Ok(res) => {
                         response = Some(res);
                         break;
                     }
-                    Err(e) if e.is_retryable() && attempt < max_retries => {
+                    Err(e) if e.is_retryable() && attempt < max_retries && executed_tools.is_empty() => {
                         let delay = retry_delay_with_jitter(&e, attempt);
                         let delay_secs = (delay.as_secs_f64()).ceil() as u64;
                         warn!(
@@ -297,14 +303,18 @@ where
 
                 debug!("Task successfully completed without further tool calls");
                 let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
-                if reply_text.is_empty() && last_reasoning.is_none() {
+                if reply_text.is_empty() && last_reasoning.is_none() && executed_tools.is_empty() {
                     return Err(HarnessError::ProviderError {
                         provider: self.provider.provider_id().to_string(),
                         message: "Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string(),
                     });
                 }
                 let final_reply = if reply_text.is_empty() {
-                    "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
+                    if !executed_tools.is_empty() {
+                        String::new()
+                    } else {
+                        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
+                    }
                 } else {
                     reply_text
                 };
@@ -399,6 +409,7 @@ where
         messages: &[Message],
         tools: &[ToolDefinition],
         options: &CompletionOptions,
+        executed_tools: &mut Vec<TurnToolCall>,
         cancel_token: &CancellationToken,
     ) -> Result<Message, HarnessError> {
         let mut stream = tokio::select! {
@@ -436,7 +447,7 @@ where
                 Err(error) => {
                     // Nothing arrived, or only reasoning arrived without content/tools:
                     // the buffered path or a clean retry can recover without failing the turn.
-                    if content.is_empty() && calls.is_empty() {
+                    if content.is_empty() && calls.is_empty() && executed_tools.is_empty() {
                         debug!(
                             "Stream failed before any content/tool output ({}), retrying buffered",
                             error
@@ -455,6 +466,50 @@ where
                     reasoning.push_str(&text);
                 }
                 StreamEvent::ContentDelta(text) => content.push_str(&text),
+                StreamEvent::ToolExecuting { name, arguments } => {
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ToolExecuting {
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                        });
+                    }
+                    executed_tools.push(TurnToolCall {
+                        name,
+                        arguments,
+                        output: String::new(),
+                        is_error: false,
+                        denied: false,
+                    });
+                }
+                StreamEvent::ToolExecuted {
+                    name,
+                    output,
+                    is_error,
+                } => {
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ToolExecuted {
+                            name: name.clone(),
+                            output: output.clone(),
+                            is_error,
+                        });
+                    }
+                    if let Some(call) = executed_tools
+                        .iter_mut()
+                        .rev()
+                        .find(|c| c.name == name && c.output.is_empty())
+                    {
+                        call.output = output;
+                        call.is_error = is_error;
+                    } else {
+                        executed_tools.push(TurnToolCall {
+                            name,
+                            arguments: serde_json::Value::Null,
+                            output,
+                            is_error,
+                            denied: false,
+                        });
+                    }
+                }
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -532,7 +587,7 @@ where
             })
             .collect();
 
-        if content.trim().is_empty() && tool_calls.is_empty() {
+        if content.trim().is_empty() && tool_calls.is_empty() && executed_tools.is_empty() {
             // A reply cut off by the output cap is not the transient empty shape the buffered
             // retry exists for: the identical request with the identical cap returns the identical
             // nothing, and re-sending it doubles the wait for a diagnosis. Reproduced against Code

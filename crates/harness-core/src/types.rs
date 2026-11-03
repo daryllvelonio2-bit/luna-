@@ -184,6 +184,15 @@ pub enum StreamEvent {
         /// The provider's signature for this call, when the wire format carries one.
         signature: Option<String>,
     },
+    ToolExecuting {
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecuted {
+        name: String,
+        output: String,
+        is_error: bool,
+    },
     Completed {
         finish_reason: Option<String>,
         usage: Option<TokenUsage>,

@@ -1050,16 +1050,16 @@ const VERB_COLUMN: usize = 12;
 /// (`📖 read      chat.rs L500-524`) instead of a JSON argument dump.
 fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
     match name {
-        "read_file" => ("📖", "read"),
-        "write_file" => ("📝", "write"),
-        "patch" => ("✏️", "patch"),
-        "search_files" => ("🔍", "search"),
-        "list_files" => ("📂", "list"),
+        "read_file" | "read" => ("📖", "read"),
+        "write_file" | "write" => ("📝", "write"),
+        "patch" | "edit" => ("✏️", "patch"),
+        "search_files" | "grep" | "find" => ("🔍", "search"),
+        "list_files" | "ls" => ("📂", "list"),
         "terminal" | "shell" | "bash" => ("💻", "run"),
         "save_note" | "read_note" | "update_note" | "delete_note" => ("📑", "note"),
         "search_notes" | "list_notes" => ("🔍", "notes"),
         "save_memory" | "update_memory" | "forget_memory" | "memory" => ("🧠", "memory"),
-        "skill_view" => ("📖", "skill"),
+        "skill_view" | "skill" => ("📖", "skill"),
         "skills_list" => ("📋", "skills"),
         "clarify" => ("❓", "ask"),
         "process" => ("⚙️", "proc"),
@@ -1106,8 +1106,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 );
             }
         }
-        "read_file" => {
-            if let Some(path) = text("path") {
+        "read_file" | "read" => {
+            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
                 let short = shorten_path(path);
                 let range = match (number("offset"), number("limit")) {
                     (Some(offset), Some(limit)) => {
@@ -1120,7 +1120,7 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), range);
             }
         }
-        "list_files" => {
+        "list_files" | "ls" => {
             let path = text("path").unwrap_or(".");
             let short = shorten_path(path);
             let glob = text("glob")
@@ -1130,8 +1130,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 .unwrap_or_default();
             return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), glob);
         }
-        "write_file" => {
-            if let Some(path) = text("path") {
+        "write_file" | "write" => {
+            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
                 let short = shorten_path(path);
                 let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
@@ -1143,8 +1143,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 );
             }
         }
-        "patch" => {
-            if let Some(path) = text("path") {
+        "patch" | "edit" => {
+            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
                 let short = shorten_path(path);
                 let mut extra = tool_activity_detail("patch", arguments)
                     .map(suffix)
@@ -1226,8 +1226,8 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 .unwrap_or_default();
             return format!("{} {} {}{}", glyph, verb_col(verb), quoted(query), limit);
         }
-        "skill_view" => {
-            let skill_name = text("name").unwrap_or("");
+        "skill_view" | "skill" => {
+            let skill_name = text("name").or_else(|| text("skill")).unwrap_or("");
             return format!("{} {} {}", glyph, verb_col(verb), quoted(skill_name));
         }
         "skills_list" => {

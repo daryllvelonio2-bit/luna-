@@ -228,15 +228,15 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/tasks",
-        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /jobs)",
+        details: "Inspect background task output and delegated subagents (Ctrl+Shift+B)",
     },
     SlashCommand {
         name: "/jobs",
-        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /tasks)",
+        details: "Inspect background task output and delegated subagents (Ctrl+Shift+B)",
     },
     SlashCommand {
         name: "/subagents",
-        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /tasks)",
+        details: "Inspect background task output and delegated subagents (Ctrl+Shift+B)",
     },
     SlashCommand {
         name: "/usage",

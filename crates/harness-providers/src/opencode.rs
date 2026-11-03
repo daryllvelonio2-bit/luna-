@@ -453,28 +453,6 @@ pub fn format_messages_for_opencode(messages: &[Message]) -> String {
     }
 }
 
-fn format_tool_use(part: &serde_json::Value) -> Option<String> {
-    let state = part.get("state")?;
-    let status = state.get("status").and_then(|s| s.as_str());
-    if status != Some("completed") {
-        return None;
-    }
-    let tool_name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
-    let raw_input = state
-        .get("input")
-        .map(|i| i.to_string())
-        .unwrap_or_default();
-    let input_snippet = if raw_input.len() > 500 {
-        &raw_input[..500]
-    } else {
-        &raw_input
-    };
-    let output = state.get("output").and_then(|o| o.as_str()).unwrap_or("");
-    Some(format!(
-        "[tool: {}] {}\n{}\n",
-        tool_name, input_snippet, output
-    ))
-}
 
 fn parse_tokens(part: &serde_json::Value) -> Option<TokenUsage> {
     let tokens = part.get("tokens")?;
@@ -835,6 +813,8 @@ pub async fn native_opencode_stream(
         let mut last_finish_reason = Some("stop".to_string());
         let mut ended_successfully = false;
         let mut saw_deltas = false;
+        let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_inputs: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
 
         while let Some(item) = event_source.next().await {
             match item {
@@ -883,18 +863,58 @@ pub async fn native_opencode_stream(
                                     }
                                 }
                             }
+                            "session.tool.input.started" => {
+                                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                                    if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                                        tool_names.insert(id.to_string(), name.to_string());
+                                    }
+                                }
+                            }
+                            "session.tool.input.ended" => {
+                                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                                    if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+                                        if let Ok(parsed_input) =
+                                            serde_json::from_str::<serde_json::Value>(text)
+                                        {
+                                            tool_inputs.insert(id.to_string(), parsed_input);
+                                        }
+                                    }
+                                }
+                            }
                             "session.tool.called" => {
-                                let name =
-                                    data.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                                let input =
-                                    data.get("input").map(|i| i.to_string()).unwrap_or_default();
+                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = data
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| tool_names.get(id).cloned())
+                                    .unwrap_or_else(|| "tool".to_string());
+                                let input = data
+                                    .get("input")
+                                    .cloned()
+                                    .or_else(|| tool_inputs.get(id).cloned())
+                                    .unwrap_or(serde_json::Value::Null);
                                 saw_deltas = true;
-                                let msg = format!("\n[tool: {}]\n{}\n", name, input);
-                                if tx.send(Ok(StreamEvent::ContentDelta(msg))).await.is_err() {
+                                if tx
+                                    .send(Ok(StreamEvent::ToolExecuting {
+                                        name,
+                                        arguments: input,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
                             "session.tool.success" => {
+                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = data
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| tool_names.get(id).cloned())
+                                    .unwrap_or_else(|| "tool".to_string());
+                                let mut output = String::new();
                                 if let Some(content) =
                                     data.get("content").and_then(|c| c.as_array())
                                 {
@@ -902,20 +922,57 @@ pub async fn native_opencode_stream(
                                         if let Some(text) =
                                             item.get("text").and_then(|t| t.as_str())
                                         {
-                                            if !text.is_empty() {
-                                                saw_deltas = true;
-                                                if tx
-                                                    .send(Ok(StreamEvent::ContentDelta(
-                                                        text.to_string(),
-                                                    )))
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    break;
-                                                }
-                                            }
+                                            output.push_str(text);
                                         }
                                     }
+                                }
+                                if output.is_empty() {
+                                    if let Some(out) = data.get("output").and_then(|o| o.as_str()) {
+                                        output.push_str(out);
+                                    }
+                                }
+                                saw_deltas = true;
+                                if tx
+                                    .send(Ok(StreamEvent::ToolExecuted {
+                                        name,
+                                        output,
+                                        is_error: false,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            "session.tool.failed" => {
+                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = data
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| tool_names.get(id).cloned())
+                                    .unwrap_or_else(|| "tool".to_string());
+                                let error_msg = data
+                                    .get("error")
+                                    .map(|e| {
+                                        if let Some(s) = e.as_str() {
+                                            s.to_string()
+                                        } else {
+                                            e.to_string()
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "Tool failed".to_string());
+                                saw_deltas = true;
+                                if tx
+                                    .send(Ok(StreamEvent::ToolExecuted {
+                                        name,
+                                        output: error_msg,
+                                        is_error: true,
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
                                 }
                             }
                             "session.step.ended" => {
@@ -1201,11 +1258,7 @@ pub async fn execute_opencode_completion_cli(
                         full_reasoning.push_str(text);
                     }
                 }
-                "tool_use" => {
-                    if let Some(tool_str) = format_tool_use(part) {
-                        full_text.push_str(&tool_str);
-                    }
-                }
+                "tool_use" => {}
                 "step_finish" => {
                     if let Some(usage) = parse_tokens(part) {
                         token_usage = Some(usage);
@@ -1376,15 +1429,39 @@ pub async fn stream_opencode_completion_cli(
                         }
                     }
                     "tool_use" => {
-                        if let Some(tool_str) = format_tool_use(part) {
-                            saw_output = true;
-                            if tx
-                                .send(Ok(StreamEvent::ContentDelta(tool_str)))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                        let tool_name = part
+                            .get("tool")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        let state = part.get("state").unwrap_or(&serde_json::Value::Null);
+                        let input = state
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let status = state.get("status").and_then(|s| s.as_str());
+                        let output = state
+                            .get("output")
+                            .and_then(|o| o.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let is_error = status == Some("failed") || status == Some("error");
+
+                        saw_output = true;
+                        let _ = tx
+                            .send(Ok(StreamEvent::ToolExecuting {
+                                name: tool_name.clone(),
+                                arguments: input,
+                            }))
+                            .await;
+                        if status == Some("completed") || is_error {
+                            let _ = tx
+                                .send(Ok(StreamEvent::ToolExecuted {
+                                    name: tool_name,
+                                    output,
+                                    is_error,
+                                }))
+                                .await;
                         }
                     }
                     "step_finish" => {
@@ -1623,4 +1700,3 @@ pub async fn fetch_opencode_cli_models() -> Result<Vec<String>, HarnessError> {
         .map(|&s| format!("opencode/{}", s))
         .collect())
 }
-
