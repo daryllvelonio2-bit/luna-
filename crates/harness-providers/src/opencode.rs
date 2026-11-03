@@ -1,26 +1,120 @@
 use eventsource_stream::Eventsource;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
+use harness_core::approval::{ApprovalDecision, ApprovalRequest};
 use harness_core::types::{
     CompletionOptions, Message, Role, StreamEvent, TokenUsage, ToolDefinition,
 };
-use harness_core::HarnessError;
+use harness_core::{ClarifyItem, ClarifyRequest, ClarifyResponse, HarnessError};
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+
+#[derive(Clone)]
+pub struct OpencodeUiBridge {
+    pub clarify_tx: tokio::sync::mpsc::UnboundedSender<(
+        ClarifyRequest,
+        tokio::sync::oneshot::Sender<ClarifyResponse>,
+    )>,
+    pub approval_tx: tokio::sync::mpsc::UnboundedSender<(
+        ApprovalRequest,
+        tokio::sync::oneshot::Sender<ApprovalDecision>,
+    )>,
+    pub allow_all: Arc<AtomicBool>,
+}
+
+static UI_BRIDGE: OnceLock<RwLock<Option<OpencodeUiBridge>>> = OnceLock::new();
+
+pub fn set_ui_bridge(bridge: OpencodeUiBridge) {
+    let cell = UI_BRIDGE.get_or_init(|| RwLock::new(None));
+    if let Ok(mut lock) = cell.write() {
+        *lock = Some(bridge);
+    }
+}
+
+pub fn get_ui_bridge() -> Option<OpencodeUiBridge> {
+    UI_BRIDGE
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|guard| guard.clone())
+}
+
+fn parse_opencode_form_to_clarify(
+    form: &serde_json::Value,
+) -> (ClarifyRequest, Vec<(String, Vec<String>)>) {
+    let mut questions = Vec::new();
+    let mut field_mappings = Vec::new();
+
+    if let Some(fields) = form.get("fields").and_then(|f| f.as_array()) {
+        for (i, field) in fields.iter().enumerate() {
+            let key = field
+                .get("key")
+                .and_then(|k| k.as_str())
+                .unwrap_or(&format!("q{}", i))
+                .to_string();
+
+            let title = field.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let desc = field.get("description").and_then(|d| d.as_str()).unwrap_or("");
+
+            let question_text = if !title.is_empty() && !desc.is_empty() && title != desc {
+                format!("{}: {}", title, desc)
+            } else if !desc.is_empty() {
+                desc.to_string()
+            } else if !title.is_empty() {
+                title.to_string()
+            } else {
+                "Please select an option:".to_string()
+            };
+
+            let mut choices = Vec::new();
+            let mut choice_raw_labels = Vec::new();
+
+            if let Some(opts) = field.get("options").and_then(|o| o.as_array()) {
+                for opt in opts {
+                    let label = opt
+                        .get("label")
+                        .and_then(|l| l.as_str())
+                        .or_else(|| opt.get("value").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    if !label.is_empty() {
+                        choice_raw_labels.push(label.to_string());
+                        if let Some(opt_desc) = opt
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            choices.push(format!("{} — {}", label, opt_desc));
+                        } else {
+                            choices.push(label.to_string());
+                        }
+                    }
+                }
+            }
+
+            questions.push(ClarifyItem {
+                question: question_text,
+                choices,
+            });
+            field_mappings.push((key, choice_raw_labels));
+        }
+    }
+
+    (ClarifyRequest { questions }, field_mappings)
+}
 
 const BASE62_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const ID_CEILING: u64 = 1 << 48;
 
 static CACHED_SESSION_ID: OnceLock<String> = OnceLock::new();
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
+
 
 #[derive(Debug, Clone)]
 pub struct DetectedOpencodeCredential {
@@ -453,28 +547,33 @@ pub fn format_messages_for_opencode(messages: &[Message]) -> String {
     }
 }
 
-
-fn parse_tokens(part: &serde_json::Value) -> Option<TokenUsage> {
-    let tokens = part.get("tokens")?;
-    let prompt_tokens = tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let completion_tokens = tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let total_tokens = tokens
-        .get("total")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
-        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+/// Normalize OpenCode's `tokens` object into the crate's one usage shape.
+///
+/// OpenCode reports `input` as the *uncached* remainder and puts the cache read beside it under
+/// `cache.read` — so `input` and `cache.read` add up to the prompt, they do not overlap. Reasoning
+/// is billed as output but counted separately, so it joins `completion`. Folding both here keeps a
+/// later cost, cache-share or context check from having to know which route wrote the row.
+fn usage_from_tokens(tokens: &serde_json::Value) -> TokenUsage {
+    let count = |key: &str| tokens.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let prompt_tokens = count("input");
+    let completion_tokens = count("output").saturating_add(count("reasoning"));
+    let total_tokens = count("total");
     let cached_tokens = tokens
         .get("cache")
         .and_then(|c| c.get("read"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
-    Some(TokenUsage {
+    TokenUsage::with_separate_cache(
         prompt_tokens,
         completion_tokens,
         total_tokens,
         cached_tokens,
-    })
+    )
+}
+
+fn parse_tokens(part: &serde_json::Value) -> Option<TokenUsage> {
+    part.get("tokens").map(usage_from_tokens)
 }
 
 #[derive(Debug, Clone)]
@@ -702,13 +801,36 @@ pub async fn native_opencode_stream(
         ses_headers.insert("x-opencode-directory", dir_val);
     }
 
+    let is_yolo = get_ui_bridge()
+        .map(|b| b.allow_all.load(Ordering::SeqCst))
+        .unwrap_or(false);
+
+    let permissions_payload = if is_yolo {
+        json!([
+            { "action": "*", "resource": "*", "effect": "allow" }
+        ])
+    } else {
+        json!([
+            { "action": "*", "resource": "*", "effect": "allow" },
+            { "action": "edit", "resource": "*", "effect": "ask" },
+            { "action": "write", "resource": "*", "effect": "ask" },
+            { "action": "patch", "resource": "*", "effect": "ask" },
+            { "action": "delete", "resource": "*", "effect": "ask" },
+            { "action": "shell", "resource": "*", "effect": "ask" },
+            { "action": "terminal", "resource": "*", "effect": "ask" },
+            { "action": "bash", "resource": "*", "effect": "ask" }
+        ])
+    };
+
     let create_session_url = format!("{}/api/session", service.url.trim_end_matches('/'));
     let create_payload = json!({
         "model": {
             "providerID": provider_id,
             "id": model_id
-        }
+        },
+        "permissions": permissions_payload
     });
+
 
     let ses_res = http_client
         .post(&create_session_url)
@@ -799,12 +921,14 @@ pub async fn native_opencode_stream(
     // 4. Transform SSE Events
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, HarnessError>>(100);
     let clean_client = http_client.clone();
+    let service_url = service.url.trim_end_matches('/').to_string();
     let clean_url = format!(
         "{}/api/session/{}",
-        service.url.trim_end_matches('/'),
+        service_url,
         session_id
     );
-    let clean_headers = auth_headers.clone();
+    let mut clean_headers = auth_headers.clone();
+    clean_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let target_session_id = session_id.clone();
 
     tokio::spawn(async move {
@@ -813,8 +937,10 @@ pub async fn native_opencode_stream(
         let mut last_finish_reason = Some("stop".to_string());
         let mut ended_successfully = false;
         let mut saw_deltas = false;
-        let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut tool_inputs: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        let mut tool_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut tool_inputs: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
 
         while let Some(item) = event_source.next().await {
             match item {
@@ -826,7 +952,14 @@ pub async fn native_opencode_stream(
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data_str) {
                         let ev_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         let data = parsed.get("data").unwrap_or(&serde_json::Value::Null);
-                        let event_session_id = data.get("sessionID").and_then(|s| s.as_str());
+                        let event_session_id = data
+                            .get("sessionID")
+                            .and_then(|s| s.as_str())
+                            .or_else(|| {
+                                data.get("form")
+                                    .and_then(|f| f.get("sessionID"))
+                                    .and_then(|s| s.as_str())
+                            });
 
                         if event_session_id != Some(&target_session_id) {
                             continue;
@@ -980,62 +1113,12 @@ pub async fn native_opencode_stream(
                                     last_finish_reason = Some(finish.to_string());
                                 }
                                 if let Some(tokens) = data.get("tokens") {
-                                    let prompt_tokens =
-                                        tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32;
-                                    let completion_tokens =
-                                        tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32;
-                                    let reasoning_tokens = tokens
-                                        .get("reasoning")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let cached_tokens = tokens
-                                        .get("cache")
-                                        .and_then(|c| c.get("read"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let total_tokens = prompt_tokens
-                                        .saturating_add(completion_tokens)
-                                        .saturating_add(reasoning_tokens);
-                                    last_usage = Some(TokenUsage {
-                                        prompt_tokens,
-                                        completion_tokens,
-                                        total_tokens,
-                                        cached_tokens,
-                                    });
+                                    last_usage = Some(usage_from_tokens(tokens));
                                 }
                             }
                             "session.usage.updated" => {
                                 if let Some(tokens) = data.get("tokens") {
-                                    let prompt_tokens =
-                                        tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32;
-                                    let completion_tokens =
-                                        tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32;
-                                    let reasoning_tokens = tokens
-                                        .get("reasoning")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let cached_tokens = tokens
-                                        .get("cache")
-                                        .and_then(|c| c.get("read"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let total_tokens = prompt_tokens
-                                        .saturating_add(completion_tokens)
-                                        .saturating_add(reasoning_tokens);
-                                    last_usage = Some(TokenUsage {
-                                        prompt_tokens,
-                                        completion_tokens,
-                                        total_tokens,
-                                        cached_tokens,
-                                    });
+                                    last_usage = Some(usage_from_tokens(tokens));
                                 }
                             }
                             "session.execution.succeeded" => {
@@ -1061,10 +1144,220 @@ pub async fn native_opencode_stream(
                                     .await;
                                 break;
                             }
+                            "form.created" => {
+                                let form = data.get("form").unwrap_or(data);
+                                let form_id = form
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !form_id.is_empty() {
+                                    let (clarify_req, field_mappings) =
+                                        parse_opencode_form_to_clarify(form);
+                                    let bridge = get_ui_bridge();
+                                    let client = clean_client.clone();
+                                    let reply_url = format!(
+                                        "{}/api/session/{}/form/{}/reply",
+                                        service_url, target_session_id, form_id
+                                    );
+                                    let cancel_url = format!(
+                                        "{}/api/session/{}/form/{}",
+                                        service_url, target_session_id, form_id
+                                    );
+                                    let post_headers = clean_headers.clone();
+
+                                    tokio::spawn(async move {
+                                        let maybe_resp = if let Some(bridge) = bridge {
+                                            let (resp_tx, resp_rx) =
+                                                tokio::sync::oneshot::channel();
+                                            if bridge.clarify_tx.send((clarify_req, resp_tx)).is_ok()
+                                            {
+                                                resp_rx.await.ok()
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
+
+                                        if let Some(resp) = maybe_resp {
+                                            let mut answer_obj = serde_json::Map::new();
+                                            for (idx, (key, raw_labels)) in
+                                                field_mappings.into_iter().enumerate()
+                                            {
+                                                let answer_val = if let Some(ans_item) =
+                                                    resp.answers.get(idx)
+                                                {
+                                                    if let Some(choice_idx) = ans_item.choice_index {
+                                                        if choice_idx < raw_labels.len() {
+                                                            raw_labels[choice_idx].clone()
+                                                        } else {
+                                                            ans_item.answer.clone()
+                                                        }
+                                                    } else {
+                                                        ans_item.answer.clone()
+                                                    }
+                                                } else if let Some(ref single_ans) = resp.answer {
+                                                    if let Some(choice_idx) = resp.choice_index {
+                                                        if choice_idx < raw_labels.len() {
+                                                            raw_labels[choice_idx].clone()
+                                                        } else {
+                                                            single_ans.clone()
+                                                        }
+                                                    } else {
+                                                        single_ans.clone()
+                                                    }
+                                                } else {
+                                                    raw_labels
+                                                        .first()
+                                                        .cloned()
+                                                        .unwrap_or_else(|| "Yes".to_string())
+                                                };
+
+                                                answer_obj.insert(key, json!([answer_val]));
+                                            }
+
+                                            let _ = client
+                                                .post(&reply_url)
+                                                .headers(post_headers)
+                                                .json(&json!({ "answer": answer_obj }))
+                                                .send()
+                                                .await;
+                                        } else {
+                                            let mut answer_obj = serde_json::Map::new();
+                                            for (key, raw_labels) in field_mappings {
+                                                if let Some(first) = raw_labels.first() {
+                                                    answer_obj.insert(key, json!([first]));
+                                                }
+                                            }
+                                            if !answer_obj.is_empty() {
+                                                let _ = client
+                                                    .post(&reply_url)
+                                                    .headers(post_headers)
+                                                    .json(&json!({ "answer": answer_obj }))
+                                                    .send()
+                                                    .await;
+                                            } else {
+                                                let _ = client
+                                                    .delete(&cancel_url)
+                                                    .headers(post_headers)
+                                                    .send()
+                                                    .await;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            "permission.asked" => {
+                                let request_id = data
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !request_id.is_empty() {
+                                    let action = data
+                                        .get("action")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("tool")
+                                        .to_string();
+                                    let resources: Vec<String> = data
+                                        .get("resources")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let metadata = data
+                                        .get("metadata")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let diff = metadata
+                                        .get("diff")
+                                        .and_then(|d| d.as_str())
+                                        .map(|s| s.to_string());
+                                    let target = metadata
+                                        .get("filepath")
+                                        .and_then(|f| f.as_str())
+                                        .map(|s| s.to_string())
+                                        .or_else(|| resources.first().cloned());
+
+                                    let bridge = get_ui_bridge();
+                                    let client = clean_client.clone();
+                                    let reply_url = format!(
+                                        "{}/api/session/{}/permission/{}/reply",
+                                        service_url, target_session_id, request_id
+                                    );
+                                    let post_headers = clean_headers.clone();
+
+                                    tokio::spawn(async move {
+                                        let is_yolo = bridge
+                                            .as_ref()
+                                            .map(|b| b.allow_all.load(Ordering::SeqCst))
+                                            .unwrap_or(false);
+
+                                        let decision = if is_yolo {
+                                            "once"
+                                        } else if let Some(bridge) = bridge {
+                                            let arguments = if action == "shell"
+                                                || action == "terminal"
+                                                || action == "bash"
+                                            {
+                                                json!({ "command": target.clone().unwrap_or_default() })
+                                            } else {
+                                                json!({
+                                                    "path": target.clone().unwrap_or_default(),
+                                                    "diff": diff.clone().unwrap_or_default(),
+                                                    "action": action,
+                                                    "resources": resources,
+                                                })
+                                            };
+
+                                            let approval_req = ApprovalRequest {
+                                                tool: action,
+                                                call_id: request_id,
+                                                target,
+                                                diff,
+                                                arguments,
+                                            };
+
+                                            let (dec_tx, dec_rx) =
+                                                tokio::sync::oneshot::channel();
+                                            if bridge.approval_tx.send((approval_req, dec_tx)).is_ok()
+                                            {
+                                                match dec_rx.await {
+                                                    Ok(ApprovalDecision::Run)
+                                                    | Ok(ApprovalDecision::RunWithArguments(_)) => {
+                                                        if bridge.allow_all.load(Ordering::SeqCst) {
+                                                            "always"
+                                                        } else {
+                                                            "once"
+                                                        }
+                                                    }
+                                                    _ => "reject",
+                                                }
+                                            } else {
+                                                "reject"
+                                            }
+                                        } else {
+                                            "reject"
+                                        };
+
+                                        let _ = client
+                                            .post(&reply_url)
+                                            .headers(post_headers)
+                                            .json(&json!({ "decision": decision }))
+                                            .send()
+                                            .await;
+                                    });
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
+
                 Err(e) => {
                     let _ = tx
                         .send(Err(HarnessError::ProviderError {
@@ -1116,11 +1409,9 @@ pub async fn native_opencode_complete(
         match event? {
             StreamEvent::ContentDelta(delta) => full_text.push_str(&delta),
             StreamEvent::ReasoningDelta(delta) => full_reasoning.push_str(&delta),
-            StreamEvent::Completed { usage, .. } => {
-                if usage.is_some() {
-                    token_usage = usage;
-                }
-            }
+            StreamEvent::Completed {
+                usage: Some(usage), ..
+            } => token_usage = Some(usage),
             _ => {}
         }
     }
@@ -1682,10 +1973,8 @@ pub async fn fetch_opencode_cli_models() -> Result<Vec<String>, HarnessError> {
             let mut list = Vec::new();
             for line in stdout.lines() {
                 let line = line.trim();
-                if line.starts_with("opencode/") {
-                    if !list.contains(&line.to_string()) {
-                        list.push(line.to_string());
-                    }
+                if line.starts_with("opencode/") && !list.contains(&line.to_string()) {
+                    list.push(line.to_string());
                 }
             }
             if !list.is_empty() {
@@ -1699,4 +1988,27 @@ pub async fn fetch_opencode_cli_models() -> Result<Vec<String>, HarnessError> {
         .iter()
         .map(|&s| format!("opencode/{}", s))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The live wire puts `input` and `cache.read` side by side; the ledger's contract is that the
+    /// cache count is part of the prompt. Row 456 of a real ledger had 56 input and 7,680 cached.
+    #[test]
+    fn a_cache_read_beside_the_input_is_folded_into_the_prompt() {
+        let tokens = serde_json::json!({
+            "input": 56,
+            "output": 18,
+            "reasoning": 3,
+            "cache": { "read": 7_680 },
+            "total": 77
+        });
+        let usage = usage_from_tokens(&tokens);
+        assert_eq!(usage.prompt_tokens, 7_736, "input + cache.read");
+        assert_eq!(usage.completion_tokens, 21, "reasoning is billed as output");
+        assert_eq!(usage.cached_tokens, 7_680);
+        assert_eq!(usage.total_tokens, 7_757);
+    }
 }

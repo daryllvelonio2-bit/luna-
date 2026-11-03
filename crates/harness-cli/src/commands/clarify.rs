@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use colored::Colorize;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -10,38 +9,7 @@ use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::modal::{paint_centred, ModalScreen};
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
 
-/// A single clarification question with its choices.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarifyItem {
-    pub question: String,
-    #[serde(default)]
-    pub choices: Vec<String>,
-}
-
-/// An incoming clarify request passed to the UI handler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarifyRequest {
-    pub questions: Vec<ClarifyItem>,
-}
-
-/// The user's answer to a single question.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarifyAnswer {
-    pub question: String,
-    pub answer: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub choice_index: Option<usize>,
-}
-
-/// Response returned to the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarifyResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub choice_index: Option<usize>,
-    pub answers: Vec<ClarifyAnswer>,
-}
+pub use harness_core::{ClarifyAnswer, ClarifyItem, ClarifyRequest, ClarifyResponse};
 
 /// ClarifyTool enables the assistant to ask interactive multiple-choice
 /// and free-text questions to the user during conversation turns.

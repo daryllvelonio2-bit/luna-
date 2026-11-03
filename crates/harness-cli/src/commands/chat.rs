@@ -447,13 +447,15 @@ pub async fn run_interactive_chat(
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>();
 
-    let allow_all_session = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let allow_all_session = Arc::new(std::sync::atomic::AtomicBool::new(
+        config.tools.approval == harness_core::ApprovalMode::Allow,
+    ));
     let plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let approver: Arc<dyn harness_core::Approver> =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
             Arc::new(ChatApprover::new(
-                approval_tx,
+                approval_tx.clone(),
                 allow_all_session.clone(),
                 plan_mode.clone(),
             ))
@@ -467,9 +469,16 @@ pub async fn run_interactive_chat(
     )>();
     registry
         .register(Arc::new(crate::commands::clarify::ClarifyTool::new(
-            clarify_tx,
+            clarify_tx.clone(),
         )))
         .await?;
+
+    harness_providers::opencode::set_ui_bridge(harness_providers::opencode::OpencodeUiBridge {
+        clarify_tx: clarify_tx.clone(),
+        approval_tx: approval_tx.clone(),
+        allow_all: allow_all_session.clone(),
+    });
+
 
     let mut agent_config = config.agent.clone();
     agent_config.skills_summary = skills_summary.clone();

@@ -148,6 +148,10 @@ pub struct TokenUsage {
     /// cache-read rate. Zero when the provider reports no cache — which is not the same as "no
     /// cache was used", only as "nothing was said about it".
     ///
+    /// Always a subset of `prompt_tokens`, whichever shape the wire used: a route that reports the
+    /// cache read beside the input is normalized through [`TokenUsage::with_separate_cache`] before
+    /// this struct is built.
+    ///
     /// `#[serde(default)]` because this field postdates stored sessions and ledger rows: a
     /// transcript written before it existed must still load.
     #[serde(default)]
@@ -165,6 +169,28 @@ impl TokenUsage {
             completion_tokens,
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
             cached_tokens: 0,
+        }
+    }
+
+    /// Build a report from a route that puts the cache read *beside* the prompt count.
+    ///
+    /// OpenCode (`tokens.input` plus `tokens.cache.read`) and Anthropic-shaped payloads
+    /// (`cache_read_input_tokens`) list the cached tokens on top of the input, not inside it.
+    /// `TokenUsage` promises `cached_tokens` is a subset of `prompt_tokens`, so the two are folded
+    /// together here — once, at the edge — and cost, cache share and the context threshold all read
+    /// the same shape instead of each guessing which provider wrote the row.
+    pub fn with_separate_cache(
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+        cached_tokens: u32,
+    ) -> Self {
+        let prompt_tokens = prompt_tokens.saturating_add(cached_tokens);
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: total_tokens.max(prompt_tokens.saturating_add(completion_tokens)),
+            cached_tokens,
         }
     }
 }
@@ -330,3 +356,36 @@ pub struct Note {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarifyItem {
+    pub question: String,
+    #[serde(default)]
+    pub choices: Vec<String>,
+}
+
+/// An incoming clarify request passed to the UI handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarifyRequest {
+    pub questions: Vec<ClarifyItem>,
+}
+
+/// The user's answer to a single question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarifyAnswer {
+    pub question: String,
+    pub answer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice_index: Option<usize>,
+}
+
+/// Response returned to the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarifyResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice_index: Option<usize>,
+    pub answers: Vec<ClarifyAnswer>,
+}
+
