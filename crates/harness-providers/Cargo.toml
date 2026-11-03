@@ -23,6 +23,7 @@ rand = { workspace = true }
 secrecy = { workspace = true }
 keyring = { workspace = true }
 rusqlite = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

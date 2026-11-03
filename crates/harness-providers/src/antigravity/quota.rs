@@ -38,202 +38,228 @@ pub struct AntigravityQuotaSummary {
     pub models_quota: std::collections::HashMap<String, AntigravityModelQuotaInfo>,
 }
 
-impl AntigravityQuotaSummary {
-    pub fn format_quota_display(&self, model: &str) -> Option<String> {
-        let lower = model.to_lowercase();
-        let is_gemini =
-            lower.contains("gemini") || lower.contains("flash") || lower.contains("pro");
-        let is_claude_gpt = lower.contains("claude")
-            || lower.contains("opus")
-            || lower.contains("sonnet")
-            || lower.contains("gpt");
+/// Which of the account's metered windows a quota line describes.
+///
+/// The two are not interchangeable: one is a rolling five-hour window and the other the weekly
+/// limit, and they reset on different schedules. Naming the window rather than handing back a
+/// rendered label is what keeps the status bar's wording out of this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaWindow {
+    /// The rolling five-hour window.
+    FiveHour,
+    /// The weekly limit.
+    Weekly,
+}
 
-        let resolved = resolve_antigravity_model(model, None);
+/// One window of the account's quota, as the provider reported it.
+///
+/// The reset time is carried as the RFC3339 string the provider sent rather than as a rendered
+/// countdown: the caller repaints its status line as the clock moves, and a `(4h 59m)` computed
+/// when the quota was fetched is a number that stops being true the moment it is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaLine {
+    /// Which window this is.
+    pub window: QuotaWindow,
+    /// Share of the window still available, `0.0..=1.0`.
+    pub remaining_fraction: f64,
+    /// When the window refills, as the provider reported it.
+    pub reset_time: Option<String>,
+}
 
-        // Check model-specific quotaInfo from fetchAvailableModels first if Gemini.
-        // Google Antigravity exposes the 5-hour rolling limit for Gemini models via quotaInfo in
-        // fetchAvailableModels (resetTime <= 5 hours), NOT in retrieveUserQuotaSummary groups.
-        if is_gemini {
-            if let Some(q_info) = self.models_quota.get(&resolved).or_else(|| {
-                self.models_quota
-                    .iter()
-                    .find(|(k, _)| {
-                        k.to_lowercase().contains("flash") || k.to_lowercase().contains("gemini")
-                    })
-                    .map(|(_, v)| v)
-            }) {
-                let pct_str = q_info
-                    .remaining_fraction
-                    .map(|frac| format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round()))
-                    .unwrap_or_else(|| "100%".to_string());
-                let time_str = q_info
-                    .reset_time
-                    .as_ref()
-                    .map(|t| format_reset_time_remaining(t))
-                    .unwrap_or_default();
+/// The `window` a bucket declares, lowercased.
+fn bucket_window(bucket: &AntigravityQuotaBucket) -> String {
+    bucket.window.as_deref().unwrap_or("").to_lowercase()
+}
 
-                let is_weekly_reset = q_info
-                    .reset_time
-                    .as_deref()
-                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|dt| (dt.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days() > 1)
-                    .unwrap_or(false);
+/// A bucket's id, lowercased.
+fn bucket_id(bucket: &AntigravityQuotaBucket) -> String {
+    bucket.bucket_id.as_deref().unwrap_or("").to_lowercase()
+}
 
-                let mut hourly_part = None;
-                let mut weekly_part = None;
+/// Whether a bucket meters a 5-hour window.
+fn is_five_hour_bucket(bucket: &AntigravityQuotaBucket) -> bool {
+    bucket_window(bucket) == "5h" || bucket_id(bucket).contains("5h")
+}
 
-                if is_weekly_reset {
-                    let part = if time_str.is_empty() {
-                        format!("w {}", pct_str)
-                    } else {
-                        format!("w {} {}", pct_str, time_str)
-                    };
-                    weekly_part = Some(part);
-                } else {
-                    let part = if time_str.is_empty() {
-                        format!("5h {}", pct_str)
-                    } else {
-                        format!("5h {} {}", pct_str, time_str)
-                    };
-                    hourly_part = Some(part);
-                }
+/// Whether a bucket meters a weekly window.
+fn is_weekly_bucket(bucket: &AntigravityQuotaBucket) -> bool {
+    let window = bucket_window(bucket);
+    window == "weekly" || window == "w" || bucket_id(bucket).contains("weekly")
+}
 
-                // Check if any group has a dedicated weekly bucket for Gemini
-                if weekly_part.is_none() {
-                    if let Some(group) = self.groups.iter().find(|g| {
-                        g.display_name
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains("gemini")
-                    }) {
-                        if let Some(b) = group.buckets.iter().find(|b| {
-                            let w = b.window.as_deref().unwrap_or("").to_lowercase();
-                            let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
-                            w == "weekly" || w == "w" || b_id.contains("weekly")
-                        }) {
-                            let w_pct = if let Some(frac) = b.remaining_fraction {
-                                format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round())
-                            } else {
-                                "100%".to_string()
-                            };
-                            let w_time = b
-                                .reset_time
-                                .as_ref()
-                                .map(|t| format_reset_time_remaining(t))
-                                .unwrap_or_default();
-                            let part = if w_time.is_empty() {
-                                format!("w {}", w_pct)
-                            } else {
-                                format!("w {} {}", w_pct, w_time)
-                            };
-                            weekly_part = Some(part);
-                        }
-                    }
-                }
+/// Whether a bucket belongs to the Gemini models rather than to the third-party (Claude/GPT) ones.
+///
+/// Gemini is metered separately, and the summary says so itself: "within each group, models share a
+/// weekly limit and a 5-hour limit". So a bucket's own identity — its id, or the name it is
+/// labelled with — is what decides which model family may read it, not the name of the group it
+/// happens to sit in.
+fn is_gemini_bucket(bucket: &AntigravityQuotaBucket) -> bool {
+    let id = bucket_id(bucket);
+    let name = bucket.display_name.as_deref().unwrap_or("").to_lowercase();
+    id.contains("gemini") || name.contains("gemini")
+}
 
-                return match (hourly_part, weekly_part) {
-                    (Some(h), Some(w)) => Some(format!("{} · {}", h, w)),
-                    (Some(h), None) => Some(h),
-                    (None, Some(w)) => Some(w),
-                    (None, None) => None,
-                };
-            }
-        }
+/// Whether a reset is far enough out to be a weekly window rather than the rolling 5-hour one.
+///
+/// Some accounts publish their weekly limit only as the per-model `quotaInfo` reset time; a day is
+/// the separator, because a 5-hour window can never be more than five hours away.
+fn reset_is_weekly(reset_time: Option<&str>) -> bool {
+    reset_time
+        .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+        .map(|dt| (dt.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days() > 1)
+        .unwrap_or(false)
+}
 
-        // Pick target group based on active model:
-        // Gemini models match groups mentioning "gemini"; Claude/GPT models match groups mentioning "claude" or "gpt".
-        let target_group = self
-            .groups
-            .iter()
-            .find(|g| {
-                let name = g.display_name.as_deref().unwrap_or("").to_lowercase();
-                (is_gemini && name.contains("gemini"))
-                    || (is_claude_gpt && (name.contains("claude") || name.contains("gpt")))
-            })
-            .or_else(|| {
-                if !is_gemini {
-                    self.groups.first()
-                } else {
-                    None
-                }
-            });
-
-        let group = target_group?;
-
-        let mut hourly_part = None;
-        let mut weekly_part = None;
-
-        for b in &group.buckets {
-            let w = b.window.as_deref().unwrap_or("").to_lowercase();
-            let b_id = b.bucket_id.as_deref().unwrap_or("").to_lowercase();
-
-            let is_5h = w == "5h" || b_id.contains("5h");
-            let is_weekly = w == "weekly" || w == "w" || b_id.contains("weekly");
-
-            if !is_5h && !is_weekly {
-                continue;
-            }
-
-            let pct_str = if let Some(frac) = b.remaining_fraction {
-                format!("{:.0}%", (frac.clamp(0.0, 1.0) * 100.0).round())
-            } else {
-                "100%".to_string()
-            };
-
-            let time_str = if let Some(ref r_time) = b.reset_time {
-                format_reset_time_remaining(r_time)
-            } else {
-                String::new()
-            };
-
-            if is_5h && hourly_part.is_none() {
-                let part = if time_str.is_empty() {
-                    format!("5h {}", pct_str)
-                } else {
-                    format!("5h {} {}", pct_str, time_str)
-                };
-                hourly_part = Some(part);
-            } else if is_weekly && weekly_part.is_none() {
-                let part = if time_str.is_empty() {
-                    format!("w {}", pct_str)
-                } else {
-                    format!("w {} {}", pct_str, time_str)
-                };
-                weekly_part = Some(part);
-            }
-        }
-
-        match (hourly_part, weekly_part) {
-            (Some(h), Some(w)) => Some(format!("{} · {}", h, w)),
-            (Some(h), None) => Some(h),
-            (None, Some(w)) => Some(w),
-            (None, None) => None,
-        }
+/// One line, with a fraction the provider left out read as "all of it".
+fn quota_line(window: QuotaWindow, fraction: Option<f64>, reset_time: Option<String>) -> QuotaLine {
+    QuotaLine {
+        window,
+        remaining_fraction: fraction.unwrap_or(1.0),
+        reset_time,
     }
 }
 
-pub fn format_reset_time_remaining(reset_time_str: &str) -> String {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(reset_time_str) {
-        let now = chrono::Utc::now();
-        let diff = dt.with_timezone(&chrono::Utc) - now;
-        let total_secs = diff.num_seconds();
-        if total_secs <= 0 {
-            "(0m)".to_string()
-        } else {
-            let days = total_secs / 86400;
-            let hours = (total_secs % 86400) / 3600;
-            let minutes = (total_secs % 3600) / 60;
-            if days > 0 {
-                format!("({}d {}h)", days, hours)
-            } else if hours > 0 {
-                format!("({}h {}m)", hours, minutes)
-            } else {
-                format!("({}m)", minutes.max(1))
-            }
+/// The 5-hour line and the weekly line, in that order, with an absent one left out.
+///
+/// The order is the contract: every caller paints them as the account's two windows, shortest
+/// first.
+fn join_quota_lines(hourly: Option<QuotaLine>, weekly: Option<QuotaLine>) -> Vec<QuotaLine> {
+    [hourly, weekly].into_iter().flatten().collect()
+}
+
+impl AntigravityQuotaSummary {
+    /// The quota windows the status bar shows for `model`, the 5-hour window first.
+    ///
+    /// Gemini models and the third-party ones (Claude, GPT-OSS) are metered in separate buckets,
+    /// and for one account the two are not published in the same place. `fetchAvailableModels`
+    /// carries the 5-hour window per Gemini model (`gemini-3.8-flash-tiered` -> 82%) and nothing
+    /// else; `retrieveUserQuotaSummary` carries the groups, and the only group many accounts get
+    /// back is the third-party one, "Claude and GPT models", holding the account's one weekly
+    /// bucket. So the 5-hour window of a Gemini model is read from that model's own `quotaInfo`,
+    /// and a weekly window is read from whichever bucket declares one — the Gemini bucket first
+    /// when the provider does publish one, the account's third-party bucket otherwise, because
+    /// that bucket *is* the account's weekly limit.
+    pub fn quota_lines(&self, model: &str) -> Option<Vec<QuotaLine>> {
+        let resolved = resolve_antigravity_model(model, None);
+        let lower = resolved.to_lowercase();
+        let is_gemini = lower.contains("gemini");
+        let is_claude_gpt = lower.contains("claude") || lower.contains("gpt");
+
+        let account_weekly = self
+            .groups
+            .iter()
+            .flat_map(|group| group.buckets.iter())
+            .filter(|bucket| is_weekly_bucket(bucket))
+            .min_by_key(|bucket| u8::from(!is_gemini_bucket(bucket)))
+            .map(|bucket| {
+                quota_line(
+                    QuotaWindow::Weekly,
+                    bucket.remaining_fraction,
+                    bucket.reset_time.clone(),
+                )
+            });
+
+        if is_gemini {
+            let own = self.model_quota(model, &resolved);
+            let own_is_weekly = own.is_some_and(|info| reset_is_weekly(info.reset_time.as_deref()));
+
+            let hourly = own
+                .filter(|_| !own_is_weekly)
+                .map(|info| {
+                    quota_line(
+                        QuotaWindow::FiveHour,
+                        info.remaining_fraction,
+                        info.reset_time.clone(),
+                    )
+                })
+                // No per-model window: a Gemini bucket in a group is the next best thing, and it
+                // is still a Gemini number. The third-party buckets are never read for a Gemini
+                // model — that 5-hour window belongs to Claude and GPT-OSS, and showing it here
+                // would report another family's limit as this model's.
+                .or_else(|| {
+                    self.gemini_bucket(is_five_hour_bucket).map(|bucket| {
+                        quota_line(
+                            QuotaWindow::FiveHour,
+                            bucket.remaining_fraction,
+                            bucket.reset_time.clone(),
+                        )
+                    })
+                });
+            let weekly = account_weekly.or_else(|| {
+                own.filter(|_| own_is_weekly).map(|info| {
+                    quota_line(
+                        QuotaWindow::Weekly,
+                        info.remaining_fraction,
+                        info.reset_time.clone(),
+                    )
+                })
+            });
+
+            let lines = join_quota_lines(hourly, weekly);
+            return (!lines.is_empty()).then_some(lines);
         }
-    } else {
-        String::new()
+
+        // Claude, GPT-OSS, and anything else the account meters as a third party: the group that
+        // names the family, or the account's only group when no name matches. A group name is a
+        // label rather than data, so it decides a *preference* here and nothing more.
+        let group = self
+            .groups
+            .iter()
+            .find(|group| {
+                let name = group.display_name.as_deref().unwrap_or("").to_lowercase();
+                is_claude_gpt && (name.contains("claude") || name.contains("gpt"))
+            })
+            .or_else(|| self.groups.first())?;
+
+        let pick = |matches: fn(&AntigravityQuotaBucket) -> bool| {
+            group
+                .buckets
+                .iter()
+                .filter(|bucket| matches(bucket))
+                .min_by_key(|bucket| u8::from(is_gemini_bucket(bucket)))
+        };
+        let hourly = pick(is_five_hour_bucket).map(|bucket| {
+            quota_line(
+                QuotaWindow::FiveHour,
+                bucket.remaining_fraction,
+                bucket.reset_time.clone(),
+            )
+        });
+        let weekly = pick(is_weekly_bucket)
+            .map(|bucket| {
+                quota_line(
+                    QuotaWindow::Weekly,
+                    bucket.remaining_fraction,
+                    bucket.reset_time.clone(),
+                )
+            })
+            .or(account_weekly);
+
+        let lines = join_quota_lines(hourly, weekly);
+        (!lines.is_empty()).then_some(lines)
+    }
+
+    /// The window the provider published for this model on its own.
+    ///
+    /// The key is the resolved backend name (`gemini-3.8-flash-tiered`), with the name the caller
+    /// asked for as a second chance, and both are looked up exactly. There is no loose match on
+    /// purpose: the same table holds the Claude and GPT-OSS entries, so "any key mentioning gemini"
+    /// answers a question about a different model's window than the one being asked about.
+    fn model_quota(&self, model: &str, resolved: &str) -> Option<&AntigravityModelQuotaInfo> {
+        self.models_quota
+            .get(resolved)
+            .or_else(|| self.models_quota.get(model))
+    }
+
+    /// The Gemini bucket matching `matches`, from whichever group carries it.
+    fn gemini_bucket(
+        &self,
+        matches: fn(&AntigravityQuotaBucket) -> bool,
+    ) -> Option<&AntigravityQuotaBucket> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.buckets.iter())
+            .find(|bucket| is_gemini_bucket(bucket) && matches(bucket))
     }
 }
 

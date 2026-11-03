@@ -40,13 +40,16 @@ pub(crate) async fn select_slash_command(
         if f.is_empty() {
             return SLASH_COMMANDS.iter().enumerate().collect();
         }
+        let f_cmd = f.split_whitespace().next().unwrap_or(&f);
         let mut matches: Vec<(usize, &'static SlashCommand)> = SLASH_COMMANDS
             .iter()
             .enumerate()
             .filter(|(_, cmd)| {
                 let name = cmd.name.to_lowercase();
                 let details = cmd.details.to_lowercase();
-                name.contains(&f) || details.contains(&f)
+                name.contains(&f)
+                    || details.contains(&f)
+                    || (!f_cmd.is_empty() && name.eq_ignore_ascii_case(&format!("/{}", f_cmd)))
             })
             .collect();
         // Prioritize prefix matches (commands starting with the filter) over substring matches.
@@ -237,7 +240,25 @@ pub(crate) async fn select_slash_command(
             }
             AppKey::Enter => {
                 if !filtered.is_empty() && selected < filtered.len() {
-                    result = Some(filtered[selected].1.name.to_string());
+                    let cmd_name = filtered[selected].1.name;
+                    let trimmed = filter_str.trim();
+                    if let Some(rest) = trimmed.strip_prefix(cmd_name) {
+                        let rest = rest.trim();
+                        if !rest.is_empty() {
+                            result = Some(format!("{} {}", cmd_name, rest));
+                        } else {
+                            result = Some(cmd_name.to_string());
+                        }
+                    } else if let Some((_, rest)) = trimmed.split_once(' ') {
+                        let rest = rest.trim();
+                        if !rest.is_empty() {
+                            result = Some(format!("{} {}", cmd_name, rest));
+                        } else {
+                            result = Some(cmd_name.to_string());
+                        }
+                    } else {
+                        result = Some(cmd_name.to_string());
+                    }
                 } else if filter_str.starts_with('/') {
                     // Enter on a filter with no menu match falls through to the typed command
                     // itself, so typing "/name luna" straight through still executes.
@@ -733,4 +754,120 @@ pub(super) async fn pick_provider_and_model(
     }
 
     Ok(Some((chosen_provider, chosen_model)))
+}
+
+/// Interactive workspace directory picker that navigates directories with fuzzy search and parent navigation.
+pub(crate) async fn pick_workspace_directory(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+    initial_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, HarnessError> {
+    if !ui.is_attended {
+        return Ok(None);
+    }
+
+    let mut current = if initial_dir.is_dir() {
+        initial_dir
+            .canonicalize()
+            .unwrap_or_else(|_| initial_dir.to_path_buf())
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    };
+
+    let mut is_chained = false;
+    loop {
+        let mut subdirs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name == ".git" {
+                            continue;
+                        }
+                        subdirs.push(name);
+                    }
+                }
+            }
+        }
+        subdirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+        let mut items = Vec::new();
+        // Item 0: Select current directory
+        items.push(format!("✔ [Select this directory] ({})", current.display()));
+        // Item 1: Parent directory
+        if current.parent().is_some() {
+            items.push(".. (parent directory)".to_string());
+        }
+        // Subdirectories
+        for d in &subdirs {
+            items.push(format!("{}/", d));
+        }
+        // Custom path entry
+        items.push("[Enter custom path...]".to_string());
+
+        let prompt = format!("Workspace: {}", current.display());
+        while key_rx.try_recv().is_ok() {}
+
+        let sel = select_from_rx(key_rx, ui, &prompt, &items, 0, is_chained, true).await;
+
+        let Some(idx) = sel else {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            return Ok(None);
+        };
+
+        if idx == 0 {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            return Ok(Some(current));
+        }
+
+        let has_parent = current.parent().is_some();
+        if has_parent && idx == 1 {
+            if let Some(parent) = current.parent() {
+                current = parent.to_path_buf();
+            }
+            is_chained = true;
+            continue;
+        }
+
+        let custom_idx = items.len() - 1;
+        if idx == custom_idx {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            while key_rx.try_recv().is_ok() {}
+            if let Some(path_str) = input_from_rx(key_rx, "Enter directory path").await {
+                let expanded = harness_core::config::expand_tilde(&path_str);
+                let p = std::path::PathBuf::from(expanded);
+                if p.is_dir() {
+                    let canon = p.canonicalize().unwrap_or(p);
+                    return Ok(Some(canon));
+                } else {
+                    ui.emit_above(&format!(
+                        "{} Directory not found: {}",
+                        "✖".red().bold(),
+                        path_str
+                    ));
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let sub_idx = if has_parent { idx - 2 } else { idx - 1 };
+        if sub_idx < subdirs.len() {
+            current = current.join(&subdirs[sub_idx]);
+            if let Ok(canon) = current.canonicalize() {
+                current = canon;
+            }
+            is_chained = true;
+            continue;
+        }
+
+        ui.clear_box_on_exit();
+        ui.draw_initial_box();
+        return Ok(Some(current));
+    }
 }

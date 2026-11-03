@@ -28,6 +28,7 @@
 - **Reproduce before patching:** Identify the exact file and line, verify against current behavior, and write or run targeted tests.
 - **Behavior contracts over snapshots:** Tests must assert invariants and contracts, not brittle text snapshots.
 - **Verification gate:** Always verify with `cargo check` and `cargo test` on touched crates before completing changes.
+- **Build and install:** Always build and install (`cargo install --path crates/harness-cli`) upon completing tasks so that the environment runs the updated `luna` binary.
 - **Worktree isolation:** Execute edits only within the assigned workspace or worktree; never contaminate other worktrees or shared checkouts.
 - **Commit authorship:** Commits must be authored and committed as `Daryll <daryllvelonio2@gmail.com>`.
 - **Push verified work:** After the verification gate passes, commit the completed change and push it to the remote tracking branch (`git push origin <branch>`) unless the user explicitly asks not to. Never push unverified or half-finished work.

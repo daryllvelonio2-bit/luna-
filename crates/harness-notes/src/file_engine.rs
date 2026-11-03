@@ -72,6 +72,7 @@ pub fn is_safe_note_id(id: &str) -> bool {
 
 pub struct FileNotesEngine {
     dir: PathBuf,
+    cache: std::sync::RwLock<std::collections::HashMap<PathBuf, (std::time::SystemTime, Note)>>,
 }
 
 impl FileNotesEngine {
@@ -97,7 +98,10 @@ impl FileNotesEngine {
             Self::import_legacy(&dir, &db);
         }
 
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+        })
     }
 
     /// An engine over a scratch directory; used by tests.
@@ -215,16 +219,46 @@ impl FileNotesEngine {
             ))
         })?;
 
+        let mut current_paths = std::collections::HashSet::new();
         let mut notes = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
+        let mut cache_updates = Vec::new();
+
+        {
+            let cache = self.cache.read().unwrap();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                current_paths.insert(path.clone());
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+                if let Some((cached_mtime, cached_note)) = cache.get(&path) {
+                    if *cached_mtime == mtime {
+                        notes.push(cached_note.clone());
+                        continue;
+                    }
+                }
+
+                match parse_note_file(&path) {
+                    Ok(note) => {
+                        notes.push(note.clone());
+                        cache_updates.push((path, mtime, note));
+                    }
+                    Err(error) => warn!("skipping unreadable note '{}': {}", path.display(), error),
+                }
             }
-            match parse_note_file(&path) {
-                Ok(note) => notes.push(note),
-                Err(error) => warn!("skipping unreadable note '{}': {}", path.display(), error),
+        }
+
+        if !cache_updates.is_empty() {
+            let mut cache = self.cache.write().unwrap();
+            for (path, mtime, note) in cache_updates {
+                cache.insert(path, (mtime, note));
             }
+            cache.retain(|p, _| current_paths.contains(p));
         }
 
         notes.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
@@ -415,6 +449,9 @@ impl NotesEngine for FileNotesEngine {
         match std::fs::remove_file(&path) {
             Ok(()) => {
                 info!("Deleted note '{}'", note.id);
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.remove(&path);
+                }
                 Ok(true)
             }
             Err(error) => Err(HarnessError::NotesError(format!(
@@ -490,8 +527,13 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
         body.push('\n');
     }
 
-    std::fs::write(&path, body).map_err(|e| {
-        HarnessError::NotesError(format!("Failed to write '{}': {}", path.display(), e))
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, &body).map_err(|e| {
+        HarnessError::NotesError(format!("Failed to write temp note '{}': {}", tmp.display(), e))
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        HarnessError::NotesError(format!("Failed to commit note '{}': {}", path.display(), e))
     })?;
     Ok(path)
 }
@@ -527,7 +569,14 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
                 break;
             }
             if let Some((key, value)) = line.split_once(':') {
-                let value = value.trim().to_string();
+                let mut value = value.trim().to_string();
+                if (value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\''))
+                {
+                    if value.len() >= 2 {
+                        value = value[1..value.len() - 1].to_string();
+                    }
+                }
                 match key.trim() {
                     "id" => id = value,
                     "title" => title = value,

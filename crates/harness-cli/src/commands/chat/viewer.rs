@@ -15,15 +15,16 @@ use super::ui::ChatUi;
 pub async fn show_background_task_viewer(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     bg_queue: Option<&BackgroundTaskQueue>,
+    delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
     ui: &ChatUi,
     turns: &[TurnRecord],
     process_expanded: bool,
 ) {
-    // 1. Collect all available background tasks
-    let mut tasks = collect_tasks(bg_queue).await;
+    // 1. Collect all available background tasks and subagents
+    let mut tasks = collect_tasks(bg_queue, delegate_tool).await;
     if tasks.is_empty() {
         ui.emit_above(&format!(
-            "{} No background tasks active or recorded",
+            "{} No background tasks or subagents active or recorded",
             "•".dimmed()
         ));
         return;
@@ -106,10 +107,15 @@ pub async fn show_background_task_viewer(
         }
 
         // 3. Task Metadata Card
+        let is_subagent = task.id.starts_with("sub_");
         let status_badge = format_process_status(&task.status);
         header_lines.push(format!(
             "  {} {}",
-            "Command:".bold(),
+            if is_subagent {
+                "Goal:".bold()
+            } else {
+                "Command:".bold()
+            },
             dialoguer::console::truncate_str(&task.command, width.saturating_sub(12), "…")
         ));
         header_lines.push(format!(
@@ -119,11 +125,19 @@ pub async fn show_background_task_viewer(
             "Elapsed:".dimmed(),
             format!("{}s", task.elapsed_secs).dimmed()
         ));
-        header_lines.push(format!(
-            "  {} {}",
-            "Workdir:".dimmed(),
-            dialoguer::console::truncate_str(&task.workdir, width.saturating_sub(12), "…")
-        ));
+        if is_subagent {
+            header_lines.push(format!(
+                "  {} {}",
+                "Type:".dimmed(),
+                "delegated subagent".dimmed()
+            ));
+        } else {
+            header_lines.push(format!(
+                "  {} {}",
+                "Workdir:".dimmed(),
+                dialoguer::console::truncate_str(&task.workdir, width.saturating_sub(12), "…")
+            ));
+        }
         header_lines.push(format!(
             "  {} {}",
             "Log:".dimmed(),
@@ -206,7 +220,7 @@ pub async fn show_background_task_viewer(
         tokio::select! {
             _ = refresh_interval.tick() => {
                 // Periodically refresh job statuses and logs
-                tasks = collect_tasks(bg_queue).await;
+                tasks = collect_tasks(bg_queue, delegate_tool).await;
                 if selected_idx >= tasks.len() {
                     selected_idx = tasks.len().saturating_sub(1);
                 }
@@ -321,12 +335,15 @@ pub async fn show_background_task_viewer(
                         }
                     }
                     AppKey::Char('x') | AppKey::Char('X') => {
-                        // Kill / cancel active job
+                        // Kill / cancel active job or subagent
                         if let Some(task) = tasks.get(selected_idx) {
                             if let Some(q) = bg_queue {
                                 let _ = q.kill(&task.id);
                             }
-                            tasks = collect_tasks(bg_queue).await;
+                            if let Some(dt) = delegate_tool {
+                                let _ = dt.kill(&task.id).await;
+                            }
+                            tasks = collect_tasks(bg_queue, delegate_tool).await;
                             if let Some(current) = tasks.get(selected_idx) {
                                 let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
                                 scroll_offset = eff;
@@ -357,13 +374,40 @@ pub async fn show_background_task_viewer(
     ui.draw_initial_box();
 }
 
-async fn collect_tasks(bg_queue: Option<&BackgroundTaskQueue>) -> Vec<JobSummary> {
+async fn collect_tasks(
+    bg_queue: Option<&BackgroundTaskQueue>,
+    delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
+) -> Vec<JobSummary> {
     let mut tasks = Vec::new();
 
     // Terminal Background Jobs
     if let Some(q) = bg_queue {
         for job in q.list() {
             tasks.push(job);
+        }
+    }
+
+    // Delegated Subagents
+    if let Some(dt) = delegate_tool {
+        for sub in dt.list_tasks().await {
+            let elapsed_secs = (chrono::Utc::now() - sub.started_at).num_seconds().max(0) as u64;
+            let status = match &sub.status {
+                harness_core::tools::delegate::SubagentStatus::Running => "running".to_string(),
+                harness_core::tools::delegate::SubagentStatus::Completed { .. } => {
+                    "completed".to_string()
+                }
+                harness_core::tools::delegate::SubagentStatus::Failed { error, .. } => {
+                    format!("failed: {error}")
+                }
+            };
+            tasks.push(JobSummary {
+                id: sub.id.clone(),
+                command: format!("subagent: {}", sub.goal),
+                workdir: "delegated subagent".to_string(),
+                status,
+                elapsed_secs,
+                log_path: sub.log_path.unwrap_or_else(|| format!("{}.log", sub.id)),
+            });
         }
     }
 

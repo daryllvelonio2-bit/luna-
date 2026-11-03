@@ -1050,6 +1050,59 @@ pub fn set_in_file(layers: &Layers, key: &str, raw: &str) -> Result<PathBuf, Har
     Ok(path)
 }
 
+/// Remove `key` from the config file if present.
+/// The resulting configuration is validated against defaults before writing back.
+/// Returns `Some(path)` if a key was removed and written, or `None` if the key was not present
+/// or the file does not exist.
+pub fn unset_in_file(layers: &Layers, key: &str) -> Result<Option<PathBuf>, HarnessError> {
+    let path = match &layers.file {
+        Some(p) => p.clone(),
+        None => return Ok(None),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut root = match read_file_value(&path)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    if !remove_path(&mut root, key) {
+        return Ok(None);
+    }
+
+    let mut check = to_value(&layers.defaults)?;
+    deep_merge(&mut check, root.clone());
+    let check_cfg: Config = from_value(&check)?;
+    check_cfg.validate()?;
+
+    write_file_value(&path, &root)?;
+    Ok(Some(path))
+}
+
+fn remove_path(root: &mut Value, key: &str) -> bool {
+    let mut segments = key.split('.');
+    let first = segments.next().unwrap_or_default();
+    if first.is_empty() {
+        return false;
+    }
+    let rest: Vec<&str> = segments.collect();
+
+    if let Some(mapping) = root.as_mapping_mut() {
+        let key_val = Value::String(first.to_string());
+        if rest.is_empty() {
+            return mapping.remove(&key_val).is_some();
+        } else if let Some(child) = mapping.get_mut(&key_val) {
+            let removed = remove_path(child, &rest.join("."));
+            let is_empty = child.as_mapping().map_or(false, |m| m.is_empty());
+            if is_empty {
+                mapping.remove(&key_val);
+            }
+            return removed;
+        }
+    }
+    false
+}
+
 /// `~` and `~/…` against `$HOME`.
 pub fn expand_tilde(value: &str) -> String {
     let home = home_dir();

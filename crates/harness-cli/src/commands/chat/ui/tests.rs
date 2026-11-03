@@ -1,5 +1,6 @@
 use super::test_support::capture_stdout;
 use super::*;
+use harness_providers::QuotaWindow;
 
 fn a_snapshot() -> TodoSnapshot {
     TodoSnapshot {
@@ -153,6 +154,15 @@ fn delegated_children_stay_visible_and_report_progress() {
         "the row leaves on finish"
     );
     assert_eq!(ui.box_row_count(), 4);
+
+    // Multiple subagents still render exactly one row with (+N more)
+    ui.start_delegate_task("sub_1", "First task");
+    ui.start_delegate_task("sub_2", "Second task");
+    let multi_rows = ui.delegate_task_rows(80);
+    assert_eq!(multi_rows.len(), 1, "only one delegate row is shown in cli");
+    let multi_plain = dialoguer::console::strip_ansi_codes(&multi_rows[0]).to_string();
+    assert!(multi_plain.contains("(+1 more)"), "{multi_plain}");
+    assert!(multi_plain.contains("sub_2"), "{multi_plain}");
 }
 
 /// A queued line sits in the composer like the background-task line it imitates, and the erase
@@ -449,12 +459,33 @@ fn humanize_tokens_stays_exact_below_10k() {
     assert_eq!(humanize_tokens(2_000_000), "2M");
 }
 
+/// A reset stamp `secs` seconds from now, in the shape the provider sends.
+fn reset_in(secs: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(secs))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 #[test]
 fn status_line_displays_antigravity_account_and_quota_format() {
     let ui = ChatUi::new(true);
     ui.set_status("gemini-3.8-flash", 0, 1_000_000);
     ui.set_account_name(Some("daryllvelonio9@gmail.com".to_string()));
-    ui.set_quota_display(Some("5h 100% (4h 59m) · w 100% (6d 23h)".to_string()));
+    // Off the minute boundary, so the rendered countdown is stable long enough to assert on.
+    ui.set_quota_lines(
+        "gemini-3.8-flash",
+        vec![
+            QuotaLine {
+                window: QuotaWindow::FiveHour,
+                remaining_fraction: 1.0,
+                reset_time: Some(reset_in(4 * 3600 + 30 * 60 + 30)),
+            },
+            QuotaLine {
+                window: QuotaWindow::Weekly,
+                remaining_fraction: 1.0,
+                reset_time: Some(reset_in(167 * 3600 + 30)),
+            },
+        ],
+    );
 
     let line = ui.format_status_line(120).expect("status line");
     let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
@@ -463,9 +494,70 @@ fn status_line_displays_antigravity_account_and_quota_format() {
         "{stripped}"
     );
     assert!(
-        stripped.contains("0/1M · 5h 100% (4h 59m) · w 100% (6d 23h)"),
+        stripped.contains("0/1M · 5h 100% (4h 30m) · w 100% (6d 23h)"),
         "{stripped}"
     );
+}
+
+#[test]
+fn a_quota_refresh_for_another_model_does_not_paint() {
+    let ui = ChatUi::new(true);
+    ui.set_status("claude-sonnet-4-6", 0, 200_000);
+    // What an in-flight refresh for the model the user just switched away from looks like.
+    ui.set_quota_lines(
+        "gemini-3.8-flash",
+        vec![QuotaLine {
+            window: QuotaWindow::FiveHour,
+            remaining_fraction: 0.5,
+            reset_time: None,
+        }],
+    );
+
+    let line = ui.format_status_line(120).expect("status line");
+    let stripped = dialoguer::console::strip_ansi_codes(&line).to_string();
+    assert!(!stripped.contains("50%"), "{stripped}");
+}
+
+/// The quota text the status bar last drew.
+fn quota_drawn(ui: &ChatUi) -> String {
+    ui.status
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.quota_drawn.clone())
+        .unwrap_or_default()
+}
+
+/// A quota readout that is drawn once and then holds still is the reported bug: the numbers were
+/// refetched only by restarting the session. This is the tick's half — it re-renders the countdown
+/// and takes the new text as soon as a minute of it has passed.
+#[test]
+fn the_tick_takes_a_quota_readout_that_has_moved_a_minute() {
+    let ui = ChatUi::new(true);
+    ui.set_status("gemini-3.8-flash", 0, 1_000_000);
+    ui.set_quota_lines(
+        "gemini-3.8-flash",
+        vec![QuotaLine {
+            window: QuotaWindow::FiveHour,
+            remaining_fraction: 0.86,
+            // Off the minute boundary, so the countdown is stable for a minute either way.
+            reset_time: Some(reset_in(4 * 3600 + 30 * 60 + 30)),
+        }],
+    );
+
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.refresh_quota_clock());
+    assert_eq!(quota_drawn(&ui), "5h 86% (4h 30m)");
+
+    // Seed the row with what the previous minute drew. A tick then has something to notice, which
+    // is the comparison under test — the clock itself is what the renderer is asked for.
+    {
+        let mut status = ui.status.lock().unwrap();
+        status.as_mut().unwrap().quota_drawn = "5h 86% (4h 31m)".to_string();
+    }
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.refresh_quota_clock());
+    assert_eq!(quota_drawn(&ui), "5h 86% (4h 30m)");
 }
 
 #[test]

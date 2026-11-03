@@ -1,6 +1,7 @@
 use colored::Colorize;
 use dialoguer::console::Term;
 use harness_core::tools::todo::TodoSnapshot;
+use harness_providers::QuotaLine;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,6 +10,7 @@ use super::render::{
     activity_line, compaction_line, fit_diff_line_to_width, needs_separator, reasoning_rows,
     tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
 };
+use super::status::format_quota_lines;
 
 /// Fewest rows the live region gives the thought block. On a screen with no room left the block
 /// still shows this much: below it the region stops saying anything at all.
@@ -116,10 +118,15 @@ struct DelegateTaskView {
 }
 
 /// One running child as a single composer row: its id, its goal, and what it is doing now.
-fn format_delegate_task_row(task: &DelegateTaskView, width: usize) -> String {
+fn format_delegate_task_row(task: &DelegateTaskView, more: usize, width: usize) -> String {
     let prefix = "🤖 delegate";
     let goal = task.goal.split_whitespace().collect::<Vec<_>>().join(" ");
-    let body = format!("{} · {} · {}", task.id, task.activity, goal);
+    let more_str = if more > 0 {
+        format!(" (+{} more)", more)
+    } else {
+        String::new()
+    };
+    let body = format!("{} · {} · {}{}", task.id, task.activity, goal, more_str);
     let budget = width.saturating_sub(visible_width(prefix) + 1);
     format!(
         "{} {}",
@@ -159,7 +166,13 @@ struct LiveRegion {
 struct ChatStatus {
     model: String,
     account_name: Option<String>,
-    quota_display: Option<String>,
+    /// The quota windows the provider reported, with their raw reset times. The countdown is
+    /// rendered from these on every paint, so `(4h 59m)` is recomputed rather than frozen at the
+    /// moment of the fetch.
+    quota: Vec<QuotaLine>,
+    /// The quota text as it was last drawn. Only the idle tick reads it: it is what says a repaint
+    /// is worth doing now that the countdown has moved a minute.
+    quota_drawn: String,
     context_used: u32,
     context_max: u32,
     yolo: bool,
@@ -453,21 +466,11 @@ impl ChatUi {
 
     /// Update what a running delegated child is doing.
     pub fn update_delegate_task(&self, id: &str, activity: &str) {
-        let changed = {
-            let mut tasks = self.delegate_tasks.lock().unwrap();
-            if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
-                if task.activity == activity {
-                    false
-                } else {
-                    task.activity = activity.to_string();
-                    true
-                }
-            } else {
-                false
+        let mut tasks = self.delegate_tasks.lock().unwrap();
+        if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+            if task.activity != activity {
+                task.activity = activity.to_string();
             }
-        };
-        if changed {
-            self.redraw_box();
         }
     }
 
@@ -485,13 +488,15 @@ impl ChatUi {
     }
 
     /// The rows that announce delegated children still running in the background.
+    /// Only one is shown in the CLI above the composer; full details for all running subagents
+    /// are inspected in the background viewer.
     pub fn delegate_task_rows(&self, width: usize) -> Vec<String> {
-        self.delegate_tasks
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|task| format_delegate_task_row(task, width))
-            .collect()
+        let tasks = self.delegate_tasks.lock().unwrap();
+        if let Some(task) = tasks.last() {
+            vec![format_delegate_task_row(task, tasks.len() - 1, width)]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn box_row_count(&self) -> usize {
@@ -622,20 +627,23 @@ impl ChatUi {
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        let (yolo, plan_mode, session_name, account_name, quota_display) = match status.as_ref() {
-            Some(s) => (
-                s.yolo,
-                s.plan_mode,
-                s.session_name.clone(),
-                s.account_name.clone(),
-                s.quota_display.clone(),
-            ),
-            None => (false, false, String::new(), None, None),
-        };
+        let (yolo, plan_mode, session_name, account_name, quota, quota_drawn) =
+            match status.as_ref() {
+                Some(s) => (
+                    s.yolo,
+                    s.plan_mode,
+                    s.session_name.clone(),
+                    s.account_name.clone(),
+                    s.quota.clone(),
+                    s.quota_drawn.clone(),
+                ),
+                None => (false, false, String::new(), None, Vec::new(), String::new()),
+            };
         *status = Some(ChatStatus {
             model: model.to_string(),
             account_name,
-            quota_display,
+            quota,
+            quota_drawn,
             context_used,
             context_max,
             yolo,
@@ -654,14 +662,52 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
-    pub fn set_quota_display(&self, quota: Option<String>) {
+    /// Show the quota windows `model` is metered against.
+    ///
+    /// A payload for a model that is no longer the one in the bar is dropped: a refresh that was in
+    /// flight when `/model` was used would otherwise paint the old model's numbers under the new
+    /// model's name. An empty payload is always taken, because that is a caller saying there is
+    /// nothing to show — a provider with no quota readout, or a credential that is gone.
+    pub fn set_quota_lines(&self, model: &str, lines: Vec<QuotaLine>) {
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
-                s.quota_display = quota;
+                if !lines.is_empty() && s.model != model {
+                    return;
+                }
+                s.quota = lines;
+                // Empty means "not drawn yet", so the tick notices the first real text.
+                s.quota_drawn.clear();
             }
         }
         self.redraw_status_line();
+    }
+
+    /// Repaint the status line when the quota countdown has moved.
+    ///
+    /// The readout carries a reset countdown, and the countdown is only as fresh as the last paint
+    /// — while a turn streams that is many times a second, but an idle composer paints nothing at
+    /// all (the animation tick returns early with no live rows). This is the idle half: re-render
+    /// the text and ask for a repaint only when a minute of it has actually passed.
+    pub fn refresh_quota_clock(&self) {
+        let changed = {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            match status.as_mut() {
+                Some(s) if !s.quota.is_empty() => {
+                    let rendered = format_quota_lines(&s.quota);
+                    if rendered == s.quota_drawn {
+                        false
+                    } else {
+                        s.quota_drawn = rendered;
+                        true
+                    }
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.redraw_status_line();
+        }
     }
 
     pub fn set_model(&self, model: &str, context_used: u32, context_max: u32) {
@@ -772,28 +818,21 @@ impl ChatUi {
         // If a provider quota display is available, format as:
         // "<used>/<max> · 5h <pct>% (<time>) · w <pct>% (<time>)"
         // Otherwise, fall back to the standard context percentage and humanized tokens.
-        let mut right = if let Some(ref q) = s.quota_display {
-            if !q.is_empty() {
-                if s.context_max > 0 {
-                    format!(
-                        "{}/{} · {}",
-                        humanize_tokens(s.context_used),
-                        humanize_tokens(s.context_max),
-                        q
-                    )
-                } else {
-                    format!("{} · {}", s.context_used, q)
-                }
-            } else if s.context_max > 0 {
-                let percent = (s.context_used as u64) * 100 / s.context_max as u64;
+        //
+        // The quota text is rendered here, at paint time, rather than stored as a string: it
+        // carries a reset countdown, and a countdown rendered once at fetch time is a number that
+        // stops moving.
+        let quota = format_quota_lines(&s.quota);
+        let mut right = if !quota.is_empty() {
+            if s.context_max > 0 {
                 format!(
-                    "ctx: {}% ({}/{})",
-                    percent,
+                    "{}/{} · {}",
                     humanize_tokens(s.context_used),
-                    humanize_tokens(s.context_max)
+                    humanize_tokens(s.context_max),
+                    quota
                 )
             } else {
-                format!("ctx: {}/{}", s.context_used, s.context_max)
+                format!("{} · {}", s.context_used, quota)
             }
         } else if s.context_max > 0 {
             let percent = (s.context_used as u64) * 100 / s.context_max as u64;
@@ -1177,6 +1216,7 @@ impl ChatUi {
                 .unwrap_or_else(|e| e.into_inner())
                 .rows
                 .is_empty()
+            && self.delegate_tasks.lock().unwrap().is_empty()
         {
             return;
         }
@@ -1431,13 +1471,19 @@ impl ChatUi {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let previous = {
-            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = live.rows.len();
-            live.rows.clear();
-            prev
+        if let Some(sequence) = self.repaint_block_sequence(width, &buf) {
+            print!("{sequence}");
+            let _ = io::stdout().flush();
+            return;
+        }
+        let (previous, live_rows) = {
+            let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            (live.rows.len(), live.rows.clone())
         };
         self.erase_live_and_box(previous);
+        for row in &live_rows {
+            println!("{}", row);
+        }
         self.draw_box(width, &buf);
     }
 

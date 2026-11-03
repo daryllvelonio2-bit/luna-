@@ -31,6 +31,7 @@ mod usage;
 pub(crate) use usage::handle_usage_command;
 
 mod context;
+mod dir;
 mod model;
 mod session;
 mod value_prompt;
@@ -38,6 +39,7 @@ mod value_prompt;
 pub(crate) use context::{
     handle_auto_compact_command, handle_compact_command, handle_diff_command,
 };
+pub(crate) use dir::handle_dir_command;
 pub(crate) use model::{
     handle_compact_model_switch, handle_model_switch, handle_reasoning_switch,
     handle_thinking_switch,
@@ -137,8 +139,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Fork current session into a new branch session",
     },
     SlashCommand {
+        name: "/tasks",
+        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /jobs)",
+    },
+    SlashCommand {
         name: "/jobs",
-        details: "List background task queue jobs",
+        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /tasks)",
+    },
+    SlashCommand {
+        name: "/subagents",
+        details: "Inspect running background tasks and delegated subagents (Ctrl+B, or /tasks)",
     },
     SlashCommand {
         name: "/usage",
@@ -177,6 +187,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Add providers and API keys",
     },
     SlashCommand {
+        name: "/dir",
+        details: "Inspect, change, or reset workspace directory (/dir reset to restore default)",
+    },
+    SlashCommand {
+        name: "/workspace",
+        details: "Inspect, change, or reset workspace directory (alias: /dir)",
+    },
+    SlashCommand {
         name: "/delete",
         details: "Delete current session and start a fresh one",
     },
@@ -191,7 +209,7 @@ pub(crate) async fn execute_slash_command(
     cmd: &str,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
-    config: &Config,
+    config: &mut Config,
     cred_manager: &Arc<CredentialManager>,
     discovery: &Arc<ModelDiscovery>,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
@@ -326,6 +344,16 @@ pub(crate) async fn execute_slash_command(
                     buf.push_str("/name ");
                 }
                 ui.redraw_input_line();
+            }
+            Ok(false)
+        }
+        "/dir" | "/workspace" => {
+            if let Err(e) = handle_dir_command(key_rx, ui, config, agent, arg).await {
+                ui.emit_above(&format!(
+                    "{} Failed to switch workspace: {}",
+                    "✖".red().bold(),
+                    e
+                ));
             }
             Ok(false)
         }

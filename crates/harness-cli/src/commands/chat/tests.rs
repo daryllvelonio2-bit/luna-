@@ -132,6 +132,19 @@ fn slash_commands_includes_thinking() {
     );
 }
 
+#[test]
+fn slash_commands_includes_dir_and_workspace() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/dir"),
+        "/dir command must be registered in SLASH_COMMANDS"
+    );
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/workspace"),
+        "/workspace command must be registered in SLASH_COMMANDS"
+    );
+}
+
 /// The slash command filter prioritizes prefix matches: typing "/s" should show /sessions,
 /// /summarize, /skills, etc. before /model (which merely contains "s").
 #[test]
@@ -337,5 +350,70 @@ async fn handle_thinking_switch_sets_effort() {
     assert_eq!(
         agent.lock().await.reasoning_effort(),
         Some(ReasoningEffort::High)
+    );
+}
+
+#[tokio::test]
+async fn handle_dir_command_switches_and_resets_workspace() {
+    use super::commands::handle_dir_command;
+    use super::ui::ChatUi;
+    use harness_core::{Agent, AgentConfig, Config, DefaultToolRegistry};
+    use harness_memory::SqliteMemoryEngine;
+    use harness_notes::FileNotesEngine;
+    use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sub = tmp.path().join("sub_workspace");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let memory = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
+    let notes = Arc::new(FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let creds = CredentialManager::new(None).unwrap();
+    let discovery = Arc::new(ModelDiscovery::new(None, 0, Default::default()));
+    let provider = Arc::new(
+        GenericProviderClient::new(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            creds,
+            discovery,
+            None,
+        )
+        .unwrap(),
+    );
+    let agent = Arc::new(tokio::sync::Mutex::new(Agent::new(
+        provider,
+        memory,
+        notes,
+        registry,
+        AgentConfig::default(),
+    )));
+    let ui = ChatUi::new(false);
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+    let mut config = Config::default();
+    config.paths.workspace_root = tmp.path().to_path_buf();
+
+    // Set workspace with explicit session scope
+    let sub_str = format!("{} --session", sub.display());
+    handle_dir_command(&mut rx, &ui, &mut config, &agent, Some(&sub_str))
+        .await
+        .unwrap();
+    assert_eq!(config.paths.workspace_root, sub.canonicalize().unwrap());
+    assert_eq!(
+        agent.lock().await.config().workspace_root,
+        Some(sub.canonicalize().unwrap())
+    );
+
+    // Reset workspace back to normal default
+    handle_dir_command(&mut rx, &ui, &mut config, &agent, Some("reset"))
+        .await
+        .unwrap();
+    let default_dir = std::env::current_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(config.paths.workspace_root, default_dir);
+    assert_eq!(
+        agent.lock().await.config().workspace_root,
+        Some(default_dir)
     );
 }

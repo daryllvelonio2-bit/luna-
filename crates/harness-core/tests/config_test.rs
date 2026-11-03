@@ -200,6 +200,15 @@ fn set_then_load_round_trips() {
     assert_eq!(resolved.config().agent.max_consecutive_failures, 3);
     // The second write kept the first key.
     assert_eq!(resolved.get("model.provider").unwrap(), "nvidia");
+
+    // Unset removes the key
+    let unset_res = unset_in_file(&layers, "agent.max_consecutive_failures").unwrap();
+    assert_eq!(unset_res, Some(path));
+    let resolved_after = resolve(&layers).unwrap();
+    assert_eq!(
+        resolved_after.source("agent.max_consecutive_failures").unwrap(),
+        Source::Default
+    );
 }
 
 #[test]

@@ -169,9 +169,10 @@ pub async fn refresh_antigravity_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<String, HarnessError> {
+    let client_secret = super::agy_client_secret()?;
     let params = [
         ("client_id", AGY_CLIENT_ID),
-        ("client_secret", AGY_CLIENT_SECRET),
+        ("client_secret", client_secret.as_str()),
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ];

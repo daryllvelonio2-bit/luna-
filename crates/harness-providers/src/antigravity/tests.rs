@@ -266,17 +266,14 @@ fn format_quota_display_separates_gemini_and_claude_groups() {
         },
     );
 
+    // The shape this account's own endpoint returns: one group — "Claude and GPT models" — holding
+    // the account's `3p-5h` and `3p-weekly` buckets, and per-model `quotaInfo` for the Gemini
+    // family. The provider publishes no Gemini group at all here, so a Gemini model has exactly one
+    // 5-hour window available (its own) and exactly one weekly window (the account's).
     let summary = AntigravityQuotaSummary {
         groups: vec![AntigravityQuotaGroup {
             display_name: Some("Claude and GPT models".to_string()),
             buckets: vec![
-                AntigravityQuotaBucket {
-                    bucket_id: Some("3p-5h".to_string()),
-                    display_name: Some("Five Hour Limit Remaining".to_string()),
-                    window: Some("5h".to_string()),
-                    reset_time: None,
-                    remaining_fraction: Some(1.0),
-                },
                 AntigravityQuotaBucket {
                     bucket_id: Some("3p-weekly".to_string()),
                     display_name: Some("Weekly Limit Remaining".to_string()),
@@ -284,22 +281,54 @@ fn format_quota_display_separates_gemini_and_claude_groups() {
                     reset_time: None,
                     remaining_fraction: Some(0.46),
                 },
+                AntigravityQuotaBucket {
+                    bucket_id: Some("3p-5h".to_string()),
+                    display_name: Some("Five Hour Limit Remaining".to_string()),
+                    window: Some("5h".to_string()),
+                    reset_time: None,
+                    remaining_fraction: Some(1.0),
+                },
             ],
         }],
         models_quota,
     };
 
-    // When active model is gemini, it must select the 6% quotaInfo from models_quota as the 5h limit
-    let gemini_fmt = summary
-        .format_quota_display("gemini-3.8-flash")
-        .expect("gemini quota");
-    assert_eq!(gemini_fmt, "5h 6%");
+    let display = |model: &str| summary.quota_lines(model).expect("quota lines");
 
-    // When active model is claude, it must select the Claude and GPT models group (5h 100% · w 46%)
-    let claude_fmt = summary
-        .format_quota_display("claude-sonnet-4-6")
-        .expect("claude quota");
-    assert_eq!(claude_fmt, "5h 100% · w 46%");
+    // A Gemini model reads the 6% from its own quotaInfo, and the weekly window from the only
+    // weekly bucket the account has. Missing that weekly window is what showed "5h 6%" alone.
+    assert_eq!(
+        display("gemini-3.8-flash"),
+        vec![
+            QuotaLine {
+                window: QuotaWindow::FiveHour,
+                remaining_fraction: 0.0628,
+                reset_time: None,
+            },
+            QuotaLine {
+                window: QuotaWindow::Weekly,
+                remaining_fraction: 0.46,
+                reset_time: None,
+            },
+        ]
+    );
+
+    // Claude reads the third-party group's own 5-hour bucket; the weekly window is the same one.
+    assert_eq!(
+        display("claude-sonnet-4-6"),
+        vec![
+            QuotaLine {
+                window: QuotaWindow::FiveHour,
+                remaining_fraction: 1.0,
+                reset_time: None,
+            },
+            QuotaLine {
+                window: QuotaWindow::Weekly,
+                remaining_fraction: 0.46,
+                reset_time: None,
+            },
+        ]
+    );
 }
 
 #[test]
@@ -313,25 +342,80 @@ fn format_quota_display_gemini_with_both_5h_and_weekly() {
         },
     );
 
+    // An account that *does* get a Gemini group: the weekly window is read from the Gemini bucket
+    // rather than from the third-party one sharing the summary.
     let summary = AntigravityQuotaSummary {
-        groups: vec![AntigravityQuotaGroup {
-            display_name: Some("Gemini models".to_string()),
-            buckets: vec![AntigravityQuotaBucket {
-                bucket_id: Some("gemini-weekly".to_string()),
-                display_name: Some("Weekly Limit".to_string()),
-                window: Some("weekly".to_string()),
-                reset_time: None,
-                remaining_fraction: Some(0.85),
-            }],
-        }],
+        groups: vec![
+            AntigravityQuotaGroup {
+                display_name: Some("Gemini models".to_string()),
+                buckets: vec![AntigravityQuotaBucket {
+                    bucket_id: Some("gemini-weekly".to_string()),
+                    display_name: Some("Weekly Limit".to_string()),
+                    window: Some("weekly".to_string()),
+                    reset_time: None,
+                    remaining_fraction: Some(0.85),
+                }],
+            },
+            AntigravityQuotaGroup {
+                display_name: Some("Claude and GPT models".to_string()),
+                buckets: vec![
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-5h".to_string()),
+                        display_name: Some("Five Hour Limit Remaining".to_string()),
+                        window: Some("5h".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(1.0),
+                    },
+                    AntigravityQuotaBucket {
+                        bucket_id: Some("3p-weekly".to_string()),
+                        display_name: Some("Weekly Limit Remaining".to_string()),
+                        window: Some("weekly".to_string()),
+                        reset_time: None,
+                        remaining_fraction: Some(0.46),
+                    },
+                ],
+            },
+        ],
         models_quota,
     };
 
-    let gemini_fmt = summary
-        .format_quota_display("gemini-2.5-flash")
+    let gemini = summary
+        .quota_lines("gemini-2.5-flash")
         .expect("gemini quota");
-    assert!(gemini_fmt.starts_with("5h 93%"));
-    assert!(gemini_fmt.contains("· w 85%"));
+    assert_eq!(gemini.len(), 2, "{gemini:?}");
+    assert_eq!(gemini[0].window, QuotaWindow::FiveHour);
+    assert!((gemini[0].remaining_fraction - 0.93).abs() < f64::EPSILON);
+    assert_eq!(gemini[1].window, QuotaWindow::Weekly);
+    // The Gemini bucket, not the third-party one sitting in the same summary.
+    assert!((gemini[1].remaining_fraction - 0.85).abs() < f64::EPSILON);
+}
+
+#[test]
+fn a_quota_window_without_a_reset_time_carries_none() {
+    let mut models_quota = std::collections::HashMap::new();
+    models_quota.insert(
+        "gemini-3.8-flash-tiered".to_string(),
+        AntigravityModelQuotaInfo {
+            remaining_fraction: Some(0.82),
+            reset_time: None,
+        },
+    );
+    let summary = AntigravityQuotaSummary {
+        groups: Vec::new(),
+        models_quota,
+    };
+
+    let lines = summary
+        .quota_lines("gemini-3.8-flash")
+        .expect("gemini quota");
+    assert_eq!(
+        lines,
+        vec![QuotaLine {
+            window: QuotaWindow::FiveHour,
+            remaining_fraction: 0.82,
+            reset_time: None,
+        }]
+    );
 }
 
 #[test]

@@ -52,6 +52,24 @@ pub struct LunaAuthStorage {
 /// File name of the credential store, under `$HOME/.luna`.
 const CREDENTIALS_FILE: &str = "credentials.json";
 
+#[cfg(unix)]
+struct StoreLock {
+    fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+            libc::close(self.fd);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct StoreLock;
+
 pub struct CredentialManager {
     storage_path: PathBuf,
     state: RwLock<LunaAuthStorage>,
@@ -85,9 +103,46 @@ impl CredentialManager {
         Ok(PathBuf::from(home).join(".luna").join(CREDENTIALS_FILE))
     }
 
+    #[cfg(unix)]
+    fn acquire_store_lock(&self) -> Result<StoreLock, HarnessError> {
+        use std::os::unix::ffi::OsStrExt;
+        let lock_path = self.storage_path.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let c_path = std::ffi::CString::new(lock_path.as_os_str().as_bytes())
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(HarnessError::Io("failed to open credential lock file".into()));
+        }
+        let res = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if res != 0 {
+            unsafe { libc::close(fd); }
+            return Err(HarnessError::Io("failed to acquire flock on credential store".into()));
+        }
+        Ok(StoreLock { fd })
+    }
+
+    #[cfg(not(unix))]
+    fn acquire_store_lock(&self) -> Result<StoreLock, HarnessError> {
+        Ok(StoreLock)
+    }
+
     fn load_from_disk(path: &Path) -> Result<LunaAuthStorage, HarnessError> {
         if !path.exists() {
             return Ok(LunaAuthStorage::default());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
         let data = fs::read_to_string(path).map_err(|e| {
             HarnessError::Io(format!(
@@ -132,12 +187,49 @@ impl CredentialManager {
                 )));
             }
         }
-        fs::write(&self.storage_path, bytes).map_err(|e| {
+
+        let tmp_path = self.storage_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true).mode(0o600);
+            let mut file = options.open(&tmp_path).map_err(|e| {
+                HarnessError::Io(format!("cannot open temp credential store {}: {e}", tmp_path.display()))
+            })?;
+            file.write_all(bytes.as_bytes()).map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                HarnessError::Io(format!("cannot write temp credential store {}: {e}", tmp_path.display()))
+            })?;
+            file.sync_all().map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                HarnessError::Io(format!("cannot sync temp credential store {}: {e}", tmp_path.display()))
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&tmp_path, bytes).map_err(|e| {
+                HarnessError::Io(format!("cannot write temp credential store {}: {e}", tmp_path.display()))
+            })?;
+        }
+
+        fs::rename(&tmp_path, &self.storage_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
             HarnessError::Io(format!(
-                "cannot write credential store {}: {e}",
+                "cannot rename credential store {} to {}: {e}",
+                tmp_path.display(),
                 self.storage_path.display()
             ))
-        })
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(())
     }
 
     /// Apply one change to the credential store on disk and write it back.
@@ -153,6 +245,7 @@ impl CredentialManager {
     where
         F: FnOnce(&mut LunaAuthStorage),
     {
+        let _lock = self.acquire_store_lock()?;
         let mut disk = Self::load_from_disk(&self.storage_path)?;
         mutate(&mut disk);
         for p in disk.providers.values_mut() {

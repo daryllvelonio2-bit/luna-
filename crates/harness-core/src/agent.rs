@@ -596,6 +596,24 @@ where
         self.checkpoints.clone()
     }
 
+    /// Set or update the workspace root for the agent and its checkpoint controller.
+    pub fn set_workspace_root(&mut self, root: PathBuf) {
+        if let Some(cp) = &self.checkpoints {
+            cp.set_workspace(root.clone());
+        }
+        self.config.workspace_root = Some(root);
+    }
+
+    /// Set or update the skills summary for the agent's prompt context.
+    pub fn set_skills_summary(&mut self, summary: Option<String>) {
+        self.config.skills_summary = summary;
+    }
+
+    /// Read-only access to current agent configuration.
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     pub fn memory(&self) -> &Arc<M> {
         &self.memory
     }

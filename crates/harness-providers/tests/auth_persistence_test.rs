@@ -135,3 +135,23 @@ async fn failover_flags_stay_out_of_the_persisted_store() {
         "process-local failover state reached the disk: {raw}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn credentials_file_has_0600_permissions_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let mgr = manager(&path);
+    mgr.add_credential("openai", "key", "sk-secret-1234", false)
+        .await
+        .unwrap();
+
+    let meta = fs::metadata(&path).unwrap();
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "credentials.json must have 0600 permissions, found {:o}",
+        mode
+    );
+}

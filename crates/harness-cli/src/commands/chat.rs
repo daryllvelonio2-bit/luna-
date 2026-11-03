@@ -74,7 +74,7 @@ fn redraw_transcript(turns: &[TurnRecord], expanded: bool) {
 pub(crate) use history::clear_on_exit;
 use history::{append_prompt_history, load_prompt_history, KittyKeyboardGuard};
 use prompts::{prompt_approval_choice, prompt_sudo_password_dialog, ChatSudoPrompter};
-pub(crate) use status::refresh_antigravity_status_if_needed;
+pub(crate) use status::{refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed};
 use turn::handle_composer_command;
 use turn::{cancel_running_turn, drain_queue, launch_turn, submission, Submission};
 
@@ -170,7 +170,7 @@ async fn register_mcp_servers(
 }
 
 pub async fn run_interactive_chat(
-    config: Config,
+    mut config: Config,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
     selection: SessionSelection,
@@ -1314,6 +1314,12 @@ pub async fn run_interactive_chat(
     let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // A quota readout fetched at start-up and never fetched again is a snapshot: its countdown
+    // stops moving the moment it is drawn, and its percentages describe the account as it was when
+    // the session opened. The tick is what keeps it honest — the clock half is repainted whenever a
+    // minute of the countdown passes, and the numbers themselves are refetched on this TTL.
+    let mut quota_refreshed_at = std::time::Instant::now();
+
     loop {
         tokio::select! {
             _ = async {
@@ -1356,6 +1362,21 @@ pub async fn run_interactive_chat(
 
             _ = animation.tick() => {
                 ui.animate_tick();
+                // The countdown is rendered from the bucket's reset time, so an idle composer — one
+                // with no live rows to animate — paints nothing and would show a frozen clock.
+                ui.refresh_quota_clock();
+                // The same tick re-reads the account's quota once its snapshot has aged out. It is
+                // spawned rather than awaited: a metered endpoint that is slow or down must never
+                // be something the composer stalls behind.
+                if quota_refreshed_at.elapsed() >= status::QUOTA_REFRESH_INTERVAL {
+                    quota_refreshed_at = std::time::Instant::now();
+                    tokio::spawn(refresh_antigravity_quota_owned(
+                        ui.clone(),
+                        current_provider.clone(),
+                        current_model.clone(),
+                        cred_manager.clone(),
+                    ));
+                }
                 // The queue's second drain path: a fold the user asked for ends without a turn-end
                 // event, so the tick is what notices the agent is free and sends what was held.
                 if !compacting.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1478,6 +1499,7 @@ pub async fn run_interactive_chat(
                         show_background_task_viewer(
                             &mut key_rx,
                             Some(bg_queue.as_ref()),
+                            Some(delegate_tool.as_ref()),
                             &ui,
                             &turns,
                             process_expanded,
@@ -1579,11 +1601,23 @@ pub async fn run_interactive_chat(
                             {
                                 continue;
                             }
+                            if cmd == "/jobs" || cmd == "/tasks" || cmd == "/subagents" {
+                                show_background_task_viewer(
+                                    &mut key_rx,
+                                    Some(bg_queue.as_ref()),
+                                    Some(delegate_tool.as_ref()),
+                                    &ui,
+                                    &turns,
+                                    process_expanded,
+                                )
+                                .await;
+                                continue;
+                            }
                             if execute_slash_command(
                                 &cmd,
                                 &mut key_rx,
                                 &ui,
-                                &config,
+                                &mut config,
                                 &cred_manager,
                                 &discovery,
                                 &agent,
@@ -1694,11 +1728,23 @@ pub async fn run_interactive_chat(
                                 {
                                     continue;
                                 }
+                                if cmd == "/jobs" || cmd == "/tasks" || cmd == "/subagents" {
+                                    show_background_task_viewer(
+                                        &mut key_rx,
+                                        Some(bg_queue.as_ref()),
+                                        Some(delegate_tool.as_ref()),
+                                        &ui,
+                                        &turns,
+                                        process_expanded,
+                                    )
+                                    .await;
+                                    continue;
+                                }
                                 if execute_slash_command(
                                     &cmd,
                                     &mut key_rx,
                                     &ui,
-                                    &config,
+                                    &mut config,
                                     &cred_manager,
                                     &discovery,
                                     &agent,
@@ -1745,6 +1791,19 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
+                        if query == "/jobs" || query == "/tasks" || query == "/subagents" {
+                            show_background_task_viewer(
+                                &mut key_rx,
+                                Some(bg_queue.as_ref()),
+                                Some(delegate_tool.as_ref()),
+                                &ui,
+                                &turns,
+                                process_expanded,
+                            )
+                            .await;
+                            continue;
+                        }
+
                         if query.starts_with('/')
                             || query.eq_ignore_ascii_case("exit")
                             || query.eq_ignore_ascii_case("quit")
@@ -1753,7 +1812,7 @@ pub async fn run_interactive_chat(
                                 &query,
                                 &mut key_rx,
                                 &ui,
-                                &config,
+                                &mut config,
                                 &cred_manager,
                                 &discovery,
                                 &agent,
@@ -1807,9 +1866,6 @@ pub async fn run_interactive_chat(
                                     diff_lines: Vec::new(),
                                 });
                                 ui.emit_above(&line);
-                                if ui.is_attended {
-                                    ui.draw_initial_box();
-                                }
                                 continue;
                             }
                             Submission::Interrupt => {

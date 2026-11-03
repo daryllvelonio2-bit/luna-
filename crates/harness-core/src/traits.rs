@@ -230,6 +230,11 @@ pub trait ToolRegistry: Send + Sync {
     /// Register a new tool
     async fn register(&self, tool: Arc<dyn Tool>) -> Result<(), HarnessError>;
 
+    /// Unregister a tool by name. Returns true if the tool was present and removed.
+    async fn unregister(&self, _name: &str) -> Result<bool, HarnessError> {
+        Ok(false)
+    }
+
     /// List all registered tool definitions
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError>;
 

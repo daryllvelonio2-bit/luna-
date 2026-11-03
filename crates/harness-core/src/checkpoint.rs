@@ -432,6 +432,14 @@ impl CheckpointController {
         &self.store
     }
 
+    pub fn workspace(&self) -> PathBuf {
+        self.store.workspace()
+    }
+
+    pub fn set_workspace(&self, workspace: PathBuf) {
+        self.store.set_workspace(workspace);
+    }
+
     /// Open a snapshot for this turn. Returns `None` when checkpoints are disabled.
     pub fn begin(
         &self,
@@ -527,7 +535,7 @@ impl ToolMiddleware for CheckpointMiddleware {
 /// The on-disk checkpoint area.
 pub struct CheckpointStore {
     root: PathBuf,
-    workspace: PathBuf,
+    workspace: std::sync::RwLock<PathBuf>,
     keep_turns: usize,
     track_external: bool,
     ignore: Vec<String>,
@@ -537,7 +545,7 @@ impl CheckpointStore {
     pub fn new(root: PathBuf, workspace: PathBuf) -> Self {
         Self {
             root,
-            workspace,
+            workspace: std::sync::RwLock::new(workspace),
             keep_turns: DEFAULT_KEEP_TURNS,
             track_external: false,
             ignore: DEFAULT_IGNORED_DIRS
@@ -545,6 +553,14 @@ impl CheckpointStore {
                 .map(|dir| dir.to_string())
                 .collect(),
         }
+    }
+
+    pub fn workspace(&self) -> PathBuf {
+        self.workspace.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set_workspace(&self, workspace: PathBuf) {
+        *self.workspace.write().unwrap_or_else(|e| e.into_inner()) = workspace;
     }
 
     /// Watch the workspace for changes the file tools did not record (`checkpoints.track_external`).
@@ -592,13 +608,14 @@ impl CheckpointStore {
 
         // Stamped before the turn runs, so a change made by a shell command has a "before" to be
         // compared against. Metadata only: this is a directory walk, not a copy of the tree.
+        let ws = self.workspace();
         let baseline = self
             .track_external
-            .then(|| TreeScan::of(&self.workspace, &self.ignore));
+            .then(|| TreeScan::of(&ws, &self.ignore));
 
         let snapshot = TurnSnapshot {
             dir: turn_dir,
-            workspace: self.workspace.clone(),
+            workspace: ws,
             session_id: session_id.to_string(),
             seq,
             created_at: now_rfc3339(),
@@ -666,9 +683,10 @@ impl CheckpointStore {
 
         let turn_dir = self.session_dir(session_id).join(turn_dir_name(seq));
         let mut report = RestoreReport::default();
+        let ws = self.workspace();
 
         for file in &checkpoint.files {
-            let target = self.workspace.join(&file.path);
+            let target = ws.join(&file.path);
             if !self.inside_workspace(&target) {
                 report
                     .skipped
@@ -740,6 +758,7 @@ impl CheckpointStore {
 
         let turn_dir = self.session_dir(session_id).join(turn_dir_name(seq));
         let mut files = Vec::with_capacity(checkpoint.files.len());
+        let ws = self.workspace();
 
         for file in &checkpoint.files {
             let before = match (file.existed, file.blob.as_ref()) {
@@ -753,7 +772,7 @@ impl CheckpointStore {
                 _ => None,
             };
 
-            let target = self.workspace.join(&file.path);
+            let target = ws.join(&file.path);
             let after = std::fs::read(&target).ok();
 
             files.push(file_diff(&file.path, before, after));
@@ -818,10 +837,11 @@ impl CheckpointStore {
                 other => normalised.push(other.as_os_str()),
             }
         }
-        match (normalised.canonicalize(), self.workspace.canonicalize()) {
+        let ws = self.workspace();
+        match (normalised.canonicalize(), ws.canonicalize()) {
             (Ok(target), Ok(workspace)) => target.starts_with(workspace),
             // Neither side exists yet: compare the lexical forms.
-            _ => normalised.starts_with(&self.workspace),
+            _ => normalised.starts_with(&ws),
         }
     }
 }

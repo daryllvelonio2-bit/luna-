@@ -38,6 +38,23 @@ pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub const AGY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 pub const AGY_CLIENT_SECRET: &str = "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";
+
+pub fn agy_client_secret() -> Result<String, HarnessError> {
+    if let Ok(sec) = std::env::var("ANTIGRAVITY_CLIENT_SECRET") {
+        if !sec.trim().is_empty() {
+            return Ok(sec);
+        }
+    }
+    if let Ok(sec) = std::env::var("AGY_CLIENT_SECRET") {
+        if !sec.trim().is_empty() {
+            return Ok(sec);
+        }
+    }
+    Err(HarnessError::AuthenticationFailed {
+        provider: "antigravity".to_string(),
+        message: "No ANTIGRAVITY_CLIENT_SECRET or AGY_CLIENT_SECRET configured in environment".to_string(),
+    })
+}
 pub const DEFAULT_USER_AGENT: &str = "antigravity/1.2.7";
 
 mod credentials;
@@ -52,7 +69,7 @@ use payload::{build_antigravity_payload, parse_antigravity_chunk};
 pub use quota::{
     fetch_antigravity_models, resolve_antigravity_model, retrieve_antigravity_quota,
     AntigravityModelQuotaInfo, AntigravityQuotaBucket, AntigravityQuotaGroup,
-    AntigravityQuotaSummary,
+    AntigravityQuotaSummary, QuotaLine, QuotaWindow,
 };
 
 async fn post_antigravity_with_transport_retry(

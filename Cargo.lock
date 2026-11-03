@@ -1421,6 +1421,7 @@ dependencies = [
  "futures-util",
  "harness-core",
  "keyring",
+ "libc",
  "rand 0.8.8",
  "reqwest",
  "rusqlite",

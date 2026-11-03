@@ -44,6 +44,11 @@ impl ToolRegistry for DefaultToolRegistry {
         Ok(())
     }
 
+    async fn unregister(&self, name: &str) -> Result<bool, HarnessError> {
+        let mut map = self.tools.write().await;
+        Ok(map.remove(name).is_some())
+    }
+
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError> {
         let map = self.tools.read().await;
         let mut definitions: Vec<ToolDefinition> = map.values().map(|t| t.definition()).collect();

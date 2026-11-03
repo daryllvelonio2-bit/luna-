@@ -322,9 +322,6 @@ pub(super) async fn handle_composer_command(
                         diff_lines: Vec::new(),
                     });
                 ui.emit_above(&line);
-                if ui.is_attended {
-                    ui.draw_initial_box();
-                }
             } else {
                 ui.emit_above(&format!(
                     "{} Steer queued — delivered right after the next turn's first model call: {}",

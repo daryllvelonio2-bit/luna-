@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use tracing::debug;
 
 use super::{default_sessions_db, ReplayOutcome, SessionRecord, SessionStore, StoredMessage};
@@ -182,6 +182,22 @@ impl SqliteSessionStore {
                 .map_err(|error| session_error("failed to add the reasoning column", error))?;
         }
         Ok(())
+    }
+
+    async fn with_conn<F, T>(&self, f: F) -> Result<T, HarnessError>
+    where
+        F: FnOnce(&mut Connection) -> Result<T, HarnessError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn
+                .lock()
+                .map_err(|e| HarnessError::SessionError(format!("poisoned sessions mutex: {}", e)))?;
+            f(&mut guard)
+        })
+        .await
+        .map_err(|e| HarnessError::SessionError(format!("blocking session store task failed: {}", e)))?
     }
 }
 
@@ -520,55 +536,64 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
 #[async_trait]
 impl SessionStore for SqliteSessionStore {
     async fn ensure_session(&self, id: &str) -> Result<SessionRecord, HarnessError> {
-        let conn = self.conn.lock().await;
-        let timestamp = now();
-        conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
-            params![id, timestamp],
-        )
-        .map_err(|error| session_error("failed to create the session", error))?;
-        read_session(&conn, id)
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let timestamp = now();
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
+                params![id, timestamp],
+            )
+            .map_err(|error| session_error("failed to create the session", error))?;
+            read_session(conn, &id)
+        })
+        .await
     }
 
     async fn get(&self, id: &str) -> Result<SessionRecord, HarnessError> {
-        let conn = self.conn.lock().await;
-        read_session(&conn, id)
+        let id = id.to_string();
+        self.with_conn(move |conn| read_session(conn, &id)).await
     }
 
     async fn set_name(&self, id: &str, name: &str) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
+        let id = id.to_string();
         let name: String = name.trim().chars().take(NAME_MAX_CHARS).collect();
-        let updated = conn
-            .execute(
-                "UPDATE sessions SET name = ?1 WHERE id = ?2",
-                params![name, id],
-            )
-            .map_err(|error| session_error("failed to set the session name", error))?;
-        if updated == 0 {
-            return Err(HarnessError::SessionError(format!(
-                "session '{}' not found",
-                id
-            )));
-        }
-        Ok(())
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET name = ?1 WHERE id = ?2",
+                    params![name, id],
+                )
+                .map_err(|error| session_error("failed to set the session name", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
+        let id = id.to_string();
         let packed = format!("{}{}{}", provider, MODEL_FIELD_SEPARATOR, model);
-        let updated = conn
-            .execute(
-                "UPDATE sessions SET model = ?1 WHERE id = ?2",
-                params![packed, id],
-            )
-            .map_err(|error| session_error("failed to set the session model", error))?;
-        if updated == 0 {
-            return Err(HarnessError::SessionError(format!(
-                "session '{}' not found",
-                id
-            )));
-        }
-        Ok(())
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET model = ?1 WHERE id = ?2",
+                    params![packed, id],
+                )
+                .map_err(|error| session_error("failed to set the session model", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn set_compact_model(
@@ -577,38 +602,44 @@ impl SessionStore for SqliteSessionStore {
         provider: &str,
         model: &str,
     ) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
+        let id = id.to_string();
         let packed = format!("{}{}{}", provider, MODEL_FIELD_SEPARATOR, model);
-        let updated = conn
-            .execute(
-                "UPDATE sessions SET compact_model = ?1 WHERE id = ?2",
-                params![packed, id],
-            )
-            .map_err(|error| session_error("failed to set the session compact model", error))?;
-        if updated == 0 {
-            return Err(HarnessError::SessionError(format!(
-                "session '{}' not found",
-                id
-            )));
-        }
-        Ok(())
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET compact_model = ?1 WHERE id = ?2",
+                    params![packed, id],
+                )
+                .map_err(|error| session_error("failed to set the session compact model", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn clear_compact_model(&self, id: &str) -> Result<(), HarnessError> {
-        let conn = self.conn.lock().await;
-        let updated = conn
-            .execute(
-                "UPDATE sessions SET compact_model = '' WHERE id = ?1",
-                params![id],
-            )
-            .map_err(|error| session_error("failed to clear the session compact model", error))?;
-        if updated == 0 {
-            return Err(HarnessError::SessionError(format!(
-                "session '{}' not found",
-                id
-            )));
-        }
-        Ok(())
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET compact_model = '' WHERE id = ?1",
+                    params![id],
+                )
+                .map_err(|error| session_error("failed to clear the session compact model", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn append(
@@ -617,92 +648,96 @@ impl SessionStore for SqliteSessionStore {
         message: &Message,
         is_summary: bool,
     ) -> Result<i64, HarnessError> {
-        let conn = self.conn.lock().await;
-        let timestamp = now();
-        // Defensive: an append can only land against an existing session (the row is a foreign
-        // key), and losing a whole turn to a missing session row would be a bad trade for one
-        // statement.
-        conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
-            params![session_id, timestamp],
-        )
-        .map_err(|error| session_error("failed to create the session", error))?;
-
-        let seq: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
-                params![session_id],
-                |row| row.get(0),
+        let session_id = session_id.to_string();
+        let message = message.clone();
+        self.with_conn(move |conn| {
+            let timestamp = now();
+            // Defensive: an append can only land against an existing session (the row is a foreign
+            // key), and losing a whole turn to a missing session row would be a bad trade for one
+            // statement.
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title) VALUES (?1, ?2, ?2, '')",
+                params![session_id, timestamp],
             )
-            .map_err(|error| session_error("failed to allocate a message sequence", error))?;
+            .map_err(|error| session_error("failed to create the session", error))?;
 
-        let tool_calls_json = if message.tool_calls.is_empty() {
-            None
-        } else {
-            Some(
-                serde_json::to_string(&message.tool_calls)
-                    .map_err(|error| session_error("failed to serialize tool calls", error))?,
-            )
-        };
-        let reasoning = message
-            .reasoning
-            .as_ref()
-            .filter(|r| !r.is_empty())
-            .cloned();
-        let tool_result_json = match &message.tool_result {
-            Some(result) => Some(
-                serde_json::to_string(result)
-                    .map_err(|error| session_error("failed to serialize the tool result", error))?,
-            ),
-            None => None,
-        };
-        let usage_json = match &message.usage {
-            Some(usage) => Some(
-                serde_json::to_string(usage)
-                    .map_err(|error| session_error("failed to serialize token usage", error))?,
-            ),
-            None => None,
-        };
-
-        conn.execute(
-            "INSERT INTO messages
-                (session_id, seq, role, content, reasoning, tool_calls_json, tool_result_json,
-                 usage_json, is_summary, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                session_id,
-                seq,
-                role_to_text(message.role),
-                message.content,
-                reasoning,
-                tool_calls_json,
-                tool_result_json,
-                usage_json,
-                if is_summary { 1 } else { 0 },
-                timestamp,
-            ],
-        )
-        .map_err(|error| session_error("failed to append the message", error))?;
-
-        // The first user line becomes the title `luna sessions list` shows.
-        if message.role == Role::User {
-            if let Some(content) = &message.content {
-                let title: String = content.trim().chars().take(TITLE_MAX_CHARS).collect();
-                conn.execute(
-                    "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
-                    params![title, session_id],
+            let seq: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
                 )
-                .map_err(|error| session_error("failed to set the session title", error))?;
+                .map_err(|error| session_error("failed to allocate a message sequence", error))?;
+
+            let tool_calls_json = if message.tool_calls.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::to_string(&message.tool_calls)
+                        .map_err(|error| session_error("failed to serialize tool calls", error))?,
+                )
+            };
+            let reasoning = message
+                .reasoning
+                .as_ref()
+                .filter(|r| !r.is_empty())
+                .cloned();
+            let tool_result_json = match &message.tool_result {
+                Some(result) => Some(
+                    serde_json::to_string(result)
+                        .map_err(|error| session_error("failed to serialize the tool result", error))?,
+                ),
+                None => None,
+            };
+            let usage_json = match &message.usage {
+                Some(usage) => Some(
+                    serde_json::to_string(usage)
+                        .map_err(|error| session_error("failed to serialize token usage", error))?,
+                ),
+                None => None,
+            };
+
+            conn.execute(
+                "INSERT INTO messages
+                    (session_id, seq, role, content, reasoning, tool_calls_json, tool_result_json,
+                     usage_json, is_summary, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    session_id,
+                    seq,
+                    role_to_text(message.role),
+                    message.content,
+                    reasoning,
+                    tool_calls_json,
+                    tool_result_json,
+                    usage_json,
+                    if is_summary { 1 } else { 0 },
+                    timestamp,
+                ],
+            )
+            .map_err(|error| session_error("failed to append the message", error))?;
+
+            // The first user line becomes the title `luna sessions list` shows.
+            if message.role == Role::User {
+                if let Some(content) = &message.content {
+                    let title: String = content.trim().chars().take(TITLE_MAX_CHARS).collect();
+                    conn.execute(
+                        "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
+                        params![title, session_id],
+                    )
+                    .map_err(|error| session_error("failed to set the session title", error))?;
+                }
             }
-        }
 
-        conn.execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            params![timestamp, session_id],
-        )
-        .map_err(|error| session_error("failed to touch the session", error))?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![timestamp, session_id],
+            )
+            .map_err(|error| session_error("failed to touch the session", error))?;
 
-        Ok(conn.last_insert_rowid())
+            Ok(conn.last_insert_rowid())
+        })
+        .await
     }
 
     async fn replay(&self, session_id: &str, limit: usize) -> Result<ReplayOutcome, HarnessError> {

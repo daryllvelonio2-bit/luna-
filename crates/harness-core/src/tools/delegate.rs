@@ -70,9 +70,47 @@ pub type SubagentTaskEventNotifier = Arc<dyn Fn(SubagentTaskEvent) + Send + Sync
 type SubagentActivityNotifier = Arc<dyn Fn(SubagentActivity) + Send + Sync>;
 
 #[derive(Clone)]
+struct SubagentLogger {
+    path: std::path::PathBuf,
+}
+
+impl SubagentLogger {
+    fn new(path: std::path::PathBuf) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Self { path }
+    }
+
+    fn append_line(&self, line: &str) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    fn append(&self, text: &str) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            use std::io::Write;
+            let _ = write!(file, "{text}");
+        }
+    }
+}
+
+#[derive(Clone)]
 struct DynProvider {
     inner: Arc<dyn ModelProvider>,
     activity: Option<SubagentActivityNotifier>,
+    tracker: Option<SubagentActivityTracker>,
+    logger: Option<SubagentLogger>,
 }
 
 #[async_trait]
@@ -93,8 +131,12 @@ impl ModelProvider for DynProvider {
             activity(SubagentActivity::ModelStreaming);
         }
         let res = self.inner.complete(messages, tools, options).await;
-        if let Some(ref activity) = self.activity {
-            activity(SubagentActivity::ModelStreaming);
+        if let Ok(ref msg) = res {
+            if let Some(ref text) = msg.content {
+                if let Some(ref l) = self.logger {
+                    l.append_line(text);
+                }
+            }
         }
         res
     }
@@ -108,19 +150,21 @@ impl ModelProvider for DynProvider {
             activity(SubagentActivity::ModelStreaming);
         }
         let stream = self.inner.stream(messages, tools, options).await?;
-        let Some(activity) = self.activity.clone() else {
-            return Ok(stream);
-        };
+        let tracker = self.tracker.clone();
+        let logger = self.logger.clone();
         Ok(stream
             .map(move |event| {
                 if let Ok(event) = &event {
+                    if let Some(ref t) = tracker {
+                        t.touch();
+                    }
                     match event {
-                        StreamEvent::ReasoningDelta(_)
-                        | StreamEvent::ContentDelta(_)
-                        | StreamEvent::ToolCallDelta { .. } => {
-                            activity(SubagentActivity::ModelStreaming);
+                        StreamEvent::ContentDelta(delta) => {
+                            if let Some(ref l) = logger {
+                                l.append(delta);
+                            }
                         }
-                        StreamEvent::Completed { .. } => {}
+                        _ => {}
                     }
                 }
                 event
@@ -219,6 +263,8 @@ pub struct SubagentTaskRecord {
     pub context: Option<String>,
     pub status: SubagentStatus,
     pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub log_path: Option<String>,
 }
 
 pub type SubagentCompletionNotifier = Arc<dyn Fn(&SubagentTaskRecord) + Send + Sync>;
@@ -353,12 +399,13 @@ pub struct DelegateTaskTool {
     memory: Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
     store: Option<Arc<SqliteSessionStore>>,
-    config: Config,
+    config: Arc<RwLock<Config>>,
     max_concurrent: usize,
     tasks_state: Arc<RwLock<HashMap<String, SubagentTaskRecord>>>,
     notifier: Arc<RwLock<Option<SubagentCompletionNotifier>>>,
     event_notifier: Arc<RwLock<Option<SubagentTaskEventNotifier>>>,
     steer_handle: SteerQueueHandle,
+    cancels: Arc<RwLock<HashMap<String, CancellationToken>>>,
 }
 
 impl DelegateTaskTool {
@@ -374,13 +421,18 @@ impl DelegateTaskTool {
             memory,
             notes,
             store,
-            config,
+            config: Arc::new(RwLock::new(config)),
             max_concurrent: 4,
             tasks_state: Arc::new(RwLock::new(HashMap::new())),
             notifier: Arc::new(RwLock::new(None)),
             event_notifier: Arc::new(RwLock::new(None)),
             steer_handle: Arc::new(RwLock::new(None)),
+            cancels: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub async fn set_workspace_root(&self, root: std::path::PathBuf) {
+        self.config.write().await.paths.workspace_root = root;
     }
 
     pub fn set_notifier(&self, notifier: SubagentCompletionNotifier) {
@@ -418,6 +470,23 @@ impl DelegateTaskTool {
 
     pub async fn list_tasks(&self) -> Vec<SubagentTaskRecord> {
         self.tasks_state.read().await.values().cloned().collect()
+    }
+
+    pub async fn kill(&self, id: &str) -> bool {
+        let mut tasks = self.tasks_state.write().await;
+        if let Some(record) = tasks.get_mut(id) {
+            if matches!(record.status, SubagentStatus::Running) {
+                record.status = SubagentStatus::Failed {
+                    error: "killed by user".to_string(),
+                    finished_at: Utc::now(),
+                };
+                if let Some(cancel) = self.cancels.read().await.get(id) {
+                    cancel.cancel();
+                }
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -462,7 +531,18 @@ async fn run_single_subagent(
 
     let mut child_cfg = config.agent.clone();
     child_cfg.max_consecutive_failures = 5;
-    child_cfg.require_hitl_for_mutation = false;
+    child_cfg.require_hitl_for_mutation = config.agent.require_hitl_for_mutation;
+
+    let log_path = config.paths.jobs_dir.join(format!("{}.log", child_session_id));
+    let logger = SubagentLogger::new(log_path);
+
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    logger.append_line(&format!("=== Subagent Started: {child_session_id} [{now_str}] ==="));
+    logger.append_line(&format!("Goal: {}", task.goal));
+    if let Some(ctx) = &task.context {
+        logger.append_line(&format!("Context: {ctx}"));
+    }
+    logger.append_line("──────────────────────────────────────────────────");
 
     let tracker =
         SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
@@ -470,11 +550,14 @@ async fn run_single_subagent(
     let provider = Arc::new(DynProvider {
         inner: provider,
         activity: Some(Arc::new(move |activity| activity_tracker.record(activity))),
+        tracker: Some(tracker.clone()),
+        logger: Some(logger.clone()),
     });
     let memory = Arc::new(DynMemory(memory));
     let notes = Arc::new(DynNotes(notes));
 
     let observer_tracker = tracker.clone();
+    let log_obs = logger.clone();
     let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
         .with_permissions(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
@@ -487,10 +570,18 @@ async fn run_single_subagent(
             ApprovalSettings::default(),
         )
         .with_observer(Arc::new(move |event| match event {
-            AgentEvent::ToolExecuting { name, .. } => {
+            AgentEvent::ReasoningDelta(delta) => {
+                log_obs.append(&delta);
+                observer_tracker.touch();
+            }
+            AgentEvent::ToolExecuting { name, arguments } => {
+                let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+                log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
                 observer_tracker.record(SubagentActivity::ToolStarted { name });
             }
-            AgentEvent::ToolExecuted { name, is_error, .. } => {
+            AgentEvent::ToolExecuted { name, output, is_error } => {
+                let status = if is_error { "FAILED" } else { "SUCCESS" };
+                log_obs.append_line(&format!("✔ Tool Result [{name}] ({status}):\n{output}\n"));
                 observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
             }
             _ => {
@@ -525,6 +616,18 @@ async fn run_single_subagent(
         Ok(Err(e)) => Err(format!("agent turn error: {e}")),
         Err(e) => Err(e),
     };
+
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    match &outcome {
+        Ok(reply) => {
+            logger.append_line(&format!("\n=== Subagent Completed [{now_str}] ==="));
+            logger.append_line(&format!("Reply:\n{reply}"));
+        }
+        Err(e) => {
+            logger.append_line(&format!("\n=== Subagent Failed [{now_str}] ==="));
+            logger.append_line(&format!("Error: {e}"));
+        }
+    }
 
     (child_session_id, task.goal, outcome)
 }
@@ -859,12 +962,13 @@ impl Tool for DelegateTaskTool {
                 if !background {
                     // Synchronous blocking mode
                     let mut join_set = JoinSet::new();
+                    let current_cfg = self.config.read().await.clone();
                     for (idx, task) in tasks_to_run.into_iter().enumerate() {
                         let provider = self.provider.clone();
                         let memory = self.memory.clone();
                         let notes = self.notes.clone();
                         let store = self.store.clone();
-                        let config = self.config.clone();
+                        let config = current_cfg.clone();
                         let sub_cancel = cancel_token.child_token();
                         let sub_idx = idx + 1;
                         let started_at = Utc::now();
@@ -914,12 +1018,19 @@ impl Tool for DelegateTaskTool {
                                         finished_at,
                                     },
                                 };
+                                let log_path_str = current_cfg
+                                    .paths
+                                    .jobs_dir
+                                    .join(format!("{}.log", id))
+                                    .to_string_lossy()
+                                    .to_string();
                                 let record = SubagentTaskRecord {
                                     id: id.clone(),
                                     goal: goal.clone(),
                                     context,
                                     status,
                                     started_at,
+                                    log_path: Some(log_path_str),
                                 };
                                 self.tasks_state
                                     .write()
@@ -966,11 +1077,18 @@ impl Tool for DelegateTaskTool {
                 // Asynchronous background mode: spawn detached Tokio tasks and return immediately
                 let mut dispatched = Vec::new();
                 let now = Utc::now();
+                let current_cfg = self.config.read().await.clone();
 
                 for (idx, task) in tasks_to_run.into_iter().enumerate() {
                     let sub_idx = idx + 1;
                     let child_session_id =
                         format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
+                    let log_path_str = current_cfg
+                        .paths
+                        .jobs_dir
+                        .join(format!("{}.log", child_session_id))
+                        .to_string_lossy()
+                        .to_string();
 
                     let record = SubagentTaskRecord {
                         id: child_session_id.clone(),
@@ -978,6 +1096,7 @@ impl Tool for DelegateTaskTool {
                         context: task.context.clone(),
                         status: SubagentStatus::Running,
                         started_at: now,
+                        log_path: Some(log_path_str.clone()),
                     };
 
                     self.tasks_state
@@ -998,12 +1117,18 @@ impl Tool for DelegateTaskTool {
                     let memory = self.memory.clone();
                     let notes = self.notes.clone();
                     let store = self.store.clone();
-                    let config = self.config.clone();
+                    let config = current_cfg.clone();
                     let sub_cancel = CancellationToken::new();
+                    self.cancels
+                        .write()
+                        .await
+                        .insert(child_session_id.clone(), sub_cancel.clone());
                     let tasks_state = self.tasks_state.clone();
+                    let cancels = self.cancels.clone();
                     let notifier = self.notifier.clone();
                     let steer_handle = self.steer_handle.clone();
                     let cid = child_session_id.clone();
+                    let log_path_task = log_path_str;
                     let goal_str = task.goal.clone();
                     let ctx_opt = task.context.clone();
                     let child_event_notifier = event_notifier.clone();
@@ -1016,7 +1141,7 @@ impl Tool for DelegateTaskTool {
                             notes,
                             store,
                             config,
-                            cid,
+                            cid.clone(),
                             SubagentTaskSpec {
                                 goal: goal_str,
                                 context: ctx_opt.clone(),
@@ -1025,6 +1150,8 @@ impl Tool for DelegateTaskTool {
                             child_event_notifier,
                         )
                         .await;
+
+                        cancels.write().await.remove(&cid);
 
                         let finished_at = Utc::now();
                         let status = match res {
@@ -1038,6 +1165,7 @@ impl Tool for DelegateTaskTool {
                             context: ctx_opt,
                             status: status.clone(),
                             started_at: now,
+                            log_path: Some(log_path_task),
                         };
 
                         tasks_state
