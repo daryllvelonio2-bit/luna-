@@ -935,20 +935,30 @@ pub async fn run_interactive_chat(
                 .await?;
                 continue;
             }
-            if query == "/jobs" || query.starts_with("/jobs ") {
-                let jobs = bg_queue.list();
-                if jobs.is_empty() {
-                    println!("\n{}\n", "No background tasks.".dimmed());
+            if query == "/jobs"
+                || query.starts_with("/jobs ")
+                || query == "/tasks"
+                || query.starts_with("/tasks ")
+                || query == "/subagents"
+                || query.starts_with("/subagents ")
+            {
+                let tasks =
+                    viewer::collect_tasks(Some(bg_queue.as_ref()), Some(delegate_tool.as_ref()))
+                        .await;
+                if tasks.is_empty() {
+                    println!(
+                        "\n{}\n",
+                        "No background tasks or subagents active or recorded.".dimmed()
+                    );
                 } else {
-                    println!("\n{}", "Background tasks:".bold());
-                    for j in jobs {
+                    println!("\n{}", "Background tasks and subagents:".bold());
+                    for t in tasks {
                         println!(
-                            "  {} {} [{}] ({}s) {}",
-                            j.id.cyan().bold(),
-                            j.command,
-                            j.status,
-                            j.elapsed_secs,
-                            j.log_path.dimmed()
+                            "  {} [{}] ({}s) {}",
+                            t.id.cyan().bold(),
+                            t.status,
+                            t.elapsed_secs,
+                            t.command
                         );
                     }
                     println!();
@@ -1125,6 +1135,14 @@ pub async fn run_interactive_chat(
                     &current_model,
                 )
                 .await?;
+                continue;
+            }
+            if query.starts_with('/') {
+                eprintln!(
+                    "{} Unrecognized command '{}'. Type /help for available commands.",
+                    "✖".red().bold(),
+                    query
+                );
                 continue;
             }
             let ag_ref = agent.clone();
@@ -1631,6 +1649,9 @@ pub async fn run_interactive_chat(
                                 &mut process_expanded,
                                 &todo_scope,
                                 skills_readout.as_deref(),
+                                &plan_mode,
+                                Some(bg_queue.as_ref()),
+                                Some(delegate_tool.as_ref()),
                             )
                             .await?
                             {
@@ -1758,6 +1779,9 @@ pub async fn run_interactive_chat(
                                     &mut process_expanded,
                                     &todo_scope,
                                     skills_readout.as_deref(),
+                                    &plan_mode,
+                                    Some(bg_queue.as_ref()),
+                                    Some(delegate_tool.as_ref()),
                                 )
                                 .await?
                                 {
@@ -1826,6 +1850,9 @@ pub async fn run_interactive_chat(
                                 &mut process_expanded,
                                 &todo_scope,
                                 skills_readout.as_deref(),
+                                &plan_mode,
+                                Some(bg_queue.as_ref()),
+                                Some(delegate_tool.as_ref()),
                             )
                             .await?
                             {

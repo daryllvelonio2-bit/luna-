@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::dispatch::DispatchState;
-use super::{retry_delay_secs, Agent, AgentEvent, TurnOutcome};
+use super::{retry_delay_secs, retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome};
 use crate::error::HarnessError;
 use crate::hooks::HookEvent;
 use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
@@ -172,13 +172,14 @@ where
                         break;
                     }
                     Err(e) if e.is_retryable() && attempt < max_retries => {
-                        let delay_secs = retry_delay_secs(&e, attempt);
+                        let delay = retry_delay_with_jitter(&e, attempt);
+                        let delay_secs = (delay.as_secs_f64()).ceil() as u64;
                         warn!(
-                            "Model request failed ({}), retrying attempt {}/{} in {}s...",
+                            "Model request failed ({}), retrying attempt {}/{} in {:.2}s...",
                             e,
                             attempt + 1,
                             max_retries,
-                            delay_secs
+                            delay.as_secs_f64()
                         );
                         if let Some(ref observer) = self.observer {
                             observer(AgentEvent::ReasoningDelta(format!(
@@ -190,7 +191,7 @@ where
                             )));
                         }
                         tokio::select! {
-                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)) => {},
+                            _ = tokio::time::sleep(delay) => {},
                             _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
                         }
                     }

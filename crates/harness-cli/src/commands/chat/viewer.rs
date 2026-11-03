@@ -374,7 +374,7 @@ pub async fn show_background_task_viewer(
     ui.draw_initial_box();
 }
 
-async fn collect_tasks(
+pub(crate) async fn collect_tasks(
     bg_queue: Option<&BackgroundTaskQueue>,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Vec<JobSummary> {

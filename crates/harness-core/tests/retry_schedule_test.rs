@@ -4,7 +4,7 @@
 //! earlier is the same request that just failed, and hammering a rate limit is how one 429
 //! becomes a ban.
 
-use harness_core::agent::retry_delay_secs;
+use harness_core::agent::{retry_delay_secs, retry_delay_with_jitter};
 use harness_core::HarnessError;
 
 /// The provider's own `Retry-After` is the delay, not the exponential floor.
@@ -62,4 +62,29 @@ fn a_windowless_rate_limit_still_backs_off() {
 
     assert_eq!(retry_delay_secs(&error, 0), 1);
     assert_eq!(retry_delay_secs(&error, 2), 4);
+}
+
+#[test]
+fn retry_delay_with_jitter_never_undercuts_base_and_adds_bounded_jitter() {
+    let error = HarnessError::RateLimited {
+        provider: "nvidia".to_string(),
+        retry_after_secs: Some(10),
+    };
+
+    for attempt in 0..4 {
+        let base_secs = retry_delay_secs(&error, attempt);
+        let jittered = retry_delay_with_jitter(&error, attempt);
+        assert!(
+            jittered.as_secs() >= base_secs,
+            "jittered delay must be at least base seconds: {:?} >= {}s",
+            jittered,
+            base_secs
+        );
+        assert!(
+            jittered.as_millis() <= (base_secs * 1000 + 1500) as u128,
+            "jitter must be bounded: {:?} <= {}ms",
+            jittered,
+            base_secs * 1000 + 1500
+        );
+    }
 }

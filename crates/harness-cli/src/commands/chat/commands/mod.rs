@@ -241,6 +241,9 @@ pub(crate) async fn execute_slash_command(
     // The rendered skill list (`None` when none are installed); `/skills` prints it or explains
     // where skills would go, instead of falling through the match and saying nothing.
     skills_readout: Option<&str>,
+    plan_mode: &Arc<std::sync::atomic::AtomicBool>,
+    bg_queue: Option<&harness_core::tasks::BackgroundTaskQueue>,
+    delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
 ) -> Result<bool, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -666,12 +669,64 @@ pub(crate) async fn execute_slash_command(
             }
             Ok(false)
         }
+        "/plan" => {
+            let current = plan_mode.load(std::sync::atomic::Ordering::SeqCst);
+            let next = !current;
+            plan_mode.store(next, std::sync::atomic::Ordering::SeqCst);
+            ui.set_plan_mode(next);
+            ui.emit_above(&format!(
+                "{} Plan mode {}",
+                "•".cyan(),
+                if next {
+                    "ON (read-only planning, mutating tools gated)"
+                        .cyan()
+                        .bold()
+                } else {
+                    "OFF".dimmed()
+                }
+            ));
+            Ok(false)
+        }
+        "/tasks" | "/jobs" | "/subagents" => {
+            super::viewer::show_background_task_viewer(
+                key_rx,
+                bg_queue,
+                delegate_tool,
+                ui,
+                turns,
+                *process_expanded,
+            )
+            .await;
+            Ok(false)
+        }
+        "/help" | "/commands" | "/?" => {
+            let mut help_text = String::from("\nAvailable commands:\n");
+            for cmd in SLASH_COMMANDS {
+                help_text.push_str(&format!(
+                    "  {:<16} {}\n",
+                    cmd.name.cyan(),
+                    cmd.details.dimmed()
+                ));
+            }
+            ui.emit_above(&help_text);
+            Ok(false)
+        }
         "exit" | "quit" | "/exit" | "/quit" => {
             ui.clear_box_on_exit();
             clear_on_exit();
             Ok(true)
         }
-        _ => Ok(false),
+        _ => {
+            if name.starts_with('/') {
+                ui.emit_above(&format!(
+                    "{} Unrecognized command '{}'. Type {} for available commands.",
+                    "✖".red().bold(),
+                    name,
+                    "/help".cyan()
+                ));
+            }
+            Ok(false)
+        }
     }
 }
 

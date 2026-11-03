@@ -23,6 +23,7 @@ rusqlite = { workspace = true }
 walkdir = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

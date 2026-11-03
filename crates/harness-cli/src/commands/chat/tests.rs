@@ -352,3 +352,166 @@ async fn handle_thinking_switch_sets_effort() {
         Some(ReasoningEffort::High)
     );
 }
+
+#[tokio::test]
+async fn execute_slash_command_plan_toggle_and_unrecognized() {
+    use super::commands::execute_slash_command;
+    use super::ui::ChatUi;
+    use harness_core::{
+        tools::TodoScope, Agent, AgentConfig, Config, DefaultToolRegistry, SqliteSessionStore,
+    };
+    use harness_memory::SqliteMemoryEngine;
+    use harness_notes::FileNotesEngine;
+    use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let memory = Arc::new(SqliteMemoryEngine::in_memory().unwrap());
+    let notes = Arc::new(FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+    let registry = Arc::new(DefaultToolRegistry::new());
+    let creds = CredentialManager::new(None).unwrap();
+    let discovery = Arc::new(ModelDiscovery::new(None, 0, Default::default()));
+    let provider = Arc::new(
+        GenericProviderClient::new(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            creds.clone(),
+            discovery.clone(),
+            None,
+        )
+        .unwrap(),
+    );
+    let agent = Arc::new(tokio::sync::Mutex::new(Agent::new(
+        provider,
+        memory,
+        notes,
+        registry,
+        AgentConfig::default(),
+    )));
+    let ui = ChatUi::new(false);
+    let mut config = Config::default();
+    let cred_manager = Arc::new(creds);
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let mut session_id = "test-session".to_string();
+    let mut current_provider = "openai".to_string();
+    let mut current_model = "gpt-4o".to_string();
+    let mut compact_provider = None;
+    let mut compact_model = None;
+    let mut turns = Vec::new();
+    let mut process_expanded = false;
+    let todo_scope = TodoScope::new(tmp.path().join("todos"), &session_id);
+    let plan_mode = Arc::new(AtomicBool::new(false));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+
+    // 1. /plan toggles plan mode
+    assert!(!plan_mode.load(Ordering::SeqCst));
+    let res = execute_slash_command(
+        "/plan",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &plan_mode,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!res);
+    assert!(plan_mode.load(Ordering::SeqCst));
+
+    // /plan again toggles it off
+    let _ = execute_slash_command(
+        "/plan",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &plan_mode,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!plan_mode.load(Ordering::SeqCst));
+
+    // 2. /help returns Ok(false)
+    let help_res = execute_slash_command(
+        "/help",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &plan_mode,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!help_res);
+
+    // 3. Unrecognized command returns Ok(false) without breaking
+    let unrec_res = execute_slash_command(
+        "/unrecognized_foo_command",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &plan_mode,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!unrec_res);
+}
