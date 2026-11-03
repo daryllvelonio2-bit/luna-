@@ -521,3 +521,86 @@ fn build_antigravity_payload_matches_most_recent_tool_call_on_id_collision() {
         "Second tool result must be named 'search_files', not the older 'read_file'"
     );
 }
+
+/// The line that makes a content-free answer diagnosable: it has to say what arrived, and it must
+/// never quote what the model said — a log line is not a transcript.
+#[test]
+fn a_frame_is_described_by_its_shape_and_never_by_its_text() {
+    let text_frame = json!({
+        "response": {
+            "candidates": [{ "content": { "parts": [{ "text": "the secret answer" }] } }],
+            "usageMetadata": { "promptTokenCount": 12345 }
+        }
+    });
+    let described = describe_frame(&text_frame);
+    assert_eq!(
+        described,
+        "candidates=1 finish=- block=- parts=[text] promptTokens=12345"
+    );
+    assert!(!described.contains("secret"), "{described}");
+
+    let call_frame = json!({
+        "candidates": [{
+            "finishReason": "STOP",
+            "content": { "parts": [{ "functionCall": { "name": "terminal" } }] }
+        }]
+    });
+    assert_eq!(
+        describe_frame(&call_frame),
+        "candidates=1 finish=STOP block=- parts=[functionCall]"
+    );
+
+    // A reasoning part and an unrecognised part are both worth telling apart from text.
+    let mixed = json!({
+        "response": { "candidates": [{ "content": { "parts": [{ "thought": true }, { "inlineData": {} }] } }] }
+    });
+    assert_eq!(
+        describe_frame(&mixed),
+        "candidates=1 finish=- block=- parts=[thought,other]"
+    );
+
+    // The frame that explains an empty answer: nothing at all.
+    assert_eq!(
+        describe_frame(&json!({})),
+        "candidates=0 finish=- block=- parts=[]"
+    );
+}
+
+#[test]
+fn a_refused_prompt_is_reported_as_refused() {
+    let blocked = json!({ "response": { "promptFeedback": { "blockReason": "SAFETY" } } });
+    assert_eq!(blocked_reason(&blocked), Some("SAFETY"));
+    // Same reason, unwrapped, and the ordinary frame that must not be mistaken for one.
+    assert_eq!(
+        blocked_reason(&json!({ "promptFeedback": { "blockReason": "OTHER" } })),
+        Some("OTHER")
+    );
+    assert_eq!(
+        blocked_reason(&json!({ "response": { "candidates": [] } })),
+        None
+    );
+}
+
+/// The message is the fix: it has to name the request it is about and something the reader can do.
+#[test]
+fn an_empty_answer_says_what_was_asked_and_what_to_do() {
+    let error = no_answer_error(std::time::Duration::from_secs(52), 1706, 21, Some(84_000));
+    let text = error.to_string();
+    assert!(text.contains("52s"), "{text}");
+    assert!(text.contains("1706 messages"), "{text}");
+    assert!(text.contains("21 tools"), "{text}");
+    assert!(text.contains("84000 prompt tokens"), "{text}");
+    assert!(
+        text.contains("/compact"),
+        "the reader needs a way out: {text}"
+    );
+    assert!(
+        !text.contains("may be overloaded"),
+        "no condition the caller cannot see: {text}"
+    );
+
+    // Without a usage report it still says the shape of the request rather than nothing.
+    let bare = no_answer_error(std::time::Duration::from_secs(3), 2, 0, None).to_string();
+    assert!(bare.contains("2 messages and 0 tools"), "{bare}");
+    assert!(!bare.contains("prompt tokens"), "{bare}");
+}

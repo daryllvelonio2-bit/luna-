@@ -227,10 +227,24 @@ pub async fn stream_antigravity_completion(
                                     })]
                                 }
                             } else {
-                                parse_antigravity_chunk(&parsed)
-                                    .into_iter()
-                                    .map(Ok)
-                                    .collect()
+                                tracing::debug!(
+                                    target: "harness_providers::antigravity",
+                                    "code assist frame: {}",
+                                    describe_frame(&parsed)
+                                );
+                                match blocked_reason(&parsed) {
+                                    Some(reason) => vec![Err(HarnessError::ProviderError {
+                                        provider: "antigravity".to_string(),
+                                        message: format!(
+                                            "the provider refused this prompt ({reason}). Retrying the same \
+                                             request will not change that; the content it objects to has to go."
+                                        ),
+                                    })],
+                                    None => parse_antigravity_chunk(&parsed)
+                                        .into_iter()
+                                        .map(Ok)
+                                        .collect(),
+                                }
                             }
                         }
                         Err(e) => vec![Err(HarnessError::SerializationError(format!(
@@ -249,6 +263,112 @@ pub async fn stream_antigravity_completion(
     });
 
     Ok(Box::pin(stream))
+}
+
+/// The error for a stream that carried nothing usable.
+///
+/// The old text — "the model may be overloaded or unavailable" — was a guess about a condition the
+/// caller could not see, and it named nothing to act on. What is known is the shape of the request
+/// that got nothing back and how long it waited, so that is what it says.
+fn no_answer_error(
+    elapsed: std::time::Duration,
+    message_count: usize,
+    tool_count: usize,
+    prompt_tokens: Option<u32>,
+) -> HarnessError {
+    HarnessError::ProviderError {
+        provider: "antigravity".to_string(),
+        message: format!(
+            "Code Assist returned no answer: the stream ended after {}s without text, tool calls or \
+             reasoning, for a request of {message_count} messages and {tool_count} tools{}. The route \
+             does this intermittently, most often on long tool-heavy turns — retry, or start a new \
+             session / run /compact when one session keeps hitting it.",
+            elapsed.as_secs(),
+            prompt_tokens
+                .map(|tokens| format!(" ({tokens} prompt tokens)"))
+                .unwrap_or_default()
+        ),
+    }
+}
+
+/// The provider's own reason for refusing a prompt, when the frame carries one.
+///
+/// Code Assist reports a refusal as `promptFeedback.blockReason` *instead of* candidates, so without
+/// this the frame looks like every other content-free frame and the turn ends with "the model may be
+/// overloaded" — which is not what happened and sends the reader looking in the wrong place.
+fn blocked_reason(frame: &serde_json::Value) -> Option<&str> {
+    let response = frame.get("response").unwrap_or(frame);
+    response
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(|reason| reason.as_str())
+}
+
+/// The shape of one frame, for the log: candidate count, finish reason, block reason, which kinds of
+/// part it carried, and the prompt size. Never the content — a Code Assist answer can come back as a
+/// stream that ends with nothing the turn loop can use, and when it does, this line is the evidence.
+fn describe_frame(frame: &serde_json::Value) -> String {
+    let response = frame.get("response").unwrap_or(frame);
+    let candidates = response
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    let finish = response
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("-");
+    let block = response
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("-");
+    let kinds: Vec<&str> = response
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .map(|candidates| {
+            candidates
+                .iter()
+                .flat_map(|candidate| {
+                    candidate
+                        .get("content")
+                        .and_then(|c| c.get("parts"))
+                        .and_then(|p| p.as_array())
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .map(|part| {
+                                    if part.get("functionCall").is_some() {
+                                        "functionCall"
+                                    } else if part.get("thought").is_some() {
+                                        "thought"
+                                    } else if part.get("text").is_some() {
+                                        "text"
+                                    } else {
+                                        "other"
+                                    }
+                                })
+                                .collect::<Vec<&str>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let prompt_tokens = response
+        .get("usageMetadata")
+        .and_then(|meta| meta.get("promptTokenCount"))
+        .and_then(|t| t.as_u64());
+    format!(
+        "candidates={candidates} finish={finish} block={block} parts=[{}]{}",
+        kinds.join(","),
+        prompt_tokens
+            .map(|tokens| format!(" promptTokens={tokens}"))
+            .unwrap_or_default()
+    )
 }
 
 pub async fn execute_antigravity_completion(
@@ -273,6 +393,7 @@ pub async fn execute_antigravity_completion(
     )
     .await?;
 
+    let started = std::time::Instant::now();
     let mut full_text = String::new();
     let mut thought_buf = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -341,6 +462,7 @@ pub async fn execute_antigravity_completion(
         Some(thought_buf)
     };
 
+    let elapsed = started.elapsed();
     if full_text.trim().is_empty() && tool_calls.is_empty() {
         if let Some(r) = reasoning {
             return Ok(Message {
@@ -352,12 +474,12 @@ pub async fn execute_antigravity_completion(
                 usage,
             });
         }
-        return Err(HarnessError::ProviderError {
-            provider: "antigravity".to_string(),
-            message:
-                "Model returned an empty response. The model may be overloaded or unavailable."
-                    .to_string(),
-        });
+        return Err(no_answer_error(
+            elapsed,
+            messages.len(),
+            tools.len(),
+            usage.map(|u| u.prompt_tokens),
+        ));
     }
 
     let mut res_msg = Message::assistant(full_text);
