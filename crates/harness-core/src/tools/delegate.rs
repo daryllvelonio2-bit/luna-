@@ -158,13 +158,10 @@ impl ModelProvider for DynProvider {
                     if let Some(ref t) = tracker {
                         t.touch();
                     }
-                    match event {
-                        StreamEvent::ContentDelta(delta) => {
-                            if let Some(ref l) = logger {
-                                l.append(delta);
-                            }
+                    if let StreamEvent::ContentDelta(delta) = event {
+                        if let Some(ref l) = logger {
+                            l.append(delta);
                         }
-                        _ => {}
                     }
                 }
                 event
@@ -533,11 +530,16 @@ async fn run_single_subagent(
     child_cfg.max_consecutive_failures = 5;
     child_cfg.require_hitl_for_mutation = config.agent.require_hitl_for_mutation;
 
-    let log_path = config.paths.jobs_dir.join(format!("{}.log", child_session_id));
+    let log_path = config
+        .paths
+        .jobs_dir
+        .join(format!("{}.log", child_session_id));
     let logger = SubagentLogger::new(log_path);
 
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    logger.append_line(&format!("=== Subagent Started: {child_session_id} [{now_str}] ==="));
+    logger.append_line(&format!(
+        "=== Subagent Started: {child_session_id} [{now_str}] ==="
+    ));
     logger.append_line(&format!("Goal: {}", task.goal));
     if let Some(ctx) = &task.context {
         logger.append_line(&format!("Context: {ctx}"));
@@ -579,7 +581,11 @@ async fn run_single_subagent(
                 log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
                 observer_tracker.record(SubagentActivity::ToolStarted { name });
             }
-            AgentEvent::ToolExecuted { name, output, is_error } => {
+            AgentEvent::ToolExecuted {
+                name,
+                output,
+                is_error,
+            } => {
                 let status = if is_error { "FAILED" } else { "SUCCESS" };
                 log_obs.append_line(&format!("✔ Tool Result [{name}] ({status}):\n{output}\n"));
                 observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });

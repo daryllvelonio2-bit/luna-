@@ -355,7 +355,18 @@ fn oldest_foldable_boundary(history: &[StoredMessage], budget: usize) -> usize {
     // transcript as it was when the fold started, and the tool results land while the
     // summariser is still thinking. Folding that call would leave its answers in the live
     // tail with nothing to answer, and a provider rejects such a request outright.
-    snap_to_round_boundary(history, boundary)
+    let b = snap_to_round_boundary(history, boundary);
+    if b == 0 || history[..b].iter().all(|s| s.is_summary) {
+        let mut fwd = boundary;
+        while fwd < history.len() && history[fwd].message.role == Role::Tool {
+            fwd += 1;
+        }
+        let b_fwd = snap_to_round_boundary(history, fwd);
+        if b_fwd > 0 && !history[..b_fwd].iter().all(|s| s.is_summary) {
+            return b_fwd;
+        }
+    }
+    b
 }
 
 /// The start of the most recent stretch of messages that fits `budget` tokens.

@@ -88,12 +88,12 @@ where
         messages: &[Message],
         history: &[StoredMessage],
         policy: FoldPolicy,
-    ) {
+    ) -> bool {
         if self.session.is_none()
             || self.compaction.is_none()
             || self.fold_disabled_this_turn.load(Ordering::SeqCst)
         {
-            return;
+            return false;
         }
 
         let estimate = estimate_tokens(messages);
@@ -102,11 +102,11 @@ where
                 "Transcript estimate {} tokens ({:?}) is within the fold threshold = {}",
                 estimate.tokens, estimate.source, policy.threshold
             );
-            return;
+            return false;
         }
         if self.fold_in_flight.swap(true, Ordering::SeqCst) {
             debug!("A fold is already in flight; running this turn on the transcript as it stands");
-            return;
+            return false;
         }
         debug!(
             "Transcript estimate {} tokens exceeds the fold threshold = {}; folding in the background",
@@ -119,6 +119,7 @@ where
             observer(AgentEvent::CompactionStarted { forced: false });
         }
         self.spawn_fold_run(history, policy);
+        true
     }
 
     /// Spawn the background fold of `history`, having already taken the in-flight latch and

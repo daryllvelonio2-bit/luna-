@@ -556,7 +556,10 @@ impl CheckpointStore {
     }
 
     pub fn workspace(&self) -> PathBuf {
-        self.workspace.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.workspace
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_workspace(&self, workspace: PathBuf) {
@@ -609,9 +612,7 @@ impl CheckpointStore {
         // Stamped before the turn runs, so a change made by a shell command has a "before" to be
         // compared against. Metadata only: this is a directory walk, not a copy of the tree.
         let ws = self.workspace();
-        let baseline = self
-            .track_external
-            .then(|| TreeScan::of(&ws, &self.ignore));
+        let baseline = self.track_external.then(|| TreeScan::of(&ws, &self.ignore));
 
         let snapshot = TurnSnapshot {
             dir: turn_dir,

@@ -1093,7 +1093,7 @@ fn remove_path(root: &mut Value, key: &str) -> bool {
             return mapping.remove(&key_val).is_some();
         } else if let Some(child) = mapping.get_mut(&key_val) {
             let removed = remove_path(child, &rest.join("."));
-            let is_empty = child.as_mapping().map_or(false, |m| m.is_empty());
+            let is_empty = child.as_mapping().is_some_and(|m| m.is_empty());
             if is_empty {
                 mapping.remove(&key_val);
             }

@@ -529,7 +529,11 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
 
     let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, &body).map_err(|e| {
-        HarnessError::NotesError(format!("Failed to write temp note '{}': {}", tmp.display(), e))
+        HarnessError::NotesError(format!(
+            "Failed to write temp note '{}': {}",
+            tmp.display(),
+            e
+        ))
     })?;
     std::fs::rename(&tmp, &path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -570,12 +574,11 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
             }
             if let Some((key, value)) = line.split_once(':') {
                 let mut value = value.trim().to_string();
-                if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
+                if ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+                    && value.len() >= 2
                 {
-                    if value.len() >= 2 {
-                        value = value[1..value.len() - 1].to_string();
-                    }
+                    value = value[1..value.len() - 1].to_string();
                 }
                 match key.trim() {
                     "id" => id = value,

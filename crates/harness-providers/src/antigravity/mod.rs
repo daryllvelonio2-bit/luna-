@@ -52,7 +52,8 @@ pub fn agy_client_secret() -> Result<String, HarnessError> {
     }
     Err(HarnessError::AuthenticationFailed {
         provider: "antigravity".to_string(),
-        message: "No ANTIGRAVITY_CLIENT_SECRET or AGY_CLIENT_SECRET configured in environment".to_string(),
+        message: "No ANTIGRAVITY_CLIENT_SECRET or AGY_CLIENT_SECRET configured in environment"
+            .to_string(),
     })
 }
 pub const DEFAULT_USER_AGENT: &str = "antigravity/1.2.7";

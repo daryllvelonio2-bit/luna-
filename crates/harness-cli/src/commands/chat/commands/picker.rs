@@ -790,7 +790,7 @@ pub(crate) async fn pick_workspace_directory(
                 }
             }
         }
-        subdirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        subdirs.sort_by_key(|a| a.to_lowercase());
 
         let mut items = Vec::new();
         // Item 0: Select current directory

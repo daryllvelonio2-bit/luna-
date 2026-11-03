@@ -191,13 +191,15 @@ impl SqliteSessionStore {
     {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let mut guard = conn
-                .lock()
-                .map_err(|e| HarnessError::SessionError(format!("poisoned sessions mutex: {}", e)))?;
+            let mut guard = conn.lock().map_err(|e| {
+                HarnessError::SessionError(format!("poisoned sessions mutex: {}", e))
+            })?;
             f(&mut guard)
         })
         .await
-        .map_err(|e| HarnessError::SessionError(format!("blocking session store task failed: {}", e)))?
+        .map_err(|e| {
+            HarnessError::SessionError(format!("blocking session store task failed: {}", e))
+        })?
     }
 }
 
@@ -630,7 +632,9 @@ impl SessionStore for SqliteSessionStore {
                     "UPDATE sessions SET compact_model = '' WHERE id = ?1",
                     params![id],
                 )
-                .map_err(|error| session_error("failed to clear the session compact model", error))?;
+                .map_err(|error| {
+                    session_error("failed to clear the session compact model", error)
+                })?;
             if updated == 0 {
                 return Err(HarnessError::SessionError(format!(
                     "session '{}' not found",

@@ -112,20 +112,20 @@ impl CredentialManager {
         }
         let c_path = std::ffi::CString::new(lock_path.as_os_str().as_bytes())
             .map_err(|e| HarnessError::Io(e.to_string()))?;
-        let fd = unsafe {
-            libc::open(
-                c_path.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT,
-                0o600,
-            )
-        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
         if fd < 0 {
-            return Err(HarnessError::Io("failed to open credential lock file".into()));
+            return Err(HarnessError::Io(
+                "failed to open credential lock file".into(),
+            ));
         }
         let res = unsafe { libc::flock(fd, libc::LOCK_EX) };
         if res != 0 {
-            unsafe { libc::close(fd); }
-            return Err(HarnessError::Io("failed to acquire flock on credential store".into()));
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(HarnessError::Io(
+                "failed to acquire flock on credential store".into(),
+            ));
         }
         Ok(StoreLock { fd })
     }
@@ -188,7 +188,9 @@ impl CredentialManager {
             }
         }
 
-        let tmp_path = self.storage_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        let tmp_path = self
+            .storage_path
+            .with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
         #[cfg(unix)]
         {
             use std::io::Write;
@@ -196,21 +198,33 @@ impl CredentialManager {
             let mut options = fs::OpenOptions::new();
             options.write(true).create(true).truncate(true).mode(0o600);
             let mut file = options.open(&tmp_path).map_err(|e| {
-                HarnessError::Io(format!("cannot open temp credential store {}: {e}", tmp_path.display()))
+                HarnessError::Io(format!(
+                    "cannot open temp credential store {}: {e}",
+                    tmp_path.display()
+                ))
             })?;
             file.write_all(bytes.as_bytes()).map_err(|e| {
                 let _ = fs::remove_file(&tmp_path);
-                HarnessError::Io(format!("cannot write temp credential store {}: {e}", tmp_path.display()))
+                HarnessError::Io(format!(
+                    "cannot write temp credential store {}: {e}",
+                    tmp_path.display()
+                ))
             })?;
             file.sync_all().map_err(|e| {
                 let _ = fs::remove_file(&tmp_path);
-                HarnessError::Io(format!("cannot sync temp credential store {}: {e}", tmp_path.display()))
+                HarnessError::Io(format!(
+                    "cannot sync temp credential store {}: {e}",
+                    tmp_path.display()
+                ))
             })?;
         }
         #[cfg(not(unix))]
         {
             fs::write(&tmp_path, bytes).map_err(|e| {
-                HarnessError::Io(format!("cannot write temp credential store {}: {e}", tmp_path.display()))
+                HarnessError::Io(format!(
+                    "cannot write temp credential store {}: {e}",
+                    tmp_path.display()
+                ))
             })?;
         }
 

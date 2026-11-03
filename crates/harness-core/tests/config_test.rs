@@ -206,7 +206,9 @@ fn set_then_load_round_trips() {
     assert_eq!(unset_res, Some(path));
     let resolved_after = resolve(&layers).unwrap();
     assert_eq!(
-        resolved_after.source("agent.max_consecutive_failures").unwrap(),
+        resolved_after
+            .source("agent.max_consecutive_failures")
+            .unwrap(),
         Source::Default
     );
 }

@@ -78,7 +78,7 @@ where
         // stored transcript, and the checks below use this to tell "still over the bar" from "over
         // the bar a fold has already answered".
         let mut fold_watermark = last_fold_seq(&history);
-        self.spawn_fold_if_needed(&messages, &history, fold_policy);
+        let fold_spawned_at_start = self.spawn_fold_if_needed(&messages, &history, fold_policy);
 
         // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
         //    ones, so a later turn cannot silently capture into the wrong checkpoint.
@@ -124,6 +124,7 @@ where
 
         debug!("Starting agent task loop for query: '{}'", user_input);
 
+        let mut loop_rounds: usize = 0;
         // Unbounded task loop: runs as long as productive progress is made
         loop {
             if cancel_token.is_cancelled() {
@@ -131,8 +132,10 @@ where
                 return Err(HarnessError::Cancelled);
             }
 
-            self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
-                .await;
+            if loop_rounds > 0 {
+                self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
+                    .await;
+            }
 
             let current_tokens = estimate_tokens(&messages).tokens;
             if let Some(ref observer) = self.observer {
@@ -304,7 +307,9 @@ where
                 // The turn just grew the transcript, so look at the fold bar before returning: a
                 // session that only folded on the *next* prompt reported compaction as something
                 // the user had to come back for.
-                if estimate_tokens(&messages).tokens as usize > fold_policy.threshold {
+                if !fold_spawned_at_start
+                    && estimate_tokens(&messages).tokens as usize > fold_policy.threshold
+                {
                     self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
                         .await;
                 }
@@ -359,6 +364,7 @@ where
                     observer(AgentEvent::Steered { text: joined_steer });
                 }
             }
+            loop_rounds = loop_rounds.saturating_add(1);
         }
     }
 

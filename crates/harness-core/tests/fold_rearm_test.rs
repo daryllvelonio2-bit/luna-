@@ -57,8 +57,8 @@ impl ModelProvider for ShrinkReplyProvider {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         // Give the background fold time to land before the later rounds: the gate can only
         // re-arm once it has seen the fold's summary in the store.
-        if n >= 3 {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        if n >= 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
         // Round the tool loop on the early calls: a plain-text reply ends the turn, and the
         // mid-turn fold gate only runs between tool rounds.
