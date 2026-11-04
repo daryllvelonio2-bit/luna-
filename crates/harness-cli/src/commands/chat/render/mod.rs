@@ -1107,7 +1107,10 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             }
         }
         "read_file" | "read" => {
-            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
+            if let Some(path) = text("path")
+                .or_else(|| text("file"))
+                .or_else(|| text("filepath"))
+            {
                 let short = shorten_path(path);
                 let range = match (number("offset"), number("limit")) {
                     (Some(offset), Some(limit)) => {
@@ -1131,7 +1134,10 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             return format!("{} {} {}{}", glyph, verb_col(verb), short.cyan(), glob);
         }
         "write_file" | "write" => {
-            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
+            if let Some(path) = text("path")
+                .or_else(|| text("file"))
+                .or_else(|| text("filepath"))
+            {
                 let short = shorten_path(path);
                 let lines = text("content").map(|c| c.lines().count()).unwrap_or(0);
                 return format!(
@@ -1144,7 +1150,10 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
             }
         }
         "patch" | "edit" => {
-            if let Some(path) = text("path").or_else(|| text("file")).or_else(|| text("filepath")) {
+            if let Some(path) = text("path")
+                .or_else(|| text("file"))
+                .or_else(|| text("filepath"))
+            {
                 let short = shorten_path(path);
                 let mut extra = tool_activity_detail("patch", arguments)
                     .map(suffix)

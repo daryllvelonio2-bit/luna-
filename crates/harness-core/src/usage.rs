@@ -54,8 +54,9 @@ impl ModelPrice {
             return None;
         }
         // A cache read is charged at the cache rate when one is known, and at the input rate
-        // otherwise. `cached_tokens` cannot exceed the prompt it is a subset of, but a provider
-        // that reported it that way must not be allowed to make a token free.
+        // otherwise. Providers report a cache read either inside the prompt or beside it; the
+        // beside-the-input shape is folded into `prompt_tokens` at ingestion, so `cached_tokens`
+        // is a subset here. The clamp stays as a guard against a provider that contradicts itself.
         let cached_rate = match self.cached_input_per_million {
             Some(rate) if rate.is_finite() => rate,
             _ => self.input_per_million,
@@ -379,6 +380,37 @@ fn ensure_cached_tokens_column(conn: &Connection) -> Result<(), HarnessError> {
     Ok(())
 }
 
+/// Fold cache reads that older OpenCode rows recorded *beside* the prompt into the prompt itself.
+///
+/// Before the OpenCode parser was normalized, it stored `tokens.input` as `prompt_tokens` and
+/// `cache.read` in the separate column, so those rows understate both the prompt and the total by
+/// exactly the cache read. The correction is provable from the provider id — only OpenCode used
+/// that parser — and it runs once, guarded by `PRAGMA user_version`, so reopening the ledger cannot
+/// add the same tokens twice. A stored cost on a repaired row is discarded: it was priced from the
+/// understated prompt, and the ledger does not keep a number it knows is wrong.
+fn repair_separate_cache_rows(conn: &Connection) -> Result<(), HarnessError> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| HarnessError::Io(format!("usage schema version: {e}")))?;
+    if version >= 1 {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE usage
+            SET prompt_tokens = prompt_tokens + cached_tokens,
+                total_tokens  = total_tokens  + cached_tokens,
+                cost_usd      = NULL
+          WHERE provider IN ('opencode', 'opencode-cli') AND cached_tokens > 0",
+        [],
+    )
+    .map_err(|e| HarnessError::Io(format!("usage cache migration: {e}")))?;
+
+    conn.execute_batch("PRAGMA user_version = 1")
+        .map_err(|e| HarnessError::Io(format!("usage schema version bump: {e}")))?;
+    Ok(())
+}
+
 /// The sqlite-backed usage ledger. One process-wide handle, like the session store.
 pub struct UsageLedger {
     conn: Arc<Mutex<Connection>>,
@@ -404,6 +436,7 @@ impl UsageLedger {
         conn.execute_batch(SCHEMA)
             .map_err(|e| HarnessError::Io(format!("usage schema: {e}")))?;
         ensure_cached_tokens_column(&conn)?;
+        repair_separate_cache_rows(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

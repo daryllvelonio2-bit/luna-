@@ -643,7 +643,14 @@ pub fn canonicalize_provider_id(id: &str) -> &str {
 pub fn route_caches_prompt_prefix(id: &str) -> bool {
     matches!(
         canonicalize_provider_id(id).to_lowercase().as_str(),
-        "openai" | "copilot" | "gemini" | "deepseek" | "antigravity" | "supercode"
+        "openai"
+            | "copilot"
+            | "gemini"
+            | "deepseek"
+            | "antigravity"
+            | "supercode"
+            | "opencode"
+            | "opencode-cli"
     )
 }
 

@@ -288,7 +288,13 @@ pub fn fold_boundary_percent(history: &[StoredMessage], percent: usize) -> usize
 
     // When the newest user turn alone exceeds the budget or is the only turn,
     // fold tool rounds inside it.
-    let boundary = snap_to_round_boundary(history, budget_boundary(history, budget));
+    //
+    // Snapped backward from the raw scan, not through `budget_boundary`: that one advances
+    // forward past an assistant tool-call to the next user turn, which is right for the turn
+    // rule but wrong here. Mid-turn there is no later user turn, so the advance runs to the
+    // final reply and folds everything before it — a 50% fold of a 20k transcript leaving one
+    // 3k message. Backward keeps the whole round that straddles the budget.
+    let boundary = snap_to_round_boundary(history, budget_boundary_raw(history, budget));
     let boundary_folds_content = boundary > 0 && !history[..boundary].iter().all(|s| s.is_summary);
     if !boundary_folds_content && total > budget {
         oldest_foldable_boundary(history, budget)
@@ -374,6 +380,14 @@ fn oldest_foldable_boundary(history: &[StoredMessage], budget: usize) -> usize {
 /// Walking back from the end, the newest message is always kept: it is the last thing said, and a
 /// transcript that cannot spare it cannot be compacted at all.
 fn budget_boundary(history: &[StoredMessage], budget: usize) -> usize {
+    safe_boundary(history, budget_boundary_raw(history, budget))
+}
+
+/// [`budget_boundary`] before provider snapping: the raw backward scan.
+///
+/// Callers that prefer a backward snap — keeping the round that straddles the budget — use this
+/// directly instead of the forward-advancing [`safe_boundary`].
+fn budget_boundary_raw(history: &[StoredMessage], budget: usize) -> usize {
     let mut kept: usize = 0;
     let mut boundary = history.len();
 
@@ -387,7 +401,7 @@ fn budget_boundary(history: &[StoredMessage], budget: usize) -> usize {
         boundary = index;
     }
 
-    safe_boundary(history, boundary)
+    boundary
 }
 
 /// The first index at or after `desired` whose message can open the kept tail.

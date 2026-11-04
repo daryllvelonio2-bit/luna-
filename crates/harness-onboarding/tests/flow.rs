@@ -134,8 +134,11 @@ fn a_blank_line_takes_the_default_persona() {
 
     let (outcome, _) = drive(&file, "\n\n");
 
-    assert_eq!(outcome.persona.id, 1);
-    assert_eq!(read_config(&file)["persona"]["id"].as_u64(), Some(1));
+    assert_eq!(outcome.persona.id, harness_onboarding::persona::DEFAULT_ID);
+    assert_eq!(
+        read_config(&file)["persona"]["id"].as_u64(),
+        Some(u64::from(harness_onboarding::persona::DEFAULT_ID))
+    );
 }
 
 #[test]

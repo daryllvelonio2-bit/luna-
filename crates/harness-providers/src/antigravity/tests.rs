@@ -757,6 +757,73 @@ fn a_non_thinking_model_keeps_the_plain_output_cap() {
     assert_eq!(generation["maxOutputTokens"], json!(4096));
 }
 
+/// A cache read is *inside* the prompt, not beside it.
+///
+/// Live Code Assist: the same 8,718-token prompt reported no cache on the first turn, then
+/// `cachedContentTokenCount: 6671` on the second — with `promptTokenCount` still 8,718. A parser
+/// that folded the read into the prompt (the shape OpenCode/Anthropic use) would report 15,389
+/// prompt tokens for an 8,718-token request, and price the cache hit twice.
+#[test]
+fn a_cache_read_stays_inside_the_prompt() {
+    let frame = json!({
+        "candidates": [],
+        "usageMetadata": {
+            "promptTokenCount": 8_718,
+            "cachedContentTokenCount": 6_671,
+            "totalTokenCount": 8_731,
+            "thoughtsTokenCount": 13
+        }
+    });
+
+    let usage = parse_antigravity_chunk(&frame)
+        .into_iter()
+        .find_map(|event| match event {
+            StreamEvent::Completed {
+                usage: Some(usage), ..
+            } => Some(usage),
+            _ => None,
+        })
+        .expect("the frame carries usage");
+
+    assert_eq!(
+        usage.prompt_tokens, 8_718,
+        "the cached read is part of the prompt"
+    );
+    assert_eq!(usage.cached_tokens, 6_671);
+    assert_eq!(usage.completion_tokens, 13);
+    assert_eq!(usage.total_tokens, 8_731);
+    assert!(usage.cached_tokens <= usage.prompt_tokens);
+}
+
+/// A non-Gemini model on the same route reports the cache the same way: `gpt-oss-120b` went from
+/// 64 cached tokens on the first identical prompt to 8,768 of 8,790 on the second.
+#[test]
+fn a_non_gemini_model_reports_the_cache_it_actually_used() {
+    let frame = json!({
+        "usageMetadata": {
+            "promptTokenCount": 8_790,
+            "cachedContentTokenCount": 8_768,
+            "candidatesTokenCount": 16,
+            "totalTokenCount": 8_806
+        }
+    });
+
+    let usage = parse_antigravity_chunk(&frame)
+        .into_iter()
+        .find_map(|event| match event {
+            StreamEvent::Completed {
+                usage: Some(usage), ..
+            } => Some(usage),
+            _ => None,
+        })
+        .expect("the frame carries usage");
+
+    assert_eq!(usage.prompt_tokens, 8_790);
+    assert_eq!(usage.cached_tokens, 8_768);
+    assert_eq!(usage.completion_tokens, 16);
+    assert_eq!(usage.total_tokens, 8_806);
+}
+
 /// A reply cut off by the output cap still says what it spent: the frame carries the finish
 /// reason and a usage block that omits `promptTokenCount`, which used to be read as zero tokens.
 #[test]

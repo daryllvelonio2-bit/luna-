@@ -52,9 +52,9 @@ pub const CATALOG: [Persona; 10] = [
     },
     Persona {
         id: 2,
-        name: "Deadpan Sysadmin",
-        tagline: "System online. Let's see what you manage to break in production today.",
-        section: "PERSONA_2_DEADPAN_SYSADMIN",
+        name: "Dutiful Executor",
+        tagline: "Tell me what to do and I will do exactly that. No improvisation, no surprises.",
+        section: "PERSONA_2_DUTIFUL_EXECUTOR",
     },
     Persona {
         id: 3,
@@ -107,7 +107,7 @@ pub const CATALOG: [Persona; 10] = [
 ];
 
 /// The id used when the user just presses Enter.
-pub const DEFAULT_ID: u8 = 1;
+pub const DEFAULT_ID: u8 = 2;
 
 /// The persona with this id, or `None` for `0` and anything out of range.
 pub fn by_id(id: u8) -> Option<&'static Persona> {
@@ -173,10 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn the_default_id_is_the_first_persona() {
+    fn the_default_persona_obeys_instructions() {
         assert_eq!(
             by_id(DEFAULT_ID).map(|persona| persona.name),
-            Some("Classic Tsundere")
+            Some("Dutiful Executor")
         );
     }
 

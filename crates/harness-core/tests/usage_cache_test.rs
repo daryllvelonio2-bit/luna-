@@ -63,6 +63,33 @@ async fn a_reported_cache_read_is_stored_and_totalled() {
     );
 }
 
+/// A route that lists the cache read beside the prompt (OpenCode, Anthropic) must be folded into
+/// the subset shape before pricing. The old code subtracted a cache count that had never been
+/// added, so a 7,680-token cache hit over a 56-token remainder was priced as 56 input tokens.
+#[test]
+fn a_cache_read_reported_beside_the_prompt_is_folded_in_before_pricing() {
+    let usage = TokenUsage::with_separate_cache(56, 21, 77, 7_680);
+    assert_eq!(usage.prompt_tokens, 7_736, "fresh + cached is the prompt");
+    assert_eq!(usage.total_tokens, 7_757);
+    assert_eq!(usage.cached_tokens, 7_680);
+
+    let mut prices = BTreeMap::new();
+    prices.insert(
+        "opencode/deepseek-v4.1-flash-free".to_string(),
+        ModelPrice {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+            cached_input_per_million: Some(0.5),
+        },
+    );
+    let cost = PriceTable::new(prices)
+        .cost("opencode", "deepseek-v4.1-flash-free", &usage)
+        .expect("priced");
+    // 56 fresh at $2 + 7,680 cached at $0.50 + 21 output at $8, all per million.
+    let expected = (56.0 * 2.0 + 7_680.0 * 0.5 + 21.0 * 8.0) / 1_000_000.0;
+    assert!((cost - expected).abs() < 1e-12);
+}
+
 #[tokio::test]
 async fn a_configured_cache_rate_prices_only_the_cached_tokens() {
     let mut prices = BTreeMap::new();
@@ -193,6 +220,89 @@ async fn a_ledger_written_before_the_cache_column_still_opens() {
         .expect("totals");
     assert_eq!(totals.turns, 2);
     assert_eq!(totals.cached_tokens, 100);
+}
+
+/// Historical OpenCode rows stored the cache read beside the prompt. The repair is applied once:
+/// reopening the ledger must not add the same tokens a second time.
+#[tokio::test]
+async fn opencode_rows_written_before_the_fix_are_repaired_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("usage.db");
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("old ledger");
+        conn.execute_batch(
+            "CREATE TABLE usage (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                TEXT NOT NULL,
+                session_id        TEXT,
+                provider          TEXT NOT NULL,
+                model             TEXT NOT NULL,
+                prompt_tokens     INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens      INTEGER NOT NULL,
+                cached_tokens     INTEGER NOT NULL DEFAULT 0,
+                cost_usd          REAL,
+                duration_ms       INTEGER NOT NULL,
+                tool_calls        INTEGER NOT NULL,
+                denied_calls      INTEGER NOT NULL,
+                ok                INTEGER NOT NULL,
+                source            TEXT NOT NULL
+            );
+            INSERT INTO usage (ts, session_id, provider, model, prompt_tokens, completion_tokens,
+                               total_tokens, cached_tokens, cost_usd, duration_ms, tool_calls,
+                               denied_calls, ok, source)
+            VALUES
+              ('2026-01-01T00:00:00+00:00', 's1', 'opencode', 'flint-40b-free',
+               56, 21, 77, 7680, 0.5, 10, 0, 0, 1, 'chat'),
+              ('2026-01-01T00:00:01+00:00', 's2', 'openai', 'gpt-4o',
+               1000, 100, 1100, 800, 0.01, 10, 0, 0, 1, 'chat');",
+        )
+        .expect("old rows");
+    }
+
+    let ledger = UsageLedger::open(Some(path.clone())).expect("ledger opens");
+    let recent = ledger
+        .recent(&UsageFilter::default(), 10)
+        .await
+        .expect("recent");
+    let opencode = recent
+        .iter()
+        .find(|row| row.provider == "opencode")
+        .expect("opencode row");
+    assert_eq!(opencode.prompt_tokens, 7_736, "fresh + cached");
+    assert_eq!(opencode.total_tokens, 7_757);
+    assert_eq!(opencode.cached_tokens, 7_680);
+    assert_eq!(
+        opencode.cost_usd, None,
+        "the old cost was wrong, so it is dropped"
+    );
+
+    let openai = recent
+        .iter()
+        .find(|row| row.provider == "openai")
+        .expect("openai row");
+    assert_eq!(
+        openai.prompt_tokens, 1_000,
+        "already-subset rows are untouched"
+    );
+    assert_eq!(openai.total_tokens, 1_100);
+
+    drop(ledger);
+    let reopened = UsageLedger::open(Some(path)).expect("ledger reopens");
+    let recent = reopened
+        .recent(&UsageFilter::default(), 10)
+        .await
+        .expect("recent after reopen");
+    let opencode = recent
+        .iter()
+        .find(|row| row.provider == "opencode")
+        .expect("opencode row");
+    assert_eq!(
+        opencode.prompt_tokens, 7_736,
+        "the repair is not applied twice"
+    );
+    assert_eq!(opencode.total_tokens, 7_757);
 }
 
 #[test]

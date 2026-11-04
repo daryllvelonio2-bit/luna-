@@ -388,4 +388,3 @@ pub struct ClarifyResponse {
     pub choice_index: Option<usize>,
     pub answers: Vec<ClarifyAnswer>,
 }
-

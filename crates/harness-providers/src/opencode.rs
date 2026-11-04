@@ -61,7 +61,10 @@ fn parse_opencode_form_to_clarify(
                 .to_string();
 
             let title = field.get("title").and_then(|t| t.as_str()).unwrap_or("");
-            let desc = field.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let desc = field
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
 
             let question_text = if !title.is_empty() && !desc.is_empty() && title != desc {
                 format!("{}: {}", title, desc)
@@ -114,7 +117,6 @@ const ID_CEILING: u64 = 1 << 48;
 
 static CACHED_SESSION_ID: OnceLock<String> = OnceLock::new();
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
-
 
 #[derive(Debug, Clone)]
 pub struct DetectedOpencodeCredential {
@@ -831,7 +833,6 @@ pub async fn native_opencode_stream(
         "permissions": permissions_payload
     });
 
-
     let ses_res = http_client
         .post(&create_session_url)
         .headers(ses_headers.clone())
@@ -922,11 +923,7 @@ pub async fn native_opencode_stream(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, HarnessError>>(100);
     let clean_client = http_client.clone();
     let service_url = service.url.trim_end_matches('/').to_string();
-    let clean_url = format!(
-        "{}/api/session/{}",
-        service_url,
-        session_id
-    );
+    let clean_url = format!("{}/api/session/{}", service_url, session_id);
     let mut clean_headers = auth_headers.clone();
     clean_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let target_session_id = session_id.clone();
@@ -952,10 +949,8 @@ pub async fn native_opencode_stream(
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data_str) {
                         let ev_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         let data = parsed.get("data").unwrap_or(&serde_json::Value::Null);
-                        let event_session_id = data
-                            .get("sessionID")
-                            .and_then(|s| s.as_str())
-                            .or_else(|| {
+                        let event_session_id =
+                            data.get("sessionID").and_then(|s| s.as_str()).or_else(|| {
                                 data.get("form")
                                     .and_then(|f| f.get("sessionID"))
                                     .and_then(|s| s.as_str())
@@ -1170,7 +1165,10 @@ pub async fn native_opencode_stream(
                                         let maybe_resp = if let Some(bridge) = bridge {
                                             let (resp_tx, resp_rx) =
                                                 tokio::sync::oneshot::channel();
-                                            if bridge.clarify_tx.send((clarify_req, resp_tx)).is_ok()
+                                            if bridge
+                                                .clarify_tx
+                                                .send((clarify_req, resp_tx))
+                                                .is_ok()
                                             {
                                                 resp_rx.await.ok()
                                             } else {
@@ -1188,7 +1186,8 @@ pub async fn native_opencode_stream(
                                                 let answer_val = if let Some(ans_item) =
                                                     resp.answers.get(idx)
                                                 {
-                                                    if let Some(choice_idx) = ans_item.choice_index {
+                                                    if let Some(choice_idx) = ans_item.choice_index
+                                                    {
                                                         if choice_idx < raw_labels.len() {
                                                             raw_labels[choice_idx].clone()
                                                         } else {
@@ -1322,9 +1321,11 @@ pub async fn native_opencode_stream(
                                                 arguments,
                                             };
 
-                                            let (dec_tx, dec_rx) =
-                                                tokio::sync::oneshot::channel();
-                                            if bridge.approval_tx.send((approval_req, dec_tx)).is_ok()
+                                            let (dec_tx, dec_rx) = tokio::sync::oneshot::channel();
+                                            if bridge
+                                                .approval_tx
+                                                .send((approval_req, dec_tx))
+                                                .is_ok()
                                             {
                                                 match dec_rx.await {
                                                     Ok(ApprovalDecision::Run)

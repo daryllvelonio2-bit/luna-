@@ -70,7 +70,7 @@ use payload::{build_antigravity_payload, parse_antigravity_chunk};
 pub use quota::{
     fetch_antigravity_models, resolve_antigravity_model, retrieve_antigravity_quota,
     AntigravityModelQuotaInfo, AntigravityQuotaBucket, AntigravityQuotaGroup,
-    AntigravityQuotaSummary, QuotaLine, QuotaWindow,
+    AntigravityQuotaSummary, QuotaLine, QuotaWindow, ANTIGRAVITY_MODELS,
 };
 
 async fn post_antigravity_with_transport_retry(
@@ -427,23 +427,21 @@ pub async fn execute_antigravity_completion(
             StreamEvent::ReasoningDelta(text) => thought_buf.push_str(&text),
             StreamEvent::ToolCallDelta {
                 id,
-                name,
+                name: Some(name),
                 arguments_delta,
                 signature,
                 ..
             } => {
-                if let Some(name) = name {
-                    let arguments = arguments_delta
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str(raw).ok())
-                        .unwrap_or_else(|| json!({}));
-                    tool_calls.push(ToolCall {
-                        id: id.unwrap_or_else(|| "call_agy".to_string()),
-                        name,
-                        arguments,
-                        signature,
-                    });
-                }
+                let arguments = arguments_delta
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_else(|| json!({}));
+                tool_calls.push(ToolCall {
+                    id: id.unwrap_or_else(|| "call_agy".to_string()),
+                    name,
+                    arguments,
+                    signature,
+                });
             }
             StreamEvent::Completed {
                 usage: event_usage,

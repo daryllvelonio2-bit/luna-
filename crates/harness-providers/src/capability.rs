@@ -93,7 +93,11 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
         || leaf.contains("o4")
         || leaf.contains("gemini")
         || leaf.contains("claude")
-        || leaf.contains("deepseek");
+        || leaf.contains("deepseek")
+        // GPT-OSS is served behind the same implicit cache on Code Assist: two identical 8.8k
+        // prompts billed 64 cached tokens on the first turn and 8,768 on the second. The route
+        // gate below keeps this honest elsewhere — a non-caching route still clears the flag.
+        || leaf.contains("gpt-oss");
     caps.prompt_cache = cache_family;
 
     caps
@@ -210,6 +214,10 @@ mod tests {
             // claim its own usage payload already made by reporting `cachedTokens`.
             ("supercode", "claude-sonnet-4"),
             ("gemini", "gemini-2.5-flash"),
+            // OpenCode's native service reports `cache.read` and the ledger records it; both ids
+            // (native and the headless CLI) share that streaming path.
+            ("opencode", "deepseek-v4.1-flash-free"),
+            ("opencode-cli", "opencode/deepseek-v4.1-flash-free"),
         ] {
             assert!(
                 resolve(provider, model).prompt_cache,
@@ -226,6 +234,20 @@ mod tests {
             resolve("kiro-ai", "claude-sonnet-4").prompt_cache,
             resolve("kiro", "claude-sonnet-4").prompt_cache
         );
+    }
+
+    /// Every model the Antigravity route publishes is served behind the same implicit prefix
+    /// cache, so no entry may be denied the flag its own ledger already proves. `gpt-oss-120b`
+    /// was: a live probe recorded 8,768 cached of 8,790 prompt tokens while the family list knew
+    /// only about Gemini and Claude.
+    #[test]
+    fn every_model_on_the_antigravity_route_is_credited_with_the_cache() {
+        for model in crate::antigravity::ANTIGRAVITY_MODELS {
+            assert!(
+                resolve("antigravity", model).prompt_cache,
+                "{model} is served by Code Assist, which caches the prefix"
+            );
+        }
     }
 
     #[test]

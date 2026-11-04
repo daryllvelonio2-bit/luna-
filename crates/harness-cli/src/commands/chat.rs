@@ -479,7 +479,6 @@ pub async fn run_interactive_chat(
         allow_all: allow_all_session.clone(),
     });
 
-
     let mut agent_config = config.agent.clone();
     agent_config.skills_summary = skills_summary.clone();
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());

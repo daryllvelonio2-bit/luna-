@@ -17,21 +17,57 @@ use harness_core::{
     ModelProvider, ReasoningEffort, Role, StreamEvent, TokenUsage, ToolCall, ToolDefinition,
 };
 
-/// The cache-read count a provider reported, in either shape the catalog's routes use.
+/// A usage block normalized into the crate's one shape, whichever way the route spelled it.
 ///
-/// OpenAI-shaped usage (OpenAI, Gemini's compatible route, DeepSeek, most aggregators) carries it
-/// in `prompt_tokens_details.cached_tokens`; Anthropic carries `cache_read_input_tokens` beside
-/// the other counts. Absent from both means zero: a provider that says nothing about caching is
-/// not credited with a cache hit, because a hit is a discount and inventing one understates a bill.
-fn cached_tokens_from(usage: &serde_json::Value) -> u32 {
-    let openai = usage
+/// OpenAI-shaped usage (OpenAI, Gemini's compatible route, DeepSeek, most aggregators) carries the
+/// cache read in `prompt_tokens_details.cached_tokens`, already *inside* `prompt_tokens`. Anthropic
+/// puts `cache_read_input_tokens` *beside* the input count, so the prompt the model saw is their
+/// sum. Absent from both means zero: a provider that says nothing about caching is not credited
+/// with a cache hit, because a hit is a discount and inventing one understates a bill.
+fn token_usage_from(usage: &serde_json::Value) -> TokenUsage {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+
+    if let Some(cached) = usage
         .get("prompt_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
-        .and_then(|value| value.as_u64());
-    let anthropic = usage
+        .and_then(|value| value.as_u64())
+    {
+        return TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_tokens: (cached as u32).min(prompt_tokens),
+        };
+    }
+
+    match usage
         .get("cache_read_input_tokens")
-        .and_then(|value| value.as_u64());
-    openai.or(anthropic).unwrap_or(0) as u32
+        .and_then(|value| value.as_u64())
+    {
+        Some(cached) => TokenUsage::with_separate_cache(
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached as u32,
+        ),
+        None => TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_tokens: 0,
+        },
+    }
 }
 
 /// Extract the stream events carried by one OpenAI-compatible SSE chunk. A single chunk can
@@ -135,21 +171,7 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
     if let Some(usage) = parsed.get("usage").filter(|u| !u.is_null()) {
         events.push(Ok(E::Completed {
             finish_reason: None,
-            usage: Some(TokenUsage {
-                prompt_tokens: usage
-                    .get("prompt_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as u32,
-                completion_tokens: usage
-                    .get("completion_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as u32,
-                total_tokens: usage
-                    .get("total_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as u32,
-                cached_tokens: cached_tokens_from(usage),
-            }),
+            usage: Some(token_usage_from(usage)),
         }));
     }
 
@@ -781,21 +803,7 @@ impl ModelProvider for GenericProviderClient {
         // The response's own `usage` object: what the provider billed for this request. The session
         // store persists it so compaction compares its threshold against a real count instead of a
         // character guess (`harness_core::session::estimate_tokens`).
-        let usage = resp_json.get("usage").map(|usage| TokenUsage {
-            prompt_tokens: usage
-                .get("prompt_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-            completion_tokens: usage
-                .get("completion_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-            total_tokens: usage
-                .get("total_tokens")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-            cached_tokens: cached_tokens_from(usage),
-        });
+        let usage = resp_json.get("usage").map(token_usage_from);
 
         if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
             // A reply whose text was nothing but protocol scaffolding still *happened* — the model
@@ -1460,6 +1468,11 @@ mod tests {
             }
         }));
         assert_eq!(anthropic.cached_tokens, 640);
+        assert_eq!(
+            anthropic.prompt_tokens, 1_640,
+            "Anthropic reports the cache read beside the input, so the prompt is their sum"
+        );
+        assert_eq!(anthropic.total_tokens, 1_645);
 
         // A provider that says nothing about caching is not credited with a hit.
         let silent = usage_from_chunk(&json!({

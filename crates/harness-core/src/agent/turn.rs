@@ -196,7 +196,11 @@ where
                         response = Some(res);
                         break;
                     }
-                    Err(e) if e.is_retryable() && attempt < max_retries && executed_tools.is_empty() => {
+                    Err(e)
+                        if e.is_retryable()
+                            && attempt < max_retries
+                            && executed_tools.is_empty() =>
+                    {
                         let delay = retry_delay_with_jitter(&e, attempt);
                         let delay_secs = (delay.as_secs_f64()).ceil() as u64;
                         warn!(
@@ -412,6 +416,10 @@ where
         executed_tools: &mut Vec<TurnToolCall>,
         cancel_token: &CancellationToken,
     ) -> Result<Message, HarnessError> {
+        // Count only the tools this call reports. `executed_tools` accumulates across the whole
+        // turn, so testing it for emptiness would make every round after the first look as if it
+        // had already produced output — and skip the buffered retry on an empty stream.
+        let tools_before = executed_tools.len();
         let mut stream = tokio::select! {
             _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
             res = self.provider.stream(messages, tools, options) => match res {
@@ -447,7 +455,10 @@ where
                 Err(error) => {
                     // Nothing arrived, or only reasoning arrived without content/tools:
                     // the buffered path or a clean retry can recover without failing the turn.
-                    if content.is_empty() && calls.is_empty() && executed_tools.is_empty() {
+                    if content.is_empty()
+                        && calls.is_empty()
+                        && executed_tools.len() == tools_before
+                    {
                         debug!(
                             "Stream failed before any content/tool output ({}), retrying buffered",
                             error
@@ -587,7 +598,10 @@ where
             })
             .collect();
 
-        if content.trim().is_empty() && tool_calls.is_empty() && executed_tools.is_empty() {
+        if content.trim().is_empty()
+            && tool_calls.is_empty()
+            && executed_tools.len() == tools_before
+        {
             // A reply cut off by the output cap is not the transient empty shape the buffered
             // retry exists for: the identical request with the identical cap returns the identical
             // nothing, and re-sending it doubles the wait for a diagnosis. Reproduced against Code

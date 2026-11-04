@@ -96,17 +96,17 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_protocol_describes_lean_cards_and_file_notes() {
+    fn the_memory_protocol_describes_index_cards_and_project_notes() {
         let body = section(MEMORY_SESSION_PROMPT).expect("memory prompt loads");
-        assert!(body.contains("Lean Index Cards"), "{body}");
-        assert!(body.contains("One Record Per Topic"), "{body}");
-        assert!(body.contains("notes_dir"), "{body}");
-        assert!(body.contains("AUDIT NOTE CONTENT"), "{body}");
-        assert!(body.contains("current worktrees"), "{body}");
+        assert!(body.contains("Single-line index cards"), "{body}");
         assert!(
-            body.contains("build, test, run, and deployment workflows"),
+            body.contains("single authoritative record per primary domain"),
             "{body}"
         );
+        assert!(body.contains("forget_memory"), "{body}");
+        assert!(body.contains("Project Notes"), "{body}");
+        assert!(body.contains("markdown notes"), "{body}");
+        assert!(body.contains("Repository Audits"), "{body}");
         // The old contract — a rich record per entity — is gone.
         assert!(!body.contains("consolidated memory record"), "{body}");
     }
