@@ -159,7 +159,6 @@ pub(super) fn launch_turn(
         format!("{}\n\n{}", q, images.join("\n\n"))
     };
 
-    ui.clear_patch_diff();
     // Luna is thinking from here: the composer's hint says so until the turn ends, and it is set
     // before the box is drawn so the busy line is what the user sees while it runs.
     ui.set_turn_active(true);

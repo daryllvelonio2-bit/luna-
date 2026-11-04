@@ -600,22 +600,6 @@ fn status_line_never_exceeds_terminal_width_even_when_narrow() {
     }
 }
 
-#[test]
-fn patch_diff_lifecycle_in_live_region() {
-    let ui = ChatUi::new(false);
-    assert!(ui.live.lock().unwrap().patch_diff.is_none());
-
-    let diff = vec!["- old".to_string(), "+ new".to_string()];
-    ui.show_patch_diff(diff.clone());
-    assert_eq!(
-        ui.live.lock().unwrap().patch_diff.as_deref(),
-        Some(diff.as_slice())
-    );
-
-    ui.clear_patch_diff();
-    assert!(ui.live.lock().unwrap().patch_diff.is_none());
-}
-
 /// The prompt is never bare when the line is empty: it says what to do next.
 #[test]
 fn the_empty_composer_shows_a_hint_and_a_typed_line_does_not() {
@@ -774,57 +758,29 @@ fn thought_lines(count: usize) -> String {
         .join("\n")
 }
 
-/// Thinking over, the transcript keeps the last few rows and says how many it folded away.
-///
-/// The fold is asserted where it is decided rather than in captured output: the UI writes with
-/// `println!`, which the test harness captures before any redirected descriptor can see it (see
-/// [`capture_stdout`]).
+/// Thinking over, the whole block goes into the transcript: the live region has been the only
+/// place it was visible, so folding it away at the end would hide what the user watched arrive.
 #[test]
-fn a_finished_thought_block_folds_to_its_last_five_rows() {
+fn a_finished_thought_block_is_printed_whole() {
     let rows = reasoning_rows(&thought_lines(12), 80);
-    assert_eq!(rows.len(), 12, "one row per thought line: {rows:?}");
-
-    let folded = folded_reasoning_rows(rows);
-    assert_eq!(
-        folded.len(),
-        FINISHED_REASONING_ROWS + 1,
-        "five rows behind a count of what went: {folded:?}"
-    );
-    assert!(
-        strip(&folded[0]).contains("7 earlier lines"),
-        "the fold says what it hid: {folded:?}"
-    );
-    assert!(
-        strip(&folded[1]).contains("thought line 8"),
-        "the rows kept are the last five: {folded:?}"
-    );
-    assert!(
-        strip(folded.last().unwrap()).contains("thought line 12"),
-        "up to the newest: {folded:?}"
-    );
-}
-
-/// One hidden row is announced in the singular: the count is read by a person.
-#[test]
-fn the_fold_says_one_line_in_the_singular() {
-    let folded = folded_reasoning_rows(reasoning_rows(&thought_lines(6), 80));
+    let text = finished_reasoning_text(&rows);
 
     assert_eq!(
-        strip(&folded[0]),
-        "  … (1 earlier line)",
-        "one row hidden, one line announced: {folded:?}"
+        text.lines().count(),
+        12,
+        "every thought row is handed to the transcript: {text:?}"
     );
-}
-
-#[test]
-fn a_short_thought_block_is_printed_whole() {
-    let rows = reasoning_rows("opening thought\nmiddle\nthe decision", 80);
-    let folded = folded_reasoning_rows(rows.clone());
-
-    assert_eq!(folded, rows, "nothing is hidden, so nothing changes");
     assert!(
-        !folded.iter().any(|r| strip(r).contains("earlier lines")),
-        "and nothing is announced: {folded:?}"
+        text.contains("thought line 1"),
+        "the opening row is kept: {text:?}"
+    );
+    assert!(
+        text.contains("thought line 12"),
+        "the newest row is kept: {text:?}"
+    );
+    assert!(
+        !text.contains("earlier lines"),
+        "nothing is folded behind a count: {text:?}"
     );
 }
 

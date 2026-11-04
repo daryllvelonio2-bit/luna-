@@ -1157,23 +1157,6 @@ fn patch_diff_included_in_history_parsing() {
     assert!(tool.diff_lines[1].contains("0;160;0"));
 }
 
-#[test]
-fn fit_diff_line_to_width_truncates_long_lines_cleanly() {
-    let long_line = format!(
-        "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
-        "x".repeat(120)
-    );
-    let fitted = fit_diff_line_to_width(&long_line, 50);
-    let visible_len = dialoguer::console::measure_text_width(&fitted);
-    assert!(
-        visible_len <= 50,
-        "visible_len {} exceeds width 50",
-        visible_len
-    );
-    assert!(fitted.contains("0;160;0"), "style preserved");
-    assert!(fitted.contains("+"), "prefix preserved");
-}
-
 #[tokio::test]
 async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     use harness_core::{Message, SessionStore, SqliteSessionStore};

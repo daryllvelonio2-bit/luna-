@@ -538,14 +538,12 @@ pub async fn run_interactive_chat(
             // Reasoning lands in the live region and is settled into the transcript by the animation
             // tick, so it is visible while it is still being produced.
             harness_core::AgentEvent::ReasoningDelta(text) => {
-                ui_obs.clear_patch_diff();
                 ui_obs.push_reasoning(&text);
             }
             harness_core::AgentEvent::ContextTokensUpdated { tokens_used } => {
                 ui_obs.update_context_used(tokens_used);
             }
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
-                ui_obs.clear_patch_diff();
                 ui_obs.finish_reasoning();
                 // A todo call reads as the task it acts on, not as the arguments it was sent.
                 let call_fmt = if name == "todo_list" {
@@ -623,7 +621,7 @@ pub async fn run_interactive_chat(
                 };
                 ui_obs.emit_above(&line);
                 if !diff_to_show.is_empty() {
-                    ui_obs.show_patch_diff(diff_to_show);
+                    ui_obs.emit_above(&diff_to_show.join("\n"));
                 }
             }
             harness_core::AgentEvent::Interrupted {
@@ -632,7 +630,6 @@ pub async fn run_interactive_chat(
                 partial,
             } => {
                 let shown = clean_user_query_for_transcript(&text);
-                ui_obs.clear_patch_diff();
                 // The reasoning produced before the cut is already in the live region; settle it so
                 // it stays on screen instead of disappearing when the next call starts.
                 ui_obs.finish_reasoning();
@@ -666,7 +663,6 @@ pub async fn run_interactive_chat(
                     });
             }
             harness_core::AgentEvent::Steered { text } => {
-                ui_obs.clear_patch_diff();
                 ui_obs.finish_reasoning();
                 let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
                 in_flight_tools_obs

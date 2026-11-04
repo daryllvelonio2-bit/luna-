@@ -7,26 +7,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, compaction_line, fit_diff_line_to_width, needs_separator, reasoning_rows,
-    tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
+    activity_line, compaction_line, needs_separator, reasoning_rows, tool_activity_detail,
+    truncate_to_cells, OutputBlockKind, PROMPT,
 };
 use super::status::format_quota_lines;
 
 /// Fewest rows the live region gives the thought block. On a screen with no room left the block
 /// still shows this much: below it the region stops saying anything at all.
 pub const MIN_LIVE_REASONING_ROWS: usize = 4;
-
-/// Rows of a live patch diff the region may show, at most. Bounded so a large patch cannot take
-/// the screen the thought block is streaming into.
-pub const MAX_LIVE_DIFF_ROWS: usize = 6;
-
-/// Rows of a finished thought block that stay in the transcript.
-///
-/// While the model is thinking the block is shown whole in the live region; once thinking is done
-/// it folds to this many rows, because the transcript is the record of what the agent did rather
-/// than a second copy of its working. The rest is not lost: Ctrl+O expands the turn's process
-/// header, which re-renders the block in full from the stored turn.
-pub const FINISHED_REASONING_ROWS: usize = 5;
 
 /// How often the live region advances a spinner frame and refreshes its elapsed time.
 pub const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
@@ -186,7 +174,6 @@ struct LiveRegion {
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     compaction: Option<Compaction>,
-    patch_diff: Option<Vec<String>>,
     rows: Vec<String>,
 }
 
@@ -234,11 +221,6 @@ pub fn visible_width(s: &str) -> usize {
     dialoguer::console::measure_text_width(s)
 }
 
-/// Rows of a live patch diff the region may show on a screen this tall.
-fn max_live_diff_rows(height: usize) -> usize {
-    height.saturating_sub(10).clamp(2, MAX_LIVE_DIFF_ROWS)
-}
-
 /// The thought rows the live region shows, given everything else the region carries and everything
 /// the composer draws below it.
 ///
@@ -254,13 +236,7 @@ fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<Strin
         reasoning_rows(&live.reasoning, width)
     };
     let height = get_terminal_height();
-    let reserved = usize::from(live.activity.is_some())
-        + usize::from(live.compaction.is_some())
-        + live
-            .patch_diff
-            .as_ref()
-            .map(|diff| diff.len().min(max_live_diff_rows(height)))
-            .unwrap_or(0);
+    let reserved = usize::from(live.activity.is_some()) + usize::from(live.compaction.is_some());
     let budget = height
         .saturating_sub(chrome + reserved + 1)
         .max(MIN_LIVE_REASONING_ROWS);
@@ -268,23 +244,13 @@ fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<Strin
     all[start..].to_vec()
 }
 
-/// The transcript's form of a finished thought block: its last [`FINISHED_REASONING_ROWS`] rows,
-/// behind a count of what the fold hides.
+/// The transcript's form of a finished thought block: every row, in order.
 ///
-/// The tail is kept rather than the opening so the rows the user was just reading stay where they
-/// are: the fold takes away what has already scrolled past, not what the thought arrived at.
-pub(crate) fn folded_reasoning_rows(rows: Vec<String>) -> Vec<String> {
-    if rows.len() <= FINISHED_REASONING_ROWS {
-        return rows;
-    }
-    let hidden = rows.len() - FINISHED_REASONING_ROWS;
-    let noun = if hidden == 1 { "line" } else { "lines" };
-    let mut folded = vec![format!(
-        "  {}",
-        format!("… ({hidden} earlier {noun})").dimmed()
-    )];
-    folded.extend(rows[hidden..].iter().cloned());
-    folded
+/// The live region is the only place reasoning is visible while it streams, so the transcript
+/// keeps it whole rather than showing a tail behind a fold. The stored turn re-renders the same
+/// block when Ctrl+O expands it.
+pub(crate) fn finished_reasoning_text(rows: &[String]) -> String {
+    rows.join("\n")
 }
 
 pub fn physical_line_count(visible_len: usize, width: usize) -> usize {
@@ -560,7 +526,7 @@ impl ChatUi {
         };
         if !rows.is_empty() {
             self.begin_block(OutputBlockKind::Thinking);
-            self.emit_above(&folded_reasoning_rows(rows).join("\n"));
+            self.emit_above(&finished_reasoning_text(&rows));
         }
     }
 
@@ -632,25 +598,6 @@ impl ChatUi {
         live.rows.clear();
         live.activity = None;
         live.compaction = None;
-        live.patch_diff = None;
-    }
-
-    pub fn show_patch_diff(&self, diff: Vec<String>) {
-        {
-            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            live.patch_diff = Some(diff);
-        }
-        self.animate_tick();
-    }
-
-    pub fn clear_patch_diff(&self) {
-        let had_diff = {
-            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            live.patch_diff.take().is_some()
-        };
-        if had_diff {
-            self.animate_tick();
-        }
     }
 
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
@@ -1217,23 +1164,6 @@ impl ChatUi {
                 ));
             }
 
-            if let Some(diff) = &live.patch_diff {
-                let count = diff.len();
-                let display_count = count.min(max_live_diff_rows(get_terminal_height()));
-                for line in &diff[..display_count] {
-                    rows.push(fit_diff_line_to_width(line, width));
-                }
-                if count > display_count {
-                    rows.push(
-                        format!(
-                            "    ... ({} more changed lines, Ctrl+O to expand)",
-                            count - display_count
-                        )
-                        .dimmed()
-                        .to_string(),
-                    );
-                }
-            }
             rows
         };
 
