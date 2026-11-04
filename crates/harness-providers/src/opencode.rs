@@ -5,7 +5,7 @@ use harness_core::approval::{ApprovalDecision, ApprovalRequest};
 use harness_core::types::{
     CompletionOptions, Message, Role, StreamEvent, TokenUsage, ToolDefinition,
 };
-use harness_core::{ClarifyItem, ClarifyRequest, ClarifyResponse, HarnessError};
+use harness_core::{ClarifyAnswer, ClarifyItem, ClarifyRequest, ClarifyResponse, HarnessError};
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::json;
@@ -47,9 +47,36 @@ pub fn get_ui_bridge() -> Option<OpencodeUiBridge> {
         .and_then(|guard| guard.clone())
 }
 
+/// How a form field's answer reaches OpenCode.
+///
+/// The API accepts a scalar for a string/number/boolean field and an array only for a
+/// multiselect. Sending an array for every field — which this bridge used to do — is rejected
+/// with `FormInvalidAnswerError`, and the form then stays pending forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormFieldKind {
+    Scalar,
+    Multi,
+}
+
+/// One field of an OpenCode form, kept so the user's answer can be encoded as the API expects.
+#[derive(Debug, Clone)]
+struct FormFieldMapping {
+    key: String,
+    field_type: String,
+    kind: FormFieldKind,
+    /// The option *values* (not the labels shown to the user), in choice order.
+    option_values: Vec<String>,
+}
+
+/// The marker `prompt_clarify_choice` uses when the user pressed Esc instead of answering.
+///
+/// A skipped prompt is a cancelled form, not an answer: posting the marker as a value would be
+/// invalid and leave the service waiting.
+const SKIPPED_ANSWER: &str = "(skipped by user)";
+
 fn parse_opencode_form_to_clarify(
     form: &serde_json::Value,
-) -> (ClarifyRequest, Vec<(String, Vec<String>)>) {
+) -> (ClarifyRequest, Vec<FormFieldMapping>) {
     let mut questions = Vec::new();
     let mut field_mappings = Vec::new();
 
@@ -58,7 +85,12 @@ fn parse_opencode_form_to_clarify(
             let key = field
                 .get("key")
                 .and_then(|k| k.as_str())
-                .unwrap_or(&format!("q{}", i))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("q{}", i));
+            let field_type = field
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("string")
                 .to_string();
 
             let title = field.get("title").and_then(|t| t.as_str()).unwrap_or("");
@@ -78,17 +110,19 @@ fn parse_opencode_form_to_clarify(
             };
 
             let mut choices = Vec::new();
-            let mut choice_raw_labels = Vec::new();
+            let mut option_values = Vec::new();
 
             if let Some(opts) = field.get("options").and_then(|o| o.as_array()) {
                 for opt in opts {
-                    let label = opt
-                        .get("label")
-                        .and_then(|l| l.as_str())
-                        .or_else(|| opt.get("value").and_then(|v| v.as_str()))
+                    let value = opt
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| opt.get("label").and_then(|l| l.as_str()))
                         .unwrap_or("");
-                    if !label.is_empty() {
-                        choice_raw_labels.push(label.to_string());
+                    if !value.is_empty() {
+                        // The reply carries the value; the label is only what the box shows.
+                        let label = opt.get("label").and_then(|l| l.as_str()).unwrap_or(value);
+                        option_values.push(value.to_string());
                         if let Some(opt_desc) = opt
                             .get("description")
                             .and_then(|d| d.as_str())
@@ -102,15 +136,68 @@ fn parse_opencode_form_to_clarify(
                 }
             }
 
+            // A boolean field has no options in the wire format, but its answer must still be a
+            // bool. Offer the two values so the box is usable instead of asking for free text.
+            if choices.is_empty() && field_type == "boolean" {
+                choices = vec!["Yes".to_string(), "No".to_string()];
+                option_values = vec!["true".to_string(), "false".to_string()];
+            }
+
             questions.push(ClarifyItem {
                 question: question_text,
                 choices,
             });
-            field_mappings.push((key, choice_raw_labels));
+            field_mappings.push(FormFieldMapping {
+                key,
+                kind: if field_type == "multiselect" {
+                    FormFieldKind::Multi
+                } else {
+                    FormFieldKind::Scalar
+                },
+                field_type,
+                option_values,
+            });
         }
     }
 
     (ClarifyRequest { questions }, field_mappings)
+}
+
+/// Encode one raw answer as the JSON value the form's field type expects.
+fn form_value_from_raw(mapping: &FormFieldMapping, raw: &str) -> serde_json::Value {
+    let value = match mapping.field_type.as_str() {
+        "boolean" => json!(matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "y" | "1"
+        )),
+        "number" => match raw.trim().parse::<f64>() {
+            Ok(number) => json!(number),
+            Err(_) => json!(raw),
+        },
+        "integer" => match raw.trim().parse::<i64>() {
+            Ok(number) => json!(number),
+            Err(_) => json!(raw),
+        },
+        _ => json!(raw),
+    };
+    // Only multiselect fields take the array shape; everything else is scalar.
+    if mapping.kind == FormFieldKind::Multi {
+        json!([value])
+    } else {
+        value
+    }
+}
+
+/// Turn one answered clarify item into the value for its form field.
+fn form_value_for_answer(
+    mapping: &FormFieldMapping,
+    answer: &ClarifyAnswer,
+) -> Option<serde_json::Value> {
+    let raw = match answer.choice_index {
+        Some(index) => mapping.option_values.get(index)?,
+        None => &answer.answer,
+    };
+    Some(form_value_from_raw(mapping, raw))
 }
 
 const BASE62_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -1550,70 +1637,84 @@ pub async fn native_opencode_stream(
                                             None
                                         };
 
-                                        if let Some(resp) = maybe_resp {
-                                            let mut answer_obj = serde_json::Map::new();
-                                            for (idx, (key, raw_labels)) in
-                                                field_mappings.into_iter().enumerate()
-                                            {
-                                                let answer_val = if let Some(ans_item) =
-                                                    resp.answers.get(idx)
+                                        let skipped = maybe_resp.as_ref().is_some_and(|resp| {
+                                            resp.answers
+                                                .iter()
+                                                .any(|answer| answer.answer == SKIPPED_ANSWER)
+                                        });
+
+                                        let answer_obj = match maybe_resp {
+                                            Some(resp) if !skipped => {
+                                                let mut answer_obj = serde_json::Map::new();
+                                                for (idx, mapping) in
+                                                    field_mappings.iter().enumerate()
                                                 {
-                                                    if let Some(choice_idx) = ans_item.choice_index
-                                                    {
-                                                        if choice_idx < raw_labels.len() {
-                                                            raw_labels[choice_idx].clone()
-                                                        } else {
-                                                            ans_item.answer.clone()
+                                                    let value = match resp.answers.get(idx) {
+                                                        Some(answer) => {
+                                                            form_value_for_answer(mapping, answer)
                                                         }
-                                                    } else {
-                                                        ans_item.answer.clone()
+                                                        // No answer for this field: keep the
+                                                        // form's first option rather than an
+                                                        // empty, invalid value.
+                                                        None => mapping.option_values.first().map(
+                                                            |first| {
+                                                                form_value_from_raw(mapping, first)
+                                                            },
+                                                        ),
+                                                    };
+                                                    if let Some(value) = value {
+                                                        answer_obj
+                                                            .insert(mapping.key.clone(), value);
                                                     }
-                                                } else if let Some(ref single_ans) = resp.answer {
-                                                    if let Some(choice_idx) = resp.choice_index {
-                                                        if choice_idx < raw_labels.len() {
-                                                            raw_labels[choice_idx].clone()
-                                                        } else {
-                                                            single_ans.clone()
-                                                        }
-                                                    } else {
-                                                        single_ans.clone()
-                                                    }
-                                                } else {
-                                                    raw_labels
-                                                        .first()
-                                                        .cloned()
-                                                        .unwrap_or_else(|| "Yes".to_string())
-                                                };
-
-                                                answer_obj.insert(key, json!([answer_val]));
+                                                }
+                                                Some(answer_obj)
                                             }
+                                            _ => None,
+                                        };
 
-                                            let _ = client
+                                        if let Some(answer_obj) =
+                                            answer_obj.filter(|a| !a.is_empty())
+                                        {
+                                            match client
                                                 .post(&reply_url)
                                                 .headers(post_headers)
                                                 .json(&json!({ "answer": answer_obj }))
                                                 .send()
-                                                .await;
-                                        } else {
-                                            let mut answer_obj = serde_json::Map::new();
-                                            for (key, raw_labels) in field_mappings {
-                                                if let Some(first) = raw_labels.first() {
-                                                    answer_obj.insert(key, json!([first]));
+                                                .await
+                                            {
+                                                Ok(res) if res.status().is_success() => {}
+                                                Ok(res) => {
+                                                    let status = res.status();
+                                                    let body = res.text().await.unwrap_or_default();
+                                                    tracing::warn!(
+                                                        "OpenCode form reply failed (HTTP {status}): {body}"
+                                                    );
                                                 }
+                                                Err(error) => tracing::warn!(
+                                                    "OpenCode form reply failed: {error}"
+                                                ),
                                             }
-                                            if !answer_obj.is_empty() {
-                                                let _ = client
-                                                    .post(&reply_url)
-                                                    .headers(post_headers)
-                                                    .json(&json!({ "answer": answer_obj }))
-                                                    .send()
-                                                    .await;
-                                            } else {
-                                                let _ = client
-                                                    .delete(&cancel_url)
-                                                    .headers(post_headers)
-                                                    .send()
-                                                    .await;
+                                        } else {
+                                            // Esc means "ask me nothing": cancel the form so the
+                                            // service resumes instead of waiting on it forever.
+                                            match client
+                                                .delete(&cancel_url)
+                                                .headers(post_headers)
+                                                .query(&[("message", "skipped by the user")])
+                                                .send()
+                                                .await
+                                            {
+                                                Ok(res) if res.status().is_success() => {}
+                                                Ok(res) => {
+                                                    let status = res.status();
+                                                    let body = res.text().await.unwrap_or_default();
+                                                    tracing::warn!(
+                                                        "OpenCode form cancel failed (HTTP {status}): {body}"
+                                                    );
+                                                }
+                                                Err(error) => tracing::warn!(
+                                                    "OpenCode form cancel failed: {error}"
+                                                ),
                                             }
                                         }
                                     });
@@ -2637,5 +2738,79 @@ mod tests {
 
         assert!(prompt.files.is_empty());
         assert!(prompt.text.contains("data:image/png"));
+    }
+
+    fn question_form(field_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "frm_test",
+            "title": "Questions",
+            "fields": [{
+                "key": "q0",
+                "title": "Next step",
+                "description": "What should happen next?",
+                "type": field_type,
+                "custom": true,
+                "options": [
+                    { "value": "restart", "label": "Restart everything" },
+                    { "value": "report", "label": "Just report" }
+                ]
+            }]
+        })
+    }
+
+    fn answer(choice_index: Option<usize>, text: &str) -> ClarifyAnswer {
+        ClarifyAnswer {
+            question: "Next step".to_string(),
+            answer: text.to_string(),
+            choice_index,
+        }
+    }
+
+    /// OpenCode types a question field as `string`, so its answer is a scalar. The bridge used to
+    /// wrap every answer in an array; the API rejects that with `FormInvalidAnswerError`, which
+    /// left the form pending and the turn loading forever.
+    #[test]
+    fn a_string_field_reply_is_scalar_and_uses_the_option_value() {
+        let (request, mappings) = parse_opencode_form_to_clarify(&question_form("string"));
+
+        assert_eq!(request.questions.len(), 1);
+        assert_eq!(mappings[0].kind, FormFieldKind::Scalar);
+        let value = form_value_for_answer(&mappings[0], &answer(Some(0), "Restart everything"))
+            .expect("the chosen option is mapped");
+        assert_eq!(value, serde_json::json!("restart"));
+    }
+
+    #[test]
+    fn a_custom_string_answer_is_sent_as_typed() {
+        let (_, mappings) = parse_opencode_form_to_clarify(&question_form("string"));
+
+        let value = form_value_for_answer(&mappings[0], &answer(None, "something else"))
+            .expect("a typed answer is mapped");
+        assert_eq!(value, serde_json::json!("something else"));
+    }
+
+    #[test]
+    fn a_multiselect_reply_is_an_array_of_values() {
+        let (_, mappings) = parse_opencode_form_to_clarify(&question_form("multiselect"));
+
+        assert_eq!(mappings[0].kind, FormFieldKind::Multi);
+        let value = form_value_for_answer(&mappings[0], &answer(Some(1), "Just report"))
+            .expect("the chosen option is mapped");
+        assert_eq!(value, serde_json::json!(["report"]));
+    }
+
+    #[test]
+    fn a_boolean_field_offers_yes_no_and_replies_with_a_bool() {
+        let form = serde_json::json!({
+            "id": "frm_bool",
+            "title": "Questions",
+            "fields": [{ "key": "enabled", "title": "Enable it?", "type": "boolean" }]
+        });
+        let (request, mappings) = parse_opencode_form_to_clarify(&form);
+
+        assert_eq!(request.questions[0].choices, vec!["Yes", "No"]);
+        let value = form_value_for_answer(&mappings[0], &answer(Some(1), "No"))
+            .expect("the chosen option is mapped");
+        assert_eq!(value, serde_json::json!(false));
     }
 }
