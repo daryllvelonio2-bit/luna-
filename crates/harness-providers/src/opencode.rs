@@ -549,10 +549,33 @@ pub fn normalize_opencode_model(model: &str) -> String {
     format!("opencode/{}", trimmed)
 }
 
-/// Formats the conversation history into a clear prompt structure for `opencode run`.
-pub fn format_messages_for_opencode(messages: &[Message]) -> String {
+/// A prompt in the shape the OpenCode routes take it: the conversation as text, and the images
+/// pasted into the newest user turn as attachments beside it.
+pub struct OpencodePrompt {
+    pub text: String,
+    pub files: Vec<serde_json::Value>,
+}
+
+/// Formats the conversation history for the OpenCode routes.
+///
+/// A `data:image/...` URL inside the text is not an image to OpenCode — it is hundreds of
+/// kilobytes of base64 the model reads as prose, and, depending on how the server splits the
+/// message, it can push the instruction out of what the model actually sees. OpenCode has a
+/// dedicated attachment field for pixels (`files`), so the URLs are lifted out of the text and
+/// handed over there instead.
+///
+/// Only the newest user turn's images are attached. Images from earlier turns stay in the
+/// transcript as the `[image: WxH]` marker the CLI wrote beside them: re-uploading every pasted
+/// screenshot on every request would grow each prompt by hundreds of kilobytes and buy the model
+/// a second look it cannot act on anymore.
+pub fn format_opencode_prompt(messages: &[Message]) -> OpencodePrompt {
+    // The turn's instruction is the newest user message, wherever the tool loop has left the
+    // tail of the vector. Images in anything older are history; only this turn's pixels are sent.
+    let attach_to = messages.iter().rposition(|msg| msg.role == Role::User);
+
     let mut parts = Vec::new();
-    for msg in messages {
+    let mut files = Vec::new();
+    for (index, msg) in messages.iter().enumerate() {
         let role_label = match msg.role {
             Role::System => "System Instruction",
             Role::User => "User",
@@ -561,9 +584,15 @@ pub fn format_messages_for_opencode(messages: &[Message]) -> String {
         };
         let mut text = String::new();
         if let Some(ref content) = msg.content {
-            let trimmed = content.trim();
+            let (without_images, images) = split_data_urls(content);
+            let trimmed = without_images.trim();
             if !trimmed.is_empty() {
                 text.push_str(trimmed);
+            }
+            if Some(index) == attach_to {
+                for url in images {
+                    files.push(image_attachment(&url, files.len() + 1));
+                }
             }
         }
         if let Some(ref result) = msg.tool_result {
@@ -587,11 +616,62 @@ pub fn format_messages_for_opencode(messages: &[Message]) -> String {
             parts.push(format!("[{}]\n{}", role_label, text));
         }
     }
-    if parts.is_empty() {
+    let text = if parts.is_empty() {
         "Hello".to_string()
     } else {
         parts.join("\n\n")
+    };
+    OpencodePrompt { text, files }
+}
+
+/// The text half of [`format_opencode_prompt`], for callers that cannot forward attachments.
+pub fn format_messages_for_opencode(messages: &[Message]) -> String {
+    format_opencode_prompt(messages).text
+}
+
+/// One `data:image/...;base64,...` URL in the prompt, in the shape OpenCode's `files` field
+/// takes: the URL itself is the URI, and the name only exists so a saved attachment has an
+/// extension that matches its MIME type.
+fn image_attachment(url: &str, ordinal: usize) -> serde_json::Value {
+    let subtype = url
+        .trim_start_matches("data:image/")
+        .split([';', ','])
+        .next()
+        .unwrap_or("png");
+    json!({
+        "uri": url,
+        "name": format!("pasted-image-{}.{}", ordinal, subtype),
+        "description": "image pasted into the chat prompt",
+    })
+}
+
+/// Split every real inline image URL out of `text`, returning the remaining prose and the URLs.
+///
+/// A URL runs to the next whitespace and only counts when it carries `;base64,` — the same rule
+/// the OpenAI-compatible serializer uses, so prose that mentions `data:image/png` in passing is
+/// left alone.
+fn split_data_urls(text: &str) -> (String, Vec<String>) {
+    if !text.contains("data:image/") {
+        return (text.to_string(), Vec::new());
     }
+
+    let mut cleaned = String::with_capacity(text.len());
+    let mut urls = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("data:image/") {
+        let after = &rest[start..];
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        if !after[..end].contains(";base64,") {
+            cleaned.push_str(&rest[..start + "data:image/".len()]);
+            rest = &after["data:image/".len()..];
+            continue;
+        }
+        cleaned.push_str(&rest[..start]);
+        urls.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    cleaned.push_str(rest);
+    (cleaned, urls)
 }
 
 /// Normalize OpenCode's `tokens` object into the crate's one usage shape.
@@ -1058,19 +1138,22 @@ pub async fn native_opencode_stream(
         .to_string();
 
     // 3. Send Prompt
-    let prompt_text = format_messages_for_opencode(messages);
+    let prompt = format_opencode_prompt(messages);
     let prompt_url = format!(
         "{}/api/session/{}/prompt",
         service.url.trim_end_matches('/'),
         session_id
     );
-    let prompt_payload = json!({
-        "text": prompt_text,
+    let mut prompt_payload = json!({
+        "text": prompt.text,
         "model": {
             "providerID": provider_id,
             "id": model_id
         }
     });
+    if !prompt.files.is_empty() {
+        prompt_payload["files"] = json!(prompt.files);
+    }
 
     let prompt_res = http_client
         .post(&prompt_url)
@@ -1765,6 +1848,65 @@ pub async fn stream_opencode_completion(
 }
 
 /// Executes a one-shot completion via `opencode run`.
+/// Temporary files holding the decoded pasted images for `opencode run --file`.
+///
+/// The CLI takes paths, not data URLs, so the bytes have to exist somewhere the child can read
+/// them. Deleting them on drop keeps a chat session from leaving screenshots behind in the
+/// temp directory.
+struct AttachmentFiles(Vec<PathBuf>);
+
+impl AttachmentFiles {
+    fn write(files: &[serde_json::Value]) -> Result<Self, HarnessError> {
+        use base64::Engine as _;
+
+        let mut paths = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let uri = file
+                .get("uri")
+                .and_then(|uri| uri.as_str())
+                .unwrap_or_default();
+            let Some((mime, payload)) = uri
+                .strip_prefix("data:")
+                .and_then(|rest| rest.split_once(";base64,"))
+            else {
+                continue;
+            };
+            let extension = mime.rsplit('/').next().unwrap_or("png");
+            let path = std::env::temp_dir().join(format!(
+                "luna-opencode-{}-{}-{}.{}",
+                std::process::id(),
+                index,
+                uuid::Uuid::new_v4(),
+                extension
+            ));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .map_err(|e| HarnessError::ProviderError {
+                    provider: "opencode".to_string(),
+                    message: format!("Failed to decode pasted image for opencode: {}", e),
+                })?;
+            std::fs::write(&path, bytes).map_err(|e| HarnessError::ProviderError {
+                provider: "opencode".to_string(),
+                message: format!("Failed to write pasted image to {}: {}", path.display(), e),
+            })?;
+            paths.push(path);
+        }
+        Ok(Self(paths))
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.0.iter().map(PathBuf::as_path)
+    }
+}
+
+impl Drop for AttachmentFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub async fn execute_opencode_completion_cli(
     model: &str,
     messages: &[Message],
@@ -1773,7 +1915,8 @@ pub async fn execute_opencode_completion_cli(
 ) -> Result<Message, HarnessError> {
     let binary = find_opencode_binary()?;
     let target_model = normalize_opencode_model(model);
-    let prompt = format_messages_for_opencode(messages);
+    let prompt = format_opencode_prompt(messages);
+    let attachments = AttachmentFiles::write(&prompt.files)?;
 
     let mut cmd = opencode_command(&binary);
     cmd.args([
@@ -1788,6 +1931,9 @@ pub async fn execute_opencode_completion_cli(
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    for path in attachments.paths() {
+        cmd.arg("--file").arg(path);
+    }
 
     let mut child = cmd.spawn().map_err(|e| HarnessError::ProviderError {
         provider: "opencode".to_string(),
@@ -1799,7 +1945,7 @@ pub async fn execute_opencode_completion_cli(
     })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
+        let _ = stdin.write_all(prompt.text.as_bytes()).await;
         let _ = stdin.flush().await;
         drop(stdin);
     }
@@ -1922,7 +2068,8 @@ pub async fn stream_opencode_completion_cli(
 ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
     let binary = find_opencode_binary()?;
     let target_model = normalize_opencode_model(model);
-    let prompt = format_messages_for_opencode(messages);
+    let prompt = format_opencode_prompt(messages);
+    let attachments = AttachmentFiles::write(&prompt.files)?;
 
     let mut cmd = opencode_command(&binary);
     cmd.args([
@@ -1937,6 +2084,9 @@ pub async fn stream_opencode_completion_cli(
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    for path in attachments.paths() {
+        cmd.arg("--file").arg(path);
+    }
 
     let mut child = cmd.spawn().map_err(|e| HarnessError::ProviderError {
         provider: "opencode".to_string(),
@@ -1948,7 +2098,7 @@ pub async fn stream_opencode_completion_cli(
     })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
+        let _ = stdin.write_all(prompt.text.as_bytes()).await;
         let _ = stdin.flush().await;
         drop(stdin);
     }
@@ -1966,6 +2116,8 @@ pub async fn stream_opencode_completion_cli(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, HarnessError>>(100);
 
     tokio::spawn(async move {
+        // Keep the decoded attachment files alive for as long as the child that reads them.
+        let _attachments = attachments;
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_output = false;
         let mut last_error = None;
@@ -2400,5 +2552,90 @@ mod tests {
             second.prompt_tokens, 7_020,
             "each step still holds its own prompt"
         );
+    }
+
+    /// A pasted screenshot is an attachment, not 300 KB of prose. The text keeps the instruction
+    /// (and the marker the CLI wrote) and the data URL moves to `files`, where OpenCode turns it
+    /// into an image part. Sending it in `text` is what produced a turn whose only content the
+    /// model could see was "pasted content" with no instruction.
+    #[test]
+    fn a_pasted_image_becomes_an_attachment_not_prompt_text() {
+        let url = "data:image/png;base64,iVBORw0KGgo=";
+        let messages = [
+            Message::system("be brief"),
+            Message::user(format!(
+                "make the output coloured [image: 800x600]\n\n{}",
+                url
+            )),
+        ];
+
+        let prompt = format_opencode_prompt(&messages);
+
+        assert!(
+            !prompt.text.contains("base64"),
+            "the pixels must not be replayed as text: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("make the output coloured"),
+            "the instruction survives: {}",
+            prompt.text
+        );
+        assert!(prompt.text.contains("[image: 800x600]"));
+        assert_eq!(prompt.files.len(), 1);
+        assert_eq!(prompt.files[0]["uri"], url);
+        assert_eq!(prompt.files[0]["name"], "pasted-image-1.png");
+    }
+
+    /// A screenshot from an earlier turn is not uploaded again: the `[image: WxH]` marker stays as
+    /// the record of it, and only the newest user turn's pixels are attached.
+    #[test]
+    fn an_older_pasted_image_is_not_reuploaded() {
+        let old = "data:image/jpeg;base64,QUJD";
+        let messages = [
+            Message::user(format!("look at this [image: 10x10]\n\n{}", old)),
+            Message::assistant("That is a chart."),
+            Message::user("and now?"),
+        ];
+
+        let prompt = format_opencode_prompt(&messages);
+
+        assert!(!prompt.text.contains("base64"));
+        assert!(prompt.files.is_empty(), "history is not re-attached");
+        assert!(prompt.text.contains("[image: 10x10]"));
+    }
+
+    /// The headless route takes `--file <path>`, so the pixels have to reach a real file and that
+    /// file must not outlive the turn.
+    #[test]
+    fn attachment_files_are_written_for_the_cli_then_removed() {
+        let files = [serde_json::json!({
+            "uri": "data:image/png;base64,aGk=",
+            "name": "pasted-image-1.png"
+        })];
+
+        let written = AttachmentFiles::write(&files).expect("the image decodes and writes");
+        let path = written
+            .paths()
+            .next()
+            .expect("one attachment")
+            .to_path_buf();
+        assert_eq!(std::fs::read(&path).expect("the file exists"), b"hi");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
+
+        drop(written);
+        assert!(!path.exists(), "the temp file is removed with the turn");
+    }
+
+    /// Text that merely mentions the format is prose: it must not be lifted out, so a prompt
+    /// explaining `data:image/png` still reaches the model intact.
+    #[test]
+    fn a_mention_of_a_data_url_is_not_an_attachment() {
+        let messages = [Message::user("the spec says data:image/png is a URL")];
+
+        let prompt = format_opencode_prompt(&messages);
+
+        assert!(prompt.files.is_empty());
+        assert!(prompt.text.contains("data:image/png"));
     }
 }

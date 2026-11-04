@@ -24,6 +24,7 @@ secrecy = { workspace = true }
 keyring = { workspace = true }
 rusqlite = { workspace = true }
 libc = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

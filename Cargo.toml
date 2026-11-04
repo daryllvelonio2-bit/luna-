@@ -56,6 +56,7 @@ pulldown-cmark = "0.10"
 url = "2.5"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
+base64 = "0.22"
 
 # Internal crate dependencies
 harness-core = { path = "crates/harness-core" }
