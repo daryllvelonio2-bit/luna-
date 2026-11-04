@@ -244,6 +244,7 @@ async fn test_read_before_write_and_stale_refusal() {
     assert!(final_content.contains("Properly patched!"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_terminal_exit_code_and_timeout() {
     let dir = tempdir().unwrap();
@@ -305,6 +306,7 @@ async fn test_terminal_exit_code_and_timeout() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_timed_out_command_leaves_no_children_behind() {
     let dir = tempdir().unwrap();
@@ -1170,6 +1172,7 @@ impl harness_core::tools::SudoPrompter for MockSudoPrompter {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_terminal_sudo_password_prompts_and_caches_in_session() {
     let dir = tempdir().unwrap();
@@ -1280,6 +1283,7 @@ fn test_sudo_auth_failure_detection() {
     assert!(!is_sudo_auth_failure("total 42\n-rw-r--r-- 1 root root"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_background_task_queue_and_process_tool() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1345,6 +1349,7 @@ async fn test_background_task_queue_and_process_tool() {
 /// The bug: each `match` arm built its own queue, so `terminal(background=true)` returned a
 /// `job_id` that `process poll` could not find ("Background job 'x' not found"). A single spawn/
 /// list/poll underneath one shared queue is what the host wiring now depends on.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_registry_wired_terminal_background_job_is_pollable() {
     let tmp = tempdir().unwrap();
@@ -1961,6 +1966,7 @@ async fn test_todo_list_read_only_gating_and_status_aliases() {
 
 /// Child half of the network test: report what a socket attempt got, without installing anything.
 /// Run by the tool under test, so the filter it installs (or does not) is the only variable.
+#[cfg(unix)]
 #[test]
 fn network_probe_child() {
     if std::env::var("LUNA_NETPROBE").is_err() {
@@ -1977,6 +1983,7 @@ fn network_probe_child() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_probe(network: harness_core::tools::netguard::NetworkPolicy) -> String {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -2000,6 +2007,7 @@ fn run_probe(network: harness_core::tools::netguard::NetworkPolicy) -> String {
     })
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_denied_network_is_enforced_in_the_child_and_keeps_local_sockets() {
     let output = run_probe(harness_core::tools::netguard::NetworkPolicy::Deny);
@@ -2013,6 +2021,7 @@ fn a_denied_network_is_enforced_in_the_child_and_keeps_local_sockets() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_allowed_network_is_left_alone() {
     let output = run_probe(harness_core::tools::netguard::NetworkPolicy::Allow);

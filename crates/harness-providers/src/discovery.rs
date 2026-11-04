@@ -73,8 +73,9 @@ impl ModelDiscovery {
         overrides: BTreeMap<String, ProviderOverride>,
     ) -> Self {
         let path = cache_path.unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".luna").join("models_cache.json")
+            harness_core::config::home_dir()
+                .join(".luna")
+                .join("models_cache.json")
         });
 
         Self {

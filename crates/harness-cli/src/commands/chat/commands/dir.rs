@@ -32,10 +32,10 @@ pub(crate) async fn handle_dir_command(
                 harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
             let cleared = harness_core::config::unset_in_file(&layers, "paths.workspace_root")?;
 
-            let default_dir = std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let default_dir = harness_core::fsutil::canonicalize(
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
             apply_workspace_change(config, agent, default_dir.clone()).await?;
 
@@ -99,7 +99,7 @@ pub(crate) async fn handle_dir_command(
                 ));
                 return Ok(());
             }
-            p.canonicalize().unwrap_or(p)
+            harness_core::fsutil::canonicalize(&p).unwrap_or(p)
         }
         None => {
             ui.redraw_input_line();

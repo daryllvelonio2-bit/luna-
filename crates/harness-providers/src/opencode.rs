@@ -286,7 +286,9 @@ pub fn ensure_compat_tools(body: &mut serde_json::Value) {
 }
 
 pub fn detect_opencode_credentials() -> Result<Vec<DetectedOpencodeCredential>, HarnessError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = harness_core::config::home_dir()
+        .to_string_lossy()
+        .into_owned();
     let xdg = std::env::var("XDG_DATA_HOME").ok();
     detect_opencode_credentials_in(&PathBuf::from(home), xdg.as_deref())
 }
@@ -408,6 +410,25 @@ pub const OPENCODE_FREE_MODELS: &[&str] = &[
     "longcat-2.5-preview-free",
 ];
 
+/// A tokio command for the OpenCode CLI binary.
+///
+/// npm and yarn install the CLI as a `.cmd` shim on Windows, and `CreateProcess` cannot execute
+/// that directly. Those go through `cmd /C`; a native `.exe` is spawned as-is.
+fn opencode_command(bin: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let is_script = bin
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+        if is_script {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(bin);
+            return cmd;
+        }
+    }
+    Command::new(bin)
+}
+
 /// Discover the installed OpenCode binary across standard platform locations or env.
 pub fn find_opencode_binary() -> Result<PathBuf, HarnessError> {
     // 1. Env vars
@@ -421,7 +442,7 @@ pub fn find_opencode_binary() -> Result<PathBuf, HarnessError> {
     }
 
     // 2. Standard user home locations
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let home = Some(harness_core::config::home_dir());
     if let Some(ref h) = home {
         let candidates = [
             h.join(".opencode/bin/opencode"),
@@ -431,6 +452,23 @@ pub fn find_opencode_binary() -> Result<PathBuf, HarnessError> {
         for cand in candidates {
             if cand.is_file() {
                 return Ok(cand);
+            }
+        }
+        // npm/yarn install the CLI as an extension-carrying shim on Windows, so the Unix name
+        // alone never matches.
+        #[cfg(windows)]
+        {
+            let windows_candidates = [
+                h.join(".opencode").join("bin").join("opencode.exe"),
+                h.join("AppData")
+                    .join("Roaming")
+                    .join("npm")
+                    .join("opencode.cmd"),
+            ];
+            for cand in windows_candidates {
+                if cand.is_file() {
+                    return Ok(cand);
+                }
             }
         }
     }
@@ -472,6 +510,12 @@ pub fn find_opencode_binary() -> Result<PathBuf, HarnessError> {
                 let cand_exe = dir.join("opencode.exe");
                 if cand_exe.is_file() {
                     return Ok(cand_exe);
+                }
+                for ext in ["cmd", "bat", "ps1"] {
+                    let shim = dir.join(format!("opencode.{ext}"));
+                    if shim.is_file() {
+                        return Ok(shim);
+                    }
                 }
             }
         }
@@ -646,8 +690,8 @@ pub fn read_opencode_service_info() -> Option<OpencodeServiceInfo> {
                 .join("service.json"),
         );
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(home);
+    {
+        let home_path = harness_core::config::home_dir();
         candidates.push(
             home_path
                 .join(".local")
@@ -716,7 +760,7 @@ pub async fn get_or_start_opencode_service(
         tracing::debug!(
             "OpenCode background service not active; attempting `opencode service start`"
         );
-        if let Ok(mut child) = Command::new(&bin)
+        if let Ok(mut child) = opencode_command(&bin)
             .args(["service", "start"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1484,7 +1528,7 @@ pub async fn execute_opencode_completion_cli(
     let target_model = normalize_opencode_model(model);
     let prompt = format_messages_for_opencode(messages);
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = opencode_command(&binary);
     cmd.args([
         "run",
         "--format",
@@ -1633,7 +1677,7 @@ pub async fn stream_opencode_completion_cli(
     let target_model = normalize_opencode_model(model);
     let prompt = format_messages_for_opencode(messages);
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = opencode_command(&binary);
     cmd.args([
         "run",
         "--format",
@@ -1864,11 +1908,7 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
     let bin = find_opencode_binary().unwrap_or_else(|_| PathBuf::from("opencode"));
 
     // 1. Try running `opencode models`
-    if let Ok(output) = tokio::process::Command::new(&bin)
-        .args(["models"])
-        .output()
-        .await
-    {
+    if let Ok(output) = opencode_command(&bin).args(["models"]).output().await {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut list = Vec::new();
@@ -1893,7 +1933,7 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
     }
 
     // 2. Try running `opencode api GET /api/model`
-    if let Ok(output) = tokio::process::Command::new(&bin)
+    if let Ok(output) = opencode_command(&bin)
         .args(["api", "GET", "/api/model"])
         .output()
         .await
@@ -1919,8 +1959,8 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
     }
 
     // 3. Try ~/.local/state/opencode/model.json
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let state_file = PathBuf::from(&home)
+    let home = harness_core::config::home_dir();
+    let state_file = home
         .join(".local")
         .join("state")
         .join("opencode")
@@ -1964,11 +2004,7 @@ pub async fn fetch_opencode_models() -> Result<Vec<String>, HarnessError> {
 pub async fn fetch_opencode_cli_models() -> Result<Vec<String>, HarnessError> {
     let bin = find_opencode_binary().unwrap_or_else(|_| PathBuf::from("opencode"));
 
-    if let Ok(output) = tokio::process::Command::new(&bin)
-        .args(["models"])
-        .output()
-        .await
-    {
+    if let Ok(output) = opencode_command(&bin).args(["models"]).output().await {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut list = Vec::new();

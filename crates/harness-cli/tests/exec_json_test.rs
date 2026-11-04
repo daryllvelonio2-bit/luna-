@@ -159,8 +159,9 @@ fn run_exec(dir: &Path, config: &Path, args: &[&str]) -> Output {
         .current_dir(dir.join("ws"))
         .env("LUNA_CONFIG", config)
         // A scratch `$HOME`, so the host's `~/.luna/hooks.json` and credentials can never decide
-        // what a test does.
+        // what a test does. `USERPROFILE` is the same directory because Windows prefers it.
         .env("HOME", dir.join("home"))
+        .env("USERPROFILE", dir.join("home"))
         .env_remove("OPENAI_API_KEY")
         .args(args);
     command.output().expect("luna exec runs")
@@ -172,6 +173,7 @@ fn run_luna(dir: &Path, config: &Path, args: &[&str]) -> Output {
         .current_dir(dir.join("ws"))
         .env("LUNA_CONFIG", config)
         .env("HOME", dir.join("home"))
+        .env("USERPROFILE", dir.join("home"))
         .args(args)
         .output()
         .expect("luna runs")
@@ -469,6 +471,7 @@ fn the_turn_is_recorded_in_the_usage_ledger() {
     assert_eq!(rows[0]["source"], "exec");
 }
 
+#[cfg(unix)]
 #[test]
 fn exec_runs_the_same_hooks_the_repl_does() {
     let dir = scratch("hooks");
@@ -578,6 +581,7 @@ fn read_turn(path: &str) -> Vec<serde_json::Value> {
     ]
 }
 
+#[cfg(unix)]
 #[test]
 fn the_workspace_is_a_boundary_even_when_the_gate_says_yes() {
     let dir = scratch("sandbox");
@@ -832,6 +836,7 @@ fn luna_diff_refuses_a_turn_that_does_not_exist() {
 
 /// Child half of the network tests: report what a socket attempt got, installing nothing itself.
 /// Run as the *tool's* child, so the only variable is the filter the tool put on it.
+#[cfg(unix)]
 #[test]
 fn network_probe_child() {
     if std::env::var("LUNA_NETPROBE").is_err() {
@@ -868,6 +873,7 @@ fn terminal_turn(command: &str) -> Vec<serde_json::Value> {
 
 /// The command string that runs the probe child, with `rtk` rewriting off so the only thing being
 /// tested is the network policy.
+#[cfg(target_os = "linux")]
 fn probe_command() -> String {
     format!(
         "LUNA_NETPROBE=1 {} --exact network_probe_child --nocapture",
@@ -875,6 +881,7 @@ fn probe_command() -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn run_terminal_under(config_lines: &str, command: &str, name: &str) -> serde_json::Value {
     let dir = scratch(name);
     let (base_url, _served) = start_mock(terminal_turn(command));
@@ -899,6 +906,7 @@ fn run_terminal_under(config_lines: &str, command: &str, name: &str) -> serde_js
         .expect("the command ran")
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn tools_network_deny_is_enforced_in_the_child_process() {
     let result = run_terminal_under(
@@ -917,6 +925,7 @@ fn tools_network_deny_is_enforced_in_the_child_process() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn tools_network_defaults_to_allow() {
     // No `network:` key at all: the kernel's own answer (ECONNREFUSED on a closed local port), not
@@ -940,6 +949,7 @@ fn tools_network_defaults_to_allow() {
 
 /// The review's blind spot, closed: a `terminal` command changes a file no file tool touched, and
 /// `luna diff` names it as un-undoable instead of leaving it out.
+#[cfg(unix)]
 #[test]
 fn luna_diff_names_files_a_shell_command_changed() {
     let dir = scratch("diff-shell");
@@ -1001,6 +1011,7 @@ fn luna_diff_names_files_a_shell_command_changed() {
 }
 
 /// With the scan off, the review makes no claim about shell changes — silent is better than wrong.
+#[cfg(unix)]
 #[test]
 fn luna_diff_is_quiet_about_shell_changes_when_tracking_is_off() {
     let dir = scratch("diff-shell-off");

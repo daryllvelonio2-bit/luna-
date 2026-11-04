@@ -187,8 +187,7 @@ pub trait SessionStore: Send + Sync {
 
 /// Default `paths.sessions_db`, also used when a caller passes `None`.
 pub fn default_sessions_db() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".luna").join("sessions.db")
+    crate::config::home_dir().join(".luna").join("sessions.db")
 }
 
 pub use sqlite::SqliteSessionStore;

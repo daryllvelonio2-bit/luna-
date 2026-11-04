@@ -20,11 +20,16 @@ use crossterm::QueueableCommand;
 use harness_core::error::HarnessError;
 
 /// Sequences written from the signal handler: show cursor, reset attributes, newline.
+///
+/// Only the Unix signal handler writes it at runtime; the tests assert its exact bytes on every
+/// platform, so a non-test Windows build has no reader for it.
+#[cfg_attr(not(unix), allow(dead_code))]
 const RESTORE: &[u8] = b"\x1b[?25h\x1b[0m\n";
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// The signal handler. Async-signal-safe by construction: one `write`, no allocation, no locking.
+#[cfg(unix)]
 extern "C" fn restore_and_die(signal: libc::c_int) {
     // SAFETY: `RESTORE` is a `'static` buffer and `write` is async-signal-safe. The signal number is
     // restored to its default disposition and re-raised so the process exits with the right status
@@ -42,6 +47,7 @@ extern "C" fn restore_and_die(signal: libc::c_int) {
 
 /// Install the SIGINT/SIGTERM handlers once per process. Idempotent: a second call is a no-op, so
 /// re-entering the flow (a test, a restarted session) cannot stack handlers.
+#[cfg(unix)]
 pub fn install() -> Result<(), HarnessError> {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return Ok(());
@@ -65,6 +71,14 @@ pub fn install() -> Result<(), HarnessError> {
             )));
         }
     }
+    Ok(())
+}
+
+/// On Windows the console has no POSIX signal disposition to restore; the cursor guard's `Drop`
+/// still runs on every ordinary exit, and Ctrl+C is delivered as a key by the console.
+#[cfg(not(unix))]
+pub fn install() -> Result<(), HarnessError> {
+    INSTALLED.store(true, Ordering::SeqCst);
     Ok(())
 }
 

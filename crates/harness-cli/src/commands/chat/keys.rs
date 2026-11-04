@@ -9,13 +9,21 @@
 //! The decoder is split in two: [`decode`] is pure (bytes in, key out) so the mapping can
 //! be asserted in tests, and [`read_key`] does the blocking read.
 
+// The byte decoder exists for terminals that answer with CSI-u sequences. Windows uses
+// crossterm's console events instead, so the decoder is only exercised by the tests there.
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::io;
-use std::os::unix::io::RawFd;
+#[cfg(unix)]
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 
 /// How long the reader waits for the rest of an escape sequence before deciding the
 /// Escape key was pressed on its own. Terminals write a sequence in one go, so this only
 /// covers the rare case of the bytes arriving in separate reads.
+#[cfg(unix)]
 const ESC_PEEK_TIMEOUT: Duration = Duration::from_millis(30);
 
 /// A key press, as the chat understands it.
@@ -50,6 +58,10 @@ pub enum AppKey {
     Ctrl(char),
     /// A sequence this decoder does not recognise; it is consumed and ignored.
     Unknown,
+    /// The terminal window changed size. Windows reports it as a console event rather than a
+    /// POSIX `SIGWINCH`, so it arrives through the key channel and the event loop redraws.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Resize,
 }
 
 /// Ask the terminal for the kitty keyboard protocol, so ctrl+shift+o arrives as a
@@ -58,14 +70,25 @@ pub enum AppKey {
 /// Returns whether the request was written. A terminal that does not know the sequence
 /// ignores it, which costs nothing: the affected keys simply keep their legacy encoding.
 pub fn enable_kitty_keyboard() -> bool {
-    write_control("\x1b[>1u")
+    #[cfg(unix)]
+    {
+        write_control("\x1b[>1u")
+    }
+    #[cfg(not(unix))]
+    {
+        // The Windows console reports modifiers itself through crossterm; the kitty sequence
+        // would just be printed as text by a console that does not understand it.
+        false
+    }
 }
 
 /// Put the terminal's key reporting back the way it was.
 pub fn disable_kitty_keyboard() {
+    #[cfg(unix)]
     write_control("\x1b[<u");
 }
 
+#[cfg(unix)]
 fn write_control(sequence: &str) -> bool {
     use std::io::Write;
     let mut stdout = io::stdout();
@@ -79,7 +102,63 @@ fn write_control(sequence: &str) -> bool {
 }
 
 /// Read one key press from the terminal.
-pub fn read_key(fd: RawFd) -> io::Result<AppKey> {
+#[cfg(unix)]
+pub fn read_key() -> io::Result<AppKey> {
+    read_key_fd(libc::STDIN_FILENO)
+}
+
+/// Read one key press from the terminal.
+#[cfg(windows)]
+pub fn read_key() -> io::Result<AppKey> {
+    use crossterm::event::{self, Event, KeyEventKind};
+    loop {
+        match event::read()? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                return Ok(from_crossterm(key));
+            }
+            // The console reports a resize as an event, not a signal. Hand it to the event
+            // loop, which reflows the transcript the same way SIGWINCH does on Unix.
+            Event::Resize(_, _) => return Ok(AppKey::Resize),
+            // Mouse and focus events are not key presses; the chat ignores them here.
+            _ => continue,
+        }
+    }
+}
+
+/// Map crossterm's Windows console key event onto the chat's key vocabulary.
+#[cfg(windows)]
+fn from_crossterm(key: crossterm::event::KeyEvent) -> AppKey {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Char(c) if ctrl && shift && c.eq_ignore_ascii_case(&'o') => AppKey::CtrlShiftO,
+        KeyCode::Char(c) if ctrl && shift && c.eq_ignore_ascii_case(&'b') => AppKey::CtrlShiftB,
+        KeyCode::Char('c') | KeyCode::Char('C') if ctrl => AppKey::CtrlC,
+        KeyCode::Char(c) if ctrl => AppKey::Ctrl(c.to_ascii_lowercase()),
+        KeyCode::Char(c) => AppKey::Char(c),
+        KeyCode::Enter => AppKey::Enter,
+        KeyCode::Backspace => AppKey::Backspace,
+        KeyCode::Tab => AppKey::Tab,
+        KeyCode::BackTab => AppKey::BackTab,
+        KeyCode::Esc => AppKey::Escape,
+        KeyCode::Up => AppKey::Up,
+        KeyCode::Down => AppKey::Down,
+        KeyCode::Left => AppKey::Left,
+        KeyCode::Right => AppKey::Right,
+        KeyCode::Home => AppKey::Home,
+        KeyCode::End => AppKey::End,
+        KeyCode::PageUp => AppKey::PageUp,
+        KeyCode::PageDown => AppKey::PageDown,
+        KeyCode::Delete => AppKey::Delete,
+        KeyCode::Insert => AppKey::Insert,
+        KeyCode::F(n) => AppKey::F(n),
+        _ => AppKey::Unknown,
+    }
+}
+
+#[cfg(unix)]
+fn read_key_fd(fd: RawFd) -> io::Result<AppKey> {
     let mut buf: Vec<u8> = Vec::with_capacity(16);
     loop {
         let Some(byte) = read_byte(fd, None)? else {
@@ -361,6 +440,7 @@ fn utf8_len(first: u8) -> usize {
 
 /// Read one byte, waiting up to `timeout` for it. `None` means the timeout expired or
 /// the terminal reached EOF.
+#[cfg(unix)]
 fn read_byte(fd: RawFd, timeout: Option<Duration>) -> io::Result<Option<u8>> {
     let mut poll_fd = libc::pollfd {
         fd,

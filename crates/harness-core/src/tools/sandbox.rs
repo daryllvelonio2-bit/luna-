@@ -82,11 +82,7 @@ impl Sandbox {
 
     /// Whether an already-resolved path is inside the sandbox.
     pub fn allows(&self, resolved: &Path) -> bool {
-        resolved.starts_with(&self.root)
-            || self
-                .extra_roots
-                .iter()
-                .any(|extra| resolved.starts_with(extra))
+        within(resolved, &self.root) || self.extra_roots.iter().any(|extra| within(resolved, extra))
     }
 
     fn escape_message(&self, resolved: &Path, user_path: &str) -> String {
@@ -109,7 +105,39 @@ impl Sandbox {
 }
 
 fn canonical_or_self(path: PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or(path)
+    path.canonicalize()
+        .map(crate::fsutil::strip_verbatim)
+        .unwrap_or_else(|_| crate::fsutil::strip_verbatim(path))
+}
+
+/// Whether `path` is `root` or below it.
+///
+/// Windows filesystems are case-insensitive, so `C:\Work` and `c:\work\file.txt` are the same
+/// tree; a case-sensitive `starts_with` would report a false escape there. Components are
+/// compared rather than strings so `ws-evil` cannot pass as a child of `ws`.
+#[cfg(windows)]
+fn within(path: &Path, root: &Path) -> bool {
+    let mut remaining = path.components();
+    for root_component in root.components() {
+        let root_text = root_component.as_os_str().to_string_lossy();
+        match remaining.next() {
+            Some(component)
+                if component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&root_text) =>
+            {
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
 }
 
 /// Fold `.` and `..` without touching the filesystem.
@@ -145,7 +173,7 @@ fn canonicalize_deepest(path: &Path) -> PathBuf {
     // Bounded so a pathological path cannot spin; 256 components is far past any real layout.
     for _ in 0..256 {
         if let Ok(canonical) = candidate.canonicalize() {
-            let mut resolved = canonical;
+            let mut resolved = crate::fsutil::strip_verbatim(canonical);
             for part in rest.iter().rev() {
                 resolved.push(part);
             }

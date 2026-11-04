@@ -254,9 +254,14 @@ const MAX_INLINE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Expand `~` so a prompt that says `~/Downloads/x.png` finds the file.
 fn resolve_path(token: &str) -> Option<std::path::PathBuf> {
-    if let Some(stripped) = token.strip_prefix("~/") {
-        let home = std::env::var("HOME").ok()?;
-        return Some(std::path::PathBuf::from(home).join(stripped));
+    if let Some(stripped) = token
+        .strip_prefix("~/")
+        .or_else(|| token.strip_prefix("~\\"))
+    {
+        return Some(harness_core::config::home_dir().join(stripped));
+    }
+    if token == "~" {
+        return Some(harness_core::config::home_dir());
     }
     Some(std::path::PathBuf::from(token))
 }

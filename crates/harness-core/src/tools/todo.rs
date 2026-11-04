@@ -252,9 +252,11 @@ impl TodoListTool {
             tool: self.name().to_string(),
             reason: format!("cannot write {}: {}", tmp.display(), e),
         })?;
-        std::fs::rename(&tmp, &path).map_err(|e| HarnessError::ToolExecutionFailed {
-            tool: self.name().to_string(),
-            reason: format!("cannot replace {}: {}", path.display(), e),
+        crate::fsutil::replace_file(&tmp, &path).map_err(|e| {
+            HarnessError::ToolExecutionFailed {
+                tool: self.name().to_string(),
+                reason: format!("cannot replace {}: {}", path.display(), e),
+            }
         })?;
         Ok(())
     }

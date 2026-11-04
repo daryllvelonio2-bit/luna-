@@ -401,8 +401,8 @@ mod tests {
     #[test]
     fn the_confirmation_names_the_persona_and_the_file() {
         let persona = persona::by_id(3).expect("in the catalog");
-        let path = PathBuf::from("/home/janelle/.luna/config.yaml");
-        let notes_dir = PathBuf::from("/home/janelle/.luna/notes");
+        let path = std::env::temp_dir().join(".luna").join("config.yaml");
+        let notes_dir = std::env::temp_dir().join(".luna").join("notes");
         let ac = store::AutoCompactSelection::default();
         let gw = store::GatewaySelection::default();
         let web = store::WebSelection::default();
@@ -423,7 +423,7 @@ mod tests {
 
         assert!(block.contains("Persona configured"));
         assert!(block.contains(&persona.labelled()));
-        assert!(block.contains("/home/janelle/.luna/config.yaml"));
+        assert!(block.contains(&path.display().to_string()));
         assert!(block.contains(persona.tagline));
         // Both answers are reported, so the screen states the whole outcome.
         assert!(block.contains("Background saver"), "{block}");

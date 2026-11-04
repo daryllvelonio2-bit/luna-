@@ -2,7 +2,11 @@
 //!
 //! These tests exercise the runner through real `sh` processes (the same path production takes),
 //! so a passing test means the wire format on stdin and the exit-code/JSON contract on stdout are
-//! the ones documented in `hooks.rs`.
+//! the ones documented in `hooks.rs`. They are Unix-only because the commands in the fixtures use
+//! POSIX shell syntax (`touch`, `cat > file`, `>&2`); the runner itself switches to `cmd /C` on
+//! Windows.
+
+#![cfg(unix)]
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};

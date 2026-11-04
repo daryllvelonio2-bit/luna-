@@ -854,10 +854,20 @@ pub fn shorten_path(raw: &str) -> String {
     if trimmed.is_empty() || trimmed == "." {
         return trimmed.to_string();
     }
+    // `C:\...` — the drive counts as a component so the shortened form still says which disk.
+    let drive = trimmed
+        .as_bytes()
+        .get(0..2)
+        .filter(|head| head[0].is_ascii_alphabetic() && head[1] == b':')
+        .map(|_| &trimmed[..2]);
     let parts: Vec<&str> = trimmed
         .split(['/', '\\'])
         .filter(|s| !s.is_empty() && *s != "." && *s != "~")
         .collect();
+    if let Some(drive) = drive {
+        let keep = 2.min(parts.len());
+        return format!("{drive}/{}", parts[parts.len() - keep..].join("/"));
+    }
     if parts.len() > 3 {
         parts[parts.len() - 3..].join("/")
     } else if parts.is_empty() {
@@ -875,9 +885,21 @@ pub fn shorten_paths_in_text(raw: &str) -> String {
     for token in raw.split(' ') {
         let clean =
             token.trim_matches(|c| c == '\'' || c == '"' || c == '`' || c == '(' || c == ')');
-        if (clean.starts_with('/') || clean.starts_with("~/") || clean.contains('/'))
+        // A Windows path is only treated as one when it is absolute: a bare token with
+        // backslashes is far more likely to be an escape sequence or regex than a path.
+        let drive_absolute = clean
+            .as_bytes()
+            .get(0..3)
+            .is_some_and(|head| head[0].is_ascii_alphabetic() && &head[1..] == b":\\");
+        let looks_like_path = clean.starts_with('/')
+            || clean.starts_with("~/")
+            || clean.starts_with("~\\")
+            || clean.starts_with(r"\\")
+            || clean.contains('/')
+            || drive_absolute;
+        if looks_like_path
             && clean
-                .split('/')
+                .split(['/', '\\'])
                 .filter(|s| !s.is_empty() && *s != "~" && *s != ".")
                 .count()
                 > 3

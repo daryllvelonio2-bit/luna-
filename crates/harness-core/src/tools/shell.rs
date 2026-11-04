@@ -130,12 +130,11 @@ impl TerminalTool {
 pub fn find_rtk_executable(custom_prefix: Option<&str>) -> Option<PathBuf> {
     if let Some(prefix) = custom_prefix {
         let p_str = prefix.trim();
-        let expanded = if let Some(stripped) = p_str.strip_prefix("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(stripped)
-            } else {
-                PathBuf::from(p_str)
-            }
+        let expanded = if let Some(stripped) = p_str
+            .strip_prefix("~/")
+            .or_else(|| p_str.strip_prefix("~\\"))
+        {
+            crate::config::home_dir().join(stripped)
         } else {
             PathBuf::from(p_str)
         };
@@ -144,16 +143,16 @@ pub fn find_rtk_executable(custom_prefix: Option<&str>) -> Option<PathBuf> {
         }
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        let p = PathBuf::from(home).join(".local/bin/rtk");
-        if p.is_file() {
-            return Some(p);
-        }
+    let home = crate::config::home_dir();
+    let binary = if cfg!(windows) { "rtk.exe" } else { "rtk" };
+    let p = home.join(".local/bin").join(binary);
+    if p.is_file() {
+        return Some(p);
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let p = dir.join("rtk");
+            let p = dir.join(binary);
             if p.is_file() {
                 return Some(p);
             }
@@ -206,7 +205,7 @@ pub fn rewrite_sudo_command(command: &str) -> (String, usize) {
         if word.is_empty() {
             return at_cmd;
         }
-        let executable = word.rsplit('/').next().unwrap_or(word);
+        let executable = word.rsplit(['/', '\\']).next().unwrap_or(word);
         if at_cmd && executable == "sudo" {
             out.push_str(word);
             out.push_str(" -S -p ''");
@@ -315,19 +314,59 @@ fn is_benign_exit(cmd: &str, code: i32) -> bool {
     }
     let last_pipeline_segment = cmd.rsplit('|').next().unwrap_or(cmd).trim();
     let mut words = last_pipeline_segment.split_whitespace();
-    let mut bin = words.next().unwrap_or("").trim_start_matches("./");
+    let mut bin = words
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("./")
+        .trim_start_matches(".\\");
 
     // Skip wrapping runners like rtk, sudo, env, etc.
     while matches!(bin, "rtk" | "sudo" | "env" | "nohup" | "time") {
-        bin = words.next().unwrap_or("").trim_start_matches("./");
+        bin = words
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("./")
+            .trim_start_matches(".\\");
     }
 
-    let bin_name = bin.rsplit('/').next().unwrap_or(bin);
+    let bin_name = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
 
     matches!(
         bin_name,
-        "grep" | "egrep" | "fgrep" | "rg" | "rgrep" | "diff" | "cmp" | "test" | "["
+        "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "rgrep"
+            | "diff"
+            | "cmp"
+            | "test"
+            | "["
+            | "findstr"
+            | "fc"
     )
+}
+
+/// A command that runs `command` through the platform's shell.
+///
+/// Windows has no `sh` in a default install, so it uses `cmd /C`; every Unix uses `sh -c`.
+/// Callers add stdin/stdout/cwd/env on top.
+pub(crate) fn shell_command(command: &str) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C");
+        // `cmd` has its own quoting rules; pass the command line through verbatim rather than
+        // letting `CommandLineToArgvW` quoting mangle `&`, `|`, `<`, `>` or embedded quotes.
+        cmd.raw_arg(command);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
 }
 
 /// Kill a command's whole process group, not just its shell.
@@ -338,7 +377,7 @@ fn is_benign_exit(cmd: &str, code: i32) -> bool {
 /// that lock and times out too. The child is spawned with `process_group(0)` so it leads a group of
 /// its own, and a negative pid signals that whole group.
 #[cfg(unix)]
-fn kill_process_group(leader: Option<u32>) {
+pub(crate) fn kill_process_group(leader: Option<u32>) {
     if let Some(pid) = leader {
         // SAFETY: a negative pid signals the process group whose id is `pid`; the leader was spawned
         // with `process_group(0)`, so that group is exactly this command's tree. A group that is
@@ -349,7 +388,21 @@ fn kill_process_group(leader: Option<u32>) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn kill_process_group(leader: Option<u32>) {
+    if let Some(pid) = leader {
+        // Windows has no process-group signal. `taskkill /T` walks the parent/child tree, which
+        // reaches the compiler or test binary the shell started; `/F` is required because a
+        // console process has no local equivalent of SIGKILL.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_leader: Option<u32>) {}
 
 #[async_trait]
@@ -459,7 +512,11 @@ impl Tool for TerminalTool {
             .and_then(|t| t.as_u64())
             .unwrap_or(self.default_timeout_secs);
 
-        let (exec_command, sudo_stdin) = {
+        let (exec_command, sudo_stdin) = if cfg!(windows) {
+            // Windows has no sudo(8); a command that mentions it fails at the shell with a
+            // normal "not recognized" result instead of being rewritten or prompting.
+            (effective_command.clone(), None)
+        } else {
             let (rewritten, sudo_count) = rewrite_sudo_command(&effective_command);
             if sudo_count > 0 {
                 if check_sudo_nopasswd_with_env(&resolved_workdir, &self.env_vars).await {
@@ -502,7 +559,7 @@ impl Tool for TerminalTool {
             }
         };
 
-        let is_background = exec_command.trim().ends_with('&');
+        let is_background = cfg!(unix) && exec_command.trim().ends_with('&');
         let final_exec_command = if is_background && sudo_stdin.is_none() {
             let stripped = exec_command.trim().trim_end_matches('&').trim();
             format!("( {} ) </dev/null >/dev/null 2>&1 & echo $!", stripped)
@@ -510,10 +567,8 @@ impl Tool for TerminalTool {
             exec_command.clone()
         };
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(&final_exec_command)
-            .current_dir(&resolved_workdir)
+        let mut cmd = shell_command(&final_exec_command);
+        cmd.current_dir(&resolved_workdir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);

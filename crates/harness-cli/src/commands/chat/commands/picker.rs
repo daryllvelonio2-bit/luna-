@@ -901,8 +901,7 @@ pub(crate) async fn pick_workspace_directory(
     }
 
     let mut current = if initial_dir.is_dir() {
-        initial_dir
-            .canonicalize()
+        harness_core::fsutil::canonicalize(initial_dir)
             .unwrap_or_else(|_| initial_dir.to_path_buf())
     } else {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -975,7 +974,7 @@ pub(crate) async fn pick_workspace_directory(
                 let expanded = harness_core::config::expand_tilde(&path_str);
                 let p = std::path::PathBuf::from(expanded);
                 if p.is_dir() {
-                    let canon = p.canonicalize().unwrap_or(p);
+                    let canon = harness_core::fsutil::canonicalize(&p).unwrap_or(p);
                     return Ok(Some(canon));
                 } else {
                     ui.emit_above(&format!(
@@ -993,7 +992,7 @@ pub(crate) async fn pick_workspace_directory(
         let sub_idx = if has_parent { idx - 2 } else { idx - 1 };
         if sub_idx < subdirs.len() {
             current = current.join(&subdirs[sub_idx]);
-            if let Ok(canon) = current.canonicalize() {
+            if let Ok(canon) = harness_core::fsutil::canonicalize(&current) {
                 current = canon;
             }
             is_chained = true;

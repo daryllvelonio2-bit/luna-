@@ -207,7 +207,7 @@ pub fn persist(
 pub fn config_file(layers: &Layers) -> Result<PathBuf, HarnessError> {
     layers.file.clone().ok_or_else(|| {
         HarnessError::ConfigurationError(
-            "no config file location: set LUNA_CONFIG or HOME".to_string(),
+            "no config file location: set LUNA_CONFIG, HOME, or USERPROFILE".to_string(),
         )
     })
 }

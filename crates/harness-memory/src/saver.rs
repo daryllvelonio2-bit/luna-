@@ -67,7 +67,7 @@ Save lean index cards (name, path, and 2-5 words about what it is) into persiste
   * predicate: property or qualifier (default: "profile")
   * object: concise 2-5 word description of what this entity is
   * name: optional friendly name (e.g. "Astra")
-  * path: optional absolute filesystem path (e.g. "/home/janelle/Documents/projects/astra")
+  * path: optional absolute filesystem path (platform-native, e.g. "/absolute/path/to/astra")
   * category: user_profile, code_pattern, workflow_rule, fact
 
 NOTE PROTOCOL:
@@ -81,7 +81,7 @@ AUDIT NOTE CONTENT:
 
 Answer with JSON only, in exactly this shape:
 
-{"memories":[{"subject":"project.astra","predicate":"profile","object":"Mobile coding IDE","name":"Astra","path":"/home/janelle/Documents/projects/astra","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
+{"memories":[{"subject":"project.astra","predicate":"profile","object":"Mobile coding IDE","name":"Astra","path":"/absolute/path/to/astra","category":"workflow_rule","confidence":1.0}],"notes":[{"title":"Descriptive Title","content":"full verbatim body","tags":["tag"]}]}
 
 Use empty arrays only if the conversation contained genuinely no durable facts, project details, user preferences, or reference notes."#;
 

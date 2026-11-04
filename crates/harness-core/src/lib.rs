@@ -4,6 +4,7 @@ pub mod capability;
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod fsutil;
 pub mod glob;
 pub mod hooks;
 pub mod permission;

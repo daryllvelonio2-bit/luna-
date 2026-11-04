@@ -2,7 +2,6 @@ use futures_util::stream::{BoxStream, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use secrecy::ExposeSecret;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::auth::CredentialManager;
@@ -31,8 +30,8 @@ pub const SUPERCODE_MODELS: &[&str] = &[
 ];
 
 pub fn extract_supercode_token_from_file() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let token_path = PathBuf::from(home).join(".better-auth/token.json");
+    let home = harness_core::config::home_dir();
+    let token_path = home.join(".better-auth/token.json");
     if !token_path.exists() {
         return None;
     }

@@ -1328,10 +1328,18 @@ mod tests {
 
     #[test]
     fn resolve_path_expands_tilde() {
-        if let Ok(home) = std::env::var("HOME") {
-            let home_path = PathBuf::from(&home);
+        let home_path = crate::config::home_dir();
+        if home_path != std::path::Path::new(".") {
             let resolved = resolve_path(&home_path, "~/").unwrap();
-            assert_eq!(resolved, home_path.canonicalize().unwrap_or(home_path));
+            let expected = home_path.canonicalize().unwrap_or(home_path);
+            // `canonicalize` returns a `\\?\` verbatim path on Windows while the resolver strips
+            // it; compare the two paths as the user would see them.
+            let plain = |path: &std::path::Path| {
+                path.to_string_lossy()
+                    .trim_start_matches(r"\\?\")
+                    .to_string()
+            };
+            assert_eq!(plain(&resolved), plain(&expected));
         }
     }
 }

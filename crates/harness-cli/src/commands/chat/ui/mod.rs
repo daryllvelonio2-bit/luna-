@@ -44,11 +44,18 @@ const HINT_MIN_ROOM: usize = 12;
 
 /// Holds the terminal in raw mode for the whole interactive session, restoring the original
 /// settings when dropped.
+#[cfg(unix)]
 pub struct RawTerminal {
     fd: libc::c_int,
     original: libc::termios,
 }
 
+/// Holds the terminal in raw mode for the whole interactive session, restoring the original
+/// settings when dropped. The Windows console has no termios; crossterm's console API owns it.
+#[cfg(windows)]
+pub struct RawTerminal;
+
+#[cfg(unix)]
 impl RawTerminal {
     /// Returns `None` when stdin is not a terminal, or when termios is unavailable.
     pub fn acquire() -> Option<Self> {
@@ -74,11 +81,30 @@ impl RawTerminal {
     }
 }
 
+#[cfg(windows)]
+impl RawTerminal {
+    /// Returns `None` when stdin is not a terminal, or when the console cannot enter raw mode.
+    pub fn acquire() -> Option<Self> {
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+        crossterm::terminal::enable_raw_mode().ok().map(|_| Self)
+    }
+}
+
+#[cfg(unix)]
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.original);
         }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
@@ -1533,6 +1559,7 @@ pub(crate) mod test_support {
     /// that captures a `println!` gets an empty string and asserts nothing — check the returned
     /// bytes are non-empty when the assertion matters.
     ///
+    #[cfg(unix)]
     pub(crate) fn capture_stdout<F: FnOnce() + Send + 'static>(f: F) -> String {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;

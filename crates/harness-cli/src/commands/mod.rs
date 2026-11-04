@@ -25,13 +25,20 @@ pub mod voice;
 /// stay clean text). A failed write is inconsequential — clearing is cosmetic and
 /// must never abort a session over it — so the errors are ignored deliberately.
 pub fn clear_screen() {
-    use std::io::Write;
+    use crossterm::cursor::MoveTo;
+    use crossterm::execute;
+    use crossterm::terminal::{self, ClearType};
 
     let term = dialoguer::console::Term::stdout();
     if !term.features().is_attended() {
         return;
     }
-    let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[H\x1b[2J\x1b[3J");
-    let _ = out.flush();
+    // crossterm emits the right sequence per platform (including enabling VT processing on
+    // Windows), rather than a hardcoded Unix ANSI string.
+    let _ = execute!(
+        std::io::stdout(),
+        terminal::Clear(ClearType::Purge),
+        terminal::Clear(ClearType::All),
+        MoveTo(0, 0)
+    );
 }

@@ -1228,24 +1228,56 @@ fn remove_path(root: &mut Value, key: &str) -> bool {
     false
 }
 
-/// `~` and `~/…` against `$HOME`.
+/// `~` and `~/…` against the platform home directory.
 pub fn expand_tilde(value: &str) -> String {
     let home = home_dir();
     if value == "~" {
         return home.to_string_lossy().into_owned();
     }
-    match value.strip_prefix("~/") {
-        Some(rest) => home.join(rest).to_string_lossy().into_owned(),
-        None => value.to_string(),
+    for prefix in ["~/", "~\\"] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
     }
+    value.to_string()
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .ok()
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+/// The platform's home directory.
+///
+/// On Windows that is `%USERPROFILE%` first, because a `HOME` inherited from Git Bash or MSYS is
+/// usually a POSIX-style path (`/c/Users/me`) that `std::fs` cannot open; `%HOMEDRIVE%%HOMEPATH%`
+/// is the last resort. Everywhere else it is `$HOME` (`$USERPROFILE` only if `HOME` is unset).
+///
+/// Every runtime path (`~/.luna`, the credential store, the session database) is derived from
+/// this one function rather than from a literal `/home/...`, so the same build runs on Windows.
+pub fn home_dir() -> PathBuf {
+    #[cfg(windows)]
+    const CANDIDATES: [&str; 2] = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    const CANDIDATES: [&str; 2] = ["HOME", "USERPROFILE"];
+
+    for key in CANDIDATES {
+        if let Ok(home) = std::env::var(key) {
+            if !home.trim().is_empty() {
+                // An MSYS-style `HOME` (`/c/Users/me`) is not a Windows path; fall through to
+                // HOMEDRIVE/HOMEPATH rather than producing a path that does not exist.
+                #[cfg(windows)]
+                if key == "HOME" && home.starts_with('/') {
+                    continue;
+                }
+                return PathBuf::from(home);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        if !drive.is_empty() && !path.is_empty() {
+            return PathBuf::from(format!("{drive}{path}"));
+        }
+    }
+
+    PathBuf::from(".")
 }
 
 /// A `providers.<id>.<field>` key, if that is what this is.

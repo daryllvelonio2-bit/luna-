@@ -161,9 +161,12 @@ fn command_bytes(program: &str, args: &[&str]) -> Option<Vec<u8>> {
 }
 
 fn save_image_file(png: &[u8]) -> Result<PathBuf, String> {
-    let dir = std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".luna").join("screenshots"))
-        .unwrap_or_else(|_| std::env::temp_dir().join("luna-screenshots"));
+    let home = harness_core::config::home_dir();
+    let dir = if home != std::path::Path::new(".") {
+        home.join(".luna").join("screenshots")
+    } else {
+        std::env::temp_dir().join("luna-screenshots")
+    };
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create screenshot dir: {e}"))?;
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%3f");
     let path = dir.join(format!("paste_{ts}.png"));

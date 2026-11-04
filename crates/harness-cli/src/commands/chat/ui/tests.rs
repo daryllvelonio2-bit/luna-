@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::test_support::capture_stdout;
 use super::*;
 use harness_providers::QuotaWindow;

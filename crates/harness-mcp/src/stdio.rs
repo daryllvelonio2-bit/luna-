@@ -22,6 +22,29 @@ pub struct McpStdioClient {
     call_timeout: Duration,
 }
 
+/// The stdio command for an MCP server, with its args, environment and working directory.
+fn mcp_command(
+    program: &str,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    cwd: Option<&Path>,
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    // `env` is layered over the inherited environment, not substituted for
+    // it: a server that needs PATH or HOME still finds them.
+    if !env.is_empty() {
+        cmd.envs(env.iter());
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd
+}
+
 impl McpStdioClient {
     pub async fn spawn(
         command: &str,
@@ -36,23 +59,29 @@ impl McpStdioClient {
             command, args
         );
 
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        // `env` is layered over the inherited environment, not substituted for
-        // it: a server that needs PATH or HOME still finds them.
-        if !env.is_empty() {
-            cmd.envs(env.iter());
-        }
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
+        let mut cmd = mcp_command(command, args, env, cwd);
 
-        let mut child = cmd.spawn().map_err(|e| {
-            HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e))
-        })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            // npm and yarn install their shims as `.cmd`/`.bat`, which `CreateProcess` does not
+            // resolve from a bare name. Retrying through the command interpreter keeps an MCP
+            // server configured as `npx` working on Windows; a real `.exe` is still spawned
+            // directly, so its signal and stdio behaviour is unchanged.
+            #[cfg(windows)]
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut fallback = mcp_command("cmd", &["/C", command], env, cwd);
+                fallback.args(args);
+                fallback.spawn().map_err(|e| {
+                    HarnessError::Io(format!("Failed to spawn MCP server '{}': {}", command, e))
+                })?
+            }
+            Err(e) => {
+                return Err(HarnessError::Io(format!(
+                    "Failed to spawn MCP server '{}': {}",
+                    command, e
+                )))
+            }
+        };
 
         let stdin = child
             .stdin

@@ -144,7 +144,12 @@ impl Tool for SkillToolAdapter {
                 .to_string_lossy();
             let cmd_str = cmd.replace("{skill_dir}", &skill_dir);
             harness_core::ToolPreview {
-                target: Some(format!("sh -c '{}' with args {}", cmd_str, args)),
+                target: Some(format!(
+                    "{} '{}' with args {}",
+                    if cfg!(windows) { "cmd /C" } else { "sh -c" },
+                    cmd_str,
+                    args
+                )),
                 diff: None,
             }
         })
@@ -168,10 +173,22 @@ impl Tool for SkillToolAdapter {
             let timeout = self.skill.timeout_secs.unwrap_or(60);
             let args_json = serde_json::to_string(args).unwrap_or_default();
 
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&cmd_str)
-                .kill_on_drop(true)
+            #[cfg(windows)]
+            let mut cmd = {
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.arg("/C");
+                // `cmd /C` does not follow CommandLineToArgvW quoting; pass the skill command
+                // through exactly as written, pipes and all.
+                cmd.raw_arg(&cmd_str);
+                cmd
+            };
+            #[cfg(not(windows))]
+            let mut cmd = {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.arg("-c").arg(&cmd_str);
+                cmd
+            };
+            cmd.kill_on_drop(true)
                 .current_dir(
                     self.skill
                         .file_path
@@ -376,6 +393,7 @@ impl Tool for SkillsListTool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_parse_and_execute_command_skill() {
         let dir = tempfile::tempdir().unwrap();

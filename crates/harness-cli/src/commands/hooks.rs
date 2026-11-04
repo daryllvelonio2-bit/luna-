@@ -20,9 +20,8 @@ pub fn run_hooks(config: harness_core::Config, options: HooksOptions) -> Result<
     let runner = HookRunner::load(workspace, &config.hooks)?;
     let bound = runner.bound();
 
-    let user_file = std::env::var("HOME")
-        .map(|home| Path::new(&home).join(USER_HOOKS_RELATIVE))
-        .ok();
+    let home = harness_core::config::home_dir();
+    let user_file = (home != Path::new(".")).then(|| home.join(USER_HOOKS_RELATIVE));
     let project_file = workspace.join(PROJECT_HOOKS_RELATIVE);
 
     if options.json {

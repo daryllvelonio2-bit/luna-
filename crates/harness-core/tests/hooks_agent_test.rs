@@ -2,7 +2,10 @@
 //!
 //! The runner-level contract lives in `hooks_test.rs`. These tests are about the seam the model
 //! actually experiences: which arguments the tool ran with, whether the human gate was consulted,
-//! and what text lands in the transcript the model reads next.
+//! and what text lands in the transcript the model reads next. They are Unix-only because the
+//! fixture hooks use `printf` and POSIX shell quoting.
+
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

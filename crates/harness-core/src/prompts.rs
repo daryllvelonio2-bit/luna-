@@ -106,7 +106,7 @@ mod tests {
         assert!(body.contains("forget_memory"), "{body}");
         assert!(body.contains("Project Notes"), "{body}");
         assert!(body.contains("markdown notes"), "{body}");
-        assert!(body.contains("Repository Audits"), "{body}");
+        assert!(body.contains("For repository audits"), "{body}");
         // The old contract — a rich record per entity — is gone.
         assert!(!body.contains("consolidated memory record"), "{body}");
     }

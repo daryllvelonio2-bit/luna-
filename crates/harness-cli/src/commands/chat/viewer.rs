@@ -534,7 +534,7 @@ mod tests {
             workdir: "worker (forked conversation)".to_string(),
             status: status.to_string(),
             elapsed_secs: 485,
-            log_path: "/home/janelle/.luna/jobs/s41253240.log".to_string(),
+            log_path: ".luna/jobs/s41253240.log".to_string(),
         }
     }
 

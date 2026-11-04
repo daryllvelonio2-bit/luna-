@@ -380,9 +380,14 @@ impl HookRunner {
             .map(Duration::from_secs)
             .unwrap_or(self.timeout);
 
-        let mut child = Command::new(shell())
-            .arg(shell_flag())
-            .arg(&spec.command)
+        let mut command = Command::new(shell());
+        command.arg(shell_flag());
+        // `cmd /C` parses its own way; a hook command must reach it verbatim.
+        #[cfg(windows)]
+        command.raw_arg(&spec.command);
+        #[cfg(not(windows))]
+        command.arg(&spec.command);
+        let mut child = command
             .current_dir(&self.workspace)
             .env("LUNA_HOOK_EVENT", event.as_str())
             .env("LUNA_PROJECT_DIR", &self.workspace)
@@ -661,12 +666,7 @@ fn matcher_allows(matcher: Option<&str>, tool: Option<&str>) -> bool {
 }
 
 fn user_hooks_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(USER_HOOKS_RELATIVE)
+    crate::config::home_dir().join(USER_HOOKS_RELATIVE)
 }
 
 fn shell() -> &'static str {

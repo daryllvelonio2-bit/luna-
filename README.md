@@ -68,6 +68,16 @@ rust-agent-harness/
 cargo build --release
 ```
 
+### Platform support
+
+Luna builds and runs on Linux, macOS, and Windows. Shell commands go through `sh -c` on Unix and
+`cmd /C` on Windows, paths come from `$HOME`/`%USERPROFILE%`, and state lives under `~/.luna`
+(`%USERPROFILE%\.luna` on Windows).
+
+On Windows, use the Rust MSVC toolchain together with the Visual Studio C++ build tools, because
+the bundled SQLite is compiled from source. One setting is Linux-only: `tools.network: deny`
+installs a seccomp filter and fails closed elsewhere, so leave it at its default on Windows.
+
 ### 1. Luna Auth: Configuring Credentials
 Add your API key and configure rotation:
 ```bash

@@ -104,7 +104,7 @@ fn write_cursor(path: &Path, id: &str) -> std::io::Result<()> {
     }
     let temporary = path.with_extension("tmp");
     std::fs::write(&temporary, format!("{id}\n"))?;
-    std::fs::rename(&temporary, path)
+    harness_core::fsutil::replace_file(&temporary, path)
 }
 
 #[async_trait]

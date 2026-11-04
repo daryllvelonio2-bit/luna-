@@ -33,6 +33,8 @@ fn run_eval(args: &[&str], home: Option<&Path>) -> Output {
     command.current_dir(repo_root()).args(args);
     if let Some(home) = home {
         command.env("HOME", home);
+        // Windows resolves the home directory from `USERPROFILE` first.
+        command.env("USERPROFILE", home);
     }
     command.output().expect("luna eval runs")
 }

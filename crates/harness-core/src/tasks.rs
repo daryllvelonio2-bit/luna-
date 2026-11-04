@@ -102,15 +102,13 @@ impl BackgroundTaskQueue {
 
         tokio::spawn(async move {
             let std_file = log_file;
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&cmd_str)
-                .current_dir(&workdir_buf)
-                .stdout(
-                    std_file
-                        .try_clone()
-                        .unwrap_or_else(|_| File::create("/dev/null").unwrap()),
-                )
+            let stdout = std_file
+                .try_clone()
+                .map(std::process::Stdio::from)
+                .unwrap_or_else(|_| std::process::Stdio::null());
+            let mut cmd = crate::tools::shell::shell_command(&cmd_str);
+            cmd.current_dir(&workdir_buf)
+                .stdout(stdout)
                 .stderr(std_file);
 
             if let Err(error) = crate::tools::netguard::apply(&mut cmd, network) {
@@ -133,6 +131,8 @@ impl BackgroundTaskQueue {
 
             tokio::select! {
                 _ = kill_rx => {
+                    #[cfg(windows)]
+                    crate::tools::shell::kill_process_group(child.id());
                     let _ = child.kill().await;
                     let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                     *st = "killed".to_string();

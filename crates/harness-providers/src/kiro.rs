@@ -3,7 +3,6 @@ use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -37,8 +36,8 @@ pub struct KiroCredentials {
 }
 
 pub fn extract_kiro_credentials_from_db() -> Option<KiroCredentials> {
-    let home = std::env::var("HOME").ok()?;
-    let db_path = PathBuf::from(home).join(".local/share/kiro-cli/data.sqlite3");
+    let home = harness_core::config::home_dir();
+    let db_path = home.join(".local/share/kiro-cli/data.sqlite3");
     if !db_path.exists() {
         return None;
     }
@@ -78,11 +77,8 @@ pub fn extract_kiro_credentials_from_db() -> Option<KiroCredentials> {
 }
 
 pub fn update_kiro_token_in_db(token: &KiroCredentials) -> Result<(), HarnessError> {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return Ok(()),
-    };
-    let db_path = PathBuf::from(&home).join(".local/share/kiro-cli/data.sqlite3");
+    let home = harness_core::config::home_dir();
+    let db_path = home.join(".local/share/kiro-cli/data.sqlite3");
     if !db_path.exists() {
         return Ok(());
     }

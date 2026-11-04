@@ -19,6 +19,18 @@ fn shorten_path_keeps_at_most_three_segments() {
     assert_eq!(shorten_path("."), ".");
 }
 
+#[test]
+fn shorten_path_keeps_a_windows_drive_letter() {
+    assert_eq!(
+        shorten_path(r"C:\Users\me\projects\harness\src\main.rs"),
+        "C:/src/main.rs"
+    );
+    assert_eq!(
+        shorten_path(r"\\server\share\team\project\src\lib.rs"),
+        "project/src/lib.rs"
+    );
+}
+
 fn call(name: &str, arguments: serde_json::Value) -> String {
     format_tool_call(name, &arguments)
 }

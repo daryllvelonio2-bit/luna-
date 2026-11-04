@@ -10,12 +10,6 @@ use harness_core::config::*;
 use harness_core::AgentConfig;
 use tempfile::TempDir;
 
-/// The same `$HOME` resolution the module uses, written out here so these tests do not depend on a
-/// private helper.
-fn home_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").expect("HOME is set in this environment"))
-}
-
 fn config_path(dir: &TempDir) -> PathBuf {
     dir.path().join("luna").join("config.yaml")
 }

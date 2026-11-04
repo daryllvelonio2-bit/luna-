@@ -192,7 +192,7 @@ impl FileNotesEngine {
         }
 
         let retired = db_path.with_extension("db.imported");
-        match std::fs::rename(db_path, &retired) {
+        match harness_core::fsutil::replace_file(db_path, &retired) {
             Ok(()) => info!(
                 "imported {} note(s) from '{}' into '{}' (legacy store retired as '{}')",
                 imported,
@@ -535,7 +535,7 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
             e
         ))
     })?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
+    harness_core::fsutil::replace_file(&tmp, &path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         HarnessError::NotesError(format!("Failed to commit note '{}': {}", path.display(), e))
     })?;

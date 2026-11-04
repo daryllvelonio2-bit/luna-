@@ -83,7 +83,11 @@ impl CredentialManager {
     pub fn new(storage_path: Option<PathBuf>) -> Result<Arc<Self>, HarnessError> {
         let path = match storage_path {
             Some(path) => path,
-            None => Self::default_storage_path(std::env::var("HOME").ok())?,
+            None => Self::default_storage_path(Some(
+                harness_core::config::home_dir()
+                    .to_string_lossy()
+                    .into_owned(),
+            ))?,
         };
 
         Ok(Arc::new(Self {
@@ -92,12 +96,14 @@ impl CredentialManager {
         }))
     }
 
-    /// `$HOME/.luna/credentials.json`. A missing `HOME` is an error rather than a `"."`
-    /// fallback, which silently relocated every credential to the current directory.
+    /// `$HOME/.luna/credentials.json` (`%USERPROFILE%` on Windows). A missing home is an error
+    /// rather than a `"."` fallback, which silently relocated every credential to the current
+    /// directory.
     fn default_storage_path(home: Option<String>) -> Result<PathBuf, HarnessError> {
         let home = home.filter(|h| !h.is_empty()).ok_or_else(|| {
             HarnessError::ConfigurationError(format!(
-                "HOME is not set: cannot locate the credential store ($HOME/.luna/{CREDENTIALS_FILE})"
+                "HOME/USERPROFILE is not set: cannot locate the credential store \
+                 ($HOME/.luna/{CREDENTIALS_FILE})"
             ))
         })?;
         Ok(PathBuf::from(home).join(".luna").join(CREDENTIALS_FILE))
@@ -228,7 +234,7 @@ impl CredentialManager {
             })?;
         }
 
-        fs::rename(&tmp_path, &self.storage_path).map_err(|e| {
+        harness_core::fsutil::replace_file(&tmp_path, &self.storage_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
             HarnessError::Io(format!(
                 "cannot rename credential store {} to {}: {e}",
@@ -879,7 +885,10 @@ mod tests {
     #[test]
     fn a_missing_home_is_an_error_not_a_cwd_relocation() {
         let err = CredentialManager::default_storage_path(None).unwrap_err();
-        assert!(err.to_string().contains("HOME is not set"), "{err}");
+        assert!(
+            err.to_string().contains("HOME/USERPROFILE is not set"),
+            "{err}"
+        );
         // An empty HOME is the same failure, not a path under the empty string.
         assert!(CredentialManager::default_storage_path(Some(String::new())).is_err());
     }

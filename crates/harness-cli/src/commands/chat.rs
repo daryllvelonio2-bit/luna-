@@ -1321,7 +1321,7 @@ pub async fn run_interactive_chat(
 
     std::thread::spawn(move || {
         loop {
-            match keys::read_key(libc::STDIN_FILENO) {
+            match keys::read_key() {
                 Ok(key) => {
                     if key_tx.send(key).is_err() {
                         break;
@@ -2094,6 +2094,32 @@ pub async fn run_interactive_chat(
                                 ui.redraw_input_line();
                             }
                         }
+                    }
+                    AppKey::Resize => {
+                        // Windows reports a console resize as an event rather than SIGWINCH.
+                        // Reflow everything the same way the signal path above does.
+                        crate::commands::clear_screen();
+                        redraw_transcript(&turns, process_expanded);
+                        if active_turn.is_some() {
+                            if !current_query.trim().is_empty() {
+                                println!();
+                                println!(
+                                    "{}",
+                                    right_aligned_user_message(&current_query, get_terminal_width())
+                                );
+                            }
+                            let tools = in_flight_tools
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            for item in &tools {
+                                println!("{}", item.call_formatted);
+                                for diff in &item.diff_lines {
+                                    println!("{}", diff);
+                                }
+                            }
+                        }
+                        ui.handle_resize();
                     }
                     _ => {}
                 }

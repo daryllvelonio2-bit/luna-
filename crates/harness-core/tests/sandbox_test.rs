@@ -72,6 +72,7 @@ fn absolute_paths_outside_the_workspace_are_refused() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlinked_parent_directory_cannot_smuggle_a_path_out() {
     // `ws/link -> /etc` makes `ws/link/passwd` lexically inside the workspace. Only canonicalizing
@@ -99,6 +100,7 @@ fn a_symlinked_parent_directory_cannot_smuggle_a_path_out() {
     assert!(!sandbox.allows(&PathBuf::from("/etc")));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlinked_parent_that_stays_inside_is_allowed() {
     let (_dir, root) = workspace();

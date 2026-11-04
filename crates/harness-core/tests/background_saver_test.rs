@@ -305,7 +305,7 @@ async fn memory_mode_switches_system_prompt_instructions_dynamically() {
 
     // 1. In session mode: prompt instructs to call save_memory / save_note
     let session_prompt = agent.build_system_prompt("hello").await.unwrap();
-    assert!(session_prompt.contains("Memory & Note Management (Session Mode)"));
+    assert!(session_prompt.contains("Memory and Note Management (Session Mode)"));
     assert!(session_prompt.contains("save_memory"));
     assert!(!session_prompt.contains("Memory Protocol (Background Saver Mode)"));
 
@@ -313,7 +313,7 @@ async fn memory_mode_switches_system_prompt_instructions_dynamically() {
     let mut bg_agent = agent;
     bg_agent.set_memory_mode(harness_core::MemoryMode::Background);
     let bg_prompt = bg_agent.build_system_prompt("hello").await.unwrap();
-    assert!(!bg_prompt.contains("Memory & Note Management (Session Mode)"));
+    assert!(!bg_prompt.contains("Memory and Note Management (Session Mode)"));
     assert!(!bg_prompt.contains("SESSION WRITER MODE"));
     assert!(!bg_prompt.contains("save_memory"));
     assert!(!bg_prompt.contains("save_note"));

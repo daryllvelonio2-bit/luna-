@@ -17,8 +17,9 @@ pub struct SqliteMemoryEngine {
 impl SqliteMemoryEngine {
     pub fn new(path: Option<PathBuf>) -> Result<Self, HarnessError> {
         let db_path = path.unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".luna").join("memory.db")
+            harness_core::config::home_dir()
+                .join(".luna")
+                .join("memory.db")
         });
 
         if let Some(parent) = db_path.parent() {

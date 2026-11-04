@@ -49,8 +49,8 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
     }
 
     // 2. Try ~/.shiina/auth.json or profile auth.json
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut candidate_paths = vec![PathBuf::from(&home).join(".shiina").join("auth.json")];
+    let home = harness_core::config::home_dir();
+    let mut candidate_paths = vec![home.join(".shiina").join("auth.json")];
 
     let profiles_dir = PathBuf::from(&home).join(".shiina").join("profiles");
     if profiles_dir.is_dir() {

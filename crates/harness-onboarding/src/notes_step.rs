@@ -24,8 +24,7 @@ pub const HINT: &str = "Enter an absolute or relative path, or press Enter to ke
 pub const MAX_ATTEMPTS: usize = 10;
 
 pub fn default_notes_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".luna").join("notes")
+    harness_core::config::home_dir().join(".luna").join("notes")
 }
 
 pub fn parse_path(answer: &str) -> PathBuf {
@@ -33,16 +32,7 @@ pub fn parse_path(answer: &str) -> PathBuf {
     if trimmed.is_empty() {
         return default_notes_dir();
     }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    } else if trimmed == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    PathBuf::from(trimmed)
+    PathBuf::from(harness_core::config::expand_tilde(trimmed))
 }
 
 pub fn summary(dir: &std::path::Path) -> String {
