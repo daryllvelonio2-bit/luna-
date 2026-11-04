@@ -633,41 +633,54 @@ pub fn normalize_tool_arguments(input: &mut serde_json::Value) {
         // Path normalization
         if let Some(v) = map.get("filePath").cloned() {
             map.entry("path".to_string()).or_insert_with(|| v.clone());
-            map.entry("filepath".to_string()).or_insert_with(|| v.clone());
+            map.entry("filepath".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("file".to_string()).or_insert(v);
         } else if let Some(v) = map.get("path").cloned() {
-            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
-            map.entry("filepath".to_string()).or_insert_with(|| v.clone());
+            map.entry("filePath".to_string())
+                .or_insert_with(|| v.clone());
+            map.entry("filepath".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("file".to_string()).or_insert(v);
         } else if let Some(v) = map.get("filepath").cloned() {
-            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
+            map.entry("filePath".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("path".to_string()).or_insert_with(|| v.clone());
             map.entry("file".to_string()).or_insert(v);
         } else if let Some(v) = map.get("file").cloned() {
-            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
+            map.entry("filePath".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("path".to_string()).or_insert_with(|| v.clone());
             map.entry("filepath".to_string()).or_insert(v);
         }
 
         // Old string normalization
         if let Some(v) = map.get("oldString").cloned() {
-            map.entry("old_string".to_string()).or_insert_with(|| v.clone());
-            map.entry("old_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("old_string".to_string())
+                .or_insert_with(|| v.clone());
+            map.entry("old_str".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("old".to_string()).or_insert(v);
         } else if let Some(v) = map.get("old_string").cloned() {
-            map.entry("oldString".to_string()).or_insert_with(|| v.clone());
-            map.entry("old_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("oldString".to_string())
+                .or_insert_with(|| v.clone());
+            map.entry("old_str".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("old".to_string()).or_insert(v);
         }
 
         // New string normalization
         if let Some(v) = map.get("newString").cloned() {
-            map.entry("new_string".to_string()).or_insert_with(|| v.clone());
-            map.entry("new_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("new_string".to_string())
+                .or_insert_with(|| v.clone());
+            map.entry("new_str".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("new".to_string()).or_insert(v);
         } else if let Some(v) = map.get("new_string").cloned() {
-            map.entry("newString".to_string()).or_insert_with(|| v.clone());
-            map.entry("new_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("newString".to_string())
+                .or_insert_with(|| v.clone());
+            map.entry("new_str".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("new".to_string()).or_insert(v);
         }
 
@@ -683,10 +696,12 @@ pub fn normalize_tool_arguments(input: &mut serde_json::Value) {
             map.entry("diff".to_string()).or_insert_with(|| v.clone());
             map.entry("patch".to_string()).or_insert(v);
         } else if let Some(v) = map.get("diff").cloned() {
-            map.entry("patchText".to_string()).or_insert_with(|| v.clone());
+            map.entry("patchText".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("patch".to_string()).or_insert(v);
         } else if let Some(v) = map.get("patch").cloned() {
-            map.entry("patchText".to_string()).or_insert_with(|| v.clone());
+            map.entry("patchText".to_string())
+                .or_insert_with(|| v.clone());
             map.entry("diff".to_string()).or_insert(v);
         }
     }
@@ -1089,11 +1104,7 @@ pub async fn native_opencode_stream(
                                 data.get("form")
                                     .and_then(|f| f.get("sessionID").or_else(|| f.get("sessionId")))
                             })
-                            .or_else(|| {
-                                parsed
-                                    .get("sessionID")
-                                    .or_else(|| parsed.get("sessionId"))
-                            })
+                            .or_else(|| parsed.get("sessionID").or_else(|| parsed.get("sessionId")))
                             .and_then(|s| s.as_str());
 
                         if event_session_id != Some(&target_session_id) {
@@ -1165,10 +1176,8 @@ pub async fn native_opencode_stream(
                                             normalize_tool_arguments(&mut parsed_input);
                                             tool_inputs.insert(id.to_string(), parsed_input);
                                         }
-                                    } else if let Some(mut input_obj) = data
-                                        .get("input")
-                                        .or_else(|| data.get("arguments"))
-                                        .cloned()
+                                    } else if let Some(mut input_obj) =
+                                        data.get("input").or_else(|| data.get("arguments")).cloned()
                                     {
                                         normalize_tool_arguments(&mut input_obj);
                                         tool_inputs.insert(id.to_string(), input_obj);
@@ -2008,9 +2017,8 @@ pub async fn stream_opencode_completion_cli(
                             let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
                             if let Some(bridge) = get_ui_bridge() {
                                 if let Some(ref update_fn) = bridge.update_context_used_fn {
-                                    let total_context = usage
-                                        .prompt_tokens
-                                        .saturating_add(usage.completion_tokens);
+                                    let total_context =
+                                        usage.prompt_tokens.saturating_add(usage.completion_tokens);
                                     if total_context > 0 {
                                         update_fn(total_context);
                                     }
@@ -2024,9 +2032,8 @@ pub async fn stream_opencode_completion_cli(
                             let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
                             if let Some(bridge) = get_ui_bridge() {
                                 if let Some(ref update_fn) = bridge.update_context_used_fn {
-                                    let total_context = usage
-                                        .prompt_tokens
-                                        .saturating_add(usage.completion_tokens);
+                                    let total_context =
+                                        usage.prompt_tokens.saturating_add(usage.completion_tokens);
                                     if total_context > 0 {
                                         update_fn(total_context);
                                     }

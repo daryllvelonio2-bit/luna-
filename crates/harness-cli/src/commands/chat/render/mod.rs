@@ -769,7 +769,11 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
     };
     let text_any = |keys: &[&str]| -> Option<&str> {
         for k in keys {
-            if let Some(s) = arguments.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if let Some(s) = arguments
+                .get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 return Some(s);
             }
         }
@@ -813,7 +817,11 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
 pub fn extract_patch_diff(arguments: &serde_json::Value) -> Vec<String> {
     let text_any = |keys: &[&str]| -> Option<&str> {
         for k in keys {
-            if let Some(s) = arguments.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if let Some(s) = arguments
+                .get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 return Some(s);
             }
         }
@@ -1261,13 +1269,19 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                         .or_else(|| text("patchText"))?;
                     for line in diff_str.lines() {
                         if let Some(rest) = line.strip_prefix("--- ") {
-                            let p = rest.trim().trim_start_matches("a/").trim_start_matches("b/");
+                            let p = rest
+                                .trim()
+                                .trim_start_matches("a/")
+                                .trim_start_matches("b/");
                             if !p.is_empty() && p != "/dev/null" {
                                 return Some(shorten_path(p));
                             }
                         }
                         if let Some(rest) = line.strip_prefix("+++ ") {
-                            let p = rest.trim().trim_start_matches("a/").trim_start_matches("b/");
+                            let p = rest
+                                .trim()
+                                .trim_start_matches("a/")
+                                .trim_start_matches("b/");
                             if !p.is_empty() && p != "/dev/null" {
                                 return Some(shorten_path(p));
                             }
