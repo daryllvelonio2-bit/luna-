@@ -1969,22 +1969,10 @@ pub async fn run_interactive_chat(
                                 ));
                                 continue;
                             }
-                            Submission::Steer => {
-                                steer_handle.lock().unwrap_or_else(|e| e.into_inner()).push_back(query.clone());
-                                let line = format!(
-                                    "{} Steered into active turn: {}",
-                                    "⏩".cyan().bold(),
-                                    query
-                                );
-                                in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
-                                    call_formatted: line.clone(),
-                                    result_formatted: String::new(),
-                                    diff_lines: Vec::new(),
-                                });
-                                ui.emit_above(&line);
-                                continue;
-                            }
                             Submission::Interrupt => {
+                                // The user has typed past what is running: stop it here, and let
+                                // the launch below be the only repaint. The partial turn stays in
+                                // the transcript as cancelled, so what was thrown away is visible.
                                 cancel_running_turn(
                                     &mut active_turn,
                                     &current_cancel,
@@ -2001,6 +1989,7 @@ pub async fn run_interactive_chat(
                                         &current_provider,
                                         &current_model,
                                     ),
+                                    false,
                                 )
                                 .await;
                             }
@@ -2042,6 +2031,7 @@ pub async fn run_interactive_chat(
                                 &current_provider,
                                 &current_model,
                             ),
+                            true,
                         )
                         .await;
                         if !cancelled {
@@ -2067,6 +2057,7 @@ pub async fn run_interactive_chat(
                                 &current_provider,
                                 &current_model,
                             ),
+                            true,
                         )
                         .await;
                         if !cancelled {

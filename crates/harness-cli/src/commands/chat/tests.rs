@@ -60,17 +60,17 @@ fn interrupt_ignores_anything_after_it() {
     );
 }
 
-/// The three states a submit can meet: idle takes the message, active steers it mid-run,
-/// and while the transcript is being folded, everything waits in the queue.
+/// The three states a submit can meet: idle takes the message, a running turn is interrupted by
+/// it, and while the transcript is being folded, everything waits in the queue.
 #[test]
-fn a_free_agent_takes_the_message_and_a_busy_one_steers_the_turn() {
+fn a_free_agent_takes_the_message_and_a_busy_one_is_interrupted() {
     assert_eq!(
         submission("run the tests", false, false),
         super::Submission::Turn
     );
     assert_eq!(
         submission("run the tests", true, false),
-        super::Submission::Steer
+        super::Submission::Interrupt
     );
 }
 

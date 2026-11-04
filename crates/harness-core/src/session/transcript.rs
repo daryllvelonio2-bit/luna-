@@ -41,12 +41,33 @@ pub fn last_fold_seq(history: &[StoredMessage]) -> Option<i64> {
 /// so the answers are what the model can do without.
 pub fn sendable_messages(history: &[StoredMessage]) -> Vec<Message> {
     let fold_seq = last_fold_seq(history);
+    // Answers present anywhere in the transcript. A turn interrupted while its tools were running
+    // leaves the assistant row that asked for them and only the answers that had landed; a
+    // provider rejects a request carrying an unanswered call, so the incomplete round is dropped
+    // rather than sent. This is the mirror of the orphaned-result check below: there the answer
+    // lost its question, here the question never got its answers.
+    let answered: HashSet<&str> = history
+        .iter()
+        .filter_map(|stored| stored.message.tool_result.as_ref())
+        .map(|result| result.call_id.as_str())
+        .collect();
     let mut announced: HashSet<String> = HashSet::new();
     let mut messages = Vec::with_capacity(history.len());
     for stored in history {
         let mut message = stored.message.clone();
         if fold_seq.is_some_and(|fold_seq| stored.seq < fold_seq) {
             message.usage = None;
+        }
+        if message.role == Role::Assistant
+            && message
+                .tool_calls
+                .iter()
+                .any(|call| !answered.contains(call.id.as_str()))
+        {
+            debug!(
+                "Dropping an incomplete tool round: the assistant asked for calls that were never answered"
+            );
+            continue;
         }
         if message.role == Role::Tool {
             let call_id = message
@@ -261,6 +282,74 @@ mod tests {
         assert_eq!(
             messages[0].content.as_deref(),
             Some("the format is data:image/png;base64,... and so on")
+        );
+    }
+
+    fn call(id: &str) -> crate::types::ToolCall {
+        crate::types::ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "a.rs" }),
+            signature: None,
+        }
+    }
+
+    /// A round the model completed is replayed whole: the call and its answer both stay.
+    #[test]
+    fn an_answered_tool_round_is_replayed() {
+        let history = vec![
+            stored(1, Message::user("read the file")),
+            stored(
+                2,
+                Message::assistant_with_tools(vec![call("call-1"), call("call-2")]),
+            ),
+            stored(
+                3,
+                Message::tool(crate::types::ToolResult::success("call-1", "one")),
+            ),
+            stored(
+                4,
+                Message::tool(crate::types::ToolResult::success("call-2", "two")),
+            ),
+            stored(5, Message::assistant("both read")),
+        ];
+
+        let messages = sendable_messages(&history);
+        assert_eq!(messages.len(), 5, "{messages:?}");
+        assert_eq!(messages[1].tool_calls.len(), 2);
+    }
+
+    /// An interrupted turn leaves the assistant row that asked for tools and not every answer.
+    /// The unanswered call would make the next request invalid, so the whole incomplete round is
+    /// dropped — including the answers that did land, which have nothing left to answer.
+    #[test]
+    fn an_unanswered_tool_round_is_not_replayed() {
+        let history = vec![
+            stored(1, Message::user("read both files")),
+            stored(
+                2,
+                Message::assistant_with_tools(vec![call("call-1"), call("call-2")]),
+            ),
+            stored(
+                3,
+                Message::tool(crate::types::ToolResult::success("call-1", "one")),
+            ),
+            stored(4, Message::user("never mind, do something else")),
+        ];
+
+        let messages = sendable_messages(&history);
+        assert!(
+            messages.iter().all(|message| message.tool_calls.is_empty()),
+            "no unanswered call survives: {messages:?}"
+        );
+        assert!(
+            messages.iter().all(|message| message.role != Role::Tool),
+            "its partial answers go with it: {messages:?}"
+        );
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("never mind, do something else")
         );
     }
 }

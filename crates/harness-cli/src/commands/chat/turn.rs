@@ -18,18 +18,17 @@ use harness_core::{HarnessError, TurnOutcome};
 
 /// What a submitted line does when the agent may not be free to take it.
 ///
-/// The rule a user can hold onto: a plain message mid-turn steers what is running, and a message
-/// typed while the transcript is being folded waits — a turn started mid-fold would be built on
-/// a history that is about to be rewritten. (`/interrupt`, `Ctrl+C` or `Escape` explicitly cancel
-/// the active turn.)
+/// The rule a user can hold onto: a message sent while a turn is running interrupts that turn and
+/// goes out immediately. Waiting for the running turn to finish means the message lands after work
+/// the user has already moved past — and a steer that only arrives at the next model call is the
+/// same wait in slower motion. `/steer` remains for guidance that should land *inside* the turn
+/// without stopping it, and a line typed while the transcript is being folded waits, because a
+/// turn started mid-fold would be built on a history that is about to be rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Submission {
     /// Nothing is in flight: start a turn.
     Turn,
-    /// Steer the running turn with this line.
-    Steer,
     /// Stop the running turn and start a new one with this line.
-    #[allow(dead_code)]
     Interrupt,
     /// Hold the line until the fold finishes; the queue pump sends it in order.
     Queue,
@@ -40,7 +39,7 @@ pub(super) fn submission(_line: &str, turn_active: bool, compacting: bool) -> Su
         return Submission::Queue;
     }
     if turn_active {
-        return Submission::Steer;
+        return Submission::Interrupt;
     }
     Submission::Turn
 }
@@ -130,6 +129,10 @@ pub(super) fn launch_turn(
 
 /// Stop the turn in flight and record it as cancelled: the body Ctrl+C, Escape and an interrupting
 /// message all share, so the three cannot drift apart. Reports whether there was a turn to stop.
+///
+/// `redraw` is false when the caller is about to draw the transcript itself (an interrupting
+/// message starts a new turn in the same handler): repainting here and again there would only
+/// flicker the screen between two states the user never gets to read.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cancel_running_turn(
     active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
@@ -142,6 +145,7 @@ pub(super) async fn cancel_running_turn(
     process_expanded: bool,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     context_max: u32,
+    redraw: bool,
 ) -> bool {
     let Some(handle) = active_turn.take() else {
         return false;
@@ -165,20 +169,24 @@ pub(super) async fn cancel_running_turn(
     turns.push(record);
 
     if ui.is_attended {
-        crate::commands::clear_screen();
-        redraw_transcript(turns, process_expanded);
-        ui.draw_initial_box();
+        if redraw {
+            crate::commands::clear_screen();
+            redraw_transcript(turns, process_expanded);
+            ui.draw_initial_box();
+        }
     } else {
         println!("{}", "✖ Cancelled".red());
     }
 
-    let context_used = agent
-        .lock()
-        .await
-        .estimate_session_tokens()
-        .await
-        .unwrap_or(0);
-    ui.update_status(context_used, context_max);
+    if redraw {
+        let context_used = agent
+            .lock()
+            .await
+            .estimate_session_tokens()
+            .await
+            .unwrap_or(0);
+        ui.update_status(context_used, context_max);
+    }
     true
 }
 
@@ -347,6 +355,7 @@ pub(super) async fn handle_composer_command(
                 process_expanded,
                 agent,
                 context_max,
+                true,
             )
             .await;
             if !cancelled {

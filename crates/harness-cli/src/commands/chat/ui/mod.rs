@@ -35,8 +35,9 @@ pub const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 const IDLE_HINT: &str = "Luna is inactive — type /help for commands";
 
 /// What the empty composer says while a turn is in flight. The commands that only work mid-turn
-/// are named here, because a running turn is exactly when they are worth knowing about.
-const BUSY_HINT: &str = "Luna is thinking — /interrupt to stop · /steer or /queue to add";
+/// are named here, because a running turn is exactly when they are worth knowing about. Typing a
+/// line now interrupts the turn, so the hint leads with that rather than with `/interrupt`.
+const BUSY_HINT: &str = "Luna is thinking — type to interrupt · /steer to guide · /queue to wait";
 
 /// Columns of room the prompt row must have before a hint is drawn at all. Below this the hint
 /// would be a clipped fragment that teaches nothing, so the prompt is drawn bare instead.
