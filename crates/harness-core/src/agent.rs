@@ -4,9 +4,12 @@
 mod dispatch;
 mod fold;
 mod gate;
+mod interrupt;
 mod prompt;
 mod session_ops;
 mod turn;
+
+pub use interrupt::{InterruptHandle, InterruptOutcome};
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -224,6 +227,15 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// A message arrived while a model call was streaming: the call was cut short, `text` is the
+    /// user's message that continues the same turn, and `reasoning`/`partial` are what the model
+    /// had produced before the cut. The partial reply is kept in the transcript, marked, so a
+    /// resume shows what was said instead of pretending the call never happened.
+    Interrupted {
+        text: String,
+        reasoning: String,
+        partial: String,
+    },
     /// A steering message arrived and was injected mid-turn into conversation context.
     Steered {
         text: String,
@@ -291,6 +303,8 @@ where
     observer: Option<AgentObserver>,
     reasoning_effort: Option<ReasoningEffort>,
     steer_queue: Arc<Mutex<VecDeque<String>>>,
+    /// The soft-interrupt channel: stops one model call without ending the turn.
+    interrupt: Arc<InterruptHandle>,
     /// The independent memory writer, when `memory.mode` is `background`.
     saver: Option<SaverHook>,
     /// Completed turns in this agent's lifetime; the saver's interval counts turns, not wall time.
@@ -372,6 +386,7 @@ where
             observer: None,
             reasoning_effort: None,
             steer_queue: Arc::new(Mutex::new(VecDeque::new())),
+            interrupt: Arc::new(InterruptHandle::new()),
             saver: None,
             turns_completed: AtomicUsize::new(0),
             fold_in_flight: Arc::new(AtomicBool::new(false)),
@@ -499,6 +514,12 @@ where
     /// Obtain a clone of the steering queue handle for mid-run submission without locking the outer Agent.
     pub fn steer_handle(&self) -> Arc<Mutex<VecDeque<String>>> {
         self.steer_queue.clone()
+    }
+
+    /// The soft-interrupt handle: a message handed to it stops the model call in flight and
+    /// continues the same turn, keeping whatever the model had already produced.
+    pub fn interrupt_handle(&self) -> Arc<InterruptHandle> {
+        self.interrupt.clone()
     }
 
     /// Update the active model provider dynamically during a session.

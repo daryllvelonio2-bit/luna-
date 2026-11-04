@@ -14,21 +14,93 @@ use tokio_util::sync::CancellationToken;
 use super::render::{right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord};
 use super::ui::{get_terminal_width, ChatUi};
 use super::{redraw_transcript, ChatAgent};
-use harness_core::{HarnessError, TurnOutcome};
+use harness_core::{HarnessError, TurnOutcome, TurnToolCall};
+
+/// One mid-turn message the agent took: the line it appended and the partial output it cut short.
+///
+/// A user message always starts a new transcript record on replay, so the live view is split the
+/// same way at turn end — otherwise resuming a session would show a different conversation from
+/// the one the user just had.
+#[derive(Debug, Clone)]
+pub(super) struct InterruptNotice {
+    pub text: String,
+    pub reasoning: String,
+    pub partial: String,
+    /// How many tool rows existed when the message landed. The turn-end builder uses it to put
+    /// each tool under the segment that ran it, matching how a resumed transcript replays.
+    pub tool_count: usize,
+    pub at: std::time::Instant,
+}
+
+/// Build the records a finished turn contributes to the transcript.
+///
+/// With no interruptions this is exactly one record, as before. Each interruption closes the
+/// segment before it: the partial reply (already marked by the core) stays under the user line it
+/// answered, and the line that cut it short becomes the next turn's query.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn turn_records(
+    query: &str,
+    interruptions: Vec<InterruptNotice>,
+    turn_start: std::time::Instant,
+    turn_duration: std::time::Duration,
+    final_reasoning: Option<String>,
+    final_tools: Vec<TurnToolCall>,
+    final_tool_items: Vec<TurnProcessItem>,
+    final_reply: String,
+) -> Vec<TurnRecord> {
+    let mut records = Vec::with_capacity(interruptions.len() + 1);
+    let mut segment_query = query.to_string();
+    let mut segment_start = turn_start;
+    let mut tool_cursor = 0;
+    let had_interruptions = !interruptions.is_empty();
+    for notice in interruptions {
+        let reasoning = notice.reasoning.trim();
+        let tool_end = notice.tool_count.min(final_tool_items.len());
+        let segment_tools = final_tool_items[tool_cursor..tool_end].to_vec();
+        tool_cursor = tool_end;
+        records.push(TurnRecord {
+            user_query: std::mem::take(&mut segment_query),
+            reasoning: (!reasoning.is_empty()).then(|| reasoning.to_string()),
+            tools: Vec::new(),
+            tool_items: segment_tools,
+            duration: notice.at.saturating_duration_since(segment_start),
+            reply: notice.partial.trim().to_string(),
+        });
+        segment_query = notice.text;
+        segment_start = notice.at;
+    }
+    records.push(TurnRecord {
+        user_query: segment_query,
+        reasoning: final_reasoning,
+        // Once the turn is split, the header reads its tool names from the partitioned items:
+        // keeping the whole turn's `tool_calls` here would stamp every call on the last segment.
+        tools: if had_interruptions {
+            Vec::new()
+        } else {
+            final_tools
+        },
+        tool_items: final_tool_items[tool_cursor..].to_vec(),
+        duration: turn_duration.saturating_sub(segment_start.saturating_duration_since(turn_start)),
+        reply: final_reply,
+    });
+    records
+}
 
 /// What a submitted line does when the agent may not be free to take it.
 ///
-/// The rule a user can hold onto: a message sent while a turn is running interrupts that turn and
-/// goes out immediately. Waiting for the running turn to finish means the message lands after work
-/// the user has already moved past — and a steer that only arrives at the next model call is the
-/// same wait in slower motion. `/steer` remains for guidance that should land *inside* the turn
-/// without stopping it, and a line typed while the transcript is being folded waits, because a
-/// turn started mid-fold would be built on a history that is about to be rewritten.
+/// The rule a user can hold onto: a message sent while a turn is running redirects that turn and
+/// goes out immediately — it stops the model call in flight, keeps what the model had already
+/// produced, and continues the same turn. Waiting for the running turn to finish means the message
+/// lands after work the user has already moved past. If a tool is running, the message waits for
+/// the batch to finish rather than killing work the user did not ask to cancel. `/steer` remains
+/// for guidance that should land *inside* the turn without stopping it, and a line typed while the
+/// transcript is being folded waits, because a turn started mid-fold would be built on a history
+/// that is about to be rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Submission {
     /// Nothing is in flight: start a turn.
     Turn,
-    /// Stop the running turn and start a new one with this line.
+    /// Cut the model call in flight short and hand this line to the same turn.
     Interrupt,
     /// Hold the line until the fold finishes; the queue pump sends it in order.
     Queue,
@@ -140,6 +212,7 @@ pub(super) async fn cancel_running_turn(
     ui: &ChatUi,
     turns: &mut Vec<TurnRecord>,
     in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    interruptions: &Arc<Mutex<Vec<InterruptNotice>>>,
     turn_start: std::time::Instant,
     current_query: &str,
     process_expanded: bool,
@@ -157,16 +230,20 @@ pub(super) async fn cancel_running_turn(
     ui.clear_live_state();
     let current_tools =
         std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
+    let interruptions =
+        std::mem::take(&mut *interruptions.lock().unwrap_or_else(|e| e.into_inner()));
+    let turn_dur = turn_start.elapsed();
 
-    let record = TurnRecord {
-        user_query: current_query.to_string(),
-        reasoning: None,
-        tools: Vec::new(),
-        tool_items: current_tools,
-        duration: turn_start.elapsed(),
-        reply: "✖ Cancelled".to_string(),
-    };
-    turns.push(record);
+    turns.extend(turn_records(
+        current_query,
+        interruptions,
+        turn_start,
+        turn_dur,
+        None,
+        Vec::new(),
+        current_tools,
+        "✖ Cancelled".to_string(),
+    ));
 
     if ui.is_attended {
         if redraw {
@@ -290,6 +367,7 @@ pub(super) async fn handle_composer_command(
     current_cancel: &CancellationToken,
     turns: &mut Vec<TurnRecord>,
     in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    interruptions: &Arc<Mutex<Vec<InterruptNotice>>>,
     turn_start: std::time::Instant,
     current_query: &str,
     process_expanded: bool,
@@ -350,6 +428,7 @@ pub(super) async fn handle_composer_command(
                 ui,
                 turns,
                 in_flight_tools,
+                interruptions,
                 turn_start,
                 current_query,
                 process_expanded,

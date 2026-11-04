@@ -1,5 +1,6 @@
 use super::commands::SlashCommand;
-use super::turn::{composer_command, submission, ComposerCommand};
+use super::turn::{composer_command, submission, turn_records, ComposerCommand, InterruptNotice};
+use std::time::{Duration, Instant};
 
 /// The commands the composer owns are recognised by their whole name, and their argument is
 /// kept verbatim: guidance is prose, not a token.
@@ -84,6 +85,68 @@ fn a_fold_holds_everything_back() {
         submission("run the tests", true, true),
         super::Submission::Queue
     );
+}
+
+/// A turn that was redirected mid-reply becomes two records, cut exactly where the user spoke:
+/// the partial answer stays under the question it was answering, and the redirect starts the next
+/// turn. This is the shape a resumed transcript replays, so the live view must match it.
+#[test]
+fn an_interrupted_turn_is_split_at_the_message_that_cut_it() {
+    let start = Instant::now();
+    let records = turn_records(
+        "write the parser",
+        vec![InterruptNotice {
+            text: "actually fix the lexer".to_string(),
+            reasoning: "weighing two designs".to_string(),
+            partial: "half an answer\n\n[interrupted by your next message]".to_string(),
+            tool_count: 0,
+            at: start + Duration::from_secs(2),
+        }],
+        start,
+        Duration::from_secs(5),
+        Some("final thought".to_string()),
+        Vec::new(),
+        Vec::new(),
+        "final answer".to_string(),
+    );
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].user_query, "write the parser");
+    assert_eq!(
+        records[0].reasoning.as_deref(),
+        Some("weighing two designs")
+    );
+    assert!(records[0].reply.contains("half an answer"), "{records:?}");
+    assert!(
+        records[0]
+            .reply
+            .contains("interrupted by your next message"),
+        "the partial reply has to be marked: {records:?}"
+    );
+    assert_eq!(records[1].user_query, "actually fix the lexer");
+    assert_eq!(records[1].reply, "final answer");
+    assert_eq!(records[1].duration, Duration::from_secs(3));
+}
+
+/// With no interruption the builder is the old one-record turn, duration and all.
+#[test]
+fn an_untouched_turn_is_one_record() {
+    let start = Instant::now();
+    let records = turn_records(
+        "run the tests",
+        Vec::new(),
+        start,
+        Duration::from_secs(4),
+        Some("thought".to_string()),
+        Vec::new(),
+        Vec::new(),
+        "all green".to_string(),
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].user_query, "run the tests");
+    assert_eq!(records[0].duration, Duration::from_secs(4));
+    assert_eq!(records[0].reply, "all green");
 }
 
 #[test]

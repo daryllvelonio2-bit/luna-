@@ -657,7 +657,7 @@ fn the_hint_says_what_luna_is_doing() {
     ui.set_turn_active(true);
     assert!(ui.turn_active());
     let busy = strip(&ui.prompt_row_drawn("").0);
-    assert!(busy.contains("interrupt"), "{busy}");
+    assert!(busy.contains("redirect"), "{busy}");
     assert!(busy.contains("/steer"), "{busy}");
     assert!(busy.contains("/queue"), "{busy}");
     assert!(!busy.contains("inactive"), "{busy}");

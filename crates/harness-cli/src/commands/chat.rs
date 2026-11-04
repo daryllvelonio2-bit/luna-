@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use harness_core::BackgroundSaver;
 use harness_core::{
-    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, ModelProvider,
-    SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
+    Agent, ApprovalRequest, Config, DefaultToolRegistry, HarnessError, InterruptOutcome,
+    ModelProvider, SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_mcp::{McpStdioClient, McpToolAdapter};
 use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
@@ -51,11 +51,11 @@ use commands::{
 };
 use keys::AppKey;
 use render::{
-    compaction_report, extract_patch_diff, format_approval_verdict, format_delegate_duration,
-    format_delegate_notification, format_delegate_title, format_tool_call,
-    format_tool_result, has_verdict, is_non_tool_event, parse_turns_from_history,
-    render_transcript, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
-    LUNA_LABEL, PROMPT,
+    clean_user_query_for_transcript, compaction_report, extract_patch_diff,
+    format_approval_verdict, format_delegate_duration, format_delegate_notification,
+    format_delegate_title, format_tool_call, format_tool_result, has_verdict, is_non_tool_event,
+    parse_turns_from_history, render_transcript, right_aligned_user_message, OutputBlockKind,
+    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -76,7 +76,7 @@ use history::{append_prompt_history, load_prompt_history, KittyKeyboardGuard};
 use prompts::{prompt_approval_choice, prompt_sudo_password_dialog, ChatSudoPrompter};
 pub(crate) use status::{refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed};
 use turn::handle_composer_command;
-use turn::{cancel_running_turn, drain_queue, launch_turn, submission, Submission};
+use turn::{cancel_running_turn, drain_queue, launch_turn, submission, turn_records, Submission};
 
 /// Register MCP servers from configuration and add their tools to the registry.
 async fn register_mcp_servers(
@@ -509,6 +509,10 @@ pub async fn run_interactive_chat(
 
     let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
     let in_flight_tools_obs = in_flight_tools.clone();
+    // Mid-turn messages the agent took, oldest first. The observer fills this so the turn-end
+    // handler can split the turn into the same records a resumed transcript would replay.
+    let interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>> = Arc::new(Mutex::new(Vec::new()));
+    let interruptions_obs = interruptions.clone();
     // The observer reads the session's list back, so the transcript can show the tasks.
     let todo_scope_obs = todo_scope.clone();
     // True only while a fold the *user* asked for is rewriting the session in place. The input
@@ -622,6 +626,45 @@ pub async fn run_interactive_chat(
                     ui_obs.show_patch_diff(diff_to_show);
                 }
             }
+            harness_core::AgentEvent::Interrupted {
+                text,
+                reasoning,
+                partial,
+            } => {
+                let shown = clean_user_query_for_transcript(&text);
+                ui_obs.clear_patch_diff();
+                // The reasoning produced before the cut is already in the live region; settle it so
+                // it stays on screen instead of disappearing when the next call starts.
+                ui_obs.finish_reasoning();
+                // Reply text is not streamed live, so the part the model had written would go
+                // unseen. Show it now, before the user's line that cut it off.
+                if !partial.trim().is_empty() {
+                    ui_obs.begin_block(OutputBlockKind::Reply);
+                    ui_obs.emit_above(&format!(
+                        "{}\n{}",
+                        LUNA_LABEL.bold().green(),
+                        partial.trim_end()
+                    ));
+                }
+                // The agent has already appended this as a user turn; echo it in the same place a
+                // normally submitted line appears.
+                ui_obs.begin_block(OutputBlockKind::User);
+                ui_obs.emit_above(&right_aligned_user_message(&shown, get_terminal_width()));
+                let tool_count = in_flight_tools_obs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len();
+                interruptions_obs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(turn::InterruptNotice {
+                        text: shown,
+                        reasoning,
+                        partial,
+                        tool_count,
+                        at: std::time::Instant::now(),
+                    });
+            }
             harness_core::AgentEvent::Steered { text } => {
                 ui_obs.clear_patch_diff();
                 ui_obs.finish_reasoning();
@@ -656,6 +699,7 @@ pub async fn run_interactive_chat(
     }
 
     let steer_handle = agent.steer_handle();
+    let interrupt_handle = agent.interrupt_handle();
     let agent = Arc::new(tokio::sync::Mutex::new(agent));
 
     delegate_tool.set_steer_handle(steer_handle.clone());
@@ -1627,6 +1671,7 @@ pub async fn run_interactive_chat(
                                 &current_cancel,
                                 &mut turns,
                                 &in_flight_tools,
+                                &interruptions,
                                 turn_start,
                                 &current_query,
                                 process_expanded,
@@ -1784,6 +1829,7 @@ pub async fn run_interactive_chat(
                                     &current_cancel,
                                     &mut turns,
                                     &in_flight_tools,
+                                    &interruptions,
                                     turn_start,
                                     &current_query,
                                     process_expanded,
@@ -1872,6 +1918,7 @@ pub async fn run_interactive_chat(
                             &current_cancel,
                             &mut turns,
                             &in_flight_tools,
+                            &interruptions,
                             turn_start,
                             &current_query,
                             process_expanded,
@@ -1970,28 +2017,36 @@ pub async fn run_interactive_chat(
                                 continue;
                             }
                             Submission::Interrupt => {
-                                // The user has typed past what is running: stop it here, and let
-                                // the launch below be the only repaint. The partial turn stays in
-                                // the transcript as cancelled, so what was thrown away is visible.
-                                cancel_running_turn(
-                                    &mut active_turn,
-                                    &current_cancel,
-                                    &ui,
-                                    &mut turns,
-                                    &in_flight_tools,
-                                    turn_start,
-                                    &current_query,
-                                    process_expanded,
-                                    &agent,
-                                    context_window(
-                                        &config,
-                                        &discovery,
-                                        &current_provider,
-                                        &current_model,
-                                    ),
-                                    false,
-                                )
-                                .await;
+                                // The turn keeps running. The handle stops the model call that is
+                                // streaming and hands the line to the same turn, which keeps the
+                                // reasoning and partial reply it had produced. If a tool is running,
+                                // the line waits for that batch rather than killing it.
+                                match interrupt_handle.interrupt(&query) {
+                                    InterruptOutcome::Streaming => {
+                                        ui.emit_above(&format!(
+                                            "{} Redirecting — stopping this reply to take your message",
+                                            "↳".cyan().bold()
+                                        ));
+                                    }
+                                    InterruptOutcome::Queued => {
+                                        ui.emit_above(&format!(
+                                            "{} Held until the running tool finishes, then sent",
+                                            "↳".cyan().bold()
+                                        ));
+                                    }
+                                    InterruptOutcome::Idle => {
+                                        // The turn ended between the busy check and the handoff.
+                                        // Queue the line so the turn-end pump still sends it, and
+                                        // the turn that just finished is recorded as usual.
+                                        queue.push_back(query.clone());
+                                        ui.set_queue_depth(queue.len());
+                                        ui.emit_above(&format!(
+                                            "{} Queued — sent when the agent is free",
+                                            "⏸".yellow().bold()
+                                        ));
+                                    }
+                                }
+                                continue;
                             }
                             Submission::Turn => {}
                         }
@@ -2021,6 +2076,7 @@ pub async fn run_interactive_chat(
                             &ui,
                             &mut turns,
                             &in_flight_tools,
+                            &interruptions,
                             turn_start,
                             &current_query,
                             process_expanded,
@@ -2047,6 +2103,7 @@ pub async fn run_interactive_chat(
                             &ui,
                             &mut turns,
                             &in_flight_tools,
+                            &interruptions,
                             turn_start,
                             &current_query,
                             process_expanded,
@@ -2125,6 +2182,14 @@ pub async fn run_interactive_chat(
                 // Nothing is in flight any more, whatever the turn did: the hint goes back to
                 // the idle line before the transcript below is redrawn.
                 ui.set_turn_active(false);
+                // One snapshot for every outcome: a turn that stopped early still produced the
+                // tool rows and mid-turn messages above, and each branch records them the same way.
+                let current_tools =
+                    std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
+                let interruptions = std::mem::take(
+                    &mut *interruptions.lock().unwrap_or_else(|e| e.into_inner()),
+                );
+                let turn_dur = turn_start.elapsed();
                 match turn_res {
                     Ok(Ok(outcome)) => {
                         ui.stop_activity();
@@ -2133,18 +2198,17 @@ pub async fn run_interactive_chat(
                         usage
                             .record_chat(&current_provider, &current_model, Some(&session_id), &outcome)
                             .await;
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
-                        let turn_dur = turn_start.elapsed();
 
-                        let record = TurnRecord {
-                            user_query: current_query.clone(),
-                            reasoning: outcome.reasoning.clone(),
-                            tools: outcome.tool_calls.clone(),
-                            tool_items: current_tools,
-                            duration: turn_dur,
-                            reply: outcome.reply.clone(),
-                        };
-                        turns.push(record);
+                        turns.extend(turn_records(
+                            &current_query,
+                            interruptions,
+                            turn_start,
+                            turn_dur,
+                            outcome.reasoning.clone(),
+                            outcome.tool_calls.clone(),
+                            current_tools,
+                            outcome.reply.clone(),
+                        ));
 
                         if ui.is_attended {
                             todo::refresh_panel(&ui, &todo_scope);
@@ -2162,22 +2226,32 @@ pub async fn run_interactive_chat(
                         let context_max =
                             context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
+
+                        // A line that landed in the sliver between the turn's last drain and the
+                        // guard being dropped belongs to the next turn, not to the one that just
+                        // answered. Queue it so the pump below sends it.
+                        for text in interrupt_handle.take_leftover() {
+                            queue.push_back(text);
+                        }
+                        if !queue.is_empty() {
+                            ui.set_queue_depth(queue.len());
+                        }
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
                         let turn_dur = turn_start.elapsed();
 
-                        let record = TurnRecord {
-                            user_query: current_query.clone(),
-                            reasoning: None,
-                            tools: Vec::new(),
-                            tool_items: current_tools,
-                            duration: turn_dur,
-                            reply: "✖ Cancelled".to_string(),
-                        };
-                        turns.push(record);
+                        turns.extend(turn_records(
+                            &current_query,
+                            interruptions,
+                            turn_start,
+                            turn_dur,
+                            None,
+                            Vec::new(),
+                            current_tools,
+                            "✖ Cancelled".to_string(),
+                        ));
 
                         if ui.is_attended {
                             todo::refresh_panel(&ui, &todo_scope);
@@ -2196,20 +2270,19 @@ pub async fn run_interactive_chat(
                     Ok(Err(e)) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
-                        let turn_dur = turn_start.elapsed();
-                        let had_tools = !current_tools.is_empty();
+                        let had_records = !current_tools.is_empty() || !interruptions.is_empty();
 
-                        if had_tools {
-                            let record = TurnRecord {
-                                user_query: current_query.clone(),
-                                reasoning: None,
-                                tools: Vec::new(),
-                                tool_items: current_tools,
-                                duration: turn_dur,
-                                reply: format!("✖ Error: {}", e),
-                            };
-                            turns.push(record);
+                        if had_records {
+                            turns.extend(turn_records(
+                                &current_query,
+                                interruptions,
+                                turn_start,
+                                turn_dur,
+                                None,
+                                Vec::new(),
+                                current_tools,
+                                format!("✖ Error: {}", e),
+                            ));
                             *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = "continue".to_string();
 
                             if ui.is_attended {
@@ -2243,24 +2316,30 @@ pub async fn run_interactive_chat(
                         let context_max =
                             context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
+
+                        for text in interrupt_handle.take_leftover() {
+                            queue.push_back(text);
+                        }
+                        if !queue.is_empty() {
+                            ui.set_queue_depth(queue.len());
+                        }
                     }
                     Err(join_err) => {
                         ui.stop_activity();
                         ui.clear_live_state();
-                        let current_tools = std::mem::take(&mut *in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()));
-                        let turn_dur = turn_start.elapsed();
-                        let had_tools = !current_tools.is_empty();
+                        let had_records = !current_tools.is_empty() || !interruptions.is_empty();
 
-                        if had_tools {
-                            let record = TurnRecord {
-                                user_query: current_query.clone(),
-                                reasoning: None,
-                                tools: Vec::new(),
-                                tool_items: current_tools,
-                                duration: turn_dur,
-                                reply: format!("✖ Task join error: {}", join_err),
-                            };
-                            turns.push(record);
+                        if had_records {
+                            turns.extend(turn_records(
+                                &current_query,
+                                interruptions,
+                                turn_start,
+                                turn_dur,
+                                None,
+                                Vec::new(),
+                                current_tools,
+                                format!("✖ Task join error: {}", join_err),
+                            ));
                             *ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()) = "continue".to_string();
 
                             if ui.is_attended {

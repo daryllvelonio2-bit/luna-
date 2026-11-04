@@ -15,6 +15,42 @@ use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
 use crate::traits::*;
 use crate::types::*;
 
+/// What is written at the end of a reply the user's next message cut short.
+///
+/// It is stored, not just displayed: the next request carries the partial assistant message, and a
+/// resumed transcript should say why the sentence stops where it does.
+const INTERRUPTED_MARKER: &str = "\n\n[interrupted by your next message]";
+
+/// One model call's output, and whether a soft interrupt cut it short.
+struct Streamed {
+    message: Message,
+    interrupted: bool,
+}
+
+impl Streamed {
+    fn done(message: Message) -> Self {
+        Self {
+            message,
+            interrupted: false,
+        }
+    }
+
+    /// A call stopped before it produced anything usable.
+    fn cut() -> Self {
+        Self {
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            interrupted: true,
+        }
+    }
+}
+
 /// Whether a finish reason means the model ran out of output budget rather than finished.
 ///
 /// Gemini spells it `max_tokens` and the OpenAI-compatible routes spell it `length`. Either way
@@ -66,6 +102,10 @@ where
             .take();
         self.fold_disabled_this_turn.store(false, Ordering::SeqCst);
         let _reaper_guard = super::FoldReaperGuard(&self.completed_fold);
+        // From here until the guard drops, a message can reach the turn without taking the agent
+        // lock. Set before the first `await` so a message typed into a just-started turn is
+        // queued for it rather than reported as idle.
+        let _interrupt_guard = self.interrupt.begin_turn();
         let system_text = self.system_prompt(user_input).await?;
 
         // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
@@ -151,6 +191,27 @@ where
                 return Err(HarnessError::Cancelled);
             }
 
+            // A message that arrived while the previous batch of tools was running is taken here,
+            // after the tools have finished and before the model is asked again. This is the one
+            // place that deliberately waits: killing a tool the user did not ask to cancel would
+            // lose work, and the next model call is the first moment the message can be used.
+            let pending_interrupts = self.interrupt.drain();
+            if !pending_interrupts.is_empty() {
+                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                    .await?;
+                let joined = pending_interrupts.join("\n\n");
+                let follow_up = Message::user(joined.clone());
+                self.append(&follow_up, false).await?;
+                messages.push(follow_up);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::Interrupted {
+                        text: joined,
+                        reasoning: String::new(),
+                        partial: String::new(),
+                    });
+                }
+            }
+
             if loop_rounds > 0 {
                 self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
                     .await;
@@ -181,6 +242,7 @@ where
             // Retrying on transient / overloaded errors with backoff
             let max_retries = 3;
             let mut response = None;
+            let mut interrupted = false;
             for attempt in 0..=max_retries {
                 match self
                     .stream_completion(
@@ -192,8 +254,9 @@ where
                     )
                     .await
                 {
-                    Ok(res) => {
-                        response = Some(res);
+                    Ok(streamed) => {
+                        interrupted = streamed.interrupted;
+                        response = Some(streamed.message);
                         break;
                     }
                     Err(e)
@@ -269,12 +332,79 @@ where
                 });
             }
 
+            if interrupted {
+                // The prompt has to precede the answer it produced, even though the normal path
+                // appends it only after the first response.
+                let partial_content = response.content.clone().unwrap_or_default();
+                let partial_reasoning = response.reasoning.clone().unwrap_or_default();
+                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                    .await?;
+                // Incomplete tool-call deltas were never assembled into a `Message`, so nothing
+                // invalid is stored. A call the provider had already executed is kept on
+                // `executed_tools` and reported as usual.
+                if response.content.is_some() || response.reasoning.is_some() {
+                    if response.content.is_some() {
+                        response.content = Some(format!("{partial_content}{INTERRUPTED_MARKER}"));
+                    }
+                    self.append(&response, false).await?;
+                    messages.push(response.clone());
+                }
+                let pending = self.interrupt.drain();
+                if pending.is_empty() {
+                    // The token was cancelled just as the call ended and the message raced ahead
+                    // to the post-call drain. Nothing to deliver here.
+                    continue;
+                }
+                let joined = pending.join("\n\n");
+                let follow_up = Message::user(joined.clone());
+                self.append(&follow_up, false).await?;
+                messages.push(follow_up);
+                if let Some(ref observer) = self.observer {
+                    observer(AgentEvent::Interrupted {
+                        text: joined,
+                        reasoning: partial_reasoning,
+                        partial: response.content.clone().unwrap_or_default(),
+                    });
+                }
+                loop_rounds = loop_rounds.saturating_add(1);
+                continue;
+            }
+
             if let Some(ref r) = response.reasoning {
                 last_reasoning = Some(r.clone());
             }
 
             // If no tools requested, assistant concluded task
             if response.tool_calls.is_empty() {
+                // A message can land in the instant between the last chunk and this branch. The
+                // answer is complete, but the user has moved on: treat the answer as an interim
+                // one and ask again with their message, exactly as an interrupted call does.
+                let pending_interrupts = self.interrupt.drain();
+                if !pending_interrupts.is_empty() {
+                    let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+                    if !reply_text.is_empty() {
+                        let mut interim = response.clone();
+                        interim.content = Some(reply_text.clone());
+                        self.append(&interim, false).await?;
+                        messages.push(interim);
+                    }
+                    self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                        .await?;
+                    let joined = pending_interrupts.join("\n\n");
+                    let follow_up = Message::user(joined.clone());
+                    self.append(&follow_up, false).await?;
+                    messages.push(follow_up);
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::Interrupted {
+                            text: joined,
+                            reasoning: response.reasoning.clone().unwrap_or_default(),
+                            partial: reply_text,
+                        });
+                    }
+                    loop_rounds = loop_rounds.saturating_add(1);
+                    continue;
+                }
+
                 let pending_steers: Vec<String> = {
                     let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
                     sq.drain(..).collect()
@@ -292,10 +422,8 @@ where
                         self.append(&interim_resp, false).await?;
                         messages.push(interim_resp);
                     }
-                    if !user_appended {
-                        self.append(&user_message, false).await?;
-                        user_appended = true;
-                    }
+                    self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                        .await?;
                     let steer_msg = Message::user(steer_prompt);
                     self.append(&steer_msg, false).await?;
                     messages.push(steer_msg);
@@ -323,9 +451,8 @@ where
                     reply_text
                 };
 
-                if !user_appended {
-                    self.append(&user_message, false).await?;
-                }
+                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                    .await?;
 
                 let mut final_response = response.clone();
                 final_response.content = Some(final_reply.clone());
@@ -357,10 +484,8 @@ where
                 });
             }
 
-            if !user_appended {
-                self.append(&user_message, false).await?;
-                user_appended = true;
-            }
+            self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                .await?;
 
             // Append assistant response with tool calls to conversation history
             self.append(&response, false).await?;
@@ -402,6 +527,32 @@ where
         }
     }
 
+    /// Persist the original prompt, and make sure the in-memory request still carries it.
+    ///
+    /// It normally sits at the end of `messages` already; only the turn loop's own appending is
+    /// deferred. But adopting a fold mid-turn rebuilds `messages` from the stored transcript, so a
+    /// prompt that had not been written yet could disappear from the request even as it is appended
+    /// here. Checking the tail covers both cases without adding a duplicate.
+    async fn ensure_user_prompt(
+        &self,
+        messages: &mut Vec<Message>,
+        user_message: &Message,
+        user_appended: &mut bool,
+    ) -> Result<(), HarnessError> {
+        if *user_appended {
+            return Ok(());
+        }
+        self.append(user_message, false).await?;
+        *user_appended = true;
+        let present = messages.last().is_some_and(|message| {
+            message.role == Role::User && message.content == user_message.content
+        });
+        if !present {
+            messages.push(user_message.clone());
+        }
+        Ok(())
+    }
+
     /// One model call, taken through the provider's streaming API so reasoning reaches the
     /// observer while the model is still producing it. The stream is assembled into the same
     /// `Message` the buffered call returns, so tool execution and persistence are unchanged.
@@ -415,21 +566,26 @@ where
         options: &CompletionOptions,
         executed_tools: &mut Vec<TurnToolCall>,
         cancel_token: &CancellationToken,
-    ) -> Result<Message, HarnessError> {
+    ) -> Result<Streamed, HarnessError> {
         // Count only the tools this call reports. `executed_tools` accumulates across the whole
         // turn, so testing it for emptiness would make every round after the first look as if it
         // had already produced output — and skip the buffered retry on an empty stream.
         let tools_before = executed_tools.len();
+        // The soft-interrupt token belongs to this one call. While it is published, a message
+        // typed at the composer stops the call but not the turn.
+        let call = self.interrupt.begin_call();
+        let call_token = call.token();
         let mut stream = tokio::select! {
+            biased;
             _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+            _ = call_token.cancelled() => return Ok(Streamed::cut()),
             res = self.provider.stream(messages, tools, options) => match res {
                 Ok(stream) => stream,
                 Err(error) => {
                     debug!("Provider stream unavailable ({}), falling back to a buffered call", error);
-                    tokio::select! {
-                        _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
-                        buffered = self.provider.complete(messages, tools, options) => return buffered,
-                    }
+                    return self
+                        .buffered_completion(messages, tools, options, cancel_token, &call_token)
+                        .await;
                 }
             }
         };
@@ -440,10 +596,16 @@ where
         let mut finish_reason: Option<String> = None;
         // Tool-call fragments arrive keyed by the index the provider assigned them.
         let mut calls: Vec<(usize, ToolCall)> = Vec::new();
+        let mut interrupted = false;
 
         loop {
             let event = tokio::select! {
+                biased;
                 _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                _ = call_token.cancelled() => {
+                    interrupted = true;
+                    break;
+                }
                 ev = stream.next() => match ev {
                     Some(event) => event,
                     None => break,
@@ -463,7 +625,15 @@ where
                             "Stream failed before any content/tool output ({}), retrying buffered",
                             error
                         );
-                        return self.provider.complete(messages, tools, options).await;
+                        return self
+                            .buffered_completion(
+                                messages,
+                                tools,
+                                options,
+                                cancel_token,
+                                &call_token,
+                            )
+                            .await;
                     }
                     return Err(error);
                 }
@@ -591,6 +761,24 @@ where
             }
         }
 
+        if interrupted {
+            // A tool call is only usable once its arguments are complete; fragments collected so
+            // far describe a request the provider never finished. Drop them and keep the prose.
+            let content = crate::text::strip_dsml_artifacts(&content);
+            let message = Message {
+                role: Role::Assistant,
+                content: (!content.trim().is_empty()).then_some(content),
+                reasoning: (!reasoning.trim().is_empty()).then_some(reasoning),
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage,
+            };
+            return Ok(Streamed {
+                message,
+                interrupted: true,
+            });
+        }
+
         calls.sort_by_key(|(index, _)| *index);
         let tool_calls: Vec<ToolCall> = calls
             .into_iter()
@@ -632,17 +820,20 @@ where
                 if reasoning.is_empty() {
                     return Err(empty_answer_error(self.provider.provider_id()));
                 }
-                return Ok(Message {
+                return Ok(Streamed::done(Message {
                     role: Role::Assistant,
                     content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
                     reasoning: Some(reasoning),
                     tool_calls: Vec::new(),
                     tool_result: None,
                     usage,
-                });
+                }));
             }
             debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
-            let buffered = self.provider.complete(messages, tools, options).await?;
+            let buffered = self
+                .buffered_completion(messages, tools, options, cancel_token, &call_token)
+                .await?;
+            let buffered = buffered.message;
             if buffered.content.as_deref().unwrap_or("").trim().is_empty()
                 && buffered.tool_calls.is_empty()
             {
@@ -651,18 +842,18 @@ where
                 } else {
                     Some(reasoning)
                 }) {
-                    return Ok(Message {
+                    return Ok(Streamed::done(Message {
                         role: Role::Assistant,
                         content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
                         reasoning: Some(r),
                         tool_calls: Vec::new(),
                         tool_result: None,
                         usage,
-                    });
+                    }));
                 }
                 return Err(empty_answer_error(self.provider.provider_id()));
             }
-            return Ok(buffered);
+            return Ok(Streamed::done(buffered));
         }
 
         if reasoning.is_empty() {
@@ -702,6 +893,29 @@ where
         };
         response.tool_calls = tool_calls;
         response.usage = usage;
-        Ok(response)
+        Ok(Streamed::done(response))
+    }
+
+    /// The buffered call, under the same two stop signals as the streamed one.
+    ///
+    /// It is entered when a provider cannot stream (or fails before producing anything usable).
+    /// A soft interrupt here returns the same empty cut result, so the turn loop treats it exactly
+    /// like a stopped stream.
+    async fn buffered_completion(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+        cancel_token: &CancellationToken,
+        call_token: &CancellationToken,
+    ) -> Result<Streamed, HarnessError> {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => Err(HarnessError::Cancelled),
+            _ = call_token.cancelled() => Ok(Streamed::cut()),
+            result = self.provider.complete(messages, tools, options) => {
+                result.map(Streamed::done)
+            }
+        }
     }
 }
