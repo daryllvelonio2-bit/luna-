@@ -155,8 +155,6 @@ where
                 Ok(Some(outcome)) => {
                     *completed_fold.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(outcome.clone());
-                    let new_tokens = estimate_tokens(&outcome.kept).tokens
-                        + estimate_tokens(&[Message::system(outcome.summary.clone())]).tokens;
                     if let Some(observer) = observer {
                         observer(AgentEvent::CompactionFinished {
                             folded: Some(CompactionNotice {
@@ -165,9 +163,6 @@ where
                                 messages: outcome.folded_messages,
                             }),
                             error: None,
-                        });
-                        observer(AgentEvent::ContextTokensUpdated {
-                            tokens_used: new_tokens,
                         });
                     }
                 }
@@ -313,9 +308,16 @@ where
             );
             *watermark = rearmed;
             let mut messages = Vec::with_capacity(history.len() + 1);
-            messages.push(Message::system(
-                self.system_prompt("").await.unwrap_or_default(),
-            ));
+            // A failed prompt is not silently an empty one: the estimate below would understate
+            // the request and skip a fold that should fire, so the failure is reported.
+            let system_text = match self.system_prompt("").await {
+                Ok(text) => text,
+                Err(error) => {
+                    warn!("system prompt unavailable while re-arming a fold; estimating without it: {error}");
+                    String::new()
+                }
+            };
+            messages.push(Message::system(system_text));
             messages.extend(sendable_messages(&history));
             // The re-armed watermark only counts folds newer than the one just seen: pass the
             // fresh value through a nested call by checking size directly here.
@@ -334,7 +336,13 @@ where
         }
         // The same shape the next turn sends — system prompt plus the replayed transcript — so this
         // estimate and the one the turn makes at its top measure the same thing.
-        let system_text = self.system_prompt("").await.unwrap_or_default();
+        let system_text = match self.system_prompt("").await {
+            Ok(text) => text,
+            Err(error) => {
+                warn!("system prompt unavailable while checking the fold bar; estimating without it: {error}");
+                String::new()
+            }
+        };
         let mut messages = Vec::with_capacity(history.len() + 1);
         messages.push(Message::system(system_text));
         messages.extend(sendable_messages(&history));
@@ -427,6 +435,7 @@ where
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::ContextTokensUpdated {
                 tokens_used: heuristic_tokens(messages),
+                reset: true,
             });
         }
         Ok(Some(notice))

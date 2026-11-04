@@ -377,8 +377,23 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
 
         if !turn.reply.is_empty() {
             println!();
-            println!("{}\n{}", LUNA_LABEL.bold().green(), turn.reply);
+            println!(
+                "{}\n{}",
+                LUNA_LABEL.bold().green(),
+                reply_for_display(&turn.reply)
+            );
         }
+    }
+}
+
+/// The core stores a neutral placeholder when a model reasons but emits no text. `Ctrl+O` is this
+/// host's binding, so the hint is added at render time instead of being written into the transcript
+/// and sent back to the provider on every later turn.
+pub fn reply_for_display(reply: &str) -> &str {
+    if reply == harness_core::types::NO_TEXT_RESPONSE {
+        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)"
+    } else {
+        reply
     }
 }
 
@@ -412,6 +427,136 @@ pub fn render_transcript(turns: &[TurnRecord], expanded: bool, width: usize) {
 /// instead. U+263E LAST QUARTER MOON is a plain text glyph — terminals keep it
 /// black-and-white, unlike the colour crescent U+1F319 which renders as an emoji.
 pub const PROMPT: &str = "\u{263E} ";
+
+/// The moon drawn above the composer when a session has no transcript yet.
+///
+/// The crescent is deliberately made of block glyphs rather than ASCII punctuation: a fresh
+/// session is the one screen with nothing else on it, and the denser shape reads as a mark
+/// instead of stray characters. Every row is shorter than [`LANDING_FULL_MIN_WIDTH`], so the
+/// full lockup below is centred with room to spare.
+const LANDING_MOON: [&str; 14] = [
+    "          ▄▄▄▄▄▄▄",
+    "        ▄███████████▄",
+    "      ▄█████████▀▀▀▀▀",
+    "     ▄███████▀",
+    "    ▄███████",
+    "   ████████",
+    "   ███████",
+    "   ███████",
+    "   ████████",
+    "    ███████",
+    "     ███████▄",
+    "      █████████▄▄▄▄",
+    "        ▀███████████▀",
+    "          ▀▀▀▀▀▀▀",
+];
+
+/// The two lines that sit beside the moon on a wide terminal.
+const LANDING_TITLE: &str = "L U N A";
+const LANDING_TAGLINE: &str = "autonomous agent harness";
+
+/// Column the title and tagline start at, measured from the left edge of the moon block.
+const LANDING_TEXT_COL: usize = 26;
+
+/// Narrowest terminal that can hold the moon and its wordmark side by side.
+const LANDING_FULL_MIN_WIDTH: usize = LANDING_TEXT_COL + LANDING_TAGLINE.len();
+
+/// Narrowest terminal that still gets the moon at all.
+const LANDING_MOON_MIN_WIDTH: usize = 24;
+
+/// Narrower than this, even the compact wordmark does not fit with a margin.
+const LANDING_COMPACT_MIN_WIDTH: usize = 12;
+
+/// Return the rows of the fresh-session mark, or an empty vector when the terminal is too
+/// small to say anything.
+///
+/// A brand-new session has no transcript to anchor the screen, so the first frame is the only
+/// chance to show what the user has opened. This is printed once above the composer (not kept
+/// as chrome), so it scrolls away with the first turn rather than being redrawn on every paint.
+/// Three layouts are available so a narrow or short terminal still gets a recognisable mark:
+/// the full moon-and-wordmark lockup, a stacked moon, and a one- or two-line wordmark.
+pub fn landing_rows(width: usize, available_height: usize) -> Vec<String> {
+    if available_height == 0 {
+        return Vec::new();
+    }
+    if width >= LANDING_FULL_MIN_WIDTH && available_height >= LANDING_MOON.len() {
+        return centre_rows(full_landing_rows(), width);
+    }
+    if width >= LANDING_MOON_MIN_WIDTH && available_height > LANDING_MOON.len() {
+        return centre_rows(stacked_landing_rows(), width);
+    }
+    if width >= LANDING_MOON_MIN_WIDTH && available_height >= 2 {
+        return centre_rows(
+            vec![
+                format!("{}  {}", "☾".cyan().bold(), LANDING_TITLE.bold()),
+                LANDING_TAGLINE.dimmed().to_string(),
+            ],
+            width,
+        );
+    }
+    if width >= LANDING_COMPACT_MIN_WIDTH {
+        return centre_rows(
+            vec![format!("{}  {}", "☾".cyan().bold(), LANDING_TITLE.bold())],
+            width,
+        );
+    }
+    Vec::new()
+}
+
+/// The wide lockup: the moon on the left, the wordmark and promise on its right.
+fn full_landing_rows() -> Vec<String> {
+    LANDING_MOON
+        .iter()
+        .enumerate()
+        .map(|(index, art)| {
+            let text = match index {
+                1 => Some(LANDING_TITLE.cyan().bold().to_string()),
+                3 => Some(LANDING_TAGLINE.dimmed().to_string()),
+                _ => None,
+            };
+            landing_row(art, text.as_deref())
+        })
+        .collect()
+}
+
+/// The narrow lockup: the moon with its name underneath, centred as one block.
+fn stacked_landing_rows() -> Vec<String> {
+    let mut rows: Vec<String> = LANDING_MOON
+        .iter()
+        .map(|art| art.white().bold().to_string())
+        .collect();
+    rows.push(LANDING_TITLE.cyan().bold().to_string());
+    rows
+}
+
+/// One row of the wide lockup: the moon in place, then the text at its own column.
+fn landing_row(art: &str, text: Option<&str>) -> String {
+    let art = art.trim_end();
+    let mut row = art.white().bold().to_string();
+    if let Some(text) = text {
+        let pad = LANDING_TEXT_COL.saturating_sub(dialoguer::console::measure_text_width(art));
+        row.push_str(&" ".repeat(pad));
+        row.push_str(text);
+    }
+    row
+}
+
+/// Centre every row of a block on `width`, using the block's widest row so the pieces keep
+/// their relative alignment.
+fn centre_rows(rows: Vec<String>, width: usize) -> Vec<String> {
+    let block_width = rows
+        .iter()
+        .map(|row| {
+            let plain = dialoguer::console::strip_ansi_codes(row).to_string();
+            dialoguer::console::measure_text_width(&plain)
+        })
+        .max()
+        .unwrap_or(0);
+    let pad = width.saturating_sub(block_width) / 2;
+    rows.into_iter()
+        .map(|row| format!("{}{}", " ".repeat(pad), row))
+        .collect()
+}
 
 /// Luna's reply label. Kept beside [`PROMPT`] so the two sides of the transcript are edited
 /// in one place rather than hunting for scattered UI literals.

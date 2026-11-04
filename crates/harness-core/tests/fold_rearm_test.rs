@@ -404,7 +404,7 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
         AgentEvent::CompactionStarted { .. } => {
             started_watcher.fetch_add(1, Ordering::SeqCst);
         }
-        AgentEvent::ContextTokensUpdated { tokens_used } => {
+        AgentEvent::ContextTokensUpdated { tokens_used, .. } => {
             tokens_watcher.lock().unwrap().push(tokens_used);
         }
         _ => {}

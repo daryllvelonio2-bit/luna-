@@ -802,6 +802,129 @@ fn strip(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
 }
 
+/// A modal owns the alternate screen; the chat loop is blocked on the prompt while it is up, but
+/// updates still arrive from other tasks (the provider's usage callback, a delegate finishing).
+/// Painting the composer there would put it on the modal's screen, which is the OpenCode approval
+/// box the user saw with the status line and composer left visible underneath it.
+#[test]
+fn a_modal_keeps_background_updates_off_the_screen() {
+    let ui = ChatUi::new(true);
+    ui.set_status("test-model", 0, 1000);
+    ui.draw_box(80, "");
+    assert!(ui.box_drawn.load(Ordering::SeqCst));
+
+    let before = ui
+        .drawn_metrics
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the composer was drawn");
+
+    ui.set_modal_active(true);
+    ui.update_context_used(4096);
+
+    let after = ui
+        .drawn_metrics
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the composer metrics survive");
+    assert_eq!(
+        after.block_rows, before.block_rows,
+        "a background status update must not repaint the composer over the modal"
+    );
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        4096,
+        "the update is still recorded for when the screen comes back"
+    );
+
+    ui.emit_above("a line from a background task");
+    assert_eq!(
+        ui.pending_above.lock().unwrap().as_slice(),
+        ["a line from a background task"],
+        "the transcript line is held while the modal owns the screen"
+    );
+
+    ui.set_modal_active(false);
+    assert!(
+        ui.pending_above.lock().unwrap().is_empty(),
+        "the held line is written once the screen is back"
+    );
+}
+
+/// A context bar that falls while nothing left the transcript reads as a reset, not as a
+/// measurement. Turn-boundary recomputes use a different source than the running turn (the
+/// provider's count versus the character heuristic, or a stored report without its tail), so the
+/// gauge holds its high-water mark; only a fold, which really removes history, may lower it.
+#[test]
+fn the_context_gauge_holds_its_high_water_mark_until_a_fold() {
+    let ui = ChatUi::new(true);
+    ui.set_status("test-model", 126_000, 1_000_000);
+
+    ui.update_status(94_000, 1_000_000);
+    ui.update_context_used(94_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        126_000,
+        "a boundary estimate smaller than the gauge must not rewind it"
+    );
+
+    ui.update_context_used(130_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        130_000,
+        "growth is still shown immediately"
+    );
+
+    // A fold lands mid-turn: the running turn is still on the transcript it replaced, so the
+    // shrunken size waits for the boundary instead of flashing and jumping back.
+    ui.defer_context_drop();
+    ui.update_context_used(90_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        130_000,
+        "a mid-turn fold does not paint its smaller size immediately"
+    );
+    ui.update_status(90_000, 1_000_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        90_000,
+        "the boundary takes the folded size once"
+    );
+    ui.update_status(80_000, 1_000_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        90_000,
+        "the deferred drop is consumed by one boundary"
+    );
+
+    ui.reset_context_used(20_000);
+    assert_eq!(
+        ui.status.lock().unwrap().as_ref().unwrap().context_used,
+        20_000,
+        "an explicit fold takes the smaller figure at once"
+    );
+}
+
+/// The flag alone cannot stop a paint that had already passed its check when the modal went up.
+/// Such a paint is counted as in flight, and the modal waits for the count to reach zero before it
+/// takes the alternate screen.
+#[test]
+fn paints_are_counted_while_they_run() {
+    let ui = ChatUi::new(true);
+    {
+        let _first = ui.paint_in_flight();
+        let _second = ui.paint_in_flight();
+        assert_eq!(ui.paints_in_flight.load(Ordering::SeqCst), 2);
+    }
+    assert_eq!(
+        ui.paints_in_flight.load(Ordering::SeqCst),
+        0,
+        "each paint is given up when it ends"
+    );
+}
+
 #[test]
 fn delegate_task_notification_format_contains_title_tool_and_running_time() {
     let title =

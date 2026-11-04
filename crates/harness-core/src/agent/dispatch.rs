@@ -438,6 +438,7 @@ where
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::ContextTokensUpdated {
                 tokens_used: current_tokens,
+                reset: false,
             });
         }
 

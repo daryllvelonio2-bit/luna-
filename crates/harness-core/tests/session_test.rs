@@ -1959,7 +1959,7 @@ async fn a_fold_announces_the_shrunken_context_without_waiting_for_a_model_call(
                 folded.is_some(),
                 error.is_some()
             )),
-            AgentEvent::ContextTokensUpdated { tokens_used } => {
+            AgentEvent::ContextTokensUpdated { tokens_used, .. } => {
                 log.push(format!("ctx {tokens_used}"))
             }
             _ => {}
@@ -2041,6 +2041,44 @@ async fn estimate_after_a_fold_ignores_the_usage_of_the_pre_fold_transcript() {
         .map(|stored| stored.message.clone())
         .collect();
     assert_eq!(after, heuristic_tokens(&live));
+}
+
+/// The turn loop measures its first request as "reported usage plus the heuristic tail"; the
+/// boundary must hand back the same number. Returning only the newest report made the gauge shrink
+/// the moment a turn ended, with nothing having left the transcript.
+#[tokio::test]
+async fn estimate_at_a_turn_boundary_adds_the_tail_after_the_newest_report() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+
+    let mut reply = Message::assistant("an answer");
+    reply.usage = Some(TokenUsage::estimated(1_000, 200));
+    store.append("s1", &reply, false).await.unwrap();
+    // A row appended after the report is sent with the next request, but no new report covers it
+    // yet.
+    store
+        .append("s1", &Message::assistant("x".repeat(400)), false)
+        .await
+        .unwrap();
+
+    let agent = Agent::new(
+        Arc::new(RecordingProvider::new("done")),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: Arc::new(store),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    });
+
+    assert_eq!(
+        agent.estimate_session_tokens().await.unwrap(),
+        1_200 + 100,
+        "reported prompt+completion plus the heuristic tail"
+    );
 }
 
 /// A fold boundary is never the end of the transcript.
@@ -2276,6 +2314,69 @@ async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
     assert!(
         count_rows(&path, "compacted_at IS NOT NULL") > 0,
         "and it folded rows rather than only marking the session"
+    );
+}
+
+/// An automatic fold is a bound on the *next* request, not an announcement about the current turn.
+/// It lands while the turn still holds the transcript it replaced, so it must not hand the gauge
+/// its shrunken size: the turn's own next report would restore the larger figure, which is the
+/// drop-then-jump the gauge showed around a soft interrupt. The drop waits for the boundary.
+#[tokio::test]
+async fn an_automatic_fold_does_not_reset_the_gauge_mid_turn() {
+    let (_dir, _path, store) = seeded_store(3).await;
+    let main = Arc::new(RecordingProvider::new(&"x".repeat(2_000_000)));
+    let summariser = Arc::new(CannedProvider::new("FOLDED WITHOUT BEING ASKED"));
+
+    let mut cfg = agent_config();
+    cfg.compact_at_tokens = 500_000;
+    cfg.auto_compact_enabled = true;
+    cfg.auto_compact_threshold = 100_000;
+    cfg.auto_compact_turns = 1;
+
+    let mut agent = Agent::new(
+        main,
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser,
+        model: "canned-model".to_string(),
+    });
+
+    let folded = Arc::new(tokio::sync::Notify::new());
+    let folded_obs = folded.clone();
+    let updates: Arc<Mutex<Vec<(u32, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let updates_obs = updates.clone();
+    agent.set_observer(Arc::new(move |event| match event {
+        AgentEvent::CompactionFinished {
+            folded: Some(_), ..
+        } => folded_obs.notify_one(),
+        AgentEvent::ContextTokensUpdated { tokens_used, reset } => {
+            updates_obs.lock().unwrap().push((tokens_used, reset));
+        }
+        _ => {}
+    }));
+
+    agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), folded.notified())
+        .await
+        .expect("the automatic fold must complete");
+
+    let updates = updates.lock().unwrap().clone();
+    assert!(!updates.is_empty(), "the turn reported its own size");
+    assert!(
+        updates.iter().all(|(_, reset)| !reset),
+        "an automatic fold must not reset the gauge mid-turn: {updates:?}"
     );
 }
 

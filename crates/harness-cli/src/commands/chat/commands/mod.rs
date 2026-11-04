@@ -1538,6 +1538,7 @@ pub(crate) async fn handle_new_command(
 
     if ui.is_attended {
         crate::commands::clear_screen();
+        ui.draw_landing();
         ui.draw_initial_box();
         if name.is_empty() {
             ui.emit_above(&format!(
@@ -1614,6 +1615,7 @@ pub(crate) async fn handle_delete_command(
 
     if ui.is_attended {
         crate::commands::clear_screen();
+        ui.draw_landing();
         ui.draw_initial_box();
         ui.emit_above(&format!(
             "{} Deleted session {} and started fresh session {}",
@@ -2154,6 +2156,7 @@ pub(crate) async fn handle_auto_compact_command(
     // Two boxes, one value each. Esc in either leaves the config exactly as it was: a half
     // answered wizard must not write a threshold the user never confirmed.
     let Some(threshold) = prompt_value(
+        ui,
         key_rx,
         &THRESHOLD_PROMPT,
         current_threshold,
@@ -2167,6 +2170,7 @@ pub(crate) async fn handle_auto_compact_command(
     };
 
     let Some(percent) = prompt_value(
+        ui,
         key_rx,
         &PERCENT_PROMPT,
         current_percent,
@@ -2384,6 +2388,7 @@ const PERCENT_PROMPT: ValuePrompt = ValuePrompt {
 /// functions read it as the default, and the box says so by showing the current value as the
 /// placeholder the answer falls back to.
 async fn prompt_value<F, A>(
+    ui: &ChatUi,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     spec: &ValuePrompt,
     current: usize,
@@ -2414,6 +2419,8 @@ where
     // The question takes the screen, the way the approval gate and the clarify box do: the whole
     // frame is repainted on every keystroke, so a box that changes height (an error row, a longer
     // value) can never walk the cursor up the screen.
+    ui.set_modal_active(true);
+    ui.wait_for_paints().await;
     let screen = ModalScreen::enter();
     paint_centred(&render_value_box(
         spec,
@@ -2463,6 +2470,8 @@ where
 
     // Back on the transcript: the composer was never painted over, so there is nothing to restore.
     drop(screen);
+    ui.set_modal_active(false);
+    ui.redraw_box();
     answer
 }
 

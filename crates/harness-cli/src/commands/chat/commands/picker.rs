@@ -87,6 +87,29 @@ pub(crate) async fn select_slash_command(
         let inner_width = width.saturating_sub(4);
         let filtered = get_filtered(filt);
 
+        // The descriptions sit in a fixed column, taken from every entry rather than the filtered
+        // page, so they line up row to row and do not jump as the user narrows the list. Without
+        // this a description started two cells after its own name and stepped right with it.
+        let name_col = entries
+            .iter()
+            .map(|cmd| cmd.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(inner_width.saturating_sub(12));
+
+        // Cut to the column and mark the cut, so a name wider than the column (a long skill name in
+        // a narrow terminal) cannot push its own description out of line.
+        let clamp_cell = |text: &str, max: usize| -> String {
+            if max == 0 {
+                return String::new();
+            }
+            if text.chars().count() > max {
+                format!("{}…", text.chars().take(max - 1).collect::<String>())
+            } else {
+                text.to_string()
+            }
+        };
+
         let mut lines = Vec::with_capacity(BOX_ROWS);
         lines.push(
             format!("┌{}┐", "─".repeat(width.saturating_sub(2)))
@@ -116,39 +139,31 @@ pub(crate) async fn select_slash_command(
                 } else {
                     "  ".to_string()
                 };
-                let cmd_styled = if is_sel {
-                    cmd.name.bold().to_string()
-                } else {
-                    cmd.name.cyan().to_string()
-                };
-
                 let pfx_len = 2;
-                let name_len = cmd.name.chars().count();
                 let gap_len = 2;
-                let remaining_width = inner_width.saturating_sub(pfx_len + name_len + gap_len);
-
-                let details_disp = if cmd.details.chars().count() > remaining_width {
-                    format!(
-                        "{}…",
-                        cmd.details
-                            .chars()
-                            .take(remaining_width.saturating_sub(1))
-                            .collect::<String>()
-                    )
+                let name_disp = clamp_cell(&cmd.name, name_col);
+                // Style the truncated cell, not the original name: a name wider than the column
+                // must not push its description out of the shared column.
+                let cmd_styled = if is_sel {
+                    name_disp.bold().to_string()
                 } else {
-                    cmd.details.to_string()
+                    name_disp.cyan().to_string()
                 };
+                let name_len = name_disp.chars().count();
+                let name_pad = " ".repeat(name_col.saturating_sub(name_len));
+                let remaining_width = inner_width.saturating_sub(pfx_len + name_col + gap_len);
+                let details_disp = clamp_cell(&cmd.details, remaining_width);
                 let details_len = details_disp.chars().count();
                 let pad_len =
-                    inner_width.saturating_sub(pfx_len + name_len + gap_len + details_len);
+                    inner_width.saturating_sub(pfx_len + name_col + gap_len + details_len);
 
                 lines.push(format!(
-                    "│ {}{}  {}{}{} │",
+                    "│ {}{}{}  {}{} │",
                     pfx,
                     cmd_styled,
+                    name_pad,
                     details_disp.dimmed(),
-                    " ".repeat(pad_len),
-                    "".clear()
+                    " ".repeat(pad_len)
                 ));
             }
 

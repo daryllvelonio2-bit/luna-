@@ -110,8 +110,10 @@ pub trait MemoryEngine: Send + Sync {
     /// Defaulted: the pointer id is derived from the note id (`mem_ptr_{note_id}`), so a plain
     /// `forget` is sufficient and implementors need not override it.
     async fn remove_note_pointer(&self, note_id: &str) -> Result<(), HarnessError> {
-        let _ = self.forget(&format!("mem_ptr_{}", note_id)).await;
-        let _ = self.forget(note_id).await;
+        // A missing pointer is not a failure — `forget` is idempotent — but a store error is:
+        // returning `Ok` there is how a dangling memory pointer survives a note deletion.
+        self.forget(&format!("mem_ptr_{}", note_id)).await?;
+        self.forget(note_id).await?;
         Ok(())
     }
 

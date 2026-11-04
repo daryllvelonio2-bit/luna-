@@ -21,6 +21,12 @@ use crate::types::*;
 /// resumed transcript should say why the sentence stops where it does.
 const INTERRUPTED_MARKER: &str = "\n\n[interrupted by your next message]";
 
+/// How many times one model call is re-sent after a retryable failure.
+///
+/// Three retries covers a short 429/503 burst (the provider's own `Retry-After` still wins) while
+/// bounding how long a turn can sit in backoff before the error reaches the user.
+const MODEL_RETRY_LIMIT: u32 = 3;
+
 /// One model call's output, and whether a soft interrupt cut it short.
 struct Streamed {
     message: Message,
@@ -237,6 +243,7 @@ where
             if let Some(ref observer) = self.observer {
                 observer(AgentEvent::ContextTokensUpdated {
                     tokens_used: current_tokens,
+                    reset: false,
                 });
             }
 
@@ -256,7 +263,7 @@ where
             };
 
             // Retrying on transient / overloaded errors with backoff
-            let max_retries = 3;
+            let max_retries = MODEL_RETRY_LIMIT;
             let tools_before_call = executed_tools.len();
             let mut response = None;
             let mut interrupted = false;
@@ -281,7 +288,7 @@ where
                     Err(e)
                         if e.is_retryable()
                             && attempt < max_retries
-                            && executed_tools.is_empty() =>
+                            && executed_tools.len() == tools_before_call =>
                     {
                         let delay = retry_delay_with_jitter(&e, attempt);
                         let delay_secs = (delay.as_secs_f64()).ceil() as u64;
@@ -391,6 +398,7 @@ where
             if let Some(ref observer) = self.observer {
                 observer(AgentEvent::ContextTokensUpdated {
                     tokens_used: actual_tokens,
+                    reset: false,
                 });
             }
 
@@ -507,7 +515,10 @@ where
                     if !executed_tools.is_empty() {
                         String::new()
                     } else {
-                        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)".to_string()
+                        // A neutral placeholder: `Ctrl+O` is a CLI binding the core cannot know
+                        // about, and this string is appended to the transcript. The CLI adds its
+                        // own hint when it renders the reply.
+                        crate::types::NO_TEXT_RESPONSE.to_string()
                     }
                 } else {
                     reply_text
@@ -850,6 +861,7 @@ where
                     if let Some(ref observer) = self.observer {
                         observer(AgentEvent::ContextTokensUpdated {
                             tokens_used: actual_tokens,
+                            reset: false,
                         });
                     }
                 }

@@ -35,6 +35,7 @@ pub(super) const PERCENT_PROMPT: ValuePrompt = ValuePrompt {
 /// functions read it as the default, and the box says so by showing the current value as the
 /// placeholder the answer falls back to.
 pub(super) async fn prompt_value<F, A>(
+    ui: &ChatUi,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     spec: &ValuePrompt,
     current: usize,
@@ -65,6 +66,8 @@ where
     // The question takes the screen, the way the approval gate and the clarify box do: the whole
     // frame is repainted on every keystroke, so a box that changes height (an error row, a longer
     // value) can never walk the cursor up the screen.
+    ui.set_modal_active(true);
+    ui.wait_for_paints().await;
     let screen = ModalScreen::enter();
     paint_centred(&render_value_box(
         spec,
@@ -114,6 +117,8 @@ where
 
     // Back on the transcript: the composer was never painted over, so there is nothing to restore.
     drop(screen);
+    ui.set_modal_active(false);
+    ui.redraw_box();
     answer
 }
 

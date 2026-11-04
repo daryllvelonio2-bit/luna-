@@ -255,7 +255,7 @@ pub async fn run_exec(
                 AgentEvent::Steered { text } => {
                     serde_json::json!({"type": "steered", "text": text})
                 }
-                AgentEvent::ContextTokensUpdated { tokens_used } => {
+                AgentEvent::ContextTokensUpdated { tokens_used, .. } => {
                     serde_json::json!({"type": "context_tokens", "tokens_used": tokens_used})
                 }
                 // Compaction is reported by the turn's own output in headless mode, where there is

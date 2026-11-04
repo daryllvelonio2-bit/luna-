@@ -54,8 +54,8 @@ use render::{
     clean_user_query_for_transcript, compaction_report, extract_patch_diff,
     format_approval_verdict, format_delegate_duration, format_delegate_notification,
     format_delegate_title, format_tool_call, format_tool_result, has_verdict, is_non_tool_event,
-    parse_turns_from_history, render_transcript, right_aligned_user_message, OutputBlockKind,
-    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    parse_turns_from_history, render_transcript, reply_for_display, right_aligned_user_message,
+    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
 use viewer::show_background_task_viewer;
@@ -540,8 +540,12 @@ pub async fn run_interactive_chat(
             harness_core::AgentEvent::ReasoningDelta(text) => {
                 ui_obs.push_reasoning(&text);
             }
-            harness_core::AgentEvent::ContextTokensUpdated { tokens_used } => {
-                ui_obs.update_context_used(tokens_used);
+            harness_core::AgentEvent::ContextTokensUpdated { tokens_used, reset } => {
+                if reset {
+                    ui_obs.reset_context_used(tokens_used);
+                } else {
+                    ui_obs.update_context_used(tokens_used);
+                }
             }
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
                 ui_obs.finish_reasoning();
@@ -686,6 +690,9 @@ pub async fn run_interactive_chat(
                 if let Some(err) = error {
                     ui_obs.emit_above(&format!("{} Compaction failed: {}", "✖".red(), err));
                 } else if let Some(notice) = folded {
+                    // A fold really retired history, so the gauge may fall — but not while this
+                    // turn is still on the transcript it replaced. Defer the drop to the boundary.
+                    ui_obs.defer_context_drop();
                     ui_obs.emit_above(&compaction_report(&notice));
                 }
             }
@@ -1229,7 +1236,11 @@ pub async fn run_interactive_chat(
                             &outcome,
                         )
                         .await;
-                    println!("\n{}\n{}\n", LUNA_LABEL.bold().green(), outcome.reply);
+                    println!(
+                        "\n{}\n{}\n",
+                        LUNA_LABEL.bold().green(),
+                        reply_for_display(&outcome.reply)
+                    );
                 }
                 Err(e) => {
                     eprintln!("\n{} Error: {}\n", "✖".red().bold(), e);
@@ -1315,6 +1326,13 @@ pub async fn run_interactive_chat(
     // A resumed session carries its list: the panel is drawn from the start, above
     // the composer, so the tasks are in front of the user before the first prompt.
     todo::refresh_panel(&ui, &todo_scope);
+
+    // A brand-new session has no transcript, so the moon is the only thing anchoring the screen.
+    // A resumed one already has its conversation; repeating the landing there would push it up
+    // for no reason.
+    if replayed.replayed == 0 {
+        ui.draw_landing();
+    }
 
     ui.draw_initial_box();
 
@@ -1492,9 +1510,9 @@ pub async fn run_interactive_chat(
                     continue;
                 }
 
-                // The popup owns the screen while it is up, so nothing is cleared here and no
-                // composer is redrawn on the way out: the verdict below restores it.
-                let choice = prompt_approval_choice(&mut key_rx, &request, &mut decision_tx).await;
+                // The popup owns the screen while it is up and gives it back on the way out; the
+                // verdict below is what lands in the transcript.
+                let choice = prompt_approval_choice(&mut key_rx, &request, &mut decision_tx, &ui).await;
                 if matches!(choice, ApprovalChoice::AllSession) {
                     // Sticky "approve all": flip the gate once and it stays for this chat.
                     allow_all_session.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1529,7 +1547,7 @@ pub async fn run_interactive_chat(
 
                 // The dialog owns the screen while it is up (see `prompt_sudo_password_dialog`):
                 // nothing to clear here, and it prints its own outcome on the way back.
-                let password = prompt_sudo_password_dialog(&mut key_rx, &command).await;
+                let password = prompt_sudo_password_dialog(&mut key_rx, &command, &ui).await;
                 let _ = decision_tx.send(password);
             }
 
@@ -2213,7 +2231,11 @@ pub async fn run_interactive_chat(
                             ui.draw_initial_box();
                         } else {
                             if !outcome.reply.is_empty() {
-                                println!("{}\n{}", LUNA_LABEL.bold().green(), outcome.reply);
+                                println!(
+                                    "{}\n{}",
+                                    LUNA_LABEL.bold().green(),
+                                    reply_for_display(&outcome.reply)
+                                );
                             }
                         }
 

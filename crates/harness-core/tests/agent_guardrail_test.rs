@@ -663,3 +663,104 @@ async fn test_huge_tool_result_is_capped_in_dispatch() {
         "Tool output >200,000 chars must be capped before feeding back to the model"
     );
 }
+
+/// A tool round followed by a transient model failure. `executed_tools` is the whole turn's
+/// ledger, so a retry guard keyed on its emptiness refuses to retry the *second* model call —
+/// the exact failure retries exist for. The guard has to look at this call only.
+struct ToolThenOverloadProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for ToolThenOverloadProvider {
+    fn provider_id(&self) -> &str {
+        "tool-then-overload"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(Message::assistant_with_tools(vec![ToolCall {
+                id: "call_noop".to_string(),
+                name: "noop_tool".to_string(),
+                arguments: serde_json::json!({}),
+                signature: None,
+            }])),
+            1 | 2 => Err(HarnessError::ProviderError {
+                provider: "tool-then-overload".to_string(),
+                message: "Model is overloaded (HTTP 503)".to_string(),
+            }),
+            _ => Ok(Message::assistant("Recovered after the tool round")),
+        }
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+struct NoopTool;
+
+#[async_trait]
+impl Tool for NoopTool {
+    fn name(&self) -> &str {
+        "noop_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Succeeds without doing anything"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        _arguments: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        Ok(ToolResult::success(call_id, "ok"))
+    }
+}
+
+#[tokio::test]
+async fn test_agent_retries_transient_error_after_a_tool_round() {
+    let provider = Arc::new(ToolThenOverloadProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let registry = Arc::new(DefaultToolRegistry::new());
+    registry.register(Arc::new(NoopTool)).await.unwrap();
+
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        registry,
+        AgentConfig::default(),
+    );
+
+    let result = agent
+        .run_task("Use the tool", CancellationToken::new())
+        .await;
+    assert!(
+        result.is_ok(),
+        "a transient error after a tool round must be retried, got: {result:?}"
+    );
+    assert_eq!(result.unwrap(), "Recovered after the tool round");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        4,
+        "one tool round, two retried failures, then the answer"
+    );
+}

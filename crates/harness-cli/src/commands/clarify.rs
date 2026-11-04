@@ -432,6 +432,8 @@ pub async fn prompt_clarify_choice(
 
     let mut answers = Vec::new();
     // The box takes the screen for as long as a question is up, and gives it back on the way out.
+    ui.set_modal_active(true);
+    ui.wait_for_paints().await;
     let screen = ModalScreen::enter();
 
     for item in &request.questions {
@@ -544,6 +546,8 @@ pub async fn prompt_clarify_choice(
     // answer was given: a line emitted while the alternate screen was up would have been drawn
     // onto that screen instead of the conversation.
     drop(screen);
+    ui.set_modal_active(false);
+    ui.redraw_box();
     for answer in &answers {
         let summary = format!(
             "{} {}: {}",

@@ -999,9 +999,13 @@ impl TreeScan {
     /// already recorded — those have a blob and a kind of their own, and listing them twice would
     /// make a rewind look like it covered more than it does.
     fn changes_against(&self, after: &TreeScan, recorded: &[String]) -> Vec<UnrecordedFile> {
+        // The recorded list is small but the scan can hold tens of thousands of files; testing it
+        // with a linear `any` made this O(files × recorded) on the runtime worker.
+        let recorded: std::collections::HashSet<&str> =
+            recorded.iter().map(String::as_str).collect();
         let mut changes = Vec::new();
         for (path, stamp) in &after.files {
-            if recorded.iter().any(|known| known == path) {
+            if recorded.contains(path.as_str()) {
                 continue;
             }
             match self.files.get(path) {

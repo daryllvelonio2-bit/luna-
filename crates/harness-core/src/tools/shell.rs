@@ -11,6 +11,15 @@ use crate::error::HarnessError;
 use crate::traits::Tool;
 use crate::types::ToolResult;
 
+/// How long the `rtk rewrite` helper gets before the command runs unrewritten.
+///
+/// The rewrite is a convenience, not part of the command: a helper that hangs must not delay the
+/// user's command, so the timeout is short and failure falls back to the original text.
+const RTK_REWRITE_TIMEOUT_MS: u64 = 1500;
+
+/// How long the non-interactive `sudo -n` probe may take before sudo is treated as unavailable.
+const SUDO_PROBE_TIMEOUT_MS: u64 = 500;
+
 #[async_trait]
 pub trait SudoPrompter: Send + Sync {
     async fn prompt_sudo_password(&self, command: &str) -> Result<Option<String>, HarnessError>;
@@ -175,11 +184,15 @@ pub async fn try_rtk_rewrite(command: &str, rtk_path: &Path) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
 
-    let output =
-        match tokio::time::timeout(std::time::Duration::from_millis(1500), cmd.output()).await {
-            Ok(Ok(out)) => out,
-            _ => return None,
-        };
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_millis(RTK_REWRITE_TIMEOUT_MS),
+        cmd.output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) => out,
+        _ => return None,
+    };
 
     if output.status.code() == Some(0) || output.status.code() == Some(3) {
         let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -297,7 +310,8 @@ pub async fn check_sudo_nopasswd_with_env(
         .envs(env_overrides)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let res = tokio::time::timeout(Duration::from_millis(500), cmd.status()).await;
+    let res =
+        tokio::time::timeout(Duration::from_millis(SUDO_PROBE_TIMEOUT_MS), cmd.status()).await;
     match res {
         Ok(Ok(status)) => status.success(),
         _ => false,

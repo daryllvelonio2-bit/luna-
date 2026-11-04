@@ -332,7 +332,7 @@ be able to reach the internet through the agent's own sockets. Details:
 row for every running child, showing its task id, goal, and current model/tool activity; the row
 is removed when the child finishes. Progress repaints that one row in place — a child's tool
 calls never append a line each to the transcript — so a long delegation leaves the conversation
-readable, and one verdict line is printed when the child ends. A child fails only after **120
+readable, and one verdict line is printed when the child ends. A child fails only after **180
 seconds with no model or tool activity**. Every streamed response and every tool event resets
 that inactivity timer, so a long
 task is not killed merely because it ran for a long time. `delegate_task(action: "wait")` waits

@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, compaction_line, needs_separator, reasoning_rows, tool_activity_detail,
-    truncate_to_cells, OutputBlockKind, PROMPT,
+    activity_line, compaction_line, landing_rows, needs_separator, reasoning_rows,
+    tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
 };
 use super::status::format_quota_lines;
 
@@ -190,6 +190,12 @@ struct ChatStatus {
     quota_drawn: String,
     context_used: u32,
     context_max: u32,
+    /// A fold retired history since the last turn boundary, so the next boundary estimate is
+    /// allowed to be lower than the gauge. Set by [`ChatUi::defer_context_drop`] and consumed by
+    /// [`ChatUi::update_status`]: a fold that lands mid-turn describes a transcript the running
+    /// turn has not adopted yet, and painting that size immediately made the gauge drop and jump
+    /// back within one round.
+    allow_context_drop: bool,
     yolo: bool,
     plan_mode: bool,
     session_name: String,
@@ -290,7 +296,32 @@ pub struct ChatUi {
     turn_active: Arc<AtomicBool>,
     box_drawn: Arc<AtomicBool>,
     drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
+    /// Set while an interactive prompt owns the screen.
+    ///
+    /// Updates arrive from tasks the chat loop is not running — the provider's usage callback, a
+    /// delegated child finishing — and a paint there would land on the alternate screen around the
+    /// question instead of on the transcript. While this is set the state is still updated, but the
+    /// composer is not drawn.
+    modal_active: Arc<AtomicBool>,
+    /// Paints running right now, so a modal can wait for the last one before it takes the screen.
+    ///
+    /// The flag alone closes the common case: a paint that sees it returns without drawing. A
+    /// paint that had already passed the check when the flag went up would still land on the
+    /// modal's screen instead of the transcript, so entering the alternate buffer waits for this
+    /// to fall to zero first.
+    paints_in_flight: Arc<AtomicUsize>,
+    /// Transcript lines produced while a modal owned the screen, written once it is gone.
+    pending_above: Arc<Mutex<Vec<String>>>,
     pub is_attended: bool,
+}
+
+/// Counts one paint as running until it is dropped.
+struct PaintInFlight(Arc<AtomicUsize>);
+
+impl Drop for PaintInFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Shortens a token count for the status line: 0→"0", 999→"999", 12_345→"12.3k", 272_000→"272k".
@@ -340,7 +371,57 @@ impl ChatUi {
             turn_active: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             drawn_metrics: Arc::new(Mutex::new(None)),
+            modal_active: Arc::new(AtomicBool::new(false)),
+            paints_in_flight: Arc::new(AtomicUsize::new(0)),
+            pending_above: Arc::new(Mutex::new(Vec::new())),
             is_attended,
+        }
+    }
+
+    /// Tell the UI that a modal owns the screen, or that it has been given back.
+    ///
+    /// While a modal is up the composer must not be painted: updates can arrive from tasks the
+    /// chat loop is not running, and a paint there would land on the alternate screen around the
+    /// question. Giving the screen back flushes any transcript lines that arrived meanwhile; the
+    /// caller repaints the composer if it needs to show state that changed under the modal.
+    pub fn set_modal_active(&self, active: bool) {
+        let was = self.modal_active.swap(active, Ordering::SeqCst);
+        if was && !active {
+            let pending: Vec<String> = {
+                let mut pending = self.pending_above.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *pending)
+            };
+            for text in pending {
+                self.emit_above(&text);
+            }
+        }
+    }
+
+    /// Whether an interactive prompt currently owns the screen.
+    pub fn modal_active(&self) -> bool {
+        self.modal_active.load(Ordering::SeqCst)
+    }
+
+    /// Count one paint as running until the returned guard is dropped.
+    ///
+    /// Taken before [`Self::modal_active`] is read: a paint that started before the flag went up
+    /// is then visible to [`Self::wait_for_paints`], and one that starts after it sees the flag.
+    fn paint_in_flight(&self) -> PaintInFlight {
+        self.paints_in_flight.fetch_add(1, Ordering::SeqCst);
+        PaintInFlight(self.paints_in_flight.clone())
+    }
+
+    /// Wait, briefly, for a paint that was already running when the modal went up.
+    ///
+    /// `set_modal_active(true)` must be called first: new paints then bail out at the flag while
+    /// the ones already printing finish. The wait is bounded — a wedged paint must not keep the
+    /// question off the screen forever.
+    pub async fn wait_for_paints(&self) {
+        const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(1);
+        let start = std::time::Instant::now();
+        while self.paints_in_flight.load(Ordering::SeqCst) > 0 && start.elapsed() < MAX_WAIT {
+            tokio::time::sleep(POLL).await;
         }
     }
 
@@ -621,6 +702,7 @@ impl ChatUi {
             quota_drawn,
             context_used,
             context_max,
+            allow_context_drop: false,
             yolo,
             plan_mode,
             session_name,
@@ -691,6 +773,7 @@ impl ChatUi {
             s.model = model.to_string();
             s.context_used = context_used;
             s.context_max = context_max;
+            s.allow_context_drop = false;
         }
     }
 
@@ -704,22 +787,67 @@ impl ChatUi {
         self.redraw_status_line();
     }
 
+    /// Refresh the gauge at a turn boundary.
+    ///
+    /// The used figure only ever rises: a boundary recomputes from a different source than the
+    /// running turn (the provider's count against the character heuristic, or a stored report
+    /// without the tail), and letting that correction paint a smaller number made the context bar
+    /// look like it had reset.
+    ///
+    /// A fold is the exception. It lands mid-turn, when the running turn is still on the transcript
+    /// the fold replaced, so the drop is deferred: [`Self::defer_context_drop`] records it and the
+    /// next boundary — by which time the turn has adopted the folded transcript — takes the smaller
+    /// figure. The window always follows the model, so it is taken as given either way.
     pub fn update_status(&self, context_used: u32, context_max: u32) {
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
-                s.context_used = context_used;
+                s.context_used = if s.allow_context_drop {
+                    context_used
+                } else {
+                    s.context_used.max(context_used)
+                };
+                s.allow_context_drop = false;
                 s.context_max = context_max;
             }
         }
         self.redraw_status_line();
     }
 
+    /// Record a mid-turn estimate. This never lowers the gauge: a provider measures the prompt it
+    /// was sent, and a running turn may still be on a transcript a fold has already replaced.
     pub fn update_context_used(&self, context_used: u32) {
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut s) = *status {
+                s.context_used = s.context_used.max(context_used);
+            }
+        }
+        self.redraw_status_line();
+    }
+
+    /// Allow the next turn boundary to take a figure lower than the gauge.
+    ///
+    /// Called when a fold lands: the summary really did retire history, but the running turn still
+    /// holds the transcript it replaced. Waiting for the boundary keeps that round from painting a
+    /// shrunken size and then jumping back to the one still in use.
+    pub fn defer_context_drop(&self) {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref mut s) = *status {
+            s.allow_context_drop = true;
+        }
+    }
+
+    /// Take a context figure that may be lower than the one on screen, right now.
+    ///
+    /// Only an explicit fold between turns (`/compact`) calls this: the value is the transcript
+    /// that will be sent next, and no running turn can contradict it.
+    pub fn reset_context_used(&self, context_used: u32) {
+        {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref mut s) = *status {
                 s.context_used = context_used;
+                s.allow_context_drop = false;
             }
         }
         self.redraw_status_line();
@@ -886,7 +1014,11 @@ impl ChatUi {
     }
 
     pub fn erase_live_and_box(&self, previous_live_rows: usize) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended {
+            return;
+        }
+        if self.modal_active() {
             return;
         }
         self.box_drawn.store(false, Ordering::SeqCst);
@@ -959,8 +1091,18 @@ impl ChatUi {
     }
 
     pub fn emit_above(&self, text: &str) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended {
             println!("{}", text);
+            return;
+        }
+        if self.modal_active() {
+            // The modal owns the alternate screen: writing here would put the line on that screen
+            // and lose it when the screen is given back. Hold it for the transcript instead.
+            self.pending_above
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(text.to_string());
             return;
         }
         let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
@@ -977,10 +1119,14 @@ impl ChatUi {
     }
 
     pub fn set_live(&self, rows: Vec<String>) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended {
             for row in &rows {
                 println!("{}", row);
             }
+            return;
+        }
+        if self.modal_active() {
             return;
         }
         let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
@@ -1209,6 +1355,10 @@ impl ChatUi {
     }
 
     pub fn draw_box(&self, width: usize, buf: &str) {
+        let _paint = self.paint_in_flight();
+        if self.modal_active() {
+            return;
+        }
         let rows = self.composer_rows(width, buf);
         let prompt_str = rows[rows.len() - 2].clone();
         let bottom_rule = rows[rows.len() - 1].clone();
@@ -1339,7 +1489,11 @@ impl ChatUi {
     }
 
     pub fn redraw_input_line(&self) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.modal_active() {
             return;
         }
         let width = get_terminal_width();
@@ -1374,8 +1528,37 @@ impl ChatUi {
         self.draw_box(width, &buf);
     }
 
-    pub fn handle_resize(&self) {
+    /// Draw the mark for a session that has no transcript yet.
+    ///
+    /// This is printed once, not kept as chrome: the composer is what has to stay put, while the
+    /// landing belongs to the scrollback and leaves with the first turn. The height check leaves
+    /// room for the composer and a blank line on either side of the mark, so a short terminal
+    /// collapses to the compact wordmark instead of pushing the prompt off the screen.
+    pub fn draw_landing(&self) {
         if !self.is_attended {
+            return;
+        }
+        let width = get_terminal_width();
+        let height = get_terminal_height();
+        let available = height.saturating_sub(self.box_row_count() + 2);
+        let rows = landing_rows(width, available);
+        if rows.is_empty() {
+            return;
+        }
+        println!();
+        for row in &rows {
+            println!("{}", row);
+        }
+        println!();
+        let _ = io::stdout().flush();
+    }
+
+    pub fn handle_resize(&self) {
+        let _paint = self.paint_in_flight();
+        if !self.is_attended {
+            return;
+        }
+        if self.modal_active() {
             return;
         }
         let width = get_terminal_width();
@@ -1420,7 +1603,11 @@ impl ChatUi {
     }
 
     pub fn redraw_box(&self) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.modal_active() {
             return;
         }
         let width = get_terminal_width();
@@ -1460,6 +1647,7 @@ impl ChatUi {
     }
 
     pub fn clear_box_on_exit(&self) {
+        let _paint = self.paint_in_flight();
         if !self.is_attended {
             return;
         }

@@ -488,6 +488,45 @@ fn set_in_file_validates_auto_compact_bounds() {
     assert!(set_in_file(&layers, "auto_compact_turns", "0").is_err());
 }
 
+/// The documented top-level keys are the ones `/auto-compact` and onboarding write. `resolve` has
+/// to carry them into the `agent.*` copy the loop actually reads, or the setting is lost at restart.
+#[test]
+fn top_level_auto_compact_keys_reach_the_agent_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(Some(file));
+
+    set_in_file(&layers, "auto_compact_enabled", "false").unwrap();
+    set_in_file(&layers, "auto_compact_threshold", "300000").unwrap();
+    set_in_file(&layers, "auto_compact_percent", "35").unwrap();
+    set_in_file(&layers, "auto_compact_turns", "15").unwrap();
+
+    let resolved = resolve(&layers).unwrap().into_config();
+    assert!(!resolved.agent.auto_compact_enabled);
+    assert_eq!(resolved.agent.auto_compact_threshold, 300_000);
+    assert_eq!(resolved.agent.auto_compact_percent, Some(35));
+    assert_eq!(resolved.agent.auto_compact_turns, 15);
+}
+
+/// A hand-written `agent.auto_compact_*` block is the other accepted spelling; it must win over the
+/// top-level defaults and be reflected back so both copies agree.
+#[test]
+fn agent_auto_compact_keys_are_honoured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write(
+        &tmp,
+        "agent:\n  auto_compact_enabled: false\n  auto_compact_threshold: 200000\n  auto_compact_percent: 40\n  auto_compact_turns: 12\n",
+    );
+
+    let resolved = resolve(&layers(Some(file))).unwrap().into_config();
+    assert!(!resolved.agent.auto_compact_enabled);
+    assert!(!resolved.auto_compact_enabled);
+    assert_eq!(resolved.agent.auto_compact_threshold, 200_000);
+    assert_eq!(resolved.auto_compact_threshold, 200_000);
+    assert_eq!(resolved.agent.auto_compact_percent, Some(40));
+    assert_eq!(resolved.auto_compact_turns, 12);
+}
+
 #[test]
 fn set_in_file_persists_compaction_model_and_provider() {
     let tmp = tempfile::tempdir().unwrap();

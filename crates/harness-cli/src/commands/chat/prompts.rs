@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::keys::AppKey;
 use super::modal::{paint_centred, ModalScreen};
 use super::render;
-use super::ui::get_terminal_width;
+use super::ui::{get_terminal_width, ChatUi};
 use crate::commands::approval::{render_approval_box, ApprovalChoice, APPROVAL_ACTIONS};
 use harness_core::{ApprovalRequest, HarnessError};
 
@@ -19,6 +19,7 @@ pub(super) async fn prompt_approval_choice(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     request: &ApprovalRequest,
     decision_tx: &mut oneshot::Sender<harness_core::ApprovalDecision>,
+    ui: &ChatUi,
 ) -> ApprovalChoice {
     let mut selected = 0; // index into APPROVAL_ACTIONS
 
@@ -28,6 +29,10 @@ pub(super) async fn prompt_approval_choice(
     // The popup takes the screen: what is being approved is not something to be read out of the
     // transcript around it, and the composer is left untouched behind it — the caller writes the
     // verdict once this returns.
+    ui.set_modal_active(true);
+    // A paint that was already in flight when the flag went up must land before the alternate
+    // buffer does, or its composer rows end up drawn around the question.
+    ui.wait_for_paints().await;
     let screen = ModalScreen::enter();
     paint_centred(&render_approval_box(
         request,
@@ -99,6 +104,10 @@ pub(super) async fn prompt_approval_choice(
 
     // Back on the transcript: the screen the popup was drawn on went with it.
     drop(screen);
+    ui.set_modal_active(false);
+    // Status updates (an OpenCode usage event, say) may have landed while the popup was up; show
+    // them now that the composer is back.
+    ui.redraw_box();
     choice
 }
 
@@ -141,6 +150,7 @@ const SUDO_HINT: &str = "(Enter password; press Enter to confirm, Esc to skip)";
 pub(super) async fn prompt_sudo_password_dialog(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     command: &str,
+    ui: &ChatUi,
 ) -> Option<String> {
     while key_rx.try_recv().is_ok() {}
 
@@ -156,6 +166,8 @@ pub(super) async fn prompt_sudo_password_dialog(
         SUDO_HINT.dimmed()
     );
 
+    ui.set_modal_active(true);
+    ui.wait_for_paints().await;
     let screen = ModalScreen::enter();
     paint_centred(&frame);
 
@@ -191,6 +203,7 @@ pub(super) async fn prompt_sudo_password_dialog(
     // Back on the transcript: the prompt went with the screen it was drawn on, and an empty entry
     // is a skip rather than a password.
     drop(screen);
+    ui.set_modal_active(false);
     let password = taken.filter(|p| !p.is_empty());
     if password.is_some() {
         println!(

@@ -743,7 +743,7 @@ async fn the_gauge_keeps_the_last_step_while_the_ledger_bills_the_whole_call() {
         .iter()
         .rev()
         .find_map(|event| match event {
-            AgentEvent::ContextTokensUpdated { tokens_used } => Some(*tokens_used),
+            AgentEvent::ContextTokensUpdated { tokens_used, .. } => Some(*tokens_used),
             _ => None,
         });
     assert_eq!(

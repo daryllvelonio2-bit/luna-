@@ -1,6 +1,82 @@
 use super::*;
 use serde_json::json;
 
+fn plain_rows(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .map(|row| dialoguer::console::strip_ansi_codes(row).to_string())
+        .collect()
+}
+
+#[test]
+fn a_wide_session_lands_on_the_moon_and_its_name() {
+    let rows = landing_rows(80, 24);
+    assert_eq!(
+        rows.len(),
+        LANDING_MOON.len(),
+        "the wide lockup is complete"
+    );
+
+    let plain = plain_rows(&rows);
+    for row in &plain {
+        assert!(
+            dialoguer::console::measure_text_width(row) <= 80,
+            "the landing overflows the terminal: {row:?}"
+        );
+    }
+    let joined = plain.join("\n");
+    assert!(joined.contains(LANDING_TITLE), "{joined}");
+    assert!(joined.contains(LANDING_TAGLINE), "{joined}");
+    assert!(joined.contains('▄'), "the moon is drawn: {joined}");
+}
+
+#[test]
+fn a_narrow_session_stacks_the_moon_above_its_name() {
+    // Wide enough for the moon, not for the side-by-side lockup.
+    let rows = landing_rows(LANDING_MOON_MIN_WIDTH, 24);
+    assert_eq!(rows.len(), LANDING_MOON.len() + 1);
+    let plain = plain_rows(&rows);
+    for row in &plain {
+        assert!(
+            dialoguer::console::measure_text_width(row) <= LANDING_MOON_MIN_WIDTH,
+            "the landing overflows the terminal: {row:?}"
+        );
+    }
+    let joined = plain.join("\n");
+    assert!(joined.contains(LANDING_TITLE), "{joined}");
+    assert!(joined.contains('▄'), "the moon is drawn: {joined}");
+}
+
+#[test]
+fn a_short_terminal_gets_only_the_wordmark() {
+    let rows = landing_rows(80, 1);
+    assert_eq!(rows.len(), 1);
+    assert!(plain_rows(&rows)[0].contains(LANDING_TITLE));
+
+    let two = landing_rows(80, 2);
+    assert_eq!(two.len(), 2, "two rows get the tagline as well");
+    assert!(plain_rows(&two)[1].contains(LANDING_TAGLINE));
+}
+
+#[test]
+fn a_very_narrow_terminal_gets_no_landing() {
+    assert!(landing_rows(LANDING_COMPACT_MIN_WIDTH - 1, 24).is_empty());
+    assert!(landing_rows(80, 0).is_empty());
+}
+
+#[test]
+fn every_compact_landing_fits_its_width() {
+    for width in LANDING_COMPACT_MIN_WIDTH..LANDING_FULL_MIN_WIDTH {
+        let rows = landing_rows(width, 5);
+        assert!(!rows.is_empty(), "width {width}");
+        for row in plain_rows(&rows) {
+            assert!(
+                dialoguer::console::measure_text_width(&row) <= width,
+                "width {width} overflowed: {row:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn shorten_path_keeps_at_most_three_segments() {
     assert_eq!(
@@ -1316,4 +1392,13 @@ fn parse_turns_from_history_cleans_historical_image_data_urls() {
         rendered.contains("[image: 948x1058]"),
         "rendered user turn retains the image marker"
     );
+}
+
+#[test]
+fn the_no_text_placeholder_gets_the_host_hint_only_at_render_time() {
+    assert_eq!(
+        reply_for_display(harness_core::types::NO_TEXT_RESPONSE),
+        "(The model completed reasoning but produced no text output. Press Ctrl+O to inspect reasoning.)"
+    );
+    assert_eq!(reply_for_display("a real answer"), "a real answer");
 }

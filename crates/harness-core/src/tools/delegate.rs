@@ -38,6 +38,10 @@ const SUBAGENT_WAIT_TIMEOUT_SECS: u64 = 300;
 /// How often the inactivity watchdog checks the last activity timestamp.
 const SUBAGENT_IDLE_CHECK_INTERVAL_SECS: u64 = 1;
 
+/// Floor for the idle-check ticker. A test (or caller) that passes a sub-second timeout must not
+/// turn the watchdog into a busy loop on the runtime.
+const SUBAGENT_IDLE_CHECK_FLOOR_MS: u64 = 10;
+
 /// What a delegated child is doing right now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -78,30 +82,63 @@ struct SubagentLogger {
 impl SubagentLogger {
     fn new(path: std::path::PathBuf) -> Self {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                // The child keeps running without a log; say so once instead of showing a healthy
+                // subagent whose log silently never starts.
+                warn!(
+                    "could not create subagent log directory {}: {error}",
+                    parent.display()
+                );
+            }
         }
         Self { path }
     }
 
     fn append_line(&self, line: &str) {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
         {
-            use std::io::Write;
-            let _ = writeln!(file, "{line}");
+            Ok(file) => file,
+            Err(error) => {
+                warn!(
+                    "could not open subagent log {}: {error}",
+                    self.path.display()
+                );
+                return;
+            }
+        };
+        use std::io::Write;
+        if let Err(error) = writeln!(file, "{line}") {
+            warn!(
+                "could not write subagent log {}: {error}",
+                self.path.display()
+            );
         }
     }
 
     fn append(&self, text: &str) {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
         {
-            use std::io::Write;
-            let _ = write!(file, "{text}");
+            Ok(file) => file,
+            Err(error) => {
+                warn!(
+                    "could not open subagent log {}: {error}",
+                    self.path.display()
+                );
+                return;
+            }
+        };
+        use std::io::Write;
+        if let Err(error) = write!(file, "{text}") {
+            warn!(
+                "could not write subagent log {}: {error}",
+                self.path.display()
+            );
         }
     }
 }
@@ -409,7 +446,7 @@ where
     tokio::pin!(future);
     let check_interval = idle_timeout
         .min(Duration::from_secs(SUBAGENT_IDLE_CHECK_INTERVAL_SECS))
-        .max(Duration::from_millis(10));
+        .max(Duration::from_millis(SUBAGENT_IDLE_CHECK_FLOOR_MS));
     let mut ticker = tokio::time::interval(check_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;

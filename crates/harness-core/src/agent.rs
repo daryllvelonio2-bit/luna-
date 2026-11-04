@@ -237,18 +237,14 @@ pub enum AgentEvent {
         partial: String,
     },
     /// A steering message arrived and was injected mid-turn into conversation context.
-    Steered {
-        text: String,
-    },
+    Steered { text: String },
     /// A fold of the oldest turns is underway: the summary call is in flight and the transcript
     /// will be rewritten when it lands. Emitted for both the automatic pass at the top of a turn
     /// and an explicit `/compact`, which is why it carries `forced`.
     ///
     /// A UI needs this to animate: the fold can take seconds, and without a start event the only
     /// evidence of it is the summary that appears afterwards.
-    CompactionStarted {
-        forced: bool,
-    },
+    CompactionStarted { forced: bool },
     /// The fold finished, whatever came of it: `folded` is the summary that replaced the oldest
     /// turns, `error` is why a fold the user asked for did not happen. Both `None` means there was
     /// nothing to fold (or an automatic fold failed and the turn continued on the full transcript).
@@ -256,9 +252,13 @@ pub enum AgentEvent {
         folded: Option<CompactionNotice>,
         error: Option<String>,
     },
-    ContextTokensUpdated {
-        tokens_used: u32,
-    },
+    /// The transcript's own estimate changed. `reset` is true only when a fold retired history,
+    /// which is the one ordinary reason the number may *fall*: an ordinary update can recompute a
+    /// smaller figure at a turn boundary (the provider counts a prompt more tightly than the
+    /// character heuristic, or the newest stored report does not cover the tail), and a gauge that
+    /// fell there read as a reset rather than as a measurement. A UI that holds a high-water mark
+    /// must still take a `reset` value even when it is lower.
+    ContextTokensUpdated { tokens_used: u32, reset: bool },
 }
 
 pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -506,7 +506,7 @@ where
         }
         self.steer_queue
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(trimmed.to_string());
         true
     }

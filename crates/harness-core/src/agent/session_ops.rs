@@ -8,7 +8,7 @@ use super::{Agent, ReplayNotice};
 use crate::error::HarnessError;
 use crate::hooks::{HookContext, HookEvent};
 use crate::saver::transcript_tail;
-use crate::session::{estimate_tokens, last_fold_seq, sendable_messages, StoredMessage};
+use crate::session::{estimate_tokens, sendable_messages, StoredMessage};
 use crate::traits::*;
 use crate::types::Message;
 
@@ -123,44 +123,18 @@ where
     }
 
     /// Get the estimated token count for the current session's conversation history.
-    /// This loads the history from the session store and runs the compaction estimator.
     ///
-    /// Reported usage wins, *unless* the newest fold is newer than it: the kept tail of a folded
-    /// session still carries the usage of the call made against the transcript that was folded
-    /// away, and handing that number back draws the gauge with the size of history the fold just
-    /// removed — the readout only catches up when the next request reports fresh usage.
+    /// This is [`estimate_tokens`] over the messages the next request would actually send, which is
+    /// the same rule the turn loop measures its first request with. `sendable_messages` has already
+    /// dropped the size reports a later fold retired, so the kept tail is measured on its own
+    /// instead of borrowing the size of the history the fold removed.
+    ///
+    /// Keeping the two measurements identical matters at a turn boundary: the turn loop reports
+    /// "reported usage plus the heuristic tail" while it runs, and an estimator that handed back
+    /// only the newest report made the gauge shrink the moment a turn ended, with nothing having
+    /// left the transcript.
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
         let (history, _replay_notice) = self.load_history().await?;
-
-        if history.is_empty() {
-            return Ok(0);
-        }
-
-        // A summary row is written with the highest `seq` in the session, so any usage reported
-        // before it describes a prompt that no longer exists.
-        let fold_seq = last_fold_seq(&history);
-
-        // 1. If any prior turn recorded actual usage from the provider, use the most recent report
-        if let Some((usage_seq, latest_usage)) = history.iter().rev().find_map(|stored| {
-            stored
-                .message
-                .usage
-                .as_ref()
-                .map(|usage| (stored.seq, usage))
-        }) {
-            if !fold_seq.is_some_and(|fold_seq| usage_seq < fold_seq) {
-                return Ok(latest_usage
-                    .prompt_tokens
-                    .saturating_add(latest_usage.completion_tokens));
-            }
-            debug!(
-                "The newest reported usage (seq {}) predates the fold at seq {:?}; estimating from the live transcript",
-                usage_seq, fold_seq
-            );
-        }
-
-        // 2. Otherwise estimate from the messages that would actually be sent, with the retired
-        //    reports dropped so the estimator measures the live transcript and not the folded one.
         Ok(estimate_tokens(&sendable_messages(&history)).tokens)
     }
 

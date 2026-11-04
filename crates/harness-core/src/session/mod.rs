@@ -186,8 +186,11 @@ pub trait SessionStore: Send + Sync {
 }
 
 /// Default `paths.sessions_db`, also used when a caller passes `None`.
+///
+/// Resolved from [`crate::config::PathsSettings`] rather than re-spelling `$HOME/.luna` here: a
+/// relocated `paths.sessions_db` must not be silently bypassed by `SqliteSessionStore::new(None)`.
 pub fn default_sessions_db() -> PathBuf {
-    crate::config::home_dir().join(".luna").join("sessions.db")
+    crate::config::PathsSettings::default().sessions_db
 }
 
 pub use sqlite::SqliteSessionStore;
