@@ -9,7 +9,6 @@ use harness_telemetry::init_telemetry;
 
 mod commands;
 mod eval;
-mod tui;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
@@ -60,20 +59,12 @@ struct Cli {
     #[arg(long = "continue")]
     continue_session: bool,
 
-    /// Launch full interactive Antigravity-style desktop TUI
-    #[arg(long)]
-    tui: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Launch full interactive Antigravity-style desktop TUI
-    App,
-    /// Alias for App
-    Tui,
     /// Interactive chat session with Luna agent
     Chat {
         /// Provider id; without it, `model.provider` from the config file
@@ -607,24 +598,6 @@ async fn main() -> Result<(), HarnessError> {
                 &config,
             )
             .await?;
-        }
-        Some(Commands::App) | Some(Commands::Tui) => {
-            let model_name = config.model.default.clone();
-            let cwd = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "rust-agent-harness".to_string());
-            let app = tui::app::AppState::new(model_name, cwd);
-            tui::run_app_tui(app).await?;
-        }
-        None if cli.tui => {
-            let model_name = config.model.default.clone();
-            let cwd = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "rust-agent-harness".to_string());
-            let app = tui::app::AppState::new(model_name, cwd);
-            tui::run_app_tui(app).await?;
         }
         None => {
             let selection = match (cli.session, cli.fork, cli.continue_session) {

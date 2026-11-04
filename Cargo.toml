@@ -54,7 +54,6 @@ tar = "0.4"
 libc = "0.2"
 pulldown-cmark = "0.10"
 url = "2.5"
-ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 
