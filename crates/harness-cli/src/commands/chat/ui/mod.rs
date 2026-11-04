@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::render::{
-    activity_line, compaction_line, landing_rows, needs_separator, reasoning_rows,
-    tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
+    activity_line, compaction_line, landing_rows, landing_star_rows, needs_separator,
+    reasoning_rows, tool_activity_detail, truncate_to_cells, OutputBlockKind, LANDING_FALL_FRAMES,
+    LANDING_FALL_FRAME_MS, PROMPT,
 };
 use super::status::format_quota_lines;
 
@@ -1534,6 +1535,11 @@ impl ChatUi {
     /// landing belongs to the scrollback and leaves with the first turn. The height check leaves
     /// room for the composer and a blank line on either side of the mark, so a short terminal
     /// collapses to the compact wordmark instead of pushing the prompt off the screen.
+    ///
+    /// A small star falls across the mark once before the art settles. It is drawn in place: the
+    /// block keeps the same height on every frame, so the cursor can be walked back up to its top
+    /// and the rows rewritten. The final frame is the untouched mark, which is also what stays in
+    /// the scrollback when the composer below scrolls it away.
     pub fn draw_landing(&self) {
         if !self.is_attended {
             return;
@@ -1545,11 +1551,40 @@ impl ChatUi {
         if rows.is_empty() {
             return;
         }
+
         println!();
-        for row in &rows {
-            println!("{}", row);
+        if rows.len() > 1 {
+            for frame in 0..LANDING_FALL_FRAMES {
+                let last_frame = frame + 1 == LANDING_FALL_FRAMES;
+                let frame_rows = if last_frame {
+                    rows.clone()
+                } else {
+                    landing_star_rows(&rows, frame)
+                };
+                for (index, row) in frame_rows.iter().enumerate() {
+                    print!("{}", row);
+                    if index + 1 < frame_rows.len() {
+                        println!();
+                    }
+                }
+                let _ = io::stdout().flush();
+                if !last_frame {
+                    // The cursor is at the end of the block's last row; walk back to its first
+                    // row and to column zero, ready for the next frame to overwrite it.
+                    print!("\x1b[{}A\r", frame_rows.len() - 1);
+                    let _ = io::stdout().flush();
+                    std::thread::sleep(std::time::Duration::from_millis(LANDING_FALL_FRAME_MS));
+                }
+            }
+            // Terminate the last row, then keep the blank line the static mark had below it.
+            println!();
+            println!();
+        } else {
+            for row in &rows {
+                println!("{}", row);
+            }
+            println!();
         }
-        println!();
         let _ = io::stdout().flush();
     }
 

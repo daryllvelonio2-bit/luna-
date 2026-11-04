@@ -459,7 +459,11 @@ const LANDING_TAGLINE: &str = "autonomous agent harness";
 const LANDING_TEXT_COL: usize = 26;
 
 /// Narrowest terminal that can hold the moon and its wordmark side by side.
-const LANDING_FULL_MIN_WIDTH: usize = LANDING_TEXT_COL + LANDING_TAGLINE.len();
+///
+/// One column wider than the lockup itself on purpose: a row that fills the terminal exactly sits
+/// in the pending-wrap state, and the next newline moves twice. The animation moves the cursor by
+/// the block's height, so a wrapped row would desynchronise every frame after it.
+const LANDING_FULL_MIN_WIDTH: usize = LANDING_TEXT_COL + LANDING_TAGLINE.len() + 1;
 
 /// Narrowest terminal that still gets the moon at all.
 const LANDING_MOON_MIN_WIDTH: usize = 24;
@@ -556,6 +560,125 @@ fn centre_rows(rows: Vec<String>, width: usize) -> Vec<String> {
     rows.into_iter()
         .map(|row| format!("{}{}", " ".repeat(pad), row))
         .collect()
+}
+
+/// The glyph the landing animation drops: U+2726 BLACK FOUR-POINTED STAR.
+///
+/// A plain text star, not an emoji, for the same reason the moon is block glyphs: the mark should
+/// keep the terminal's own font all the way through rather than pulling in a colour emoji.
+pub const LANDING_STAR: &str = "\u{2726}";
+
+/// Frames in one fall. Eighteen frames at [`LANDING_FALL_FRAME_MS`] is a little under a second:
+/// long enough to be seen, short enough that it never feels like the prompt is slow to appear.
+pub const LANDING_FALL_FRAMES: usize = 18;
+
+/// How long each frame of the fall is held, in milliseconds.
+pub const LANDING_FALL_FRAME_MS: u64 = 38;
+
+/// The mark with the star overlaid at one point of its fall.
+///
+/// The star enters at the top-right of the block and drops diagonally toward the lower-left, so
+/// the eye follows a shooting star across the moon instead of a cursor blinking inside it. Every
+/// frame replaces one character rather than inserting one, which keeps every row exactly as wide
+/// as the static mark: the caller rewrites the block in place, and a row that changed width would
+/// leave the previous frame's tail behind it.
+///
+/// ANSI sequences in `rows` are copied through untouched, so the star inherits the colour of
+/// whatever it is passing over — white on the moon, cyan on the wordmark — and the rest of the row
+/// keeps its own styling.
+pub fn landing_star_rows(rows: &[String], frame: usize) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let last_row = rows.len() - 1;
+    let last_frame = LANDING_FALL_FRAMES.saturating_sub(1).max(1);
+    let progress = frame.min(last_frame) as f64 / last_frame as f64;
+
+    // Width of the widest row is the block's own width: the rows all share the same centring pad,
+    // so a column inside that width exists on every row and can be replaced rather than appended.
+    let block_width = rows
+        .iter()
+        .map(|row| {
+            let plain = dialoguer::console::strip_ansi_codes(row).to_string();
+            dialoguer::console::measure_text_width(&plain)
+        })
+        .max()
+        .unwrap_or(0);
+    if block_width == 0 {
+        return rows.to_vec();
+    }
+
+    let star_row = (progress * last_row as f64).round() as usize;
+    let start_col = block_width.saturating_sub(2);
+    let end_col = (block_width / 3).max(1);
+    let fall = (start_col.saturating_sub(end_col)) as f64 * progress;
+    let star_col = start_col.saturating_sub(fall as usize);
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            // Rows are centred as a block but keep their own trailing edge, so a short moon row
+            // would end before the star's column. Pad every row out to the block's width first:
+            // then the star always replaces a cell instead of being appended, and every frame is
+            // the same width as the last one.
+            let mut row = row.clone();
+            let width =
+                dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(&row));
+            row.push_str(&" ".repeat(block_width.saturating_sub(width)));
+            if index == star_row {
+                overlay_star(&row, star_col)
+            } else {
+                row
+            }
+        })
+        .collect()
+}
+
+/// Replace the character at visible column `col` with [`LANDING_STAR`], leaving ANSI sequences in
+/// place so the glyph takes on the styling of the text around it.
+///
+/// Widths are counted in terminal cells rather than bytes: the moon is block glyphs, which are
+/// several bytes each, and slicing by byte would land in the middle of one. `col` is clamped to the
+/// row's last cell by the caller's arithmetic, but an out-of-range column appends rather than
+/// panics so a caller that miscalculates still draws something.
+fn overlay_star(row: &str, col: usize) -> String {
+    let mut out = String::with_capacity(row.len() + LANDING_STAR.len());
+    let mut visible = 0usize;
+    let mut placed = false;
+    let mut chars = row.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            out.push(ch);
+            // Only CSI sequences reach these rows; copy one whole so its digits are never
+            // mistaken for visible characters.
+            if chars.peek() == Some(&'[') {
+                out.push(chars.next().unwrap_or('['));
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if !placed && visible == col {
+            out.push_str(LANDING_STAR);
+            placed = true;
+            // The character under the star is dropped: this is a replacement, not an insertion.
+            continue;
+        }
+
+        out.push(ch);
+        visible += dialoguer::console::measure_text_width(&ch.to_string()).max(1);
+    }
+
+    if !placed {
+        out.push_str(LANDING_STAR);
+    }
+    out
 }
 
 /// Luna's reply label. Kept beside [`PROMPT`] so the two sides of the transcript are edited

@@ -77,6 +77,104 @@ fn every_compact_landing_fits_its_width() {
     }
 }
 
+/// Visible width of a row, ignoring its colour codes.
+fn plain_width(row: &str) -> usize {
+    dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(row))
+}
+
+/// Where the star is on a frame, as `(row, visible column)`.
+fn star_position(rows: &[String]) -> Option<(usize, usize)> {
+    rows.iter().enumerate().find_map(|(index, row)| {
+        let plain = dialoguer::console::strip_ansi_codes(row).to_string();
+        let byte = plain.find(LANDING_STAR)?;
+        Some((
+            index,
+            dialoguer::console::measure_text_width(&plain[..byte]),
+        ))
+    })
+}
+
+#[test]
+fn the_landing_star_falls_down_and_to_the_left() {
+    let rows = landing_rows(80, 24);
+    let mut positions = Vec::new();
+    for frame in 0..LANDING_FALL_FRAMES {
+        let frame_rows = landing_star_rows(&rows, frame);
+        positions.push(star_position(&frame_rows).expect("every frame draws the star"));
+    }
+
+    for pair in positions.windows(2) {
+        let (previous_row, previous_col) = pair[0];
+        let (row, col) = pair[1];
+        assert!(row >= previous_row, "the star never climbs: {positions:?}");
+        assert!(
+            col <= previous_col,
+            "the star never drifts right: {positions:?}"
+        );
+    }
+
+    let (first_row, first_col) = positions[0];
+    let (last_row, last_col) = *positions.last().unwrap();
+    assert!(
+        last_row > first_row,
+        "the star crosses the mark downward: {positions:?}"
+    );
+    assert!(
+        last_col < first_col,
+        "the star crosses the mark leftward: {positions:?}"
+    );
+}
+
+#[test]
+fn every_landing_star_frame_keeps_the_mark_exactly_as_wide() {
+    let rows = landing_rows(80, 24);
+    let static_width = rows
+        .iter()
+        .map(|row| plain_width(row))
+        .max()
+        .expect("the mark has rows");
+
+    let first = landing_star_rows(&rows, 0);
+    let first_widths: Vec<usize> = first.iter().map(|row| plain_width(row)).collect();
+
+    for frame in 0..LANDING_FALL_FRAMES {
+        let frame_rows = landing_star_rows(&rows, frame);
+        assert_eq!(
+            frame_rows.len(),
+            rows.len(),
+            "frame {frame} keeps the height"
+        );
+        for (row, expected) in frame_rows.iter().zip(&first_widths) {
+            assert_eq!(
+                plain_width(row),
+                *expected,
+                "frame {frame} changed a row's width: {row:?}"
+            );
+            assert_eq!(
+                *expected, static_width,
+                "frame {frame} is as wide as the static mark: {row:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_star_lands_on_one_row_at_a_time() {
+    let rows = landing_rows(80, 24);
+    for frame in 0..LANDING_FALL_FRAMES {
+        let frame_rows = landing_star_rows(&rows, frame);
+        let marked = frame_rows
+            .iter()
+            .filter(|row| {
+                dialoguer::console::strip_ansi_codes(row)
+                    .to_string()
+                    .contains(LANDING_STAR)
+            })
+            .count();
+        assert_eq!(marked, 1, "frame {frame} drew {marked} stars");
+    }
+}
+
 #[test]
 fn shorten_path_keeps_at_most_three_segments() {
     assert_eq!(
