@@ -28,6 +28,7 @@ pub struct OpencodeUiBridge {
         tokio::sync::oneshot::Sender<ApprovalDecision>,
     )>,
     pub allow_all: Arc<AtomicBool>,
+    pub update_context_used_fn: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 }
 
 static UI_BRIDGE: OnceLock<RwLock<Option<OpencodeUiBridge>>> = OnceLock::new();
@@ -600,15 +601,24 @@ pub fn format_messages_for_opencode(messages: &[Message]) -> String {
 /// is billed as output but counted separately, so it joins `completion`. Folding both here keeps a
 /// later cost, cache-share or context check from having to know which route wrote the row.
 fn usage_from_tokens(tokens: &serde_json::Value) -> TokenUsage {
-    let count = |key: &str| tokens.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let prompt_tokens = count("input");
-    let completion_tokens = count("output").saturating_add(count("reasoning"));
-    let total_tokens = count("total");
+    let count = |keys: &[&str]| -> u32 {
+        for k in keys {
+            if let Some(v) = tokens.get(*k).and_then(|v| v.as_u64()) {
+                return v as u32;
+            }
+        }
+        0
+    };
+    let prompt_tokens = count(&["input", "prompt", "prompt_tokens", "input_tokens"]);
+    let completion_tokens = count(&["output", "completion", "completion_tokens", "output_tokens"])
+        .saturating_add(count(&["reasoning", "reasoning_tokens"]));
+    let total_tokens = count(&["total", "total_tokens"]);
     let cached_tokens = tokens
         .get("cache")
-        .and_then(|c| c.get("read"))
+        .and_then(|c| c.get("read").or_else(|| c.get("read_tokens")))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|v| v as u32)
+        .unwrap_or_else(|| count(&["cache_read", "cached_tokens", "cache_read_input_tokens"]));
 
     TokenUsage::with_separate_cache(
         prompt_tokens,
@@ -618,8 +628,85 @@ fn usage_from_tokens(tokens: &serde_json::Value) -> TokenUsage {
     )
 }
 
+pub fn normalize_tool_arguments(input: &mut serde_json::Value) {
+    if let serde_json::Value::Object(ref mut map) = input {
+        // Path normalization
+        if let Some(v) = map.get("filePath").cloned() {
+            map.entry("path".to_string()).or_insert_with(|| v.clone());
+            map.entry("filepath".to_string()).or_insert_with(|| v.clone());
+            map.entry("file".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("path").cloned() {
+            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
+            map.entry("filepath".to_string()).or_insert_with(|| v.clone());
+            map.entry("file".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("filepath").cloned() {
+            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
+            map.entry("path".to_string()).or_insert_with(|| v.clone());
+            map.entry("file".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("file").cloned() {
+            map.entry("filePath".to_string()).or_insert_with(|| v.clone());
+            map.entry("path".to_string()).or_insert_with(|| v.clone());
+            map.entry("filepath".to_string()).or_insert(v);
+        }
+
+        // Old string normalization
+        if let Some(v) = map.get("oldString").cloned() {
+            map.entry("old_string".to_string()).or_insert_with(|| v.clone());
+            map.entry("old_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("old".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("old_string").cloned() {
+            map.entry("oldString".to_string()).or_insert_with(|| v.clone());
+            map.entry("old_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("old".to_string()).or_insert(v);
+        }
+
+        // New string normalization
+        if let Some(v) = map.get("newString").cloned() {
+            map.entry("new_string".to_string()).or_insert_with(|| v.clone());
+            map.entry("new_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("new".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("new_string").cloned() {
+            map.entry("newString".to_string()).or_insert_with(|| v.clone());
+            map.entry("new_str".to_string()).or_insert_with(|| v.clone());
+            map.entry("new".to_string()).or_insert(v);
+        }
+
+        // Replace all normalization
+        if let Some(v) = map.get("replaceAll").cloned() {
+            map.entry("replace_all".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("replace_all").cloned() {
+            map.entry("replaceAll".to_string()).or_insert(v);
+        }
+
+        // Patch / Diff normalization
+        if let Some(v) = map.get("patchText").cloned() {
+            map.entry("diff".to_string()).or_insert_with(|| v.clone());
+            map.entry("patch".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("diff").cloned() {
+            map.entry("patchText".to_string()).or_insert_with(|| v.clone());
+            map.entry("patch".to_string()).or_insert(v);
+        } else if let Some(v) = map.get("patch").cloned() {
+            map.entry("patchText".to_string()).or_insert_with(|| v.clone());
+            map.entry("diff".to_string()).or_insert(v);
+        }
+    }
+}
+
 fn parse_tokens(part: &serde_json::Value) -> Option<TokenUsage> {
-    part.get("tokens").map(usage_from_tokens)
+    if let Some(tokens) = part
+        .get("tokens")
+        .or_else(|| part.get("usage"))
+        .or_else(|| part.get("tokenUsage"))
+    {
+        Some(usage_from_tokens(tokens))
+    } else if part.get("input").is_some()
+        || part.get("prompt_tokens").is_some()
+        || part.get("total").is_some()
+    {
+        Some(usage_from_tokens(part))
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -993,19 +1080,28 @@ pub async fn native_opencode_stream(
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data_str) {
                         let ev_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         let data = parsed.get("data").unwrap_or(&serde_json::Value::Null);
-                        let event_session_id =
-                            data.get("sessionID").and_then(|s| s.as_str()).or_else(|| {
+                        let event_session_id = data
+                            .get("sessionID")
+                            .or_else(|| data.get("sessionId"))
+                            .or_else(|| data.get("session_id"))
+                            .or_else(|| data.get("session").and_then(|s| s.get("id")))
+                            .or_else(|| {
                                 data.get("form")
-                                    .and_then(|f| f.get("sessionID"))
-                                    .and_then(|s| s.as_str())
-                            });
+                                    .and_then(|f| f.get("sessionID").or_else(|| f.get("sessionId")))
+                            })
+                            .or_else(|| {
+                                parsed
+                                    .get("sessionID")
+                                    .or_else(|| parsed.get("sessionId"))
+                            })
+                            .and_then(|s| s.as_str());
 
                         if event_session_id != Some(&target_session_id) {
                             continue;
                         }
 
                         match ev_type {
-                            "session.reasoning.delta" => {
+                            "session.reasoning.delta" | "session.next.reasoning.delta" => {
                                 if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
                                     if !delta.is_empty() {
                                         saw_deltas = true;
@@ -1021,7 +1117,7 @@ pub async fn native_opencode_stream(
                                     }
                                 }
                             }
-                            "session.text.delta" => {
+                            "session.text.delta" | "session.next.text.delta" => {
                                 if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
                                     if !delta.is_empty() {
                                         saw_deltas = true;
@@ -1035,37 +1131,72 @@ pub async fn native_opencode_stream(
                                     }
                                 }
                             }
-                            "session.tool.input.started" => {
-                                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                                    if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                            "session.tool.input.started" | "session.next.tool.input.started" => {
+                                let id = data
+                                    .get("id")
+                                    .or_else(|| data.get("callID"))
+                                    .or_else(|| data.get("callId"))
+                                    .and_then(|v| v.as_str());
+                                if let Some(id) = id {
+                                    if let Some(name) = data
+                                        .get("name")
+                                        .or_else(|| data.get("tool"))
+                                        .and_then(|v| v.as_str())
+                                    {
                                         tool_names.insert(id.to_string(), name.to_string());
                                     }
                                 }
                             }
-                            "session.tool.input.ended" => {
-                                if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                                    if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
-                                        if let Ok(parsed_input) =
+                            "session.tool.input.ended" | "session.next.tool.input.ended" => {
+                                let id = data
+                                    .get("id")
+                                    .or_else(|| data.get("callID"))
+                                    .or_else(|| data.get("callId"))
+                                    .and_then(|v| v.as_str());
+                                if let Some(id) = id {
+                                    if let Some(text) = data
+                                        .get("text")
+                                        .or_else(|| data.get("arguments"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        if let Ok(mut parsed_input) =
                                             serde_json::from_str::<serde_json::Value>(text)
                                         {
+                                            normalize_tool_arguments(&mut parsed_input);
                                             tool_inputs.insert(id.to_string(), parsed_input);
                                         }
+                                    } else if let Some(mut input_obj) = data
+                                        .get("input")
+                                        .or_else(|| data.get("arguments"))
+                                        .cloned()
+                                    {
+                                        normalize_tool_arguments(&mut input_obj);
+                                        tool_inputs.insert(id.to_string(), input_obj);
                                     }
                                 }
                             }
-                            "session.tool.called" => {
-                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            "session.tool.called" | "session.next.tool.called" => {
+                                let id = data
+                                    .get("id")
+                                    .or_else(|| data.get("callID"))
+                                    .or_else(|| data.get("callId"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 let name = data
                                     .get("name")
+                                    .or_else(|| data.get("tool"))
                                     .and_then(|n| n.as_str())
                                     .map(|s| s.to_string())
                                     .or_else(|| tool_names.get(id).cloned())
                                     .unwrap_or_else(|| "tool".to_string());
-                                let input = data
+                                let mut input = data
                                     .get("input")
+                                    .or_else(|| data.get("arguments"))
                                     .cloned()
                                     .or_else(|| tool_inputs.get(id).cloned())
                                     .unwrap_or(serde_json::Value::Null);
+                                normalize_tool_arguments(&mut input);
+                                tool_inputs.insert(id.to_string(), input.clone());
                                 saw_deltas = true;
                                 if tx
                                     .send(Ok(StreamEvent::ToolExecuting {
@@ -1078,10 +1209,16 @@ pub async fn native_opencode_stream(
                                     break;
                                 }
                             }
-                            "session.tool.success" => {
-                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            "session.tool.success" | "session.next.tool.success" => {
+                                let id = data
+                                    .get("id")
+                                    .or_else(|| data.get("callID"))
+                                    .or_else(|| data.get("callId"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 let name = data
                                     .get("name")
+                                    .or_else(|| data.get("tool"))
                                     .and_then(|n| n.as_str())
                                     .map(|s| s.to_string())
                                     .or_else(|| tool_names.get(id).cloned())
@@ -1099,7 +1236,11 @@ pub async fn native_opencode_stream(
                                     }
                                 }
                                 if output.is_empty() {
-                                    if let Some(out) = data.get("output").and_then(|o| o.as_str()) {
+                                    if let Some(out) = data
+                                        .get("output")
+                                        .or_else(|| data.get("result"))
+                                        .and_then(|o| o.as_str())
+                                    {
                                         output.push_str(out);
                                     }
                                 }
@@ -1116,10 +1257,16 @@ pub async fn native_opencode_stream(
                                     break;
                                 }
                             }
-                            "session.tool.failed" => {
-                                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            "session.tool.failed" | "session.next.tool.failed" => {
+                                let id = data
+                                    .get("id")
+                                    .or_else(|| data.get("callID"))
+                                    .or_else(|| data.get("callId"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 let name = data
                                     .get("name")
+                                    .or_else(|| data.get("tool"))
                                     .and_then(|n| n.as_str())
                                     .map(|s| s.to_string())
                                     .or_else(|| tool_names.get(id).cloned())
@@ -1147,20 +1294,50 @@ pub async fn native_opencode_stream(
                                     break;
                                 }
                             }
-                            "session.step.ended" => {
-                                if let Some(finish) = data.get("finish").and_then(|f| f.as_str()) {
+                            "session.step.ended" | "session.next.step.ended" => {
+                                if let Some(finish) = data
+                                    .get("finish")
+                                    .or_else(|| data.get("finishReason"))
+                                    .or_else(|| data.get("reason"))
+                                    .and_then(|f| f.as_str())
+                                {
                                     last_finish_reason = Some(finish.to_string());
                                 }
-                                if let Some(tokens) = data.get("tokens") {
-                                    last_usage = Some(usage_from_tokens(tokens));
+                                if let Some(usage) = parse_tokens(data) {
+                                    last_usage = Some(usage.clone());
+                                    let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
+                                    if let Some(bridge) = get_ui_bridge() {
+                                        if let Some(ref update_fn) = bridge.update_context_used_fn {
+                                            let total_context = usage
+                                                .prompt_tokens
+                                                .saturating_add(usage.completion_tokens);
+                                            if total_context > 0 {
+                                                update_fn(total_context);
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            "session.usage.updated" => {
-                                if let Some(tokens) = data.get("tokens") {
-                                    last_usage = Some(usage_from_tokens(tokens));
+                            "session.usage.updated" | "session.next.usage.updated" => {
+                                if let Some(usage) = parse_tokens(data) {
+                                    last_usage = Some(usage.clone());
+                                    let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
+                                    if let Some(bridge) = get_ui_bridge() {
+                                        if let Some(ref update_fn) = bridge.update_context_used_fn {
+                                            let total_context = usage
+                                                .prompt_tokens
+                                                .saturating_add(usage.completion_tokens);
+                                            if total_context > 0 {
+                                                update_fn(total_context);
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            "session.execution.succeeded" => {
+                            "session.execution.succeeded"
+                            | "session.next.execution.succeeded"
+                            | "session.idle"
+                            | "session.next.idle" => {
                                 ended_successfully = true;
                                 let _ = tx
                                     .send(Ok(StreamEvent::Completed {
@@ -1170,7 +1347,7 @@ pub async fn native_opencode_stream(
                                     .await;
                                 break;
                             }
-                            "session.execution.failed" => {
+                            "session.execution.failed" | "session.next.execution.failed" => {
                                 let err_msg = data
                                     .get("error")
                                     .map(|e| e.to_string())
@@ -1183,7 +1360,26 @@ pub async fn native_opencode_stream(
                                     .await;
                                 break;
                             }
-                            "form.created" => {
+                            "session.status" | "session.next.status" => {
+                                let status_type = data
+                                    .get("status")
+                                    .and_then(|s| s.get("type").or(Some(s)))
+                                    .and_then(|t| t.as_str())
+                                    .or_else(|| data.get("type").and_then(|t| t.as_str()));
+                                if status_type == Some("idle") && saw_deltas {
+                                    ended_successfully = true;
+                                    let _ = tx
+                                        .send(Ok(StreamEvent::Completed {
+                                            finish_reason: last_finish_reason.clone(),
+                                            usage: last_usage.clone(),
+                                        }))
+                                        .await;
+                                    break;
+                                }
+                            }
+                            "form.created"
+                            | "session.form.created"
+                            | "session.next.form.created" => {
                                 let form = data.get("form").unwrap_or(data);
                                 let form_id = form
                                     .get("id")
@@ -1291,7 +1487,9 @@ pub async fn native_opencode_stream(
                                     });
                                 }
                             }
-                            "permission.asked" => {
+                            "permission.asked"
+                            | "session.permission.asked"
+                            | "session.next.permission.asked" => {
                                 let request_id = data
                                     .get("id")
                                     .and_then(|v| v.as_str())
@@ -1771,10 +1969,11 @@ pub async fn stream_opencode_completion_cli(
                             .unwrap_or("tool")
                             .to_string();
                         let state = part.get("state").unwrap_or(&serde_json::Value::Null);
-                        let input = state
+                        let mut input = state
                             .get("input")
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
+                        normalize_tool_arguments(&mut input);
                         let status = state.get("status").and_then(|s| s.as_str());
                         let output = state
                             .get("output")
@@ -1804,8 +2003,35 @@ pub async fn stream_opencode_completion_cli(
                         if let Some(reason) = part.get("reason").and_then(|r| r.as_str()) {
                             last_finish_reason = Some(reason.to_string());
                         }
-                        if let Some(usage) = parse_tokens(part) {
-                            last_usage = Some(usage);
+                        if let Some(usage) = parse_tokens(part).or_else(|| parse_tokens(&val)) {
+                            last_usage = Some(usage.clone());
+                            let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
+                            if let Some(bridge) = get_ui_bridge() {
+                                if let Some(ref update_fn) = bridge.update_context_used_fn {
+                                    let total_context = usage
+                                        .prompt_tokens
+                                        .saturating_add(usage.completion_tokens);
+                                    if total_context > 0 {
+                                        update_fn(total_context);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "usage" => {
+                        if let Some(usage) = parse_tokens(part).or_else(|| parse_tokens(&val)) {
+                            last_usage = Some(usage.clone());
+                            let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
+                            if let Some(bridge) = get_ui_bridge() {
+                                if let Some(ref update_fn) = bridge.update_context_used_fn {
+                                    let total_context = usage
+                                        .prompt_tokens
+                                        .saturating_add(usage.completion_tokens);
+                                    if total_context > 0 {
+                                        update_fn(total_context);
+                                    }
+                                }
+                            }
                         }
                     }
                     "error" => {

@@ -564,6 +564,17 @@ where
                         slot.arguments = serde_json::Value::String(raw);
                     }
                 }
+                StreamEvent::Usage(token_usage) => {
+                    let actual_tokens = token_usage
+                        .prompt_tokens
+                        .saturating_add(token_usage.completion_tokens);
+                    usage = Some(token_usage);
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ContextTokensUpdated {
+                            tokens_used: actual_tokens,
+                        });
+                    }
+                }
                 StreamEvent::Completed {
                     usage: event_usage,
                     finish_reason: event_finish,

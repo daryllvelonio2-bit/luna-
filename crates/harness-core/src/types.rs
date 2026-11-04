@@ -219,6 +219,7 @@ pub enum StreamEvent {
         output: String,
         is_error: bool,
     },
+    Usage(TokenUsage),
     Completed {
         finish_reason: Option<String>,
         usage: Option<TokenUsage>,

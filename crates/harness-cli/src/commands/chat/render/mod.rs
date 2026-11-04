@@ -219,18 +219,11 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                     }
                 }
                 for call in &msg.tool_calls {
-                    let diff_lines = if call.name == "patch" {
-                        let old_str = call
-                            .arguments
-                            .get("old_string")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let new_str = call
-                            .arguments
-                            .get("new_string")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        format_patch_diff(old_str, new_str)
+                    let diff_lines = if call.name == "patch"
+                        || call.name == "edit"
+                        || call.name == "apply_patch"
+                    {
+                        extract_patch_diff(&call.arguments)
                     } else {
                         Vec::new()
                     };
@@ -774,12 +767,37 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
     };
+    let text_any = |keys: &[&str]| -> Option<&str> {
+        for k in keys {
+            if let Some(s) = arguments.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                return Some(s);
+            }
+        }
+        None
+    };
 
     match name {
-        "patch" => {
-            let removed = text("old_string").map(|s| s.lines().count()).unwrap_or(0);
-            let added = text("new_string").map(|s| s.lines().count()).unwrap_or(0);
-            Some(format!("−{} +{}", removed, added))
+        "patch" | "edit" | "apply_patch" => {
+            let old_str = text_any(&["old_string", "oldString", "old_str", "old"]);
+            let new_str = text_any(&["new_string", "newString", "new_str", "new"]);
+            if old_str.is_some() || new_str.is_some() {
+                let removed = old_str.map(|s| s.lines().count()).unwrap_or(0);
+                let added = new_str.map(|s| s.lines().count()).unwrap_or(0);
+                Some(format!("−{} +{}", removed, added))
+            } else if let Some(diff_str) = text_any(&["diff", "patch", "patchText"]) {
+                let mut added = 0;
+                let mut removed = 0;
+                for line in diff_str.lines() {
+                    if line.starts_with('+') && !line.starts_with("+++") {
+                        added += 1;
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        removed += 1;
+                    }
+                }
+                Some(format!("−{} +{}", removed, added))
+            } else {
+                Some("−0 +0".to_string())
+            }
         }
         "write_file" => {
             let added = text("content").map(|c| c.lines().count()).unwrap_or(0);
@@ -788,6 +806,70 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
         "summarize" => Some("summarizing session...".to_string()),
         _ => None,
     }
+}
+
+/// Extracts formatted diff lines from tool call arguments (handles old/new strings, diff/patchText,
+/// and both snake_case and camelCase parameters).
+pub fn extract_patch_diff(arguments: &serde_json::Value) -> Vec<String> {
+    let text_any = |keys: &[&str]| -> Option<&str> {
+        for k in keys {
+            if let Some(s) = arguments.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                return Some(s);
+            }
+        }
+        None
+    };
+
+    let old_str = text_any(&["old_string", "oldString", "old_str", "old"]);
+    let new_str = text_any(&["new_string", "newString", "new_str", "new"]);
+
+    if let (Some(old), Some(new)) = (old_str, new_str) {
+        return format_patch_diff(old, new);
+    }
+
+    if let Some(diff_str) = text_any(&["diff", "patch", "patchText"]) {
+        return format_unified_diff(diff_str);
+    }
+
+    if let Some(old) = old_str {
+        return format_patch_diff(old, "");
+    }
+    if let Some(new) = new_str {
+        return format_patch_diff("", new);
+    }
+
+    Vec::new()
+}
+
+/// Formats a unified diff string with red deletions and green additions.
+pub fn format_unified_diff(diff_str: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in diff_str.lines() {
+        let val = line.trim_end_matches(&['\r', '\n'][..]);
+        if val.starts_with("+++") || val.starts_with("---") {
+            lines.push(format!("\x1b[2m    {}\x1b[0m", val));
+        } else if val.starts_with('+') {
+            lines.push(format!(
+                "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
+                &val[1..].trim_start()
+            ));
+        } else if val.starts_with('-') {
+            lines.push(format!(
+                "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m",
+                &val[1..].trim_start()
+            ));
+        } else if val.starts_with("@@") {
+            lines.push(format!("\x1b[2m  {}\x1b[0m", val));
+        } else if !val.is_empty() {
+            let content = if val.starts_with(' ') {
+                &val[1..]
+            } else {
+                val
+            };
+            lines.push(format!("\x1b[2m    {}\x1b[0m", content));
+        }
+    }
+    lines
 }
 
 /// Formats the diff between `old_string` and `new_string` for a patch tool call.
@@ -1074,7 +1156,7 @@ fn tool_glyph_and_verb(name: &str) -> (&'static str, &'static str) {
     match name {
         "read_file" | "read" => ("📖", "read"),
         "write_file" | "write" => ("📝", "write"),
-        "patch" | "edit" => ("✏️", "patch"),
+        "patch" | "edit" | "apply_patch" => ("✏️", "patch"),
         "search_files" | "grep" | "find" => ("🔍", "search"),
         "list_files" | "ls" => ("📂", "list"),
         "terminal" | "shell" | "bash" => ("💻", "run"),
@@ -1171,17 +1253,42 @@ pub fn format_tool_call(name: &str, arguments: &serde_json::Value) -> String {
                 );
             }
         }
-        "patch" | "edit" => {
-            if let Some(path) = text("path")
-                .or_else(|| text("file"))
+        "patch" | "edit" | "apply_patch" => {
+            let path_opt = text("path")
+                .or_else(|| text("filePath"))
                 .or_else(|| text("filepath"))
-            {
-                let short = shorten_path(path);
+                .or_else(|| text("file"))
+                .map(shorten_path)
+                .or_else(|| {
+                    let diff_str = text("diff")
+                        .or_else(|| text("patch"))
+                        .or_else(|| text("patchText"))?;
+                    for line in diff_str.lines() {
+                        if let Some(rest) = line.strip_prefix("--- ") {
+                            let p = rest.trim().trim_start_matches("a/").trim_start_matches("b/");
+                            if !p.is_empty() && p != "/dev/null" {
+                                return Some(shorten_path(p));
+                            }
+                        }
+                        if let Some(rest) = line.strip_prefix("+++ ") {
+                            let p = rest.trim().trim_start_matches("a/").trim_start_matches("b/");
+                            if !p.is_empty() && p != "/dev/null" {
+                                return Some(shorten_path(p));
+                            }
+                        }
+                    }
+                    None
+                });
+
+            if let Some(short) = path_opt {
                 let mut extra = tool_activity_detail("patch", arguments)
                     .map(suffix)
                     .unwrap_or_default();
                 if matches!(
-                    arguments.get("replace_all").and_then(|v| v.as_bool()),
+                    arguments
+                        .get("replace_all")
+                        .or_else(|| arguments.get("replaceAll"))
+                        .and_then(|v| v.as_bool()),
                     Some(true)
                 ) {
                     extra.push_str(&suffix("all occurrences".to_string()));

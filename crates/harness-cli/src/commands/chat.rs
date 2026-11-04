@@ -51,8 +51,8 @@ use commands::{
 };
 use keys::AppKey;
 use render::{
-    compaction_report, format_approval_verdict, format_delegate_duration,
-    format_delegate_notification, format_delegate_title, format_patch_diff, format_tool_call,
+    compaction_report, extract_patch_diff, format_approval_verdict, format_delegate_duration,
+    format_delegate_notification, format_delegate_title, format_tool_call,
     format_tool_result, has_verdict, is_non_tool_event, parse_turns_from_history,
     render_transcript, right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord,
     LUNA_LABEL, PROMPT,
@@ -473,10 +473,14 @@ pub async fn run_interactive_chat(
         )))
         .await?;
 
+    let ui_for_bridge = ui.clone();
     harness_providers::opencode::set_ui_bridge(harness_providers::opencode::OpencodeUiBridge {
         clarify_tx: clarify_tx.clone(),
         approval_tx: approval_tx.clone(),
         allow_all: allow_all_session.clone(),
+        update_context_used_fn: Some(Arc::new(move |tokens| {
+            ui_for_bridge.update_context_used(tokens);
+        })),
     });
 
     let mut agent_config = config.agent.clone();
@@ -545,16 +549,8 @@ pub async fn run_interactive_chat(
                 } else {
                     format_tool_call(&name, &arguments)
                 };
-                let diff_lines = if name == "patch" {
-                    let old_str = arguments
-                        .get("old_string")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let new_str = arguments
-                        .get("new_string")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    format_patch_diff(old_str, new_str)
+                let diff_lines = if name == "patch" || name == "edit" || name == "apply_patch" {
+                    extract_patch_diff(&arguments)
                 } else {
                     Vec::new()
                 };
@@ -609,7 +605,9 @@ pub async fn run_interactive_chat(
                     if let Some(item) = target {
                         item.call_formatted.push_str(&status);
                         item.result_formatted.clear();
-                        let diff = if !is_error && name == "patch" {
+                        let diff = if !is_error
+                            && (name == "patch" || name == "edit" || name == "apply_patch")
+                        {
                             item.diff_lines.clone()
                         } else {
                             Vec::new()
