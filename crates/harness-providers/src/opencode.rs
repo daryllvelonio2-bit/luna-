@@ -628,6 +628,47 @@ fn usage_from_tokens(tokens: &serde_json::Value) -> TokenUsage {
     )
 }
 
+/// Add one step's report to a call total.
+///
+/// The headless route emits one `step_finish` per inner step and no cumulative event, so the
+/// ledger has to sum them itself. The context gauge keeps the per-step figure (only the newest
+/// prompt is the context); only the bill is cumulative.
+fn add_usage(total: &mut Option<TokenUsage>, usage: &TokenUsage) {
+    match total {
+        Some(sum) => {
+            sum.prompt_tokens = sum.prompt_tokens.saturating_add(usage.prompt_tokens);
+            sum.completion_tokens = sum
+                .completion_tokens
+                .saturating_add(usage.completion_tokens);
+            sum.total_tokens = sum.total_tokens.saturating_add(usage.total_tokens);
+            sum.cached_tokens = sum.cached_tokens.saturating_add(usage.cached_tokens);
+        }
+        None => *total = Some(usage.clone()),
+    }
+}
+
+/// The size of the prompt one native step sent: what the context gauge may show.
+///
+/// Only `session.step.ended` carries this. `session.usage.updated` looks similar but is the
+/// session's running total, so treating it as a context size made the gauge climb past the model
+/// window as OpenCode's inner loop ran.
+fn step_context_usage(ev_type: &str, data: &serde_json::Value) -> Option<TokenUsage> {
+    matches!(ev_type, "session.step.ended" | "session.next.step.ended")
+        .then(|| parse_tokens(data))
+        .flatten()
+}
+
+/// The usage to bill for the whole native call. This *is* the cumulative figure, and the session
+/// is created per call, so the newest value describes every step OpenCode ran for it.
+fn session_total_usage(ev_type: &str, data: &serde_json::Value) -> Option<TokenUsage> {
+    matches!(
+        ev_type,
+        "session.usage.updated" | "session.next.usage.updated"
+    )
+    .then(|| parse_tokens(data))
+    .flatten()
+}
+
 pub fn normalize_tool_arguments(input: &mut serde_json::Value) {
     if let serde_json::Value::Object(ref mut map) = input {
         // Path normalization
@@ -1077,6 +1118,11 @@ pub async fn native_opencode_stream(
     tokio::spawn(async move {
         let mut event_source = sse_resp.bytes_stream().eventsource();
         let mut last_usage = None;
+        // `session.usage.updated` reports the running totals for the whole OpenCode session. This
+        // connection creates a fresh session per completion, so the newest figure is this call's
+        // total and belongs in the ledger; it is *not* the size of the context, which is what the
+        // last step reported and what the gauge shows.
+        let mut total_usage = None;
         let mut last_finish_reason = Some("stop".to_string());
         let mut ended_successfully = false;
         let mut saw_deltas = false;
@@ -1312,7 +1358,7 @@ pub async fn native_opencode_stream(
                                 {
                                     last_finish_reason = Some(finish.to_string());
                                 }
-                                if let Some(usage) = parse_tokens(data) {
+                                if let Some(usage) = step_context_usage(ev_type, data) {
                                     last_usage = Some(usage.clone());
                                     let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
                                     if let Some(bridge) = get_ui_bridge() {
@@ -1328,19 +1374,11 @@ pub async fn native_opencode_stream(
                                 }
                             }
                             "session.usage.updated" | "session.next.usage.updated" => {
-                                if let Some(usage) = parse_tokens(data) {
-                                    last_usage = Some(usage.clone());
-                                    let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
-                                    if let Some(bridge) = get_ui_bridge() {
-                                        if let Some(ref update_fn) = bridge.update_context_used_fn {
-                                            let total_context = usage
-                                                .prompt_tokens
-                                                .saturating_add(usage.completion_tokens);
-                                            if total_context > 0 {
-                                                update_fn(total_context);
-                                            }
-                                        }
-                                    }
+                                // Session-cumulative, not one request's prompt. Feeding it to the
+                                // context gauge is what pushed the readout past the window while
+                                // an inner loop ran: every step's prompt was added to the last.
+                                if let Some(usage) = session_total_usage(ev_type, data) {
+                                    total_usage = Some(usage);
                                 }
                             }
                             "session.execution.succeeded"
@@ -1351,7 +1389,7 @@ pub async fn native_opencode_stream(
                                 let _ = tx
                                     .send(Ok(StreamEvent::Completed {
                                         finish_reason: last_finish_reason.clone(),
-                                        usage: last_usage.clone(),
+                                        usage: total_usage.clone().or_else(|| last_usage.clone()),
                                     }))
                                     .await;
                                 break;
@@ -1380,7 +1418,9 @@ pub async fn native_opencode_stream(
                                     let _ = tx
                                         .send(Ok(StreamEvent::Completed {
                                             finish_reason: last_finish_reason.clone(),
-                                            usage: last_usage.clone(),
+                                            usage: total_usage
+                                                .clone()
+                                                .or_else(|| last_usage.clone()),
                                         }))
                                         .await;
                                     break;
@@ -1626,7 +1666,7 @@ pub async fn native_opencode_stream(
             let _ = tx
                 .send(Ok(StreamEvent::Completed {
                     finish_reason: last_finish_reason,
-                    usage: last_usage,
+                    usage: total_usage.or(last_usage),
                 }))
                 .await;
         }
@@ -1804,7 +1844,7 @@ pub async fn execute_opencode_completion_cli(
                 "tool_use" => {}
                 "step_finish" => {
                     if let Some(usage) = parse_tokens(part) {
-                        token_usage = Some(usage);
+                        add_usage(&mut token_usage, &usage);
                     }
                 }
                 "error" => {
@@ -1930,6 +1970,7 @@ pub async fn stream_opencode_completion_cli(
         let mut saw_output = false;
         let mut last_error = None;
         let mut last_usage = None;
+        let mut total_usage = None;
         let mut last_finish_reason = Some("stop".to_string());
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -2014,6 +2055,7 @@ pub async fn stream_opencode_completion_cli(
                         }
                         if let Some(usage) = parse_tokens(part).or_else(|| parse_tokens(&val)) {
                             last_usage = Some(usage.clone());
+                            add_usage(&mut total_usage, &usage);
                             let _ = tx.send(Ok(StreamEvent::Usage(usage.clone()))).await;
                             if let Some(bridge) = get_ui_bridge() {
                                 if let Some(ref update_fn) = bridge.update_context_used_fn {
@@ -2091,7 +2133,7 @@ pub async fn stream_opencode_completion_cli(
         let _ = tx
             .send(Ok(StreamEvent::Completed {
                 finish_reason: last_finish_reason,
-                usage: last_usage,
+                usage: total_usage.or(last_usage),
             }))
             .await;
     });
@@ -2280,5 +2322,83 @@ mod tests {
         assert_eq!(usage.completion_tokens, 21, "reasoning is billed as output");
         assert_eq!(usage.cached_tokens, 7_680);
         assert_eq!(usage.total_tokens, 7_757);
+    }
+
+    /// The gauge reads `session.step.ended`: one step's prompt is the context. The same numbers on
+    /// `session.usage.updated` are the running total for every step the inner loop ran, so that
+    /// event must never be mistaken for a context size.
+    #[test]
+    fn only_a_step_report_is_a_context_size() {
+        let step = serde_json::json!({
+            "tokens": {
+                "input": 929,
+                "output": 2,
+                "reasoning": 0,
+                "cache": { "read": 6_144 }
+            }
+        });
+        let context =
+            step_context_usage("session.step.ended", &step).expect("a step reports usage");
+        assert_eq!(context.prompt_tokens, 7_073, "input + cache.read");
+        assert_eq!(context.completion_tokens, 2);
+        assert!(
+            step_context_usage("session.usage.updated", &step).is_none(),
+            "the cumulative event is not a context size"
+        );
+    }
+
+    /// The native route bills from `session.usage.updated`, which already covers every step of the
+    /// completion; the session is created per call, so its newest value is the call's total.
+    #[test]
+    fn the_cumulative_report_is_the_ledger_total() {
+        let cumulative = serde_json::json!({
+            "tokens": {
+                "input": 1_015,
+                "output": 6,
+                "reasoning": 81,
+                "cache": { "read": 6_528 }
+            }
+        });
+        let usage =
+            session_total_usage("session.usage.updated", &cumulative).expect("a cumulative total");
+        assert_eq!(usage.prompt_tokens, 7_543);
+        assert_eq!(usage.completion_tokens, 87, "output + reasoning");
+        assert!(
+            session_total_usage("session.step.ended", &cumulative).is_none(),
+            "a single step is not a cumulative total"
+        );
+    }
+
+    /// Headless emits one `step_finish` per step and no cumulative event, so the call total is the
+    /// sum of the steps while the gauge keeps whichever step arrived last.
+    #[test]
+    fn headless_steps_are_summed_for_the_ledger() {
+        let first = usage_from_tokens(&serde_json::json!({
+            "input": 14, "output": 41, "reasoning": 21, "cache": { "read": 6_016 }
+        }));
+        let second = usage_from_tokens(&serde_json::json!({
+            "input": 20, "output": 5, "reasoning": 0, "cache": { "read": 7_000 }
+        }));
+        let mut total = None;
+        add_usage(&mut total, &first);
+        add_usage(&mut total, &second);
+        let total = total.expect("two steps make a total");
+        assert_eq!(
+            total.prompt_tokens,
+            first.prompt_tokens + second.prompt_tokens
+        );
+        assert_eq!(
+            total.completion_tokens,
+            first.completion_tokens + second.completion_tokens
+        );
+        assert_eq!(
+            total.cached_tokens,
+            first.cached_tokens + second.cached_tokens
+        );
+        assert_eq!(total.total_tokens, first.total_tokens + second.total_tokens);
+        assert_eq!(
+            second.prompt_tokens, 7_020,
+            "each step still holds its own prompt"
+        );
     }
 }

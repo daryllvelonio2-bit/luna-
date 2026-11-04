@@ -500,3 +500,410 @@ async fn a_message_with_no_turn_running_is_refused() {
     );
     assert!(handle.take_leftover().is_empty());
 }
+
+/// The OpenCode shape: the provider runs tools inside its own model call and streams
+/// `ToolExecuting` / `ToolExecuted`, then answers with prose and no `tool_calls` for the agent to
+/// dispatch. Those calls and results still have to reach the transcript, or a later "continue"
+/// replays only the final sentence and loses what already ran.
+struct ProviderExecutedToolProvider {
+    calls: AtomicUsize,
+    last_request: Mutex<Vec<Message>>,
+}
+
+#[async_trait]
+impl ModelProvider for ProviderExecutedToolProvider {
+    fn provider_id(&self) -> &str {
+        "provider-executed-tools-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        unreachable!("the streamed path must answer, not the buffered one")
+    }
+
+    async fn stream(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        *self.last_request.lock().unwrap() = messages.to_vec();
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::ToolExecuting {
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({ "command": "echo hello-from-tool" }),
+                }),
+                Ok(StreamEvent::ToolExecuted {
+                    name: "bash".to_string(),
+                    output: "hello-from-tool\n".to_string(),
+                    is_error: false,
+                }),
+                Ok(StreamEvent::ContentDelta("final answer".to_string())),
+                Ok(StreamEvent::Completed {
+                    usage: None,
+                    finish_reason: Some("stop".to_string()),
+                }),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::ContentDelta("done after continue".to_string())),
+            Ok(StreamEvent::Completed {
+                usage: None,
+                finish_reason: Some("stop".to_string()),
+            }),
+        ])))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn provider_executed_tools_are_persisted_and_replayed() {
+    let provider = Arc::new(ProviderExecutedToolProvider {
+        calls: AtomicUsize::new(0),
+        last_request: Mutex::new(Vec::new()),
+    });
+    let store = Arc::new(SqliteSessionStore::in_memory().expect("in-memory store"));
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig::default(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s_provider_tools".to_string(),
+        resume_max_messages: 200,
+    });
+
+    let first = agent
+        .run_turn("run the tool", CancellationToken::new())
+        .await
+        .expect("the first turn runs");
+    assert_eq!(first.reply, "final answer");
+    assert_eq!(first.tool_calls.len(), 1, "the call is still reported");
+    assert_eq!(first.tool_calls[0].name, "bash");
+
+    let replay = store
+        .replay("s_provider_tools", 100)
+        .await
+        .expect("the transcript replays");
+    let call_row = replay
+        .history
+        .iter()
+        .position(|stored| !stored.message.tool_calls.is_empty())
+        .expect("the assistant tool-call row was written");
+    let call = &replay.history[call_row].message.tool_calls[0];
+    assert!(
+        call.id.starts_with("call_oc_"),
+        "the synthetic id has to be a legal call id: {call:?}"
+    );
+    let result_row = replay
+        .history
+        .iter()
+        .position(|stored| {
+            stored
+                .message
+                .tool_result
+                .as_ref()
+                .is_some_and(|result| result.call_id == call.id)
+        })
+        .expect("the matching tool-result row was written");
+    assert!(result_row > call_row, "the result follows its call");
+    assert_eq!(
+        replay.history[result_row]
+            .message
+            .tool_result
+            .as_ref()
+            .unwrap()
+            .content,
+        "hello-from-tool\n"
+    );
+    let final_row = replay
+        .history
+        .iter()
+        .rposition(|stored| stored.message.content.as_deref() == Some("final answer"))
+        .expect("the final prose was written");
+    assert!(final_row > result_row, "the answer follows the result");
+
+    // The next turn is the proof: a resumed request carries the call and its result, not just the
+    // last sentence.
+    let second = agent
+        .run_turn("continue", CancellationToken::new())
+        .await
+        .expect("the second turn runs");
+    assert_eq!(second.reply, "done after continue");
+    let request = provider.last_request.lock().unwrap().clone();
+    assert!(
+        request
+            .iter()
+            .any(|message| message.tool_calls.iter().any(|sent| sent.id == call.id)),
+        "the call was dropped from the next request: {request:?}"
+    );
+    assert!(
+        request.iter().any(|message| message
+            .tool_result
+            .as_ref()
+            .is_some_and(|result| result.call_id == call.id)),
+        "the result was dropped from the next request: {request:?}"
+    );
+}
+
+/// OpenCode's native stream reports one `Usage` per inner step and closes with a cumulative
+/// `Completed` total. The ledger bills the total; the gauge and the stored row must keep the last
+/// step's prompt, or the readout climbs past the model window.
+struct InnerLoopUsageProvider;
+
+#[async_trait]
+impl ModelProvider for InnerLoopUsageProvider {
+    fn provider_id(&self) -> &str {
+        "inner-loop-usage-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        unreachable!("the streamed path must answer, not the buffered one")
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::Usage(TokenUsage::estimated(100, 10))),
+            Ok(StreamEvent::Usage(TokenUsage::estimated(700, 40))),
+            Ok(StreamEvent::ContentDelta("done".to_string())),
+            Ok(StreamEvent::Completed {
+                usage: Some(TokenUsage::estimated(800, 50)),
+                finish_reason: Some("stop".to_string()),
+            }),
+        ])))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn the_gauge_keeps_the_last_step_while_the_ledger_bills_the_whole_call() {
+    let events: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_obs = events.clone();
+    let store = Arc::new(SqliteSessionStore::in_memory().expect("in-memory store"));
+    let agent = Agent::new(
+        Arc::new(InnerLoopUsageProvider),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig::default(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s_inner_loop".to_string(),
+        resume_max_messages: 200,
+    })
+    .with_observer(Arc::new(move |event| {
+        events_obs.lock().unwrap().push(event);
+    }));
+
+    let outcome = agent
+        .run_turn("go", CancellationToken::new())
+        .await
+        .expect("the turn runs");
+
+    let billed = outcome.usage.expect("the cumulative total is billed");
+    assert_eq!(billed.prompt_tokens, 800);
+    assert_eq!(billed.completion_tokens, 50);
+
+    let gauge = events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            AgentEvent::ContextTokensUpdated { tokens_used } => Some(*tokens_used),
+            _ => None,
+        });
+    assert_eq!(
+        gauge,
+        Some(740),
+        "the gauge must show the last step's prompt (700 + 40), never the cumulative 850"
+    );
+
+    let replay = store
+        .replay("s_inner_loop", 100)
+        .await
+        .expect("the transcript replays");
+    let stored = replay
+        .history
+        .iter()
+        .rev()
+        .find_map(|stored| stored.message.usage.as_ref())
+        .expect("the answer carries the per-step usage");
+    assert_eq!(stored.prompt_tokens, 700);
+    assert_eq!(stored.completion_tokens, 40);
+    assert_eq!(
+        stored.prompt_tokens + stored.completion_tokens,
+        740,
+        "a resumed session must estimate the prompt, not the call total"
+    );
+}
+
+/// A provider that reports its tools, then keeps the call open until the test cancels it. The
+/// call and its result already happened; the stop must still write them to the transcript.
+struct ProviderToolThenHoldProvider {
+    started: Arc<Notify>,
+}
+
+fn provider_tool_then_hold(
+    started: Arc<Notify>,
+) -> BoxStream<'static, Result<StreamEvent, HarnessError>> {
+    Box::pin(stream::unfold(0u8, move |step| {
+        let started = started.clone();
+        async move {
+            match step {
+                0 => Some((
+                    Ok(StreamEvent::ToolExecuting {
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({ "command": "echo persisted" }),
+                    }),
+                    1,
+                )),
+                1 => Some((
+                    Ok(StreamEvent::ToolExecuted {
+                        name: "shell".to_string(),
+                        output: "persisted\n".to_string(),
+                        is_error: false,
+                    }),
+                    2,
+                )),
+                2 => {
+                    started.notify_one();
+                    Some((Ok(StreamEvent::ContentDelta("partial".to_string())), 3))
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Some((
+                        Ok(StreamEvent::ContentDelta("late text".to_string())),
+                        step + 1,
+                    ))
+                }
+            }
+        }
+    }))
+}
+
+#[async_trait]
+impl ModelProvider for ProviderToolThenHoldProvider {
+    fn provider_id(&self) -> &str {
+        "provider-tool-then-hold-mock"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["mock".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        unreachable!("the streamed path must answer, not the buffered one")
+    }
+
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        Ok(provider_tool_then_hold(self.started.clone()))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn a_stop_keeps_the_provider_tools_that_already_ran() {
+    let started = Arc::new(Notify::new());
+    let store = Arc::new(SqliteSessionStore::in_memory().expect("in-memory store"));
+    let agent = Arc::new(
+        Agent::new(
+            Arc::new(ProviderToolThenHoldProvider {
+                started: started.clone(),
+            }),
+            Arc::new(MockMemory),
+            Arc::new(MockNotes),
+            Arc::new(DefaultToolRegistry::new()),
+            AgentConfig::default(),
+        )
+        .with_session(SessionBinding {
+            store: store.clone(),
+            session_id: "s_stopped_tools".to_string(),
+            resume_max_messages: 200,
+        }),
+    );
+
+    let cancel = CancellationToken::new();
+    let run = tokio::spawn({
+        let agent = agent.clone();
+        let cancel = cancel.clone();
+        async move { agent.run_turn("run it", cancel).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .expect("the provider never reported its tool");
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the stop did not end the turn")
+        .expect("the turn task panicked");
+    assert!(
+        matches!(result, Err(HarnessError::Cancelled)),
+        "a stop must stay a cancelled turn: {result:?}"
+    );
+
+    let replay = store
+        .replay("s_stopped_tools", 100)
+        .await
+        .expect("the transcript replays");
+    let call = replay
+        .history
+        .iter()
+        .find_map(|stored| stored.message.tool_calls.first())
+        .expect("the tool call that ran before the stop was not written");
+    let result = replay
+        .history
+        .iter()
+        .find_map(|stored| stored.message.tool_result.as_ref())
+        .expect("the tool result that ran before the stop was not written");
+    assert_eq!(call.name, "shell");
+    assert_eq!(call.arguments["command"], "echo persisted");
+    assert_eq!(result.call_id, call.id);
+    assert_eq!(result.content, "persisted\n");
+}

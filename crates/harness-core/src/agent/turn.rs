@@ -25,6 +25,12 @@ const INTERRUPTED_MARKER: &str = "\n\n[interrupted by your next message]";
 struct Streamed {
     message: Message,
     interrupted: bool,
+    /// The newest usage a provider reported per step. OpenCode runs an inner loop inside one
+    /// model call: its per-step usage is the context size, while `message.usage` is the call's
+    /// cumulative bill. The gauge and the stored row keep this, the ledger takes the total.
+    /// `None` when the provider reported no per-step usage (the message's own usage is the
+    /// context then).
+    context_usage: Option<TokenUsage>,
 }
 
 impl Streamed {
@@ -32,6 +38,15 @@ impl Streamed {
         Self {
             message,
             interrupted: false,
+            context_usage: None,
+        }
+    }
+
+    fn done_with_context(message: Message, context_usage: Option<TokenUsage>) -> Self {
+        Self {
+            message,
+            interrupted: false,
+            context_usage,
         }
     }
 
@@ -47,6 +62,7 @@ impl Streamed {
                 usage: None,
             },
             interrupted: true,
+            context_usage: None,
         }
     }
 }
@@ -241,8 +257,10 @@ where
 
             // Retrying on transient / overloaded errors with backoff
             let max_retries = 3;
+            let tools_before_call = executed_tools.len();
             let mut response = None;
             let mut interrupted = false;
+            let mut context_usage = None;
             for attempt in 0..=max_retries {
                 match self
                     .stream_completion(
@@ -256,6 +274,7 @@ where
                 {
                     Ok(streamed) => {
                         interrupted = streamed.interrupted;
+                        context_usage = streamed.context_usage;
                         response = Some(streamed.message);
                         break;
                     }
@@ -287,7 +306,30 @@ where
                             _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
                         }
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // A call the provider had already executed is still real work: write its
+                        // calls and results before the error unwinds the turn, so a stop/continue
+                        // does not lose the steps that did run.
+                        if !executed_tools[tools_before_call..].is_empty() {
+                            self.ensure_user_prompt(
+                                &mut messages,
+                                &user_message,
+                                &mut user_appended,
+                            )
+                            .await
+                            .ok();
+                            if let Err(persist_error) = self
+                                .persist_provider_tools(
+                                    &mut messages,
+                                    &executed_tools[tools_before_call..],
+                                )
+                                .await
+                            {
+                                warn!("Failed to persist provider-executed tools: {persist_error}");
+                            }
+                        }
+                        return Err(e);
+                    }
                 }
             }
 
@@ -320,11 +362,31 @@ where
 
             if rebound {
                 response.usage = None;
+                context_usage = None;
+            } else if let Some(context) = context_usage.as_ref() {
+                // The ledger already took the call's cumulative total above. The row keeps the
+                // newest per-step usage: replay and compaction measure a prompt with it, and a
+                // session-cumulative figure there would inflate every later estimate.
+                response.usage = Some(context.clone());
             }
 
-            let actual_tokens = match &response.usage {
+            // The provider ran these tools inside its own loop (OpenCode). They are not on
+            // `response.tool_calls`, so the dispatch below will never see them; persist the calls
+            // and results now. Otherwise the next request, and a resumed session, replay only the
+            // final prose and the model cannot tell what it already ran.
+            if response.tool_calls.is_empty() && !executed_tools[tools_before_call..].is_empty() {
+                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
+                    .await?;
+                self.persist_provider_tools(&mut messages, &executed_tools[tools_before_call..])
+                    .await?;
+            }
+
+            let actual_tokens = match context_usage {
                 Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
-                None => estimate_tokens(&messages).tokens,
+                None => match &response.usage {
+                    Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                    None => estimate_tokens(&messages).tokens,
+                },
             };
             if let Some(ref observer) = self.observer {
                 observer(AgentEvent::ContextTokensUpdated {
@@ -553,6 +615,48 @@ where
         Ok(())
     }
 
+    /// Write tools a provider executed inside its own model call as ordinary transcript rows.
+    ///
+    /// OpenCode runs the tool loop on its side and reports each call as `ToolExecuting` /
+    /// `ToolExecuted`, with no `tool_calls` left for this loop to dispatch. Replaying only the
+    /// final prose loses that trajectory: a later "continue" cannot see what already ran, and a
+    /// stop/continue starts the step over. The synthetic ids are local to this transcript; the
+    /// assistant row and its tool rows share them so the shape stays a legal call/result pair.
+    async fn persist_provider_tools(
+        &self,
+        messages: &mut Vec<Message>,
+        tools: &[TurnToolCall],
+    ) -> Result<(), HarnessError> {
+        if tools.is_empty() {
+            return Ok(());
+        }
+        let base = messages.len();
+        let calls: Vec<ToolCall> = tools
+            .iter()
+            .enumerate()
+            .map(|(index, tool)| ToolCall {
+                id: format!("call_oc_{base}_{index}"),
+                name: tool.name.clone(),
+                arguments: tool.arguments.clone(),
+                signature: None,
+            })
+            .collect();
+        let assistant = Message::assistant_with_tools(calls);
+        self.append(&assistant, false).await?;
+        messages.push(assistant);
+        for (index, tool) in tools.iter().enumerate() {
+            let result = ToolResult {
+                call_id: format!("call_oc_{base}_{index}"),
+                content: tool.output.clone(),
+                is_error: tool.is_error,
+            };
+            let message = Message::tool(result);
+            self.append(&message, false).await?;
+            messages.push(message);
+        }
+        Ok(())
+    }
+
     /// One model call, taken through the provider's streaming API so reasoning reaches the
     /// observer while the model is still producing it. The stream is assembled into the same
     /// `Message` the buffered call returns, so tool execution and persistence are unchanged.
@@ -593,6 +697,9 @@ where
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut usage = None;
+        // The newest per-step usage. OpenCode's cumulative `Completed` usage must not overwrite
+        // it, or the post-call gauge update jumps past the window.
+        let mut context_usage = None;
         let mut finish_reason: Option<String> = None;
         // Tool-call fragments arrive keyed by the index the provider assigned them.
         let mut calls: Vec<(usize, ToolCall)> = Vec::new();
@@ -738,6 +845,7 @@ where
                     let actual_tokens = token_usage
                         .prompt_tokens
                         .saturating_add(token_usage.completion_tokens);
+                    context_usage = Some(token_usage.clone());
                     usage = Some(token_usage);
                     if let Some(ref observer) = self.observer {
                         observer(AgentEvent::ContextTokensUpdated {
@@ -776,6 +884,7 @@ where
             return Ok(Streamed {
                 message,
                 interrupted: true,
+                context_usage,
             });
         }
 
@@ -820,14 +929,17 @@ where
                 if reasoning.is_empty() {
                     return Err(empty_answer_error(self.provider.provider_id()));
                 }
-                return Ok(Streamed::done(Message {
-                    role: Role::Assistant,
-                    content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
-                    reasoning: Some(reasoning),
-                    tool_calls: Vec::new(),
-                    tool_result: None,
-                    usage,
-                }));
+                return Ok(Streamed::done_with_context(
+                    Message {
+                        role: Role::Assistant,
+                        content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
+                        reasoning: Some(reasoning),
+                        tool_calls: Vec::new(),
+                        tool_result: None,
+                        usage,
+                    },
+                    context_usage,
+                ));
             }
             debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
             let buffered = self
@@ -842,14 +954,17 @@ where
                 } else {
                     Some(reasoning)
                 }) {
-                    return Ok(Streamed::done(Message {
-                        role: Role::Assistant,
-                        content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
-                        reasoning: Some(r),
-                        tool_calls: Vec::new(),
-                        tool_result: None,
-                        usage,
-                    }));
+                    return Ok(Streamed::done_with_context(
+                        Message {
+                            role: Role::Assistant,
+                            content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
+                            reasoning: Some(r),
+                            tool_calls: Vec::new(),
+                            tool_result: None,
+                            usage,
+                        },
+                        context_usage,
+                    ));
                 }
                 return Err(empty_answer_error(self.provider.provider_id()));
             }
@@ -893,7 +1008,7 @@ where
         };
         response.tool_calls = tool_calls;
         response.usage = usage;
-        Ok(Streamed::done(response))
+        Ok(Streamed::done_with_context(response, context_usage))
     }
 
     /// The buffered call, under the same two stop signals as the streamed one.

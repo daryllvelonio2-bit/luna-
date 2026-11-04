@@ -220,11 +220,19 @@ pub(super) async fn cancel_running_turn(
     context_max: u32,
     redraw: bool,
 ) -> bool {
-    let Some(handle) = active_turn.take() else {
+    let Some(mut handle) = active_turn.take() else {
         return false;
     };
     current_cancel.cancel();
-    handle.abort();
+    // Let the cancelled turn unwind before dropping it. A provider that runs its tools inside one
+    // model call (OpenCode) only has those rows in memory until the turn returns, so aborting
+    // immediately would lose the very steps the user is about to ask it to continue.
+    if tokio::time::timeout(std::time::Duration::from_millis(1500), &mut handle)
+        .await
+        .is_err()
+    {
+        handle.abort();
+    }
     ui.set_turn_active(false);
     ui.stop_activity();
     ui.clear_live_state();
