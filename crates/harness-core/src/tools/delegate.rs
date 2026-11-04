@@ -318,7 +318,7 @@ impl SubagentActivityTracker {
             SubagentActivity::ToolFinished { .. } => {
                 let _ = self
                     .active_tools
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                         Some(n.saturating_sub(1))
                     });
             }

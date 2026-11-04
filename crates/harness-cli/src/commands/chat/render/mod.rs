@@ -851,21 +851,17 @@ pub fn format_unified_diff(diff_str: &str) -> Vec<String> {
         } else if val.starts_with('+') {
             lines.push(format!(
                 "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
-                &val[1..].trim_start()
+                val.strip_prefix('+').unwrap_or(val).trim_start()
             ));
         } else if val.starts_with('-') {
             lines.push(format!(
                 "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m",
-                &val[1..].trim_start()
+                val.strip_prefix('-').unwrap_or(val).trim_start()
             ));
         } else if val.starts_with("@@") {
             lines.push(format!("\x1b[2m  {}\x1b[0m", val));
         } else if !val.is_empty() {
-            let content = if val.starts_with(' ') {
-                &val[1..]
-            } else {
-                val
-            };
+            let content = val.strip_prefix(' ').unwrap_or(val);
             lines.push(format!("\x1b[2m    {}\x1b[0m", content));
         }
     }
