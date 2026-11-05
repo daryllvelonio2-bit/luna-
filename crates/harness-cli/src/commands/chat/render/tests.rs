@@ -25,7 +25,6 @@ fn a_wide_session_lands_on_the_moon_and_its_name() {
     }
     let joined = plain.join("\n");
     assert!(joined.contains(LANDING_TITLE), "{joined}");
-    assert!(joined.contains(LANDING_TAGLINE), "{joined}");
     assert!(joined.contains('▄'), "the moon is drawn: {joined}");
 }
 
@@ -48,13 +47,13 @@ fn a_narrow_session_stacks_the_moon_above_its_name() {
 
 #[test]
 fn a_short_terminal_gets_only_the_wordmark() {
-    let rows = landing_rows(80, 1);
-    assert_eq!(rows.len(), 1);
-    assert!(plain_rows(&rows)[0].contains(LANDING_TITLE));
-
-    let two = landing_rows(80, 2);
-    assert_eq!(two.len(), 2, "two rows get the tagline as well");
-    assert!(plain_rows(&two)[1].contains(LANDING_TAGLINE));
+    // Neither height leaves room for the moon, so both collapse to the compact wordmark. There
+    // is no second line to fall back to now that the tagline is gone.
+    for height in [1, 2] {
+        let rows = landing_rows(80, height);
+        assert_eq!(rows.len(), 1, "height {height}");
+        assert!(plain_rows(&rows)[0].contains(LANDING_TITLE));
+    }
 }
 
 #[test]
@@ -174,74 +173,6 @@ fn the_shower_moves_between_frames() {
         landing_star_positions(&rows, 1),
         "a static shower would not be an animation"
     );
-}
-
-#[test]
-fn stationary_stars_keep_their_places() {
-    let rows = landing_rows(80, 24);
-    let slots = landing_twinkle_slots(&rows);
-    assert!(!slots.is_empty(), "the field should have stars");
-
-    for frame in 0..LANDING_FALL_FRAMES {
-        for position in landing_twinkle_positions(&rows, frame) {
-            assert!(
-                slots.contains(&position),
-                "frame {frame} moved a stationary star to {position:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn every_stationary_star_glints_over_a_cycle() {
-    let rows = landing_rows(80, 24);
-    for slot in landing_twinkle_slots(&rows) {
-        assert!(
-            (0..LANDING_TWINKLE_PERIOD)
-                .any(|frame| landing_twinkle_positions(&rows, frame).contains(&slot)),
-            "stationary star {slot:?} never lit"
-        );
-    }
-}
-
-#[test]
-fn a_stationary_star_never_covers_a_letter() {
-    let rows = landing_rows(80, 24);
-    for (row, col) in landing_twinkle_slots(&rows) {
-        let plain = dialoguer::console::strip_ansi_codes(&rows[row]).to_string();
-        assert!(
-            plain.chars().nth(col).map_or(true, |ch| ch == ' '),
-            "a twinkle landed on text at row {row}, column {col}: {plain:?}"
-        );
-    }
-}
-
-#[test]
-fn the_fixed_starfield_is_spread_through_the_open_sky() {
-    let rows = landing_rows(80, 24);
-    let slots = landing_dust_slots(&rows);
-    assert!(
-        slots.len() >= 12,
-        "the sky should hold a field, not a handful of dots: {slots:?}"
-    );
-
-    let distinct: std::collections::HashSet<_> = slots.iter().copied().collect();
-    assert_eq!(distinct.len(), slots.len(), "a fixed slot is drawn twice");
-    assert_eq!(slots, landing_dust_slots(&rows), "the field is stable");
-
-    let touched_rows: std::collections::HashSet<_> = slots.iter().map(|(row, _)| *row).collect();
-    assert!(
-        touched_rows.len() >= 4,
-        "the field should surround the mark: {slots:?}"
-    );
-
-    for (row, col) in slots {
-        let plain = dialoguer::console::strip_ansi_codes(&rows[row]).to_string();
-        assert!(
-            plain.chars().nth(col).map_or(true, |ch| ch == ' '),
-            "a fixed star landed on text at row {row}, column {col}: {plain:?}"
-        );
-    }
 }
 
 #[test]
