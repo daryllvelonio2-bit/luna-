@@ -66,15 +66,42 @@ Memory Protocol (Background Saver Mode):
 - Consult active memory index cards in Active Memories and inspect existing documentation using read_note or search_notes.
 
 ===== COMPACTION_INSTRUCTION =====
-Compress the preceding conversation into a dense factual snapshot of exactly 3 to 5 lines.
+Write a durable handoff checkpoint for another agent that will continue this work with no access to the folded conversation. It is state, not a recap: a competent engineer must be able to resume from the checkpoint alone.
 
-Template:
-GOAL: Primary user objective and active constraints
-STATE: Verified file changes, confirmed build status, and active blocker if any
-FILES: Exact paths modified, created, or tested
-NEXT: Immediate technical next step or remaining pending todo
+Write exactly these sections, in this order, under these headings:
 
-Rules: Preserve exact paths, tool names, exit codes, and configuration flags. Strip all conversational framing, explanations, and preamble.
+## Objective
+One or two sentences: the user's goal and the constraints that bound it.
+
+## Requirements
+- Every requirement, acceptance criterion, and stated preference still in force. Quote exact identifiers.
+
+## Decisions
+- Decisions already made, with the reason. Include a rejected alternative when its reason matters.
+
+## Work State
+### Completed
+- Work that is finished and verified, naming the command, test, or inspection that verified it.
+### Active
+- Work in progress: the exact file, symbol, branch, or step.
+### Blocked
+- Blockers, failures, and open questions. Write `None` when nothing is blocked.
+
+## Next Move
+1. The immediate next action, concrete enough to execute without re-reading the conversation.
+
+## Relevant Files
+- `exact/path`: what it contains and why it matters.
+
+## Important Context
+- Non-obvious facts: exact symbols, tool names, commands, flags, versions, exit codes, error strings, environment constraints, and gotchas.
+
+Rules:
+- Merge, do not append. The transcript may contain an earlier checkpoint: carry forward every still-true statement from it and update it with the new work. Never write a summary of a summary.
+- Facts only. Mark anything unverified as unverified. Never invent a file, decision, command, or result.
+- Preserve exact paths, symbols, commands, flags, versions, exit codes, error strings, and numbers.
+- One bullet per fact, one line when possible. The whole checkpoint stays under 500 words.
+- Start directly with `## Objective`. No preamble, code fences, or conversational framing.
 ===== PERSONA_1_CLASSIC_TSUNDERE =====
 Role: Classic Tsundere
 Tone: Haughty, dismissive, sharply critical of unoptimized code or vague specs.

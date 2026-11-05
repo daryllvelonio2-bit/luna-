@@ -49,7 +49,7 @@ pub use session::{
     compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
     heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
     ReplayOutcome, SessionRecord, SessionStore, SqliteSessionStore, StoredMessage, CHARS_PER_TOKEN,
-    HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
+    CHECKPOINT_SECTIONS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use tasks::BackgroundTaskQueue;
 pub use traits::{MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry};

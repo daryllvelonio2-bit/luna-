@@ -7,7 +7,7 @@
 //!
 //! Bounded context is [`compaction`]: when the estimated transcript size crosses the fold
 //! threshold — `agent.auto_compact_threshold` when auto-compaction is on, else
-//! `agent.compact_at_tokens` — the oldest user turns are folded into a single `system`-role summary
+//! `agent.compact_at_tokens` — the oldest user turns are folded into one structured checkpoint
 //! row, the configured number of recent turns stay verbatim, and the folded rows are kept in the
 //! table with `compacted_at` set (nothing is destroyed — that is the raw material for a rewind
 //! spec). [`estimate_tokens`] is the one estimator both the threshold and the tests use.
@@ -31,7 +31,7 @@ use crate::types::Message;
 pub use compaction::{
     compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
     heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
-    CHARS_PER_TOKEN, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
+    CHARS_PER_TOKEN, CHECKPOINT_SECTIONS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use transcript::{last_fold_seq, sendable_messages, trim_messages_to_tokens};
 

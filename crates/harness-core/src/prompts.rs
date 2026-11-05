@@ -79,6 +79,32 @@ mod tests {
     }
 
     #[test]
+    fn the_compaction_prompt_asks_for_a_structured_checkpoint() {
+        let body = section(COMPACTION_INSTRUCTION).expect("compaction prompt loads");
+
+        // The template and the persisted shape are the same contract: a section the prompt stops
+        // asking for would silently disappear from every later resume.
+        for heading in crate::session::compaction::CHECKPOINT_SECTIONS {
+            assert!(body.contains(heading), "{heading} missing from: {body}");
+        }
+        for state in ["### Completed", "### Active", "### Blocked"] {
+            assert!(body.contains(state), "{state} missing from: {body}");
+        }
+
+        // The guarantees the old 3-5 line snapshot carried are upgraded, not dropped.
+        assert!(body.contains("Merge, do not append"), "{body}");
+        assert!(
+            body.contains("Preserve exact paths, symbols, commands, flags, versions, exit codes"),
+            "{body}"
+        );
+        assert!(body.contains("Never invent"), "{body}");
+        assert!(
+            !body.contains("exactly 3 to 5 lines"),
+            "the old snapshot template is gone: {body}"
+        );
+    }
+
+    #[test]
     fn a_misspelled_section_is_an_error_not_an_empty_prompt() {
         assert!(section("NO_SUCH_SECTION").is_err());
     }

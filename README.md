@@ -387,6 +387,7 @@ Luna automatically bounds session context tokens before making model requests an
   Both the runtime in-memory state and the configuration file are updated immediately.
   - `/compact-model` — choose a dedicated provider and model for transcript compaction, with interactive scope selection: **This session only** (saved to session SQLite row across restarts) or **Globally** (persisted into `~/.luna/config.yaml`). Reset with `/compact-model reset`.
 - **Mid-Turn Context Re-binding**: When background compaction completes during multi-round tool iterations, active turn messages are immediately rebound to the compacted transcript and the UI context gauge drops dynamically, avoiding repeated re-threshold thrashing.
+- **Structured handoff checkpoints**: every fold — and `/summarize` — writes a durable checkpoint instead of a 3–5 line snapshot: `Objective`, `Requirements`, `Decisions`, `Work State` (`Completed` / `Active` / `Blocked`), `Next Move`, `Relevant Files`, and `Important Context`. The summariser merges any earlier checkpoint rather than summarising a summary, preserves exact paths, symbols, commands, flags, versions, exit codes and error strings, and marks unverified claims as unverified. The checkpoint is size-bounded so one summary cannot cost the turns it replaced.
 
 **The todo list belongs to the session.** `todo_list` keeps one file per conversation in
 `paths.todos_dir` (`~/.luna/todos/<session>.json`), so a new session starts with an empty

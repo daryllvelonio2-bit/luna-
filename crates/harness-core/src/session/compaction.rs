@@ -1,5 +1,5 @@
-//! Bounded context: the token estimate, the fold boundary, and the one model call that summarises
-//! the turns that no longer fit.
+//! Bounded context: the token estimate, the fold boundary, and the one model call that writes a
+//! durable handoff checkpoint for the turns that no longer fit.
 
 use tracing::debug;
 
@@ -49,7 +49,106 @@ fn usable_summary(response: &Message) -> Option<String> {
     if text.is_empty() || text == crate::types::NO_TEXT_RESPONSE {
         return None;
     }
-    Some(text.to_string())
+    Some(normalize_summary(text))
+}
+
+/// The sections a checkpoint must carry, in order.
+///
+/// `COMPACTION_INSTRUCTION` in `prompts.md` names the same headings in the same order. Keeping
+/// the list here lets the prompt change be asserted instead of trusted, and gives a future
+/// reader of the persisted summary a fixed shape to look for.
+pub const CHECKPOINT_SECTIONS: [&str; 7] = [
+    "Objective",
+    "Requirements",
+    "Decisions",
+    "Work State",
+    "Next Move",
+    "Relevant Files",
+    "Important Context",
+];
+
+/// Upper bound on one checkpoint written back into the transcript.
+///
+/// The prompt asks for under 500 words, so this is a safety valve rather than a target: a model
+/// that rambles still cannot make the summary cost the transcript it replaced. A summary is
+/// replayed on every later request, so it has to stay smaller than the turns it stands in for.
+const SUMMARY_MAX_CHARS: usize = 12_000;
+
+/// What replaces the tail of a checkpoint that blew past [`SUMMARY_MAX_CHARS`].
+const SUMMARY_TRUNCATED: &str =
+    "\n… [checkpoint truncated: one summary must stay smaller than the turns it replaces]";
+
+/// Clean up the shape a model returns, without discarding its content.
+///
+/// Models occasionally answer with a fenced block or a sentence before the first heading even
+/// when the instruction says not to. Unwrapping and cutting that preamble is safe; a checkpoint
+/// that ignored the template entirely is kept whole, because a plain summary is still a better
+/// transcript replacement than running on the unfolded history.
+fn normalize_summary(raw: &str) -> String {
+    let mut text = raw.trim();
+
+    // ```markdown\n## Objective …\n```
+    if text.starts_with("```") {
+        if let Some(newline) = text.find('\n') {
+            let body = text[newline + 1..].trim_end();
+            if let Some(unfenced) = body.strip_suffix("```") {
+                text = unfenced.trim();
+            }
+        }
+    }
+
+    if let Some(start) = checkpoint_start(text) {
+        text = text[start..].trim_start();
+    }
+
+    bound_summary(text)
+}
+
+/// Byte offset of the first line that is one of the checkpoint headings.
+fn checkpoint_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let hashes = trimmed.chars().take_while(|&ch| ch == '#').count();
+        if (1..=3).contains(&hashes) {
+            let title = trimmed[hashes..].trim();
+            if CHECKPOINT_SECTIONS
+                .iter()
+                .any(|section| title.eq_ignore_ascii_case(section))
+            {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Keep a checkpoint inside [`SUMMARY_MAX_CHARS`], cutting on a line boundary when possible.
+fn bound_summary(text: &str) -> String {
+    if text.chars().count() <= SUMMARY_MAX_CHARS {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(SUMMARY_MAX_CHARS + SUMMARY_TRUNCATED.len());
+    let mut used = 0;
+    for line in text.split_inclusive('\n') {
+        let count = line.chars().count();
+        if used + count > SUMMARY_MAX_CHARS {
+            break;
+        }
+        out.push_str(line);
+        used += count;
+    }
+    if out.is_empty() {
+        // One unbroken line larger than the whole budget: keep its head so the checkpoint still
+        // says something instead of becoming a bare truncation marker.
+        out.extend(text.chars().take(SUMMARY_MAX_CHARS));
+    }
+    let end = out.trim_end().len();
+    out.truncate(end);
+    out.push_str(SUMMARY_TRUNCATED);
+    out
 }
 
 /// Where an estimate came from.
@@ -450,7 +549,10 @@ fn safe_boundary(history: &[StoredMessage], desired: usize) -> usize {
 /// What a successful compaction produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionOutcome {
-    /// The summary text, written back as a synthetic `system` turn.
+    /// The checkpoint text, written back as a synthetic `system` turn.
+    ///
+    /// It carries the sections in [`CHECKPOINT_SECTIONS`]: objective, requirements, decisions,
+    /// work state, next move, files, and context. A later fold merges it instead of replacing it.
     pub summary: String,
     /// The messages that stay verbatim, in order.
     pub kept: Vec<Message>,
@@ -775,7 +877,7 @@ async fn compact_at_boundary(
     }))
 }
 
-/// Summarise the entire `history` of a session into a concise context summary.
+/// Summarise the entire `history` of a session into a durable handoff checkpoint.
 pub async fn summarize_session(
     provider: &dyn ModelProvider,
     model: &str,
@@ -808,14 +910,10 @@ pub async fn summarize_session(
     };
 
     let response = provider.complete(&request, &[], &options).await?;
-    let summary = response
-        .content
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| HarnessError::ProviderError {
-            provider: provider.provider_id().to_string(),
-            message: "session summary returned empty content".to_string(),
-        })?;
+    let summary = usable_summary(&response).ok_or_else(|| HarnessError::ProviderError {
+        provider: provider.provider_id().to_string(),
+        message: "session summary returned empty content".to_string(),
+    })?;
 
     Ok(summary)
 }
@@ -932,5 +1030,57 @@ mod tests {
         )]);
         assert!(rendered.contains("and here is what I saw"), "{rendered}");
         assert!(!rendered.contains("characters cut"), "{rendered}");
+    }
+
+    /// A fenced answer is unwrapped before it is written back, so the checkpoint in the
+    /// transcript is markdown rather than a code block the next model has to read through.
+    #[test]
+    fn a_checkpoint_in_a_code_fence_is_unwrapped() {
+        let fenced = "```markdown\n## Objective\nShip it.\n\n## Next Move\nRun the tests.\n```";
+        let summary = normalize_summary(fenced);
+
+        assert!(!summary.contains("```"), "{summary}");
+        assert!(summary.starts_with("## Objective"), "{summary}");
+        assert!(summary.ends_with("Run the tests."), "{summary}");
+    }
+
+    /// A model that opens with a chatty sentence still produces a usable checkpoint: the
+    /// preamble is dropped from the first real heading onward.
+    #[test]
+    fn a_preamble_before_the_checkpoint_is_dropped() {
+        let raw = "Here is the checkpoint you asked for:\n\n## Objective\nFinish the upgrade.";
+        let summary = normalize_summary(raw);
+
+        assert_eq!(summary, "## Objective\nFinish the upgrade.");
+    }
+
+    /// A model that ignores the template is not punished by losing its answer: a plain summary
+    /// still replaces the transcript better than no summary at all.
+    #[test]
+    fn a_summary_that_ignores_the_template_is_kept() {
+        let plain = "The user asked for a parser fix; the build passes.";
+        assert_eq!(normalize_summary(plain), plain);
+    }
+
+    /// The checkpoint is replayed on every later request, so one run of model verbosity cannot
+    /// make the summary as large as the turns it replaced. The cut lands on a line boundary and
+    /// announces itself.
+    #[test]
+    fn a_checkpoint_over_budget_is_cut_on_a_line_boundary() {
+        let body = format!(
+            "## Objective\n{}\n\n## Important Context\nkeep this",
+            "- a fact\n".repeat(SUMMARY_MAX_CHARS)
+        );
+        let summary = normalize_summary(&body);
+
+        assert!(summary.chars().count() <= SUMMARY_MAX_CHARS + SUMMARY_TRUNCATED.len());
+        assert!(summary.starts_with("## Objective"), "the head survives");
+        assert!(
+            summary
+                .trim_end_matches(SUMMARY_TRUNCATED)
+                .ends_with("- a fact"),
+            "the cut keeps whole lines: {summary:?}"
+        );
+        assert!(summary.ends_with(SUMMARY_TRUNCATED), "{summary}");
     }
 }
