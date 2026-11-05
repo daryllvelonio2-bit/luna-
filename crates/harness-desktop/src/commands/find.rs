@@ -40,7 +40,11 @@ impl FindQuery {
 
 /// Look for elements by role or name and return them with refs.
 pub fn find(engine: &DesktopEngine, app: &str, query: &FindQuery) -> Response {
-    let snapshot = match engine.observe(app, &TreeOptions::default()) {
+    let options = TreeOptions {
+        compact: true,
+        ..Default::default()
+    };
+    let snapshot = match engine.observe(app, &options) {
         Ok(data) => data,
         Err(error) => return Response::err("find", &error),
     };
@@ -52,7 +56,11 @@ pub fn find(engine: &DesktopEngine, app: &str, query: &FindQuery) -> Response {
         .flatten()
         .into_iter()
         .filter(|node| query.matches(node))
-        .map(|node| serde_json::to_value(node).unwrap_or(serde_json::Value::Null))
+        .map(|node| {
+            let mut lean = node.clone();
+            lean.children.clear();
+            serde_json::to_value(&lean).unwrap_or(serde_json::Value::Null)
+        })
         .collect();
     Response::ok(
         "find",

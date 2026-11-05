@@ -85,8 +85,14 @@ fn walk_at(
         .max_depth
         .is_some_and(|limit| depth >= limit);
     let cut_by_skeleton = options.skeleton && depth >= 1;
+    // In compact mode, do not recurse into nested submenus (menus inside menus)
+    // as their popup contents are not visible on screen until opened.
+    let is_submenu = options.compact
+        && (raw.role == "menu item" || raw.role == "menu")
+        && node.presentation.offers("showmenu")
+        && depth > 2;
 
-    if cut_by_depth || cut_by_skeleton {
+    if cut_by_depth || cut_by_skeleton || is_submenu {
         node.subtree_truncated = !raw.children.is_empty();
         if node.subtree_truncated {
             node.children_count = Some(raw.children.len() as u32);
