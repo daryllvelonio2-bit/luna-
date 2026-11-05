@@ -198,6 +198,13 @@ const REPLAYED_TOOL_RESULTS: usize = 6;
 /// Characters kept from a tool result older than [`REPLAYED_TOOL_RESULTS`]: head, marker, tail.
 const STALE_TOOL_RESULT_CHARS: usize = 4_000;
 
+/// Hard ceiling for a tool result that is still among the newest [`REPLAYED_TOOL_RESULTS`].
+///
+/// The dispatch cap bounds every result produced from now on, but rows written before it existed
+/// can be megabytes. A result the model is still acting on keeps more of its text, not all of it:
+/// no single answer gets to fill the window alone.
+const FRESH_TOOL_RESULT_MAX_CHARS: usize = 100_000;
+
 /// What sits between the head and tail of a clipped tool result.
 const TOOL_RESULT_CLIPPED: &str = "\n\n[tool result clipped when replayed: middle omitted]\n\n";
 
@@ -227,15 +234,14 @@ fn elide_stale_tool_results(messages: &mut [Message]) {
         let Some(result) = message.tool_result.as_mut() else {
             continue;
         };
-        if seen < REPLAYED_TOOL_RESULTS {
+        // The newest few keep more of their text; everything older is reduced to a head and tail.
+        let cap = if seen < REPLAYED_TOOL_RESULTS {
             seen += 1;
-            continue;
-        }
-        let clipped = crate::tools::clip_middle(
-            &result.content,
-            STALE_TOOL_RESULT_CHARS,
-            TOOL_RESULT_CLIPPED,
-        );
+            FRESH_TOOL_RESULT_MAX_CHARS
+        } else {
+            STALE_TOOL_RESULT_CHARS
+        };
+        let clipped = crate::tools::clip_middle(&result.content, cap, TOOL_RESULT_CLIPPED);
         if clipped.len() == result.content.len() {
             continue;
         }
@@ -503,6 +509,28 @@ mod tests {
         for result in &results[2..] {
             assert_eq!(&result.tool_result.as_ref().unwrap().content, &body);
         }
+    }
+
+    /// Even the newest result has a ceiling: a row written before the dispatch cap can be
+    /// megabytes, and no single answer may fill the window alone.
+    #[test]
+    fn a_fresh_tool_result_is_still_capped() {
+        let body = format!("begin{}end", "x".repeat(250_000));
+        let history = vec![
+            stored(1, Message::user("go")),
+            stored(2, Message::assistant_with_tools(vec![call("call-big")])),
+            stored(
+                3,
+                Message::tool(crate::types::ToolResult::success("call-big", &body)),
+            ),
+        ];
+
+        let messages = sendable_messages(&history);
+        let text = &messages[2].tool_result.as_ref().unwrap().content;
+        assert!(text.len() <= FRESH_TOOL_RESULT_MAX_CHARS);
+        assert!(text.starts_with("begin"));
+        assert!(text.ends_with("end"));
+        assert!(text.contains(TOOL_RESULT_CLIPPED));
     }
 
     /// Old reasoning is no longer replayed; the newest blocks keep theirs.

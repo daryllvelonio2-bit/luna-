@@ -74,9 +74,9 @@ Test: `reasoning_and_signatures_count_towards_the_estimate`.
 `sendable_messages()` is the single seam used by turn replay, fold estimation, rebinding and the
 context gauge, so clipping there keeps all four consistent. It now:
 
-- keeps the newest **6** tool results verbatim and clips older ones to **4,000 chars**, head and
-  tail with a marker (both `content` and `tool_result.content`, because `Message::tool` stores
-  the text twice);
+- keeps the newest **6** tool results verbatim up to a **100,000-char** ceiling and clips older
+  ones to **4,000 chars**, head and tail with a marker (both `content` and
+  `tool_result.content`, because `Message::tool` stores the text twice);
 - keeps reasoning on the newest **4** assistant messages and drops it from older ones;
 - keeps the newest **8** thought signatures and clears the rest. The provider layer already
   substitutes Google's documented dummy (`SKIP_THOUGHT_SIGNATURE_VALIDATOR`) when the field is
