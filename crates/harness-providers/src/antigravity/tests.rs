@@ -861,3 +861,88 @@ fn a_truncated_frame_reports_the_limit_and_the_tokens_it_spent() {
     assert_eq!(usage.completion_tokens, 3_932);
     assert_eq!(usage.total_tokens, 140_892);
 }
+
+/// A stored credential is a record, not just a token pair: a refresh must not erase the fields the
+/// original import wrote (the e-mail in particular), and it must move `expiry` forward so a later
+/// reader does not see a token that is already past its lifetime.
+#[test]
+fn a_refresh_keeps_the_fields_the_credential_already_carried() {
+    use super::credentials::{merge_antigravity_refresh, AntigravityRefreshedToken};
+
+    let raw = json!({
+        "access_token": "old-access",
+        "refresh_token": "refresh-1",
+        "email": "user@example.com",
+        "expiry": "2020-01-01T00:00:00Z",
+    })
+    .to_string();
+
+    let merged: serde_json::Value = serde_json::from_str(&merge_antigravity_refresh(
+        &raw,
+        &AntigravityRefreshedToken {
+            access_token: "new-access".to_string(),
+            refresh_token: None,
+            expires_in_secs: Some(3_600),
+        },
+    ))
+    .expect("the merged credential is JSON");
+
+    assert_eq!(merged["access_token"], "new-access");
+    assert_eq!(
+        merged["refresh_token"], "refresh-1",
+        "a refresh that does not rotate the token keeps the one already stored"
+    );
+    assert_eq!(merged["email"], "user@example.com");
+
+    let expiry = merged["expiry"].as_str().expect("expiry is a timestamp");
+    let expiry = chrono::DateTime::parse_from_rfc3339(expiry).expect("expiry is RFC 3339");
+    assert!(
+        expiry > chrono::Utc::now() + chrono::Duration::minutes(50),
+        "the refreshed expiry is relative to now, not the old record: {expiry}"
+    );
+}
+
+/// The desktop client's embedded secret is what every Antigravity login was issued against. The
+/// environment overrides win when set, but the fallback must never make a stored refresh token
+/// unusable just because the user did not export a variable.
+#[test]
+fn the_client_secret_falls_back_to_the_embedded_value() {
+    let override_set = std::env::var("ANTIGRAVITY_CLIENT_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("AGY_CLIENT_SECRET")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+
+    let secret = agy_client_secret();
+    assert!(!secret.trim().is_empty(), "a refresh always has a secret");
+    if let Some(expected) = override_set {
+        assert_eq!(secret, expected, "the environment override still wins");
+    } else {
+        assert_eq!(secret, AGY_CLIENT_SECRET);
+    }
+}
+
+/// A credential imported without a refresh token cannot renew itself; the error has to say what to
+/// do rather than leaving the user to guess why copying `agy` credentials fixes it temporarily.
+#[tokio::test]
+async fn a_credential_without_a_refresh_token_says_how_to_reimport_it() {
+    use super::credentials::refresh_and_store_antigravity_credential;
+
+    let client = reqwest::Client::new();
+    let error = refresh_and_store_antigravity_credential(&client, "plain-access-token", None)
+        .await
+        .expect_err("a plain token has nothing to refresh with");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("refresh token"),
+        "the failure names the missing piece: {message}"
+    );
+    assert!(
+        message.contains("luna auth antigravity copy"),
+        "the failure names the way back: {message}"
+    );
+}

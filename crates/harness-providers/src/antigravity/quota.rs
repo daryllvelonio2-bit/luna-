@@ -269,7 +269,7 @@ pub async fn retrieve_antigravity_quota(
     raw_secret: &str,
     cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
 ) -> Result<AntigravityQuotaSummary, HarnessError> {
-    let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
+    let (mut bearer_token, _) = extract_bearer_token(raw_secret);
 
     let send = |endpoint: &'static str, token: String| {
         let client = http_client.clone();
@@ -292,29 +292,19 @@ pub async fn retrieve_antigravity_quota(
         match send(ep, bearer_token.clone()).await {
             Ok(r) => {
                 if r.status().as_u16() == 401 {
-                    if let Some(ref refresh_tok) = refresh_tok_opt {
-                        if let Ok(new_token) =
-                            refresh_antigravity_token(http_client, refresh_tok).await
-                        {
-                            bearer_token = new_token.clone();
-                            if let Some(cm) = cred_manager {
-                                let updated_secret = json!({
-                                    "access_token": new_token,
-                                    "refresh_token": refresh_tok,
-                                });
-                                let _ = cm
-                                    .update_credential_key(
-                                        "antigravity",
-                                        raw_secret,
-                                        &updated_secret.to_string(),
-                                    )
-                                    .await;
-                            }
-                            if let Ok(r2) = send(ep, bearer_token.clone()).await {
-                                if r2.status().is_success() {
-                                    resp_opt = Some(r2);
-                                    break;
-                                }
+                    if let Ok(new_token) =
+                        super::credentials::refresh_and_store_antigravity_credential(
+                            http_client,
+                            raw_secret,
+                            cred_manager,
+                        )
+                        .await
+                    {
+                        bearer_token = new_token;
+                        if let Ok(r2) = send(ep, bearer_token.clone()).await {
+                            if r2.status().is_success() {
+                                resp_opt = Some(r2);
+                                break;
                             }
                         }
                     }

@@ -4,6 +4,8 @@
 //! the account's own e-mail out of it (the display name has to follow the credential actually in
 //! use, not a label written down once), and reading the bearer token back out for a request.
 
+use serde_json::json;
+
 use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,12 +166,33 @@ fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// What Google's token endpoint returned for a refresh.
+///
+/// The expiry is kept relative (`expires_in`) because the caller writes it to a stored credential
+/// and the clock starts when the response arrives, not when it is read back.
+#[derive(Debug, Clone)]
+pub(crate) struct AntigravityRefreshedToken {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in_secs: Option<i64>,
+}
+
 /// Refresh an Antigravity Google OAuth access token using a refresh token.
 pub async fn refresh_antigravity_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<String, HarnessError> {
-    let client_secret = super::agy_client_secret()?;
+    Ok(request_antigravity_token(http_client, refresh_token)
+        .await?
+        .access_token)
+}
+
+/// The full token response, so a stored credential can be updated without losing anything.
+async fn request_antigravity_token(
+    http_client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<AntigravityRefreshedToken, HarnessError> {
+    let client_secret = super::agy_client_secret();
     let params = [
         ("client_id", AGY_CLIENT_ID),
         ("client_secret", client_secret.as_str()),
@@ -211,7 +234,69 @@ pub async fn refresh_antigravity_token(
             message: "Missing access_token in OAuth refresh response".to_string(),
         })?;
 
-    Ok(access.to_string())
+    Ok(AntigravityRefreshedToken {
+        access_token: access.to_string(),
+        refresh_token: data
+            .get("refresh_token")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string()),
+        expires_in_secs: data.get("expires_in").and_then(|e| e.as_i64()),
+    })
+}
+
+/// The stored credential after a refresh: every field the old record carried (`email`, ...) is
+/// kept, and the tokens and expiry are replaced with the ones Google just issued.
+pub(crate) fn merge_antigravity_refresh(
+    raw_secret: &str,
+    refreshed: &AntigravityRefreshedToken,
+) -> String {
+    let mut record = serde_json::from_str::<serde_json::Value>(raw_secret)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| json!({}));
+
+    record["access_token"] = json!(refreshed.access_token);
+    if let Some(refresh_token) = &refreshed.refresh_token {
+        record["refresh_token"] = json!(refresh_token);
+    }
+    if let Some(seconds) = refreshed.expires_in_secs {
+        let expiry = chrono::Utc::now() + chrono::Duration::seconds(seconds);
+        record["expiry"] = json!(expiry.to_rfc3339());
+    }
+    record.to_string()
+}
+
+/// Renew the credential a request just used and write it back to the pool.
+///
+/// This is the one place a refresh happens: the turn path and the quota path both see a 401 once
+/// the access token ages out (roughly hourly), and both need the same merge so a refreshed record
+/// keeps the e-mail and expiry the original import carried. Returns the new access token.
+pub(crate) async fn refresh_and_store_antigravity_credential(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
+) -> Result<String, HarnessError> {
+    let (_, refresh_token) = extract_bearer_token(raw_secret);
+    let Some(refresh_token) = refresh_token else {
+        return Err(HarnessError::AuthenticationFailed {
+            provider: "antigravity".to_string(),
+            message: "the Antigravity credential has no refresh token, so it cannot renew itself; \
+                      import a fresh login with `luna auth antigravity copy` (or /connect → Import \
+                      Antigravity) once"
+                .to_string(),
+        });
+    };
+
+    let refreshed = request_antigravity_token(http_client, &refresh_token).await?;
+
+    if let Some(cm) = cred_manager {
+        let updated = merge_antigravity_refresh(raw_secret, &refreshed);
+        let _ = cm
+            .update_credential_key("antigravity", raw_secret, &updated)
+            .await;
+    }
+
+    Ok(refreshed.access_token)
 }
 
 /// Extracts the raw bearer token string if stored as a JSON credential record.

@@ -39,22 +39,25 @@ pub const AGY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 pub const AGY_CLIENT_SECRET: &str = "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";
 
-pub fn agy_client_secret() -> Result<String, HarnessError> {
+/// The OAuth client secret used to refresh an Antigravity login.
+///
+/// The desktop client embeds one, which is the secret every login was issued against; the
+/// environment overrides exist for a caller that registered its own client. Falling back to the
+/// embedded value is what keeps a stored `refresh_token` usable: without it the hourly access-token
+/// expiry turned into a hard authentication failure and the only way back was to copy `agy`'s
+/// credentials again.
+pub fn agy_client_secret() -> String {
     if let Ok(sec) = std::env::var("ANTIGRAVITY_CLIENT_SECRET") {
         if !sec.trim().is_empty() {
-            return Ok(sec);
+            return sec;
         }
     }
     if let Ok(sec) = std::env::var("AGY_CLIENT_SECRET") {
         if !sec.trim().is_empty() {
-            return Ok(sec);
+            return sec;
         }
     }
-    Err(HarnessError::AuthenticationFailed {
-        provider: "antigravity".to_string(),
-        message: "No ANTIGRAVITY_CLIENT_SECRET or AGY_CLIENT_SECRET configured in environment"
-            .to_string(),
-    })
+    AGY_CLIENT_SECRET.to_string()
 }
 pub const DEFAULT_USER_AGENT: &str = "antigravity/1.2.7";
 
@@ -123,7 +126,7 @@ async fn post_antigravity_turn(
     cred_manager: Option<&std::sync::Arc<crate::auth::CredentialManager>>,
     payload: &serde_json::Value,
 ) -> Result<reqwest::Response, HarnessError> {
-    let (mut bearer_token, refresh_tok_opt) = extract_bearer_token(raw_secret);
+    let (mut bearer_token, _) = extract_bearer_token(raw_secret);
 
     let mut resp = post_antigravity_with_transport_retry(http_client, &bearer_token, payload)
         .await
@@ -132,23 +135,19 @@ async fn post_antigravity_turn(
             message: format!("HTTP error: {}", e),
         })?;
 
+    // The access token lives about an hour. A 401 is the ordinary expiry, not a dead credential:
+    // spend it on one refresh (which rewrites the stored record in place) and retry the request.
+    let mut refresh_error = None;
     if resp.status().as_u16() == 401 {
-        if let Some(ref refresh_tok) = refresh_tok_opt {
-            if let Ok(new_token) = refresh_antigravity_token(http_client, refresh_tok).await {
-                bearer_token = new_token.clone();
-                if let Some(cm) = cred_manager {
-                    let updated_secret = json!({
-                        "access_token": new_token,
-                        "refresh_token": refresh_tok,
-                    });
-                    let _ = cm
-                        .update_credential_key(
-                            "antigravity",
-                            raw_secret,
-                            &updated_secret.to_string(),
-                        )
-                        .await;
-                }
+        match credentials::refresh_and_store_antigravity_credential(
+            http_client,
+            raw_secret,
+            cred_manager,
+        )
+        .await
+        {
+            Ok(new_token) => {
+                bearer_token = new_token;
                 resp = post_antigravity_with_transport_retry(http_client, &bearer_token, payload)
                     .await
                     .map_err(|e| HarnessError::ProviderError {
@@ -156,13 +155,20 @@ async fn post_antigravity_turn(
                         message: format!("HTTP error on retry: {}", e),
                     })?;
             }
+            Err(error) => refresh_error = Some(error),
         }
     }
 
     match resp.status().as_u16() {
         401 => Err(HarnessError::AuthenticationFailed {
             provider: "antigravity".to_string(),
-            message: "Antigravity OAuth token expired or unauthorized (401)".to_string(),
+            message: match refresh_error {
+                Some(error) => format!(
+                    "Antigravity OAuth token expired or unauthorized (401) and the automatic \
+                     refresh failed: {error}"
+                ),
+                None => "Antigravity OAuth token expired or unauthorized (401)".to_string(),
+            },
         }),
         429 => Err(HarnessError::RateLimited {
             provider: "antigravity".to_string(),
