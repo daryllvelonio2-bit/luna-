@@ -167,6 +167,8 @@ pub async fn run_voice_loop(
             all_skills.extend(skills);
         }
     }
+    // The skills the harness ships with, including the desktop skill.
+    all_skills.extend(crate::commands::desktop::builtin_skills());
 
     let skills_summary = if all_skills.is_empty() {
         None
@@ -189,6 +191,8 @@ pub async fn run_voice_loop(
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
             .await?;
     }
+    // The desktop tools, and the skill that documents them.
+    crate::commands::desktop::tools::register(registry.as_ref()).await?;
 
     let mut agent_cfg = config.agent.clone();
     agent_cfg.skills_summary = skills_summary;

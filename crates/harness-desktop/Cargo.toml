@@ -1,0 +1,14 @@
+[package]
+name = "harness-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Computer use for the Luna harness: observe and operate desktop apps through native accessibility trees"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }

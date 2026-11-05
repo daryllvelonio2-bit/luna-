@@ -149,6 +149,8 @@ pub async fn run_exec(
             all_skills.extend(skills);
         }
     }
+    // The skills the harness ships with, including the desktop skill.
+    all_skills.extend(crate::commands::desktop::builtin_skills());
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
         registry
@@ -160,6 +162,8 @@ pub async fn run_exec(
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
             .await?;
     }
+    // The desktop tools, and the skill that documents them.
+    crate::commands::desktop::tools::register(registry.as_ref()).await?;
 
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     let bg_queue = Arc::new(

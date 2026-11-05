@@ -25,6 +25,7 @@ harness-mcp = { workspace = true }
 harness-voice = { workspace = true }
 harness-telemetry = { workspace = true }
 harness-onboarding = { workspace = true }
+harness-desktop = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
@@ -45,6 +46,9 @@ rusqlite = { workspace = true }
 similar = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+harness-desktop-linux = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

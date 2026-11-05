@@ -9,6 +9,8 @@ members = [
     "crates/harness-voice",
     "crates/harness-telemetry",
     "crates/harness-onboarding",
+    "crates/harness-desktop",
+    "crates/harness-desktop-linux",
     "crates/harness-cli",
 ]
 resolver = "2"
@@ -68,3 +70,5 @@ harness-notes = { path = "crates/harness-notes" }
 harness-voice = { path = "crates/harness-voice" }
 harness-telemetry = { path = "crates/harness-telemetry" }
 harness-onboarding = { path = "crates/harness-onboarding" }
+harness-desktop = { path = "crates/harness-desktop" }
+harness-desktop-linux = { path = "crates/harness-desktop-linux" }

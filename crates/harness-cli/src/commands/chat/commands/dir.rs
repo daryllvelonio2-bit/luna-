@@ -256,6 +256,8 @@ async fn apply_workspace_change(
             all_skills.extend(skills);
         }
     }
+    // The skills the harness ships with, including the desktop skill.
+    all_skills.extend(crate::commands::desktop::builtin_skills());
     let summary = if all_skills.is_empty() {
         None
     } else {

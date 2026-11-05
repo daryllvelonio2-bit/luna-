@@ -6,6 +6,7 @@ pub mod clipboard_image;
 pub mod config;
 pub mod context_window;
 pub mod diff;
+pub mod desktop;
 pub mod exec;
 pub mod gateway;
 pub mod heartbeat;

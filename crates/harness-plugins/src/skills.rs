@@ -32,6 +32,39 @@ pub struct Skill {
     pub parameters: Option<serde_json::Value>,
 }
 
+impl Skill {
+    /// A skill that ships inside the binary.
+    ///
+    /// A built-in skill has no file: its text is compiled in, so it is always
+    /// present, always version-matched, and cannot be half-installed. The
+    /// path says so, because a caller that wants to edit a skill needs to know
+    /// that this one cannot be edited on disk.
+    pub fn builtin(name: &str, description: &str, instructions: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            instructions: instructions.to_string(),
+            file_path: PathBuf::from("<builtin>"),
+            command: None,
+            timeout_secs: None,
+            parameters: None,
+        }
+    }
+}
+
+/// Whether two skill names name the same skill.
+///
+/// A hyphen and an underscore are the same character to a person typing a
+/// command, and `agent-desktop` is as likely to be written `agent_desktop` as
+/// not. The comparison ignores case and treats the two separators as one.
+pub fn names_match(left: &str, right: &str) -> bool {
+    normalize_name(left) == normalize_name(right)
+}
+
+fn normalize_name(name: &str) -> String {
+    name.trim().to_lowercase().replace('_', "-")
+}
+
 pub struct SkillLoader;
 
 impl SkillLoader {
@@ -308,7 +341,7 @@ impl Tool for SkillViewTool {
         if let Some(skill) = self
             .skills
             .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .find(|s| names_match(&s.name, name))
         {
             let mut output = format!(
                 "# Skill: {}\n{}\n\n## Instructions\n{}",

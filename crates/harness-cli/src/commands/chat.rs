@@ -372,6 +372,8 @@ pub async fn run_interactive_chat(
             all_skills.extend(skills);
         }
     }
+    // The skills the harness ships with, including the desktop skill.
+    all_skills.extend(crate::commands::desktop::builtin_skills());
 
     let skills_summary = if all_skills.is_empty() {
         None
@@ -406,6 +408,8 @@ pub async fn run_interactive_chat(
             )))
             .await?;
     }
+    // The desktop tools, and the skill that documents them.
+    crate::commands::desktop::tools::register(registry.as_ref()).await?;
     let skills: &[harness_plugins::Skill] = skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
 
     let bg_queue = Arc::new(

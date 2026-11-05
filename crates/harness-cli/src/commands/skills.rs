@@ -19,7 +19,7 @@ pub fn invocation_prompt(cmd: &str, skills: &[Skill]) -> Option<String> {
     let input = parts.next().unwrap_or("").trim();
     let skill = skills
         .iter()
-        .find(|skill| skill.name.eq_ignore_ascii_case(name))?;
+        .find(|skill| harness_plugins::names_match(&skill.name, name))?;
 
     Some(format!(
         "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
