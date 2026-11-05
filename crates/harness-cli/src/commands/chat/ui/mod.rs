@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use super::render::{
     activity_line, compaction_line, landing_rows, landing_star_rows, needs_separator,
-    reasoning_rows, tool_activity_detail, truncate_to_cells, OutputBlockKind, LANDING_FALL_FRAMES,
-    LANDING_FALL_FRAME_MS, PROMPT,
+    reasoning_rows, tool_activity_detail, truncate_to_cells, OutputBlockKind, PROMPT,
 };
 use super::status::format_quota_lines;
 
@@ -19,6 +18,10 @@ pub const MIN_LIVE_REASONING_ROWS: usize = 4;
 
 /// How often the live region advances a spinner frame and refreshes its elapsed time.
 pub const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// How often the landing shower advances a frame. Faster than [`ANIMATION_INTERVAL`] because the
+/// stars move across the mark: a spinner reads fine at twelve frames a second, a meteor does not.
+pub const LANDING_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// What the empty composer says when nothing is in flight: the one line that teaches the way in.
 const IDLE_HINT: &str = "Luna is inactive — type /help for commands";
@@ -224,6 +227,17 @@ struct BoxDrawnMetrics {
     prompt_drawn: String,
 }
 
+/// The landing mark while its shower is still running.
+///
+/// The mark is printed once into the scrollback; this keeps the static rows so each animation
+/// frame can be rendered from the same source, and counts the frames so the shower loops.
+struct LandingAnimation {
+    /// The unabridged mark, before any stars are overlaid.
+    rows: Vec<String>,
+    /// Frames since the mark was drawn. Only the modulo of this is used.
+    frame: usize,
+}
+
 pub fn visible_width(s: &str) -> usize {
     dialoguer::console::measure_text_width(s)
 }
@@ -296,6 +310,9 @@ pub struct ChatUi {
     /// something different depending on whether Luna is idle or working.
     turn_active: Arc<AtomicBool>,
     box_drawn: Arc<AtomicBool>,
+    /// The fresh-session mark while its shower is running. `None` once the transcript starts or
+    /// the screen is cleared: the mark then stays in the scrollback as the last frame drawn.
+    landing: Arc<Mutex<Option<LandingAnimation>>>,
     drawn_metrics: Arc<Mutex<Option<BoxDrawnMetrics>>>,
     /// Set while an interactive prompt owns the screen.
     ///
@@ -371,6 +388,7 @@ impl ChatUi {
             delegate_tasks: Arc::new(Mutex::new(Vec::new())),
             turn_active: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
+            landing: Arc::new(Mutex::new(None)),
             drawn_metrics: Arc::new(Mutex::new(None)),
             modal_active: Arc::new(AtomicBool::new(false)),
             paints_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1106,6 +1124,9 @@ impl ChatUi {
                 .push(text.to_string());
             return;
         }
+        // A transcript line lands between the mark and the composer, so the animation's row
+        // arithmetic no longer holds. The mark keeps whatever frame it last drew.
+        self.stop_landing();
         let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
         let width = get_terminal_width();
         let previous = {
@@ -1188,9 +1209,14 @@ impl ChatUi {
         let queued_line = self.format_queue_line(width);
         let status_line = self.format_status_line(width);
 
-        // The block is everything between the transcript and the prompt, top to bottom.
+        // The block is everything between the transcript and the prompt, top to bottom. The
+        // landing prefix is only present while the mark is still immediately above the block;
+        // once the transcript starts, `stop_landing` has cleared it.
         let mut block: Vec<String> =
-            Vec::with_capacity(live_rows.len() + panel_rows.len() + delegate_rows.len() + 4);
+            Vec::with_capacity(live_rows.len() + panel_rows.len() + delegate_rows.len() + 5);
+        if let Some(prefix) = self.landing_block_prefix() {
+            block.extend(prefix);
+        }
         block.extend(live_rows.iter().cloned());
         block.extend(panel_rows.iter().cloned());
         block.extend(delegate_rows.iter().cloned());
@@ -1397,8 +1423,12 @@ impl ChatUi {
         let status_str = self.format_status_line(width);
 
         // The block is everything between the transcript and the prompt: the live region, then the
-        // composer's own rows, ending with the rule above the prompt.
-        let mut block_rows = live_rows.clone();
+        // composer's own rows, ending with the rule above the prompt. While the fresh-session
+        // shower is running, the mark and its blank separator sit directly above the live region,
+        // so they are measured here too — that is what lets the animation tick find them from the
+        // prompt and rewrite them in place.
+        let mut block_rows = self.landing_block_prefix().unwrap_or_default();
+        block_rows.extend(live_rows.clone());
         block_rows.extend(rows[..rows.len() - 2].iter().cloned());
 
         *self.drawn_metrics.lock().unwrap_or_else(|e| e.into_inner()) = Some(BoxDrawnMetrics {
@@ -1439,6 +1469,11 @@ impl ChatUi {
     /// loop sets it when it spawns a turn and clears it on every path a turn can end by.
     pub fn set_turn_active(&self, active: bool) {
         self.turn_active.store(active, Ordering::SeqCst);
+        if active {
+            // The first turn brings the transcript, which scrolls the mark away. Settle the
+            // shower before that happens.
+            self.stop_landing();
+        }
     }
 
     /// Whether a turn is in flight, as far as the composer's hint is concerned.
@@ -1531,15 +1566,15 @@ impl ChatUi {
 
     /// Draw the mark for a session that has no transcript yet.
     ///
-    /// This is printed once, not kept as chrome: the composer is what has to stay put, while the
-    /// landing belongs to the scrollback and leaves with the first turn. The height check leaves
-    /// room for the composer and a blank line on either side of the mark, so a short terminal
-    /// collapses to the compact wordmark instead of pushing the prompt off the screen.
+    /// The first frame is printed here and the mark is registered with the UI; the animation
+    /// tick then keeps rewriting those same rows in place, so the shower carries on after the
+    /// composer has appeared below it. The mark belongs to the scrollback and leaves with the
+    /// first turn, which is also when [`Self::stop_landing`] settles it.
     ///
-    /// A small star falls across the mark once before the art settles. It is drawn in place: the
-    /// block keeps the same height on every frame, so the cursor can be walked back up to its top
-    /// and the rows rewritten. The final frame is the untouched mark, which is also what stays in
-    /// the scrollback when the composer below scrolls it away.
+    /// The height check leaves room for the composer and a blank line on either side of the mark,
+    /// so a short terminal collapses to the compact wordmark instead of pushing the prompt off
+    /// the screen. Every frame keeps the same height, and the block is followed by exactly one
+    /// blank line before the composer, so the tick can walk the cursor between the two by count.
     pub fn draw_landing(&self) {
         if !self.is_attended {
             return;
@@ -1549,43 +1584,94 @@ impl ChatUi {
         let available = height.saturating_sub(self.box_row_count() + 2);
         let rows = landing_rows(width, available);
         if rows.is_empty() {
+            self.stop_landing();
             return;
         }
 
         println!();
-        if rows.len() > 1 {
-            for frame in 0..LANDING_FALL_FRAMES {
-                let last_frame = frame + 1 == LANDING_FALL_FRAMES;
-                let frame_rows = if last_frame {
-                    rows.clone()
-                } else {
-                    landing_star_rows(&rows, frame)
-                };
-                for (index, row) in frame_rows.iter().enumerate() {
-                    print!("{}", row);
-                    if index + 1 < frame_rows.len() {
-                        println!();
-                    }
-                }
-                let _ = io::stdout().flush();
-                if !last_frame {
-                    // The cursor is at the end of the block's last row; walk back to its first
-                    // row and to column zero, ready for the next frame to overwrite it.
-                    print!("\x1b[{}A\r", frame_rows.len() - 1);
-                    let _ = io::stdout().flush();
-                    std::thread::sleep(std::time::Duration::from_millis(LANDING_FALL_FRAME_MS));
-                }
+        // Always the same shape: one leading blank line, the mark, and the blank line that keeps
+        // the composer clear of it. The count is what the repaint walks back up, so a one-row
+        // mark and a ten-row moon must agree on it.
+        let frame_rows = landing_star_rows(&rows, 0);
+        for (index, row) in frame_rows.iter().enumerate() {
+            print!("{}", row);
+            if index + 1 < frame_rows.len() {
+                println!();
             }
-            // Terminate the last row, then keep the blank line the static mark had below it.
-            println!();
-            println!();
-        } else {
-            for row in &rows {
-                println!("{}", row);
-            }
-            println!();
         }
+        println!();
+        println!();
         let _ = io::stdout().flush();
+
+        *self.landing.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(LandingAnimation { rows, frame: 0 });
+    }
+
+    /// Stop advancing the landing shower.
+    ///
+    /// The rows already on screen stay exactly as they were; only future frames stop. Called when
+    /// the mark is about to move (a transcript line, a turn, a screen clear) or the terminal
+    /// changes width, because the repaint finds the mark by counting rows above the prompt.
+    pub fn stop_landing(&self) {
+        self.landing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    /// The landing rows as they belong at the top of the drawn block: the current frame, then the
+    /// blank line that separates the mark from the composer.
+    ///
+    /// `None` when no shower is running. The caller decides whether the prefix belongs in the
+    /// block it is measuring; it only does while the mark is still directly above the composer.
+    fn landing_block_prefix(&self) -> Option<Vec<String>> {
+        let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        let landing = landing.as_ref()?;
+        let mut prefix = landing_star_rows(&landing.rows, landing.frame);
+        prefix.push(String::new());
+        Some(prefix)
+    }
+
+    /// Advance the shower by one frame. Returns false when there is nothing to animate.
+    fn advance_landing_frame(&self) -> bool {
+        let mut landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        match landing.as_mut() {
+            Some(landing) => {
+                landing.frame = landing.frame.wrapping_add(1);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Repaint the landing at its next frame.
+    ///
+    /// This runs on its own, faster tick than the live region. It reuses the composer's in-place
+    /// repaint: the mark's rows are part of the block measured from the prompt, so the same
+    /// sequence walks up to them, rewrites only the rows whose stars moved, and returns the
+    /// cursor to the prompt. If the layout no longer matches (the composer grew a panel, a
+    /// resize raced the tick), the composer is redrawn and the shower keeps running from the new
+    /// row positions instead of freezing.
+    pub fn animate_landing(&self) {
+        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) || self.modal_active() {
+            return;
+        }
+        if !self.advance_landing_frame() {
+            return;
+        }
+
+        let width = get_terminal_width();
+        let buf = self
+            .input_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(sequence) = self.repaint_block_sequence(width, &buf) {
+            print!("{sequence}");
+            let _ = io::stdout().flush();
+        } else {
+            self.redraw_box();
+        }
     }
 
     pub fn handle_resize(&self) {
@@ -1596,6 +1682,9 @@ impl ChatUi {
         if self.modal_active() {
             return;
         }
+        // The screen is cleared and the transcript redrawn at the new width: the old mark is gone
+        // with it, so there is no block for the shower to rewrite.
+        self.stop_landing();
         let width = get_terminal_width();
         let buf = self
             .input_buf

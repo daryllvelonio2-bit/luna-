@@ -53,6 +53,59 @@ fn the_panel_rows_are_counted_with_the_box() {
 }
 
 #[test]
+fn the_landing_keeps_showering_after_the_composer_is_drawn() {
+    let ui = ChatUi::new(true);
+    let drawn = ui.clone();
+    capture_stdout(move || {
+        drawn.draw_landing();
+        drawn.draw_initial_box();
+    });
+
+    let frame = ui
+        .landing
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("the mark starts its shower")
+        .frame;
+
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.animate_landing());
+
+    assert_eq!(
+        ui.landing
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|landing| landing.frame),
+        Some(frame + 1),
+        "the composer appearing must not settle the shower"
+    );
+}
+
+#[test]
+fn a_growing_composer_does_not_settle_the_landing() {
+    let ui = ChatUi::new(true);
+    let drawn = ui.clone();
+    capture_stdout(move || {
+        drawn.draw_landing();
+        drawn.draw_initial_box();
+    });
+
+    // A queued message adds a composer row. The repaint can no longer reuse the old row
+    // positions, so it redraws the box — but the mark itself is still on screen and must keep
+    // animating instead of freezing at the frame it happened to be on.
+    ui.set_queue_depth(1);
+    let ticked = ui.clone();
+    capture_stdout(move || ticked.animate_landing());
+
+    assert!(
+        ui.landing.lock().unwrap().is_some(),
+        "a taller composer settles the shower"
+    );
+}
+
+#[test]
 fn a_fresh_list_replaces_the_old_one() {
     let ui = ChatUi::new(true);
     ui.set_todo_panel(Some(a_snapshot()));

@@ -77,52 +77,194 @@ fn every_compact_landing_fits_its_width() {
     }
 }
 
+#[test]
+fn the_landing_grows_out_of_the_left_margin() {
+    let rows = plain_rows(&landing_rows(80, 24));
+    let margin = " ".repeat(LANDING_LEFT_MARGIN);
+    assert!(rows.iter().all(|row| row.starts_with(&margin)));
+    assert!(
+        rows.iter().any(|row| row
+            .strip_prefix(&margin)
+            .is_some_and(|row| !row.starts_with(' '))),
+        "the mark should start at the margin instead of being centred: {rows:?}"
+    );
+}
+
+#[test]
+fn every_landing_row_leaves_the_last_column_clear() {
+    // A row that fills the terminal is left in the pending-wrap state; the landing animation then
+    // steps the cursor up by one row too few and overwrites itself.
+    for width in LANDING_COMPACT_MIN_WIDTH..120 {
+        for height in [1, 2, 5, 24] {
+            for row in plain_rows(&landing_rows(width, height)) {
+                assert!(
+                    plain_width(&row) < width,
+                    "width {width}, height {height} overflowed: {row:?}"
+                );
+            }
+        }
+    }
+}
+
 /// Visible width of a row, ignoring its colour codes.
 fn plain_width(row: &str) -> usize {
     dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(row))
 }
 
-/// Where the star is on a frame, as `(row, visible column)`.
-fn star_position(rows: &[String]) -> Option<(usize, usize)> {
-    rows.iter().enumerate().find_map(|(index, row)| {
-        let plain = dialoguer::console::strip_ansi_codes(row).to_string();
-        let byte = plain.find(LANDING_STAR)?;
-        Some((
-            index,
-            dialoguer::console::measure_text_width(&plain[..byte]),
-        ))
-    })
+/// One track per star, each holding that star's position on every frame.
+fn star_tracks(rows: &[String]) -> Vec<Vec<(usize, usize)>> {
+    let mut tracks = vec![Vec::new(); LANDING_STARS];
+    for frame in 0..LANDING_FALL_FRAMES {
+        for (star, position) in landing_star_positions(rows, frame).into_iter().enumerate() {
+            tracks[star].push(position);
+        }
+    }
+    tracks
 }
 
 #[test]
-fn the_landing_star_falls_down_and_to_the_left() {
+fn every_landing_star_falls_down_and_to_the_left() {
     let rows = landing_rows(80, 24);
-    let mut positions = Vec::new();
-    for frame in 0..LANDING_FALL_FRAMES {
-        let frame_rows = landing_star_rows(&rows, frame);
-        positions.push(star_position(&frame_rows).expect("every frame draws the star"));
-    }
 
-    for pair in positions.windows(2) {
-        let (previous_row, previous_col) = pair[0];
-        let (row, col) = pair[1];
-        assert!(row >= previous_row, "the star never climbs: {positions:?}");
+    for (star, positions) in star_tracks(&rows).iter().enumerate() {
+        assert_eq!(positions.len(), LANDING_FALL_FRAMES);
+        for pair in positions.windows(2) {
+            let (previous_row, previous_col) = pair[0];
+            let (row, col) = pair[1];
+            let advanced = row >= previous_row && col <= previous_col;
+            // A star that reaches the bottom restarts at the top-right, so a sudden jump back
+            // up and to the right is the loop, not a star moving backwards.
+            let wrapped = row <= 1 && col >= previous_col;
+            assert!(
+                advanced || wrapped,
+                "star {star} jumped without wrapping: {positions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_shower_fills_several_lanes_and_phases() {
+    let rows = landing_rows(80, 24);
+    let positions = landing_star_positions(&rows, 0);
+    assert_eq!(positions.len(), LANDING_STARS);
+
+    let distinct: std::collections::HashSet<_> = positions.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        LANDING_STARS,
+        "stars should not stack on one cell: {positions:?}"
+    );
+
+    // The stars are spread across the fall rather than moving as one rigid tail: several rows
+    // and several columns are occupied at any one moment.
+    let touched_rows: std::collections::HashSet<_> =
+        positions.iter().map(|(row, _)| *row).collect();
+    let touched_cols: std::collections::HashSet<_> =
+        positions.iter().map(|(_, col)| *col).collect();
+    assert!(touched_rows.len() >= 3, "too few rows: {positions:?}");
+    assert!(touched_cols.len() >= 3, "too few columns: {positions:?}");
+}
+
+#[test]
+fn the_shower_moves_between_frames() {
+    let rows = landing_rows(80, 24);
+    assert_ne!(
+        landing_star_positions(&rows, 0),
+        landing_star_positions(&rows, 1),
+        "a static shower would not be an animation"
+    );
+}
+
+#[test]
+fn stationary_stars_keep_their_places() {
+    let rows = landing_rows(80, 24);
+    let slots = landing_twinkle_slots(&rows);
+    assert!(!slots.is_empty(), "the field should have stars");
+
+    for frame in 0..LANDING_FALL_FRAMES {
+        for position in landing_twinkle_positions(&rows, frame) {
+            assert!(
+                slots.contains(&position),
+                "frame {frame} moved a stationary star to {position:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_stationary_star_glints_over_a_cycle() {
+    let rows = landing_rows(80, 24);
+    for slot in landing_twinkle_slots(&rows) {
         assert!(
-            col <= previous_col,
-            "the star never drifts right: {positions:?}"
+            (0..LANDING_TWINKLE_PERIOD)
+                .any(|frame| landing_twinkle_positions(&rows, frame).contains(&slot)),
+            "stationary star {slot:?} never lit"
         );
     }
+}
 
-    let (first_row, first_col) = positions[0];
-    let (last_row, last_col) = *positions.last().unwrap();
+#[test]
+fn a_stationary_star_never_covers_a_letter() {
+    let rows = landing_rows(80, 24);
+    for (row, col) in landing_twinkle_slots(&rows) {
+        let plain = dialoguer::console::strip_ansi_codes(&rows[row]).to_string();
+        assert!(
+            plain.chars().nth(col).map_or(true, |ch| ch == ' '),
+            "a twinkle landed on text at row {row}, column {col}: {plain:?}"
+        );
+    }
+}
+
+#[test]
+fn the_fixed_starfield_is_spread_through_the_open_sky() {
+    let rows = landing_rows(80, 24);
+    let slots = landing_dust_slots(&rows);
     assert!(
-        last_row > first_row,
-        "the star crosses the mark downward: {positions:?}"
+        slots.len() >= 12,
+        "the sky should hold a field, not a handful of dots: {slots:?}"
     );
+
+    let distinct: std::collections::HashSet<_> = slots.iter().copied().collect();
+    assert_eq!(distinct.len(), slots.len(), "a fixed slot is drawn twice");
+    assert_eq!(slots, landing_dust_slots(&rows), "the field is stable");
+
+    let touched_rows: std::collections::HashSet<_> = slots.iter().map(|(row, _)| *row).collect();
     assert!(
-        last_col < first_col,
-        "the star crosses the mark leftward: {positions:?}"
+        touched_rows.len() >= 4,
+        "the field should surround the mark: {slots:?}"
     );
+
+    for (row, col) in slots {
+        let plain = dialoguer::console::strip_ansi_codes(&rows[row]).to_string();
+        assert!(
+            plain.chars().nth(col).map_or(true, |ch| ch == ' '),
+            "a fixed star landed on text at row {row}, column {col}: {plain:?}"
+        );
+    }
+}
+
+#[test]
+fn the_shower_never_draws_over_a_letter() {
+    let rows = landing_rows(80, 24);
+    let static_rows = plain_rows(&rows);
+
+    for frame in 0..LANDING_FALL_FRAMES {
+        let frame_rows = plain_rows(&landing_star_rows(&rows, frame));
+        for (row_index, (before, after)) in static_rows.iter().zip(&frame_rows).enumerate() {
+            for (column, before_glyph) in before.chars().enumerate() {
+                if !before_glyph.is_alphabetic() {
+                    continue;
+                }
+                assert_eq!(
+                    after.chars().nth(column),
+                    Some(before_glyph),
+                    "frame {frame} drew over the letter at row {row_index}, column {column}: \
+                     {before:?} became {after:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -159,20 +301,65 @@ fn every_landing_star_frame_keeps_the_mark_exactly_as_wide() {
 }
 
 #[test]
-fn the_star_lands_on_one_row_at_a_time() {
+fn the_shower_draws_its_stars_in_every_frame() {
     let rows = landing_rows(80, 24);
+    let mut counts = Vec::with_capacity(LANDING_FALL_FRAMES);
+    let mut expected = Vec::with_capacity(LANDING_FALL_FRAMES);
     for frame in 0..LANDING_FALL_FRAMES {
         let frame_rows = landing_star_rows(&rows, frame);
-        let marked = frame_rows
-            .iter()
-            .filter(|row| {
-                dialoguer::console::strip_ansi_codes(row)
-                    .to_string()
-                    .contains(LANDING_STAR)
-            })
-            .count();
-        assert_eq!(marked, 1, "frame {frame} drew {marked} stars");
+        let mut drawn = std::collections::HashSet::new();
+        for (row_index, row) in frame_rows.iter().enumerate() {
+            let plain = dialoguer::console::strip_ansi_codes(row).to_string();
+            for (column, glyph) in plain.chars().enumerate() {
+                if glyph == LANDING_STAR.chars().next().unwrap() {
+                    drawn.insert((row_index, column));
+                }
+            }
+        }
+        counts.push(drawn.len());
+
+        // A star crossing a wordmark row is deliberately not drawn: it passes behind the text.
+        // Two meteors can also cross the same cell, where the overlay keeps one glyph rather
+        // than printing two over each other, so count the distinct cells that can hold a head.
+        let drawable: std::collections::HashSet<_> = landing_star_positions(&rows, frame)
+            .into_iter()
+            .filter(|(row, col)| can_host_star(&rows[*row], *col))
+            .collect();
+        assert_eq!(
+            drawn, drawable,
+            "frame {frame} rendered a different set than the landing positions"
+        );
+        expected.push(drawable.len());
     }
+
+    for (frame, (marked, drawable)) in counts.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            marked, drawable,
+            "frame {frame} drew {marked} of {drawable} visible stars: {counts:?}"
+        );
+    }
+
+    let fewest = *counts.iter().min().expect("the shower has frames");
+    assert!(
+        fewest >= LANDING_STARS / 2,
+        "a frame drew only {fewest} of {LANDING_STARS} stars: {counts:?}"
+    );
+}
+
+#[test]
+fn the_star_keeps_a_moon_cell_filled() {
+    let cut_out = overlay_stars("███", &[1]);
+    assert!(
+        cut_out.contains("\x1b[7m✦\x1b[27m"),
+        "a block under the star is filled rather than punched out: {cut_out:?}"
+    );
+
+    let in_the_sky = overlay_stars("   ", &[1]);
+    assert!(in_the_sky.contains('✦'));
+    assert!(
+        !in_the_sky.contains("\x1b[7m"),
+        "an empty cell needs no background: {in_the_sky:?}"
+    );
 }
 
 #[test]

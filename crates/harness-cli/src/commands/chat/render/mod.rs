@@ -432,23 +432,21 @@ pub const PROMPT: &str = "\u{263E} ";
 ///
 /// The crescent is deliberately made of block glyphs rather than ASCII punctuation: a fresh
 /// session is the one screen with nothing else on it, and the denser shape reads as a mark
-/// instead of stray characters. Every row is shorter than [`LANDING_FULL_MIN_WIDTH`], so the
-/// full lockup below is centred with room to spare.
-const LANDING_MOON: [&str; 14] = [
-    "          ▄▄▄▄▄▄▄",
-    "        ▄███████████▄",
-    "      ▄█████████▀▀▀▀▀",
-    "     ▄███████▀",
-    "    ▄███████",
-    "   ████████",
-    "   ███████",
-    "   ███████",
-    "   ████████",
-    "    ███████",
-    "     ███████▄",
-    "      █████████▄▄▄▄",
-    "        ▀███████████▀",
-    "          ▀▀▀▀▀▀▀",
+/// instead of stray characters. Quadrant blocks give the concave edge sub-cell steps, so the
+/// curve stays smooth instead of turning into the square notch a half-block crescent leaves.
+/// It is deliberately compact — thirteen cells wide and ten rows tall — so the mark hugs the
+/// left margin of a wide terminal instead of filling it.
+const LANDING_MOON: [&str; 10] = [
+    "   ▗▄▟█████▀▀",
+    " ▗▟█████▀▘",
+    "▗█████▛▘",
+    "██████",
+    "█████▌",
+    "█████▙",
+    "▜█████▖",
+    " ▜█████▙",
+    "  ▝▜█████▙▄",
+    "     ▝▀▀▀▀▀▀▀",
 ];
 
 /// The two lines that sit beside the moon on a wide terminal.
@@ -456,17 +454,22 @@ const LANDING_TITLE: &str = "L U N A";
 const LANDING_TAGLINE: &str = "autonomous agent harness";
 
 /// Column the title and tagline start at, measured from the left edge of the moon block.
-const LANDING_TEXT_COL: usize = 26;
+const LANDING_TEXT_COL: usize = 17;
+
+/// Cells kept empty between the left edge of the terminal and the mark.
+const LANDING_LEFT_MARGIN: usize = 2;
 
 /// Narrowest terminal that can hold the moon and its wordmark side by side.
 ///
 /// One column wider than the lockup itself on purpose: a row that fills the terminal exactly sits
 /// in the pending-wrap state, and the next newline moves twice. The animation moves the cursor by
 /// the block's height, so a wrapped row would desynchronise every frame after it.
-const LANDING_FULL_MIN_WIDTH: usize = LANDING_TEXT_COL + LANDING_TAGLINE.len() + 1;
+const LANDING_FULL_MIN_WIDTH: usize =
+    LANDING_LEFT_MARGIN + LANDING_TEXT_COL + LANDING_TAGLINE.len() + 1;
 
-/// Narrowest terminal that still gets the moon at all.
-const LANDING_MOON_MIN_WIDTH: usize = 24;
+/// Narrowest terminal that can hold the moon with its tagline and still leave the last column
+/// clear.
+const LANDING_MOON_MIN_WIDTH: usize = LANDING_TAGLINE.len() + 1;
 
 /// Narrower than this, even the compact wordmark does not fit with a margin.
 const LANDING_COMPACT_MIN_WIDTH: usize = 12;
@@ -478,19 +481,21 @@ const LANDING_COMPACT_MIN_WIDTH: usize = 12;
 /// chance to show what the user has opened. This is printed once above the composer (not kept
 /// as chrome), so it scrolls away with the first turn rather than being redrawn on every paint.
 /// Three layouts are available so a narrow or short terminal still gets a recognisable mark:
-/// the full moon-and-wordmark lockup, a stacked moon, and a one- or two-line wordmark.
+/// the full moon-and-wordmark lockup, a stacked moon, and a one- or two-line wordmark. Every
+/// layout is left-aligned, so the mark grows out of the same margin Luna's replies use instead of
+/// floating in the far corner of a wide terminal.
 pub fn landing_rows(width: usize, available_height: usize) -> Vec<String> {
     if available_height == 0 {
         return Vec::new();
     }
     if width >= LANDING_FULL_MIN_WIDTH && available_height >= LANDING_MOON.len() {
-        return centre_rows(full_landing_rows(), width);
+        return left_align_rows(full_landing_rows(), width);
     }
     if width >= LANDING_MOON_MIN_WIDTH && available_height > LANDING_MOON.len() {
-        return centre_rows(stacked_landing_rows(), width);
+        return left_align_rows(stacked_landing_rows(), width);
     }
     if width >= LANDING_MOON_MIN_WIDTH && available_height >= 2 {
-        return centre_rows(
+        return left_align_rows(
             vec![
                 format!("{}  {}", "☾".cyan().bold(), LANDING_TITLE.bold()),
                 LANDING_TAGLINE.dimmed().to_string(),
@@ -499,7 +504,7 @@ pub fn landing_rows(width: usize, available_height: usize) -> Vec<String> {
         );
     }
     if width >= LANDING_COMPACT_MIN_WIDTH {
-        return centre_rows(
+        return left_align_rows(
             vec![format!("{}  {}", "☾".cyan().bold(), LANDING_TITLE.bold())],
             width,
         );
@@ -523,7 +528,7 @@ fn full_landing_rows() -> Vec<String> {
         .collect()
 }
 
-/// The narrow lockup: the moon with its name underneath, centred as one block.
+/// The narrow lockup: the moon with its name underneath, stacked as one block.
 fn stacked_landing_rows() -> Vec<String> {
     let mut rows: Vec<String> = LANDING_MOON
         .iter()
@@ -545,106 +550,388 @@ fn landing_row(art: &str, text: Option<&str>) -> String {
     row
 }
 
-/// Centre every row of a block on `width`, using the block's widest row so the pieces keep
-/// their relative alignment.
-fn centre_rows(rows: Vec<String>, width: usize) -> Vec<String> {
-    let block_width = rows
-        .iter()
-        .map(|row| {
-            let plain = dialoguer::console::strip_ansi_codes(row).to_string();
-            dialoguer::console::measure_text_width(&plain)
-        })
-        .max()
-        .unwrap_or(0);
-    let pad = width.saturating_sub(block_width) / 2;
+/// Visible width of a row, ignoring its colour codes.
+fn visible_width(row: &str) -> usize {
+    dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(row))
+}
+
+/// Left-align every row of a block on the terminal margin, using the block's widest row so the
+/// pieces keep their relative alignment.
+///
+/// The margin shrinks on a terminal too narrow to hold the block and the full margin, so the
+/// narrow layouts still fit instead of spilling a column off the edge. Where there is room it
+/// also keeps one cell clear on the right: a row that fills the terminal sits in the pending-wrap
+/// state, and the animation walks the cursor back up by row count, so a wrapped row would
+/// desynchronise every frame after it.
+fn left_align_rows(rows: Vec<String>, width: usize) -> Vec<String> {
+    let block_width = rows.iter().map(|row| visible_width(row)).max().unwrap_or(0);
+    let spare = width.saturating_sub(block_width);
+    let margin = LANDING_LEFT_MARGIN.min(spare.saturating_sub(1));
     rows.into_iter()
-        .map(|row| format!("{}{}", " ".repeat(pad), row))
+        .map(|row| format!("{}{}", " ".repeat(margin), row))
         .collect()
 }
 
-/// The glyph the landing animation drops: U+2726 BLACK FOUR-POINTED STAR.
+/// The glyph a falling star draws: U+2726 BLACK FOUR-POINTED STAR.
 ///
 /// A plain text star, not an emoji, for the same reason the moon is block glyphs: the mark should
 /// keep the terminal's own font all the way through rather than pulling in a colour emoji.
 pub const LANDING_STAR: &str = "\u{2726}";
 
-/// Frames in one fall. Eighteen frames at [`LANDING_FALL_FRAME_MS`] is a little under a second:
-/// long enough to be seen, short enough that it never feels like the prompt is slow to appear.
-pub const LANDING_FALL_FRAMES: usize = 18;
+/// The glyph a stationary star glints as: U+2727 WHITE FOUR-POINTED STAR. The outline is lighter
+/// than the filled meteor, so the fixed field sits behind the shower instead of competing with it.
+pub const LANDING_TWINKLE: &str = "\u{2727}";
 
-/// How long each frame of the fall is held, in milliseconds.
-pub const LANDING_FALL_FRAME_MS: u64 = 38;
+/// The small dot that makes up the fixed starfield and the tail of a meteor. U+00B7 is one cell
+/// in every terminal font that draws the rest of the mark, and it reads as distance rather than
+/// as another falling star.
+pub const LANDING_DUST: &str = "\u{00b7}";
 
-/// The mark with the star overlaid at one point of its fall.
+/// A meteor's tail uses the same small dot as the fixed field, so a moving star leaves a trail
+/// through the dust rather than dragging a second, brighter object behind it.
+pub const LANDING_TRAIL: &str = LANDING_DUST;
+
+/// Falling stars in one frame. Nine read as a shower — enough to feel alive, few enough that the
+/// moon still reads as the subject rather than vanishing under a starfield.
+pub const LANDING_STARS: usize = 9;
+
+/// Cells of trail behind each falling star. Two is the shortest tail that reads as motion at the
+/// animation tick instead of a second star travelling in formation.
+pub const LANDING_TRAIL_CELLS: usize = 2;
+
+/// Fixed stars scattered through the open cells of the mark. The slots are derived from the row
+/// rather than chosen at random, so the field stays put while only its brightness moves.
+pub const LANDING_TWINKLES: usize = 14;
+
+/// One fixed dot every this many blank cells. Coarse enough that the sky stays sparse: the point
+/// is a field behind the moon, not a texture in front of it.
+pub const LANDING_DUST_STEP: usize = 7;
+
+/// Frames in one full loop of the shower. At the animation tick this is a little under three
+/// seconds, and the shower keeps looping for as long as the fresh session stays on screen.
+pub const LANDING_FALL_FRAMES: usize = 72;
+
+/// Frames in one twinkle cycle of a stationary star.
+pub const LANDING_TWINKLE_PERIOD: usize = 24;
+
+/// Frames of that cycle a stationary star is lit. A short glint, not a blink.
+pub const LANDING_TWINKLE_LIT: usize = 6;
+
+/// How much faster (or slower) each successive star crosses the block. Different speeds pull the
+/// shower apart over time, so the stars do not stay locked in one rigid diagonal.
+const LANDING_STAR_SPEEDS: [f64; 5] = [0.65, 0.95, 0.75, 1.1, 0.85];
+
+/// The mark with the shower overlaid at one point of its fall.
 ///
-/// The star enters at the top-right of the block and drops diagonally toward the lower-left, so
-/// the eye follows a shooting star across the moon instead of a cursor blinking inside it. Every
-/// frame replaces one character rather than inserting one, which keeps every row exactly as wide
-/// as the static mark: the caller rewrites the block in place, and a row that changed width would
-/// leave the previous frame's tail behind it.
+/// The stars enter at the top-right of the block and drop diagonally toward the lower-left, so
+/// the eye follows a meteor across the moon instead of a cursor blinking inside it. Each star has
+/// its own phase, speed and lane, which is what turns the group into a shower rather than one
+/// head with a tail. A faint fixed starfield fills the open cells of the mark, and a subset of it
+/// glints as the meteors pass, so the scene never empties out between falls.
 ///
-/// ANSI sequences in `rows` are copied through untouched, so the star inherits the colour of
-/// whatever it is passing over — white on the moon, cyan on the wordmark — and the rest of the row
-/// keeps its own styling.
+/// A meteor passes behind the wordmark instead of through it: a cell is only replaced when it is
+/// blank or part of the moon, so the title and tagline keep every letter. The eye still reads the
+/// path because the star reappears below the text.
+///
+/// Every frame replaces characters rather than inserting them, which keeps every row exactly as
+/// wide as the static mark: the caller rewrites the block in place, and a row that changed width
+/// would leave the previous frame's tail behind it.
+///
+/// ANSI sequences in `rows` are copied through untouched, so each star takes on the colour of
+/// whatever it is passing over — a white cut-out on the moon, cyan on the wordmark — and the rest
+/// of the row keeps its own styling.
 pub fn landing_star_rows(rows: &[String], frame: usize) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
     }
-    let last_row = rows.len() - 1;
-    let last_frame = LANDING_FALL_FRAMES.saturating_sub(1).max(1);
-    let progress = frame.min(last_frame) as f64 / last_frame as f64;
 
-    // Width of the widest row is the block's own width: the rows all share the same centring pad,
-    // so a column inside that width exists on every row and can be replaced rather than appended.
-    let block_width = rows
-        .iter()
-        .map(|row| {
-            let plain = dialoguer::console::strip_ansi_codes(row).to_string();
-            dialoguer::console::measure_text_width(&plain)
-        })
-        .max()
-        .unwrap_or(0);
+    // Every row is padded to the block's width first: then a star always replaces a cell instead
+    // of being appended, and every frame is the same width as the last one.
+    let block_width = rows.iter().map(|row| visible_width(row)).max().unwrap_or(0);
     if block_width == 0 {
         return rows.to_vec();
     }
 
-    let star_row = (progress * last_row as f64).round() as usize;
-    let start_col = block_width.saturating_sub(2);
-    let end_col = (block_width / 3).max(1);
-    let fall = (start_col.saturating_sub(end_col)) as f64 * progress;
-    let star_col = start_col.saturating_sub(fall as usize);
+    // `&str` glyphs keep every layer in one table so a meteor, its trail, a glint and a fixed
+    // dot that land on the same cell are deduplicated instead of overwriting one another.
+    let mut slots: Vec<Vec<(usize, &'static str)>> = vec![Vec::new(); rows.len()];
+    let stars = landing_star_positions(rows, frame);
+    // Every head goes in before any trail. The layers are deduplicated by insertion order, and a
+    // trail from an earlier star must not claim the cell a later star's head is about to occupy.
+    for &(row, col) in &stars {
+        let Some(row_text) = rows.get(row) else {
+            continue;
+        };
+        // The star only lands on sky or on the moon. A letter is never replaced: the meteor
+        // passes behind the wordmark and comes back out underneath it.
+        if can_host_star(row_text, col) {
+            slots[row].push((col, LANDING_STAR));
+        }
+    }
+    for &(row, col) in &stars {
+        let Some(row_text) = rows.get(row) else {
+            continue;
+        };
+        if !can_host_star(row_text, col) {
+            continue;
+        }
+        for step in 1..=LANDING_TRAIL_CELLS {
+            let Some(trail_row) = row.checked_sub(step) else {
+                break;
+            };
+            let trail_col = col.saturating_add(step);
+            let Some(trail_text) = rows.get(trail_row) else {
+                break;
+            };
+            if trail_col < block_width && can_host_star(trail_text, trail_col) {
+                slots[trail_row].push((trail_col, LANDING_TRAIL));
+            }
+        }
+    }
+    for (row, col) in landing_twinkle_positions(rows, frame) {
+        if let Some(row_slots) = slots.get_mut(row) {
+            row_slots.push((col, LANDING_TWINKLE));
+        }
+    }
+    for (row, col) in landing_dust_slots(rows) {
+        if let Some(row_slots) = slots.get_mut(row) {
+            row_slots.push((col, LANDING_DUST));
+        }
+    }
 
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            // Rows are centred as a block but keep their own trailing edge, so a short moon row
-            // would end before the star's column. Pad every row out to the block's width first:
-            // then the star always replaces a cell instead of being appended, and every frame is
-            // the same width as the last one.
             let mut row = row.clone();
-            let width =
-                dialoguer::console::measure_text_width(&dialoguer::console::strip_ansi_codes(&row));
+            let width = visible_width(&row);
             row.push_str(&" ".repeat(block_width.saturating_sub(width)));
-            if index == star_row {
-                overlay_star(&row, star_col)
-            } else {
+
+            let cells = &mut slots[index];
+            // Stable sort: a meteor is pushed first, then its trail, then a glint, then the
+            // fixed field. The earlier layer wins a cell two layers both picked.
+            cells.sort_by_key(|(col, _)| *col);
+            cells.dedup_by_key(|(col, _)| *col);
+            if cells.is_empty() {
                 row
+            } else {
+                overlay_glyphs(&row, cells)
             }
         })
         .collect()
 }
 
-/// Replace the character at visible column `col` with [`LANDING_STAR`], leaving ANSI sequences in
-/// place so the glyph takes on the styling of the text around it.
+/// Where each falling star sits on `frame`, as `(row, visible column)` pairs.
+///
+/// Each star is a point on its own diagonal: `phase` spreads them along the fall, `speed` pulls
+/// them apart over time, and `lane` shifts the whole track left so they do not all ride the same
+/// line. `fract` sends a star that reaches the bottom back to the top-right, so the shower keeps
+/// going for the whole loop instead of emptying out halfway through.
+///
+/// Exposed within the module so the tests can reason about individual tracks instead of scraping
+/// glyphs back out of the rendered rows.
+pub fn landing_star_positions(rows: &[String], frame: usize) -> Vec<(usize, usize)> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let last_row = rows.len() - 1;
+    let block_width = rows.iter().map(|row| visible_width(row)).max().unwrap_or(0);
+    if block_width == 0 {
+        return Vec::new();
+    }
+
+    let cycle = LANDING_FALL_FRAMES.max(1);
+    let progress = (frame % cycle) as f64 / cycle as f64;
+    let base_start = block_width.saturating_sub(2);
+
+    (0..LANDING_STARS)
+        .map(|star| {
+            let phase = star as f64 / LANDING_STARS as f64;
+            let speed = LANDING_STAR_SPEEDS[star % LANDING_STAR_SPEEDS.len()];
+            let t = (progress * speed + phase).fract();
+
+            // Four lanes, two cells apart, each ending a little earlier than the one before it.
+            let lane = (star % 4) * 2;
+            let start_col = base_start.saturating_sub(lane);
+            let end_col = (block_width / 4).max(1).saturating_sub(lane / 2).max(1);
+            let span = start_col.saturating_sub(end_col) as f64;
+
+            let row = (t * last_row as f64).round() as usize;
+            let col = start_col.saturating_sub((span * t) as usize);
+            (row.min(last_row), col)
+        })
+        .collect()
+}
+
+/// Fixed cells in the mark's open sky, as `(row, visible column)` pairs.
+///
+/// The slots are taken from blank cells that sit in open space rather than in the single-cell
+/// gaps inside the wordmark, so the field surrounds the mark instead of punctuating its letters.
+/// The stride is fixed per row, which is what keeps the field from shimmering by moving: only the
+/// brightness of each dot changes.
+fn landing_dust_slots(rows: &[String]) -> Vec<(usize, usize)> {
+    let block_width = rows.iter().map(|row| visible_width(row)).max().unwrap_or(0);
+    let mut slots = Vec::new();
+    for (row, text) in rows.iter().enumerate() {
+        // The right-hand sky exists because every row is padded to the block's width when it is
+        // drawn, so the field has to be chosen from the padded row as well.
+        let mut padded = text.clone();
+        padded.push_str(&" ".repeat(block_width.saturating_sub(visible_width(text))));
+        for (index, col) in sky_columns(&padded).into_iter().enumerate() {
+            // A per-row offset stops every row from putting its dots in the same column.
+            if (index + row * 3) % LANDING_DUST_STEP == 0 {
+                slots.push((row, col));
+            }
+        }
+    }
+    slots
+}
+
+/// Fixed cells the stationary stars glint in.
+///
+/// A glint is a brighter member of the fixed field, so it is picked from the dust slots rather
+/// than placed independently. The result is a field that mostly stays dim with a loose handful of
+/// stars catching the light at any moment.
+fn landing_twinkle_slots(rows: &[String]) -> Vec<(usize, usize)> {
+    landing_dust_slots(rows)
+        .into_iter()
+        .step_by(3)
+        .take(LANDING_TWINKLES)
+        .collect()
+}
+
+/// Where the stationary stars are lit on `frame`.
+///
+/// The slots are fixed; only their brightness moves. Each star gets a phase from its position, so
+/// the field glints in a loose pattern instead of blinking in unison.
+pub fn landing_twinkle_positions(rows: &[String], frame: usize) -> Vec<(usize, usize)> {
+    landing_twinkle_slots(rows)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (row, col))| {
+            let phase = (index * 5 + row * 3 + col) % LANDING_TWINKLE_PERIOD;
+            (frame.wrapping_add(phase) % LANDING_TWINKLE_PERIOD < LANDING_TWINKLE_LIT)
+                .then_some((row, col))
+        })
+        .collect()
+}
+
+/// Whether the glyph at visible column `col` is the moon's body, which a star may cut into.
+fn is_moon_block(ch: char) -> bool {
+    ('\u{2580}'..='\u{259f}').contains(&ch)
+}
+
+/// Whether a star may replace the cell at `col` without destroying a letter.
+///
+/// Blank cells are sky, and block glyphs are the moon: a meteor cut-out there reads as the star
+/// passing in front of the body. Everything else — the wordmark, punctuation — is left alone, so
+/// the star passes behind the text and reappears below it. A column past the end of the row is
+/// padded sky.
+fn can_host_star(row: &str, col: usize) -> bool {
+    let mut visible = 0usize;
+    let mut chars = row.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let width = dialoguer::console::measure_text_width(&ch.to_string()).max(1);
+        if visible == col {
+            if is_moon_block(ch) {
+                return true;
+            }
+            if ch != ' ' {
+                return false;
+            }
+            // A single space inside the wordmark is not open sky: a star there reads as
+            // punctuation between two letters. The wide gaps before and after the text are.
+            let blanks = blank_columns(row);
+            let row_width = visible_width(row);
+            let left_filled = col > 0 && !blanks.contains(&(col - 1));
+            let right_blank = col + 1 < row_width && blanks.contains(&(col + 1));
+            return !(left_filled && !right_blank);
+        }
+        if col < visible.saturating_add(width) {
+            // The column lands inside a double-width glyph, so the whole cell is taken.
+            return false;
+        }
+        visible = visible.saturating_add(width);
+    }
+    true
+}
+
+/// The visible columns of `row` that hold a space, ignoring ANSI sequences.
+///
+/// Twinkles are placed from this list rather than from a grid so they sit in the sky around the
+/// mark: a blank cell in a styled row is still background, while a letter is not.
+fn blank_columns(row: &str) -> Vec<usize> {
+    let mut columns = Vec::new();
+    let mut column = 0usize;
+    let mut chars = row.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        let width = dialoguer::console::measure_text_width(&ch.to_string()).max(1);
+        if ch == ' ' {
+            columns.push(column);
+        }
+        column += width;
+    }
+    columns
+}
+
+/// The blank columns that are open sky rather than the single-cell gaps inside the wordmark.
+///
+/// A dot between the letters of `L U N A` would read as punctuation, so a blank whose neighbours
+/// are both filled is not sky. The wide spaces before and after the wordmark, and the empty half
+/// of the moon rows, are.
+fn sky_columns(row: &str) -> Vec<usize> {
+    let blanks = blank_columns(row);
+    let width = visible_width(row);
+    blanks
+        .iter()
+        .copied()
+        .filter(|&col| {
+            let left_filled = col > 0 && !blanks.contains(&(col - 1));
+            let right_blank = col + 1 < width && blanks.contains(&(col + 1));
+            !(left_filled && !right_blank)
+        })
+        .collect()
+}
+
+/// Replace the cells at the visible columns in `cells` with their glyphs, leaving ANSI sequences
+/// in place so each glyph takes on the styling of the text around it.
+///
+/// On a block glyph the cell is drawn in reverse video: filling the cell with the moon's own
+/// colour turns the star into a cut-out instead of a black square punched through the mark. On
+/// text and empty cells the plain glyph is invisible enough against the terminal background.
 ///
 /// Widths are counted in terminal cells rather than bytes: the moon is block glyphs, which are
-/// several bytes each, and slicing by byte would land in the middle of one. `col` is clamped to the
-/// row's last cell by the caller's arithmetic, but an out-of-range column appends rather than
-/// panics so a caller that miscalculates still draws something.
-fn overlay_star(row: &str, col: usize) -> String {
-    let mut out = String::with_capacity(row.len() + LANDING_STAR.len());
+/// several bytes each, and slicing by byte would land in the middle of one. `cells` is sorted and
+/// deduplicated by the caller; an out-of-range column appends rather than panics so a caller that
+/// miscalculates still draws something.
+fn overlay_glyphs(row: &str, cells: &[(usize, &str)]) -> String {
+    let mut out = String::with_capacity(row.len() + 2 * cells.len());
     let mut visible = 0usize;
-    let mut placed = false;
+    let mut next = 0usize;
     let mut chars = row.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -664,21 +951,44 @@ fn overlay_star(row: &str, col: usize) -> String {
             continue;
         }
 
-        if !placed && visible == col {
-            out.push_str(LANDING_STAR);
-            placed = true;
+        let width = dialoguer::console::measure_text_width(&ch.to_string()).max(1);
+        if let Some((_, glyph)) = cells.get(next).filter(|(col, _)| *col == visible) {
+            // A block is part of the moon's body, so keep its cell filled and let the star read
+            // as a cut-out. Anything else sits on the terminal background already.
+            if is_moon_block(ch) {
+                out.push_str("\x1b[7m");
+                out.push_str(glyph);
+                out.push_str("\x1b[27m");
+            } else {
+                out.push_str(glyph);
+            }
+            // A double-width glyph we replaced still occupies two cells: pad the second one so
+            // the row keeps its visible width.
+            if width > 1 {
+                out.push_str(&" ".repeat(width - 1));
+            }
+            next += 1;
+            visible += width;
             // The character under the star is dropped: this is a replacement, not an insertion.
             continue;
         }
 
         out.push(ch);
-        visible += dialoguer::console::measure_text_width(&ch.to_string()).max(1);
+        visible += width;
     }
 
-    if !placed {
-        out.push_str(LANDING_STAR);
+    for (_, glyph) in &cells[next..] {
+        out.push_str(glyph);
     }
     out
+}
+
+/// Replace the cells at `cols` with [`LANDING_STAR`]. Kept as the narrow entry point for tests
+/// that only need the falling layer.
+#[cfg(test)]
+fn overlay_stars(row: &str, cols: &[usize]) -> String {
+    let cells: Vec<(usize, &str)> = cols.iter().map(|&col| (col, LANDING_STAR)).collect();
+    overlay_glyphs(row, &cells)
 }
 
 /// Luna's reply label. Kept beside [`PROMPT`] so the two sides of the transcript are edited

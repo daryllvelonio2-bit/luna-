@@ -701,3 +701,45 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     .unwrap();
     assert!(matches!(unrec_res, SlashOutcome::Continue));
 }
+
+#[test]
+fn typing_keeps_the_landing_shower_running() {
+    use super::keys::AppKey;
+
+    // Editing the prompt leaves the mark exactly where it is.
+    for key in [
+        AppKey::Char('a'),
+        AppKey::Backspace,
+        AppKey::Delete,
+        AppKey::Left,
+        AppKey::Right,
+        AppKey::Home,
+        AppKey::End,
+        AppKey::Up,
+        AppKey::Down,
+    ] {
+        assert!(
+            super::key_keeps_landing(&key, false),
+            "{key:?} only edits the prompt"
+        );
+    }
+
+    // A slash on an empty prompt opens the command menu; one inside a prompt is just a slash.
+    assert!(!super::key_keeps_landing(&AppKey::Char('/'), true));
+    assert!(super::key_keeps_landing(&AppKey::Char('/'), false));
+
+    // Enter starts a turn, Tab changes plan mode, and the control keys take over the screen.
+    for key in [
+        AppKey::Enter,
+        AppKey::Tab,
+        AppKey::Escape,
+        AppKey::Ctrl('o'),
+        AppKey::Ctrl('t'),
+        AppKey::CtrlC,
+    ] {
+        assert!(
+            !super::key_keeps_landing(&key, false),
+            "{key:?} can move the mark"
+        );
+    }
+}

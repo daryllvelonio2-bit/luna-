@@ -57,7 +57,7 @@ use render::{
     parse_turns_from_history, render_transcript, reply_for_display, right_aligned_user_message,
     OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
-use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL};
+use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL, LANDING_FRAME_INTERVAL};
 use viewer::show_background_task_viewer;
 
 pub(crate) type ChatAgent =
@@ -167,6 +167,28 @@ async fn register_mcp_servers(
     }
 
     Ok(())
+}
+
+/// Whether a keypress can be handled without moving the mark.
+///
+/// Typing, deleting and moving the caret only rewrite the prompt row, which the landing repaint
+/// already accounts for. Everything else can open a picker, clear the screen or start a turn, and
+/// those move the rows the shower rewrites, so the mark settles before the key is handled.
+fn key_keeps_landing(key: &AppKey, prompt_empty: bool) -> bool {
+    match key {
+        // `/` on an empty prompt opens the command menu, which owns the screen.
+        AppKey::Char('/') => !prompt_empty,
+        AppKey::Char(_)
+        | AppKey::Backspace
+        | AppKey::Delete
+        | AppKey::Left
+        | AppKey::Right
+        | AppKey::Home
+        | AppKey::End
+        | AppKey::Up
+        | AppKey::Down => true,
+        _ => false,
+    }
 }
 
 pub async fn run_interactive_chat(
@@ -1417,6 +1439,12 @@ pub async fn run_interactive_chat(
     let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // The landing shower moves faster than the spinner, so it gets its own tick. It costs a
+    // timer that does nothing once the mark has settled, and in exchange the first screen is
+    // alive while the user is reading it instead of ending before the prompt appears.
+    let mut landing_animation = tokio::time::interval(LANDING_FRAME_INTERVAL);
+    landing_animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     // A quota readout fetched at start-up and never fetched again is a snapshot: its countdown
     // stops moving the moment it is drawn, and its percentages describe the account as it was when
     // the session opened. The tick is what keeps it honest — the clock half is repainted whenever a
@@ -1500,6 +1528,10 @@ pub async fn run_interactive_chat(
                 }
             }
 
+            _ = landing_animation.tick() => {
+                ui.animate_landing();
+            }
+
             maybe_approval = approval_rx.recv() => {
                 let (request, mut decision_tx) = match maybe_approval {
                     Some(pair) => pair,
@@ -1570,6 +1602,18 @@ pub async fn run_interactive_chat(
                     Some(k) => k,
                     None => break,
                 };
+
+                // Editing the prompt does not move the mark, so the shower keeps running while
+                // the user types. Only a key that can take over the screen, change the composer's
+                // height or start a turn settles it.
+                let prompt_empty = ui
+                    .input_buf
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty();
+                if !key_keeps_landing(&key, prompt_empty) {
+                    ui.stop_landing();
+                }
 
                 match key {
                     AppKey::Ctrl('o') => {
