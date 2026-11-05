@@ -131,39 +131,95 @@ before the provider's limit.
 
 ---
 
-## Remaining work, in priority order
+## Follow-up changes landed
 
-1. **A synchronous preflight fold before an over-window request.** Folds are announced in the
-   background, so the turn that crosses the bar still sends the full transcript and adopts the
-   fold on the next round. The new 70% clamp makes this much less likely, but a single
-   tool-heavy turn can still overshoot. Fold synchronously when the estimate is above the
-   ceiling and there is no fold already in flight; keep the background path for the ordinary
-   case.
+The six items left open by the first pass are now implemented.
 
-2. **Bound replay by tokens, not only by rows.** `session.resume_max_messages` is 200 rows with
-   no token bound; a 200-row agentic window measured ~365k heuristic tokens. Drop oldest complete
-   tool rounds at replay time until the sendable vector fits a ceiling. This is the structural
-   fix behind the 238k-prompt observation.
+### 7. A synchronous preflight fold at the hard ceiling
 
-3. **Clip old tool-call arguments.** Arguments are 3.86 MB live, and old `write_file`/`patch`
-   calls can be tens of kilobytes each. Their results are the useful part once the round is
-   behind the conversation; a marker in place of the argument body would save most of that.
-   Riskier than results because the model sometimes refers back to what it wrote — keep the
-   newest rounds whole, as with results.
+`crates/harness-core/src/agent.rs`, `agent/fold.rs`, `agent/turn.rs`
 
-4. **Cap each retained reasoning block.** The newest four blocks are kept whole, and one live
-   block was 137,791 chars (~34k tokens). A per-block ceiling (head + tail) would bound the worst
-   case without dropping the current reasoning entirely. Verify strict Code Assist accepts a
-   rewritten thought part for the current turn before shipping.
+The ordinary fold bar is deliberately soft: at 70% of the window the turn runs on the transcript it
+holds and the fold bounds the *next* request. That is fine until the request itself is the one a
+provider refuses. `FoldPolicy` now carries an `urgent_fold_threshold()` ceiling of **90%** of the
+window. When the estimate is above it, the fold runs synchronously:
 
-5. **Bound the summariser's own transcript.** `render_transcript(folded)` elides images but not
-   large tool results. At a 70% fold bar the summary call re-reads most of what it is replacing;
-   a head/tail clip in the summariser prompt would make the compaction call itself cheaper and
-   keep it under the model window.
+- at turn start (`preflight_fold_if_needed`) before the first model call;
+- between tool rounds (`fold_now_from_stored`) when a long round pushes the in-memory transcript
+  over the ceiling.
 
-6. **Make `list_files` cheaper at the source.** The 40k cap is a backstop; a non-recursive default
-   or a depth limit would avoid producing the listing at all. Watch whether models actually need
-   deep recursive listings or are using them as a substitute for `search_files`.
+The turn waits, then rebuilds its vector from the store exactly as it does for a fold that landed
+mid-turn. Up to three folds run in a row if the kept tail is still over the ceiling; a fold that
+does not make the request smaller stops the loop. A failed summary is reported and the turn
+continues on the full transcript — a summariser outage is not a failed prompt. Both paths take the
+existing one-fold-at-a-time latch, so a background fold and a preflight fold cannot race.
+
+Test: `an_over_window_turn_folds_before_the_next_model_call` asserts that the fourth model call
+receives the folded transcript, not the three big rounds that triggered the ceiling.
+
+### 8. Replay is bounded by tokens, not only rows
+
+`crates/harness-core/src/session/transcript.rs`, `agent/session_ops.rs`
+
+`session.resume_max_messages` is a row limit; 200 agentic rows measured ~365k heuristic tokens. The
+sendable vector now passes through `trim_messages_to_tokens()` with a budget of **three fifths of
+the model window** (`replay_token_budget`). The oldest non-summary messages are dropped first, and
+summary rows always survive. A cut that leaves orphaned tool results at the front drops those too,
+so the kept vector remains a request a provider accepts.
+
+The budget sits below the 70% fold bar: a normal resume does not immediately fold, while the
+request the turn is about to make still leaves room for the system prompt, the user line, a reply
+and the next tool round. Folds act on the raw row-bounded replay, not the trimmed request, so the
+rows trimmed from a request are still available to be folded into a summary rather than resurfacing
+later.
+
+Test: `replayed_history_is_trimmed_to_a_token_budget`.
+
+### 9. Old tool-call arguments are clipped
+
+`crates/harness-core/src/session/transcript.rs`
+
+Arguments were 3.86 MB live, and a `write_file` body or `patch` hunk can be tens of kilobytes. The
+newest **4** calls keep their arguments whole; older calls have long string values replaced with a
+head/tail marker by `clip_argument_strings()`. The recursion preserves the JSON shape, so a short
+`path` beside a long `content` stays readable and a nested flag is untouched.
+
+Tests: `old_tool_call_arguments_are_clipped_but_keep_their_shape`.
+
+### 10. Retained reasoning has a per-block ceiling
+
+`crates/harness-core/src/session/transcript.rs`
+
+The newest four reasoning blocks are still kept, but each is clipped to **16,000 characters** with
+both ends preserved. One live block was 137,791 characters (~34k tokens) for a round the model had
+already finished. The Antigravity route replays reasoning as a `thought` part; keeping a shortened
+thought part preserves the structure Code Assist validates, while the signature remains the thing
+that is checked.
+
+Test: `a_retained_reasoning_block_is_capped`.
+
+### 11. The summariser's own transcript is bounded
+
+`crates/harness-core/src/session/compaction.rs`
+
+`render_transcript()` already capped each message at 4,000 characters and the whole transcript at
+60,000, but tool results were head-clipped and a `Role::Tool` row rendered the same answer twice —
+once as `content`, once as `tool result`. Tool results and call arguments now use a head/tail clip,
+and the duplicated `content` copy is skipped. A fold no longer pays for two copies of the output it
+is about to replace.
+
+Test: `a_huge_tool_result_is_bounded_in_the_summarisers_transcript`.
+
+### 12. `list_files` stops at a default depth
+
+`crates/harness-core/src/tools/fs.rs`
+
+The 40k byte cap was applied after the walk had already produced the listing. The tool now takes a
+`depth` parameter (default **8**, maximum 64) and passes it to `WalkDir::max_depth`. A directory at
+the boundary that may still have children is announced in the output, as are the existing entry and
+byte caps. Use `path` to go deeper or raise `depth`.
+
+Test: `list_entries_stops_at_the_depth_limit`.
 
 ---
 

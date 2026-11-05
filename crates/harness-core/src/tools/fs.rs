@@ -1076,6 +1076,16 @@ const MAX_LISTED_ENTRIES: usize = 1_000;
 /// which entries are shown; this cap decides how much text one answer may carry.
 const MAX_LISTED_OUTPUT_CHARS: usize = 40_000;
 
+/// Default depth of a `list_files` walk. The root is depth 0, so this lists eight levels below it.
+///
+/// The normal source tree fits comfortably; generated output and vendored trees are what grow past
+/// it, and the byte cap only ever ran after the walk had already produced the listing. Bounding
+/// the walk keeps the tool from doing work whose answer would be clipped away.
+const DEFAULT_LIST_DEPTH: usize = 8;
+
+/// The deepest walk a caller may request explicitly.
+const MAX_LIST_DEPTH: usize = 64;
+
 /// How many entries the walk collects before it stops, independent of `MAX_LISTED_ENTRIES`.
 /// The display cap is applied *after* sorting, so the walk has to see enough of the tree to
 /// guarantee the alphabetically-first entries are found, while a pathological tree still
@@ -1105,11 +1115,11 @@ impl Tool for ListFilesTool {
 
     fn description(&self) -> &str {
         "List directory contents inside the workspace as workspace-relative paths, one per line, \
-         with directories carrying a trailing slash. Recursive; use 'path' to bound it or 'glob' \
-         to find files by name. 'glob' matches exactly as in search_files: a bare pattern \
-         ('*.rs', '*_test.rs') matches the entry name, a pattern with a slash ('src/*.rs') \
-         matches the workspace-relative path. .git, target and node_modules are skipped, and \
-         results are capped (every cap announces itself in the output)."
+         with directories carrying a trailing slash. Recursive to 'depth' levels (default 8); use \
+         'path' to bound it, or 'glob' to find files by name. 'glob' matches exactly as in \
+         search_files: a bare pattern ('*.rs', '*_test.rs') matches the entry name, a pattern with \
+         a slash ('src/*.rs') matches the workspace-relative path. .git, target and node_modules \
+         are skipped, and results are capped (every cap announces itself in the output)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -1117,7 +1127,8 @@ impl Tool for ListFilesTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Directory to list (default: workspace root)" },
-                "glob": { "type": "string", "description": "Filter entries by glob: bare patterns match the entry name, slash patterns match the workspace-relative path" }
+                "glob": { "type": "string", "description": "Filter entries by glob: bare patterns match the entry name, slash patterns match the workspace-relative path" },
+                "depth": { "type": "integer", "description": "Maximum directory depth to walk below 'path' (default: 8, maximum: 64); 1 lists only direct children" }
             },
             "required": []
         })
@@ -1140,6 +1151,11 @@ impl Tool for ListFilesTool {
             _ => ".",
         };
         let glob = args.get("glob").and_then(|g| g.as_str());
+        let depth = args
+            .get("depth")
+            .and_then(|d| d.as_u64())
+            .map(|depth| (depth as usize).clamp(1, MAX_LIST_DEPTH))
+            .unwrap_or(DEFAULT_LIST_DEPTH);
 
         let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
@@ -1163,10 +1179,12 @@ impl Tool for ListFilesTool {
         // The walk is a blocking syscall; owning a blocking thread keeps a large tree from
         // parking an async worker, the same reason `search_files` runs its scan this way.
         let request_glob = glob.clone();
-        let (entries, truncated) =
-            tokio::task::spawn_blocking(move || list_entries(&root, &resolved, glob.as_deref()))
-                .await
-                .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
+        let listed = tokio::task::spawn_blocking(move || {
+            list_entries(&root, &resolved, glob.as_deref(), depth)
+        })
+        .await
+        .map_err(|e| HarnessError::Io(format!("list task failed: {}", e)))?;
+        let entries = listed.entries;
 
         // An empty result must say *why* it is empty: a silent success reads as "nothing to
         // see here" when the truth is a glob that matched nothing or an empty directory.
@@ -1180,7 +1198,12 @@ impl Tool for ListFilesTool {
             listing.push('\n');
             listing
         };
-        if truncated {
+        if listed.depth_capped {
+            output.push_str(&format!(
+                "[listing stopped at depth {depth}; use 'path' to go deeper or raise 'depth']\n"
+            ));
+        }
+        if listed.entries_capped {
             output.push_str(&format!(
                 "[listing stopped after {MAX_LISTED_ENTRIES} entries; narrow 'path' or add 'glob']"
             ));
@@ -1197,13 +1220,29 @@ impl Tool for ListFilesTool {
     }
 }
 
+/// What one walked listing found, and which bound stopped it.
+struct ListedEntries {
+    entries: Vec<String>,
+    /// The display cap dropped entries.
+    entries_capped: bool,
+    /// The walk stopped at `depth` while a directory still had children below it.
+    depth_capped: bool,
+}
+
 /// Recursively list entries under `resolved`, skipping noise directories and applying the
-/// optional glob. Returns the sorted entries and whether the cap stopped the walk early.
-fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (Vec<String>, bool) {
+/// optional glob. `depth` is the maximum walk depth below the listed directory (root is 0).
+fn list_entries(
+    workspace_root: &Path,
+    resolved: &Path,
+    glob: Option<&str>,
+    depth: usize,
+) -> ListedEntries {
     let mut entries: Vec<String> = Vec::new();
-    let mut truncated = false;
+    let mut entries_capped = false;
+    let mut depth_capped = false;
 
     for entry in walkdir::WalkDir::new(resolved)
+        .max_depth(depth)
         .into_iter()
         .filter_entry(|e| e.depth() == 0 || !is_noise_dir(&e.file_name().to_string_lossy()))
         .filter_map(Result::ok)
@@ -1215,6 +1254,12 @@ fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (
 
         let path = entry.path();
         let is_dir = entry.file_type().is_dir();
+
+        // A directory at the boundary may have children the walk never visited. Say so even when
+        // the glob filters the directory itself out: its contents can still match.
+        if !depth_capped && entry.depth() >= depth && is_dir {
+            depth_capped = true;
+        }
 
         if let Some(g) = glob {
             let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1228,7 +1273,7 @@ fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (
         // The collection cap counts *matches*, not visited entries, so a glob that matches
         // only a few files deep in a large tree still returns all of them.
         if entries.len() >= MAX_COLLECTED_ENTRIES {
-            truncated = true;
+            entries_capped = true;
             break;
         }
 
@@ -1247,10 +1292,14 @@ fn list_entries(workspace_root: &Path, resolved: &Path, glob: Option<&str>) -> (
     entries.sort();
     if entries.len() > MAX_LISTED_ENTRIES {
         entries.truncate(MAX_LISTED_ENTRIES);
-        truncated = true;
+        entries_capped = true;
     }
 
-    (entries, truncated)
+    ListedEntries {
+        entries,
+        entries_capped,
+        depth_capped,
+    }
 }
 
 #[cfg(test)]
@@ -1305,14 +1354,17 @@ mod tests {
             std::fs::write(root.join(format!("{:05}.txt", i)), "x").unwrap();
         }
 
-        let (entries, truncated) = list_entries(root, root, None);
+        let listed = list_entries(root, root, None, DEFAULT_LIST_DEPTH);
 
-        assert!(truncated, "dropping entries must be announced");
-        assert_eq!(entries.len(), MAX_LISTED_ENTRIES);
-        assert_eq!(entries.first().map(String::as_str), Some("00000.txt"));
+        assert!(listed.entries_capped, "dropping entries must be announced");
+        assert_eq!(listed.entries.len(), MAX_LISTED_ENTRIES);
+        assert_eq!(
+            listed.entries.first().map(String::as_str),
+            Some("00000.txt")
+        );
         let expected_last = format!("{:05}.txt", MAX_LISTED_ENTRIES - 1);
         assert_eq!(
-            entries.last().map(String::as_str),
+            listed.entries.last().map(String::as_str),
             Some(expected_last.as_str())
         );
     }
@@ -1327,17 +1379,60 @@ mod tests {
         std::fs::create_dir_all(root.join("rust-agent-harness")).unwrap();
         std::fs::write(root.join("rust-harness.md"), "x").unwrap();
 
-        let (matched, _) = list_entries(root, root, Some("*rust-harness*"));
-        assert_eq!(matched, vec!["rust-harness.md".to_string()]);
+        let matched = list_entries(root, root, Some("*rust-harness*"), DEFAULT_LIST_DEPTH);
+        assert_eq!(matched.entries, vec!["rust-harness.md".to_string()]);
 
-        let (dirs, _) = list_entries(root, root, Some("*agent-harness*"));
-        assert_eq!(dirs, vec!["rust-agent-harness/".to_string()]);
+        let dirs = list_entries(root, root, Some("*agent-harness*"), DEFAULT_LIST_DEPTH);
+        assert_eq!(dirs.entries, vec!["rust-agent-harness/".to_string()]);
 
-        let (nothing, _) = list_entries(root, root, Some("*nope*"));
+        let nothing = list_entries(root, root, Some("*nope*"), DEFAULT_LIST_DEPTH);
         assert!(
-            nothing.is_empty(),
+            nothing.entries.is_empty(),
             "an unmatched glob returns nothing, not a guess"
         );
+    }
+
+    /// The walk stops at the requested depth and says so, rather than producing a listing the
+    /// byte cap would only cut after the work was done.
+    #[test]
+    fn list_entries_stops_at_the_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src").join("deep").join("deeper")).unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "x").unwrap();
+        std::fs::write(root.join("src").join("deep").join("nested.rs"), "x").unwrap();
+        std::fs::write(
+            root.join("src").join("deep").join("deeper").join("lost.rs"),
+            "x",
+        )
+        .unwrap();
+
+        let listed = list_entries(root, root, None, 2);
+
+        assert!(
+            listed.entries.contains(&"src/".to_string()),
+            "{:?}",
+            listed.entries
+        );
+        assert!(
+            listed.entries.contains(&"src/deep/".to_string()),
+            "{:?}",
+            listed.entries
+        );
+        assert!(
+            listed.entries.contains(&"src/main.rs".to_string()),
+            "{:?}",
+            listed.entries
+        );
+        assert!(
+            listed
+                .entries
+                .iter()
+                .all(|entry| !entry.ends_with("nested.rs") && !entry.ends_with("lost.rs")),
+            "nothing below the boundary is walked: {:?}",
+            listed.entries
+        );
+        assert!(listed.depth_capped, "the cut is announced");
     }
 
     #[test]

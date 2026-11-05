@@ -51,6 +51,47 @@ pub fn fold_threshold(configured: usize, context_window: Option<usize>) -> usize
     }
 }
 
+/// Fraction of the model window above which a fold may no longer wait until the next turn.
+///
+/// The ordinary bar is deliberately soft: a fold that lands just after the request it was meant
+/// to bound is still useful, and making every crossing wait for the summariser put a whole model
+/// call between the user's prompt and its answer. This bar is the hard one. A transcript past it
+/// may be refused outright, so the fold runs before the first model call even though it delays
+/// that turn.
+pub const FOLD_URGENT_FRACTION_NUMERATOR: usize = 9;
+pub const FOLD_URGENT_FRACTION_DENOMINATOR: usize = 10;
+
+/// The hard ceiling for the model window, or `None` when the host did not report one.
+pub fn urgent_fold_threshold(context_window: Option<usize>) -> Option<usize> {
+    match context_window {
+        Some(window) if window > 0 => Some(
+            window.saturating_mul(FOLD_URGENT_FRACTION_NUMERATOR)
+                / FOLD_URGENT_FRACTION_DENOMINATOR,
+        ),
+        _ => None,
+    }
+}
+
+/// Fraction of the model window replayed from the session store before the fold even runs.
+///
+/// `session.resume_max_messages` bounds rows, not tokens: a 200-row agentic window measured about
+/// 365k heuristic tokens, which can exceed a 256k model's whole window. Replaying at three fifths
+/// of the window leaves room for the system prompt, the new user line, a reply and the next tool
+/// round — and stays below the 70% fold bar, so a normal resume does not immediately fold.
+pub const REPLAY_CONTEXT_FRACTION_NUMERATOR: usize = 3;
+pub const REPLAY_CONTEXT_FRACTION_DENOMINATOR: usize = 5;
+
+/// The token budget for replayed history, or `None` when the window is unknown.
+pub fn replay_token_budget(context_window: Option<usize>) -> Option<usize> {
+    match context_window {
+        Some(window) if window > 0 => Some(
+            window.saturating_mul(REPLAY_CONTEXT_FRACTION_NUMERATOR)
+                / REPLAY_CONTEXT_FRACTION_DENOMINATOR,
+        ),
+        _ => None,
+    }
+}
+
 /// Agent-loop tunables. Deserialized from the `agent:` section of `~/.luna/config.yaml`
 /// (see `crate::config`), which is why the defaults below are the single source of truth for the
 /// config file's `agent.*` defaults.
@@ -197,6 +238,9 @@ pub enum FoldTarget {
 pub(super) struct FoldPolicy {
     /// Fold once the transcript estimate crosses this many tokens.
     threshold: usize,
+    /// Above this many tokens a fold runs before the request instead of behind it. `None` when
+    /// the host did not report the model's window.
+    ceiling: Option<usize>,
     /// Target percentage or count of turns.
     target: FoldTarget,
 }
@@ -518,11 +562,13 @@ where
                         .auto_compact_threshold
                         .min(self.config.compact_at_tokens),
                 ),
+                ceiling: urgent_fold_threshold(self.config.context_window),
                 target,
             }
         } else {
             FoldPolicy {
                 threshold: self.bounded_threshold(self.config.compact_at_tokens),
+                ceiling: urgent_fold_threshold(self.config.context_window),
                 target: FoldTarget::Turns(self.config.keep_recent_turns),
             }
         }
@@ -537,6 +583,7 @@ where
         };
         FoldPolicy {
             threshold: self.bounded_threshold(self.config.compact_at_tokens),
+            ceiling: urgent_fold_threshold(self.config.context_window),
             target,
         }
     }
@@ -734,5 +781,26 @@ mod tests {
         assert_eq!(fold_threshold(150_000, Some(1_000_000)), 150_000);
         assert_eq!(fold_threshold(300_000, None), 300_000);
         assert_eq!(fold_threshold(300_000, Some(0)), 300_000);
+    }
+
+    /// The urgent bar sits above the ordinary one, so a crossing still has the background path to
+    /// fall back on and only a near-window transcript forces the turn to wait.
+    #[test]
+    fn the_urgent_bar_leaves_room_for_the_reply() {
+        assert_eq!(urgent_fold_threshold(Some(256_000)), Some(230_400));
+        assert_eq!(urgent_fold_threshold(None), None);
+        assert_eq!(urgent_fold_threshold(Some(0)), None);
+        assert!(urgent_fold_threshold(Some(256_000)).unwrap() > 179_200);
+    }
+
+    /// Replay is bounded below the fold bar: the request is assembled from history at three fifths
+    /// of the window, leaving the system prompt, the user line and the reply their own room.
+    #[test]
+    fn replay_stays_below_the_fold_bar() {
+        let budget = replay_token_budget(Some(256_000)).unwrap();
+        assert_eq!(budget, 153_600);
+        assert!(budget < fold_threshold(300_000, Some(256_000)));
+        assert_eq!(replay_token_budget(None), None);
+        assert_eq!(replay_token_budget(Some(0)), None);
     }
 }

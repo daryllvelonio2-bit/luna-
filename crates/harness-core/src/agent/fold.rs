@@ -7,11 +7,18 @@ use tracing::{debug, warn};
 use super::{Agent, AgentEvent, CompactionNotice, FoldInFlight, FoldPolicy, FoldTarget};
 use crate::error::HarnessError;
 use crate::session::{
-    compact, compact_percent, estimate_tokens, heuristic_tokens, last_fold_seq, sendable_messages,
-    CompactionOutcome, SessionStore, StoredMessage,
+    compact, compact_percent, estimate_tokens, heuristic_tokens, last_fold_seq, CompactionOutcome,
+    SessionStore, StoredMessage,
 };
 use crate::traits::*;
 use crate::types::Message;
+
+/// How many urgent folds one request may run back to back before it is sent anyway.
+///
+/// A fold normally takes a large fraction of the transcript, so one is enough. A tail of oversized
+/// kept turns can need a second, and a fold that only rewrites a summary must not loop; the cap
+/// bounds the summariser calls a single model request can trigger.
+const MAX_URGENT_FOLDS_PER_REQUEST: usize = 3;
 
 impl<P, M, N, R> Agent<P, M, N, R>
 where
@@ -46,10 +53,11 @@ where
                 &system_text,
                 &mut messages,
                 self.explicit_fold_policy(),
+                true,
             )
             .await?
         {
-            Some(notice) => notice,
+            Some((notice, _)) => notice,
             None => {
                 let error = HarnessError::SessionError(
                     "nothing to compact: the transcript holds no more turns than agent.keep_recent_turns and fits the compaction budget"
@@ -238,13 +246,21 @@ where
         if let Some(seq) = outcome.fold_seq {
             *fold_watermark = Some(seq);
         }
+        self.rebuild_messages_from_store(messages, system_text)
+            .await;
+        true
+    }
+
+    /// Reload the stored transcript as the vector this turn should send.
+    ///
+    /// A fold retires the rows of this turn as well as older ones, so the in-memory copy is not a
+    /// transcript the store agrees with any more. The usage reports written against the retired
+    /// requests are cleared first: they carry sequence numbers newer than the summary and would
+    /// make the bar re-measure the transcript the fold just removed.
+    async fn rebuild_messages_from_store(&self, messages: &mut Vec<Message>, system_text: &str) {
         let Some(binding) = self.session.as_ref() else {
-            return true;
+            return;
         };
-        // The bar must never read a size reported against the transcript this fold replaced. A
-        // running turn writes those reports in the window between the fold landing and this
-        // adoption, and they carry sequence numbers newer than the summary row, so the replay below
-        // would believe them and fold again — the loop this method exists to stop.
         if let Err(error) = binding.store.clear_usage_reports(&binding.session_id).await {
             warn!("Cannot drop the session's retired size reports: {}", error);
         }
@@ -252,7 +268,7 @@ where
             Ok(replayed) => {
                 let mut rebuilt = Vec::with_capacity(replayed.history.len() + 1);
                 rebuilt.push(Message::system(system_text.to_string()));
-                rebuilt.extend(sendable_messages(&replayed.history));
+                rebuilt.extend(self.replay_messages(&replayed.history));
                 *messages = rebuilt;
             }
             Err(error) => warn!(
@@ -260,7 +276,6 @@ where
                 binding.session_id, error
             ),
         }
-        true
     }
 
     /// Re-check the fold bar against the transcript the session now holds, and start a fold if it is
@@ -318,7 +333,7 @@ where
                 }
             };
             messages.push(Message::system(system_text));
-            messages.extend(sendable_messages(&history));
+            messages.extend(self.replay_messages(&history));
             // The re-armed watermark only counts folds newer than the one just seen: pass the
             // fresh value through a nested call by checking size directly here.
             let estimate = estimate_tokens(&messages);
@@ -345,23 +360,223 @@ where
         };
         let mut messages = Vec::with_capacity(history.len() + 1);
         messages.push(Message::system(system_text));
-        messages.extend(sendable_messages(&history));
+        messages.extend(self.replay_messages(&history));
         self.spawn_fold_if_needed(&messages, &history, policy);
     }
 
+    /// Fold before the next model call when the in-memory transcript is past the urgent ceiling.
+    ///
+    /// A long tool round can add more to the request than the replay budget left room for. The
+    /// ordinary mid-turn check starts a background fold and lets the round run on the transcript it
+    /// holds — fine at the policy bar, fatal at the window. Here the turn waits, then rebuilds from
+    /// the store exactly as it would for a fold that landed while it was thinking.
+    ///
+    /// One fold does not always clear the ceiling: a kept tail of oversized turns can still be
+    /// over it. Up to [`MAX_URGENT_FOLDS_PER_REQUEST`] folds run in a row, stopping early when the
+    /// transcript fits or a fold no longer makes it smaller.
+    ///
+    /// Returns `true` when at least one fold ran and `messages` was replaced.
+    pub(super) async fn fold_now_from_stored(
+        &self,
+        messages: &mut Vec<Message>,
+        system_text: &str,
+        policy: FoldPolicy,
+        watermark: &mut Option<i64>,
+    ) -> bool {
+        let Some(ceiling) = policy.ceiling else {
+            return false;
+        };
+        if self.session.is_none()
+            || self.compaction.is_none()
+            || self.fold_disabled_this_turn.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
+            return false;
+        };
+        // One fold at a time, background or preflight: a second summary over the same tail would
+        // race the first one's summary row and could fold it away.
+        if self.fold_in_flight.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let _guard = FoldInFlight(self.fold_in_flight.clone());
+        let mut folded_any = false;
+        for _ in 0..MAX_URGENT_FOLDS_PER_REQUEST {
+            let before = estimate_tokens(messages).tokens as usize;
+            if before <= ceiling {
+                break;
+            }
+            // The fold acts on the store, not on the bounded copy in hand: the whole reason to
+            // fold mid-turn is that the live transcript is too large, and the replay budget may
+            // already be hiding rows the store still holds.
+            let history = match binding.store.replay(&binding.session_id, usize::MAX).await {
+                Ok(replayed) => replayed.history,
+                Err(error) => {
+                    warn!("Cannot re-read the session to fold it mid-turn: {}", error);
+                    break;
+                }
+            };
+            debug!(
+                "Transcript estimate {} tokens is past the urgent ceiling {}; folding before the next request",
+                before, ceiling
+            );
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::CompactionStarted { forced: false });
+            }
+            match run_fold(
+                binding.store.as_ref(),
+                &binding.session_id,
+                setup.provider.as_ref(),
+                &setup.model,
+                &history,
+                policy.target,
+            )
+            .await
+            {
+                Ok(Some(outcome)) => {
+                    if let Some(seq) = outcome.fold_seq {
+                        *watermark = Some(seq);
+                    }
+                    self.rebuild_messages_from_store(messages, system_text)
+                        .await;
+                    let notice = CompactionNotice {
+                        session_id: binding.session_id.clone(),
+                        turns: outcome.folded_turns,
+                        messages: outcome.folded_messages,
+                    };
+                    folded_any = true;
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: Some(notice),
+                            error: None,
+                        });
+                        observer(AgentEvent::ContextTokensUpdated {
+                            tokens_used: heuristic_tokens(messages),
+                            reset: true,
+                        });
+                    }
+                    // A fold that did not make the request smaller will not make the next one
+                    // smaller either; stop rather than fold the same tail repeatedly.
+                    if estimate_tokens(messages).tokens as usize >= before {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    self.fold_disabled_this_turn.store(true, Ordering::SeqCst);
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: None,
+                            error: None,
+                        });
+                    }
+                    break;
+                }
+                Err(error) => {
+                    // A summariser outage must not become a failed prompt: keep the turn alive on
+                    // the transcript it holds and stop asking this turn for another fold.
+                    self.fold_disabled_this_turn.store(true, Ordering::SeqCst);
+                    warn!(
+                        "Mid-turn preflight fold failed; running on the full transcript: {}",
+                        error
+                    );
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::CompactionFinished {
+                            folded: None,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+        folded_any
+    }
+
+    /// Fold before the first model call when the transcript is already past the hard ceiling.
+    ///
+    /// The ordinary fold is background work: it bounds the *next* request, and the turn that
+    /// crossed the bar runs on a transcript a previous turn already sent. That reasoning stops
+    /// holding near the model's window — the request the turn is about to make is the one the
+    /// provider will refuse. At that point the turn waits for the summary and continues on the
+    /// bounded vector [`Self::compact_now`] hands back.
+    ///
+    /// Returns `true` when a fold ran and `messages` was rebuilt. A failed or empty fold leaves
+    /// the vector untouched, disables further automatic folds for this turn, and lets the turn
+    /// proceed: a summariser outage must not become a failed prompt.
+    pub(super) async fn preflight_fold_if_needed(
+        &self,
+        messages: &mut Vec<Message>,
+        history: &[StoredMessage],
+        system_text: &str,
+        policy: FoldPolicy,
+        watermark: &mut Option<i64>,
+    ) -> bool {
+        let Some(ceiling) = policy.ceiling else {
+            return false;
+        };
+        if self.session.is_none()
+            || self.compaction.is_none()
+            || self.fold_disabled_this_turn.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let estimate = estimate_tokens(messages);
+        if estimate.tokens as usize <= ceiling {
+            return false;
+        }
+        if self.fold_in_flight.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let _guard = FoldInFlight(self.fold_in_flight.clone());
+        debug!(
+            "Transcript estimate {} tokens is past the urgent ceiling {}; folding before the request",
+            estimate.tokens, ceiling
+        );
+        match self
+            .compact_now(history, system_text, messages, policy, false)
+            .await
+        {
+            Ok(Some((_notice, fold_seq))) => {
+                if let Some(seq) = fold_seq {
+                    *watermark = Some(seq);
+                }
+                true
+            }
+            Ok(None) => {
+                // Nothing the fold could take; the next turn must not keep asking it to try.
+                self.fold_disabled_this_turn.store(true, Ordering::SeqCst);
+                false
+            }
+            Err(error) => {
+                // A fold is a bound, not the user's answer. Report it and keep the turn alive on
+                // the transcript it holds, the same way the background path does.
+                self.fold_disabled_this_turn.store(true, Ordering::SeqCst);
+                warn!(
+                    "Preflight fold failed; running this turn on the full transcript: {}",
+                    error
+                );
+                false
+            }
+        }
+    }
+
     /// Fold the oldest turns now and swap the sent vector for the bounded one — for a caller that
-    /// asked for it and will report the result (`/compact`, summarize-and-new). Automatic folds do
-    /// not come through here: see [`Self::spawn_fold_if_needed`].
+    /// asked for it and will report the result (`/compact`, summarize-and-new) or for the urgent
+    /// preflight above. Automatic folds otherwise do not come through here: see
+    /// [`Self::spawn_fold_if_needed`].
     ///
     /// A provider failure is the caller's to report: the vector is untouched and the error is
-    /// returned.
+    /// returned. The notice carries the fold's sequence number so a running turn can move its
+    /// watermark to the fold it just adopted.
     async fn compact_now(
         &self,
         history: &[StoredMessage],
         system_text: &str,
         messages: &mut Vec<Message>,
         policy: FoldPolicy,
-    ) -> Result<Option<CompactionNotice>, HarnessError> {
+        forced: bool,
+    ) -> Result<Option<(CompactionNotice, Option<i64>)>, HarnessError> {
         let (Some(binding), Some(setup)) = (&self.session, &self.compaction) else {
             return Ok(None);
         };
@@ -369,7 +584,7 @@ where
         // The observer is told before the summary call is made: the wait is seconds long and a UI
         // that only learns about it afterwards has nothing to show while the user is waiting.
         if let Some(ref observer) = self.observer {
-            observer(AgentEvent::CompactionStarted { forced: true });
+            observer(AgentEvent::CompactionStarted { forced });
         }
 
         let outcome = match run_fold(
@@ -418,6 +633,7 @@ where
             turns: outcome.folded_turns,
             messages: outcome.folded_messages,
         };
+        let fold_seq = outcome.fold_seq;
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::CompactionFinished {
                 folded: Some(notice.clone()),
@@ -438,7 +654,7 @@ where
                 reset: true,
             });
         }
-        Ok(Some(notice))
+        Ok(Some((notice, fold_seq)))
     }
 }
 

@@ -33,7 +33,7 @@ pub use compaction::{
     heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
     CHARS_PER_TOKEN, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
-pub use transcript::{last_fold_seq, sendable_messages};
+pub use transcript::{last_fold_seq, sendable_messages, trim_messages_to_tokens};
 
 /// One chat session as `luna sessions list` reports it.
 #[derive(Debug, Clone, PartialEq)]

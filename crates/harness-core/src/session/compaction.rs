@@ -538,6 +538,9 @@ fn clip(text: &str, limit: usize) -> String {
     format!("{}\n… [{} more characters cut]", head, count - limit)
 }
 
+/// What replaces the middle of a long message, call or result in the summariser transcript.
+const TRANSCRIPT_CLIPPED: &str = "\n… [middle clipped in summary transcript] …\n";
+
 /// One stored message rendered as one transcript block, the way the summariser reads it.
 fn render_stored(stored: &StoredMessage) -> String {
     let message = &stored.message;
@@ -552,28 +555,40 @@ fn render_stored(stored: &StoredMessage) -> String {
         }
     };
     let mut out = String::new();
-    // Elided before the clip, not after: a data URL is one unbroken run of base64, so clipping it
-    // first spends the whole budget on the cut blob and drops what the message actually says.
-    let body = clip(
-        &elide_image_data(message.content.as_deref().unwrap_or_default()),
-        TRANSCRIPT_MESSAGE_CHARS,
-    );
-    out.push_str(&format!("{}: {}\n", label, body));
+    // `Message::tool` stores the answer in both `content` and `tool_result.content`; rendering
+    // both doubles the budget the summariser spends on the very answers a fold is replacing.
+    let content_is_tool_result = message.role == Role::Tool && message.tool_result.is_some();
+    if !content_is_tool_result {
+        // Elided before the clip, not after: a data URL is one unbroken run of base64, so clipping
+        // it first spends the whole budget on the cut blob and drops what the message actually says.
+        let body = clip(
+            &elide_image_data(message.content.as_deref().unwrap_or_default()),
+            TRANSCRIPT_MESSAGE_CHARS,
+        );
+        out.push_str(&format!("{}: {}\n", label, body));
+    } else {
+        out.push_str(&format!("{}:\n", label));
+    }
     for call in &message.tool_calls {
         out.push_str(&format!(
             "  tool call {} {} {}\n",
             call.name,
             call.id,
-            clip(
+            crate::tools::clip_middle(
                 &elide_image_data(&call.arguments.to_string()),
-                TRANSCRIPT_MESSAGE_CHARS
+                TRANSCRIPT_MESSAGE_CHARS,
+                TRANSCRIPT_CLIPPED,
             )
         ));
     }
     if let Some(result) = &message.tool_result {
         out.push_str(&format!(
             "  tool result: {}\n",
-            clip(&elide_image_data(&result.content), TRANSCRIPT_MESSAGE_CHARS)
+            crate::tools::clip_middle(
+                &elide_image_data(&result.content),
+                TRANSCRIPT_MESSAGE_CHARS,
+                TRANSCRIPT_CLIPPED,
+            )
         ));
     }
     out
@@ -850,6 +865,38 @@ mod tests {
     fn a_data_url_that_carries_no_payload_is_left_alone() {
         let text = "see data:image/png;base64 not the format";
         assert_eq!(elide_image_data(text), text);
+    }
+
+    /// A summary call must not re-read the whole tool result it is replacing: the per-message
+    /// bound keeps the head and the tail, and a tool row is rendered once rather than twice.
+    #[test]
+    fn a_huge_tool_result_is_bounded_in_the_summarisers_transcript() {
+        let body = format!("begin{}end", "x".repeat(100_000));
+        let rendered = render_transcript(&[stored(
+            1,
+            Message::tool(crate::types::ToolResult::success("call_1", &body)),
+        )]);
+
+        assert!(
+            rendered.len() < body.len(),
+            "the summariser transcript is smaller than the result"
+        );
+        assert!(rendered.contains("begin"), "the opening survives");
+        assert!(rendered.contains("end"), "the closing survives");
+        assert!(
+            rendered.contains(TRANSCRIPT_CLIPPED),
+            "the omission is announced: {}",
+            rendered.len()
+        );
+        assert_eq!(
+            rendered.matches("tool result:").count(),
+            1,
+            "the answer is rendered once, not once per stored copy"
+        );
+        assert!(
+            !rendered.contains("tool: begin"),
+            "the duplicated `content` copy is not rendered beside the result"
+        );
     }
 
     /// The estimator measures what the provider is sent, including the two fields that dominate a

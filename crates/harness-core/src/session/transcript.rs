@@ -92,12 +92,92 @@ pub fn sendable_messages(history: &[StoredMessage]) -> Vec<Message> {
     }
     elide_replayed_images(&mut messages);
     elide_stale_tool_results(&mut messages);
+    elide_stale_tool_arguments(&mut messages);
     elide_stale_reasoning(&mut messages);
     elide_stale_signatures(&mut messages);
     messages
 }
 
-/// How many of the most recent image-bearing user messages keep their pixels when replayed.
+/// Drop the oldest non-summary messages until the replayed transcript fits `max_tokens`.
+///
+/// The row bound (`session.resume_max_messages`) is not a context bound: 200 agentic rows measured
+/// roughly 365k heuristic tokens, and a provider refuses the request long before that. Messages are
+/// removed oldest-first, never a system summary — a summary is the compressed head of the
+/// conversation and the only trace of the turns it covers. Leading tool results whose call was cut
+/// away are removed too, so the kept vector stays a request a provider accepts.
+///
+/// The character heuristic is the right measure here: provider usage on the kept rows describes
+/// prompts that included the dropped rows and would make a trimmed transcript look untrimmed.
+pub fn trim_messages_to_tokens(messages: Vec<Message>, max_tokens: usize) -> Vec<Message> {
+    if max_tokens == 0 || messages.is_empty() {
+        return messages;
+    }
+    let non_summary = messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .count();
+    if non_summary == 0 || super::compaction::heuristic_tokens(&messages) as usize <= max_tokens {
+        return messages;
+    }
+
+    // Smallest number of oldest non-summary messages whose removal fits. Removal is monotonic:
+    // the candidate for a larger count is a subsequence of the one for a smaller count, so it
+    // cannot measure larger after orphaned results are dropped.
+    let mut low = 1usize;
+    let mut high = non_summary;
+    while low < high {
+        let mid = (low + high) / 2;
+        let candidate = drop_oldest_non_summaries(&messages, mid);
+        if super::compaction::heuristic_tokens(&candidate) as usize <= max_tokens {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    let trimmed = drop_oldest_non_summaries(&messages, low);
+    debug!(
+        "Replay trimmed {} oldest messages to fit {} tokens ({} -> {} messages)",
+        low,
+        max_tokens,
+        messages.len(),
+        trimmed.len()
+    );
+    trimmed
+}
+
+/// `messages` without its oldest `count` non-summary messages; system summaries always survive.
+fn drop_oldest_non_summaries(messages: &[Message], count: usize) -> Vec<Message> {
+    let mut dropped = 0usize;
+    let mut kept: Vec<Message> = messages
+        .iter()
+        .filter(|message| {
+            if message.role == Role::System || dropped >= count {
+                true
+            } else {
+                dropped += 1;
+                false
+            }
+        })
+        .cloned()
+        .collect();
+
+    // The cut may have kept tool results whose assistant call went with the dropped prefix. A
+    // request cannot open on an orphaned result (`sendable_messages` drops them in the full
+    // transcript), so drop them here as well, skipping any summary rows in front.
+    let mut index = 0usize;
+    while index < kept.len() {
+        match kept[index].role {
+            Role::System => index += 1,
+            Role::Tool => {
+                kept.remove(index);
+            }
+            _ => break,
+        }
+    }
+    kept
+}
+
 ///
 /// A pasted screenshot belongs to the conversation that was about it. Two user messages later the
 /// conversation has moved on, but the pixels were still posted on every request for the rest of the
@@ -224,6 +304,30 @@ const REPLAYED_REASONING: usize = 4;
 /// where it still matters.
 const REPLAYED_SIGNATURES: usize = 8;
 
+/// Characters of a retained reasoning block that are replayed whole.
+///
+/// One live block was 137,791 characters, about 34k tokens, for a round the model had already
+/// finished. Keeping a head and tail bounds the worst case without dropping the reasoning that
+/// still explains the current round.
+const REPLAYED_REASONING_MAX_CHARS: usize = 16_000;
+
+/// What sits between the head and tail of a clipped reasoning block.
+const REASONING_CLIPPED: &str = "\n\n[reasoning clipped when replayed: middle omitted]\n\n";
+
+/// How many of the newest tool calls keep their arguments whole when replayed.
+///
+/// The newest calls are the work in flight, and the model may still refer to exactly what it
+/// asked for. Older arguments are mostly `write_file`/`patch` bodies whose result is the useful
+/// part once the round is behind the conversation.
+const REPLAYED_TOOL_CALL_ARGUMENTS: usize = 4;
+
+/// Characters kept from one string argument of a tool call older than
+/// [`REPLAYED_TOOL_CALL_ARGUMENTS`].
+const STALE_ARGUMENT_STRING_CHARS: usize = 512;
+
+/// What replaces the middle of a long string inside an old tool call's arguments.
+const TOOL_ARGUMENT_CLIPPED: &str = "\n\n[tool argument clipped when replayed: middle omitted]\n\n";
+
 /// Keep the head and tail of tool results older than the newest few, dropping the middle.
 ///
 /// Both `content` and `tool_result.content` are written, because `Message::tool` stores the same
@@ -252,7 +356,8 @@ fn elide_stale_tool_results(messages: &mut [Message]) {
     }
 }
 
-/// Drop the reasoning of assistant messages older than the newest [`REPLAYED_REASONING`].
+/// Drop the reasoning of assistant messages older than the newest [`REPLAYED_REASONING`], and
+/// bound every retained block to [`REPLAYED_REASONING_MAX_CHARS`].
 ///
 /// A message left with neither content nor a call keeps its reasoning: stripping it would make the
 /// message empty, and an empty assistant turn is worse than a little dead context.
@@ -268,11 +373,63 @@ fn elide_stale_reasoning(messages: &mut [Message]) {
         }
         if seen < REPLAYED_REASONING {
             seen += 1;
+            if let Some(reasoning) = message.reasoning.as_mut() {
+                let clipped = crate::tools::clip_middle(
+                    reasoning,
+                    REPLAYED_REASONING_MAX_CHARS,
+                    REASONING_CLIPPED,
+                );
+                if clipped.len() != reasoning.len() {
+                    *reasoning = clipped;
+                }
+            }
             continue;
         }
         if message.content.is_some() || !message.tool_calls.is_empty() {
             message.reasoning = None;
         }
+    }
+}
+
+/// Clip long string values inside the arguments of calls older than
+/// [`REPLAYED_TOOL_CALL_ARGUMENTS`], keeping the JSON shape intact.
+///
+/// A `write_file` body or a `patch` hunk can be tens of kilobytes. Once the round is behind the
+/// conversation the model needs to remember that it wrote a file, not the file itself; the result
+/// message already carries what happened. Recursing instead of replacing the whole value means a
+/// short `path` beside a long `content` stays readable.
+fn elide_stale_tool_arguments(messages: &mut [Message]) {
+    let mut seen = 0usize;
+    for message in messages.iter_mut().rev() {
+        for call in message.tool_calls.iter_mut().rev() {
+            if seen < REPLAYED_TOOL_CALL_ARGUMENTS {
+                seen += 1;
+                continue;
+            }
+            clip_argument_strings(&mut call.arguments, STALE_ARGUMENT_STRING_CHARS);
+        }
+    }
+}
+
+fn clip_argument_strings(value: &mut serde_json::Value, cap: usize) {
+    match value {
+        serde_json::Value::String(text) => {
+            let clipped = crate::tools::clip_middle(text, cap, TOOL_ARGUMENT_CLIPPED);
+            if clipped.len() != text.len() {
+                *text = clipped;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                clip_argument_strings(item, cap);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for item in fields.values_mut() {
+                clip_argument_strings(item, cap);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -590,5 +747,126 @@ mod tests {
         for tool_call in &calls[4..] {
             assert!(tool_call.signature.is_some(), "newest keep theirs");
         }
+    }
+
+    /// A retained reasoning block is bounded too. The newest four keep their reasoning, but a
+    /// 137k-character block cannot fill the window by itself.
+    #[test]
+    fn a_retained_reasoning_block_is_capped() {
+        let mut message = Message::assistant("answer");
+        message.reasoning = Some(format!("begin{}end", "r".repeat(50_000)));
+        let history = vec![stored(1, Message::user("go")), stored(2, message)];
+
+        let messages = sendable_messages(&history);
+        let reasoning = messages[1].reasoning.as_deref().unwrap();
+        assert!(reasoning.len() <= REPLAYED_REASONING_MAX_CHARS);
+        assert!(reasoning.starts_with("begin"));
+        assert!(reasoning.ends_with("end"));
+        assert!(reasoning.contains(REASONING_CLIPPED));
+    }
+
+    /// Old call arguments keep their JSON shape but lose the middle of long strings; the newest
+    /// rounds stay whole because the model may still be acting on exactly what it asked for.
+    #[test]
+    fn old_tool_call_arguments_are_clipped_but_keep_their_shape() {
+        let body = format!("begin{}end", "x".repeat(20_000));
+        let mut history = vec![stored(1, Message::user("go"))];
+        for index in 0..8 {
+            let id = format!("call-{index}");
+            let mut tool_call = call(&id);
+            tool_call.arguments = serde_json::json!({
+                "path": "src/a.rs",
+                "content": body,
+                "options": { "dry_run": false, "note": "keep me" }
+            });
+            history.push(stored(
+                2 + index * 2,
+                Message::assistant_with_tools(vec![tool_call]),
+            ));
+            history.push(stored(
+                3 + index * 2,
+                Message::tool(crate::types::ToolResult::success(&id, "ok")),
+            ));
+        }
+
+        let messages = sendable_messages(&history);
+        let calls: Vec<&crate::types::ToolCall> = messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .collect();
+        assert_eq!(calls.len(), 8);
+
+        for tool_call in &calls[..4] {
+            let content = tool_call.arguments["content"].as_str().unwrap();
+            assert!(content.len() < 2_000, "old argument body is clipped");
+            assert!(content.starts_with("begin"));
+            assert!(content.ends_with("end"));
+            assert!(content.contains(TOOL_ARGUMENT_CLIPPED));
+            assert_eq!(
+                tool_call.arguments["path"].as_str(),
+                Some("src/a.rs"),
+                "a short sibling stays readable"
+            );
+            assert_eq!(
+                tool_call.arguments["options"]["note"].as_str(),
+                Some("keep me"),
+                "nested short values are untouched"
+            );
+        }
+        for tool_call in &calls[4..] {
+            assert_eq!(
+                tool_call.arguments["content"].as_str(),
+                Some(body.as_str()),
+                "the newest rounds keep their arguments whole"
+            );
+        }
+    }
+
+    /// The row bound is not a context bound: when the replayed messages exceed the token budget,
+    /// the oldest non-summary messages go first and a summary always survives.
+    #[test]
+    fn replayed_history_is_trimmed_to_a_token_budget() {
+        let body = "x".repeat(20_000);
+        let mut history = vec![StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::system("summary of the oldest turns"),
+            is_summary: true,
+        }];
+        for index in 0..10 {
+            let id = format!("call-{index}");
+            history.push(stored(2 + index * 2, Message::user(format!("ask {index}"))));
+            history.push(stored(
+                3 + index * 2,
+                Message::assistant_with_tools(vec![call(&id)]),
+            ));
+            history.push(stored(
+                4 + index * 2,
+                Message::tool(crate::types::ToolResult::success(&id, &body)),
+            ));
+        }
+
+        let untrimmed = sendable_messages(&history);
+        let untrimmed_len = untrimmed.len();
+        let trimmed = trim_messages_to_tokens(untrimmed, 20_000);
+
+        assert!(
+            trimmed.iter().any(|message| message.role == Role::System),
+            "the summary survives"
+        );
+        assert!(
+            trimmed.len() < untrimmed_len,
+            "the oldest messages were dropped"
+        );
+        let tokens = super::super::compaction::heuristic_tokens(&trimmed) as usize;
+        assert!(
+            tokens <= 20_000,
+            "the kept transcript fits: {tokens} tokens"
+        );
+        let first_non_summary = trimmed.iter().find(|message| message.role != Role::System);
+        assert!(
+            first_non_summary.is_none_or(|message| message.role != Role::Tool),
+            "the trim does not leave an orphaned tool result at the start"
+        );
     }
 }

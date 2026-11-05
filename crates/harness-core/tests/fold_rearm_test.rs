@@ -594,3 +594,169 @@ async fn a_fold_landing_mid_turn_bounds_what_the_turn_sends_next() {
         "a 50% fold of a 20k bar leaves the stored transcript near the bar: {live_tokens} tokens live"
     );
 }
+
+/// A mid-turn round that pushes the request past the model window is folded before the next call,
+/// not after it. The measured prompt sizes distinguish the two: a background fold leaves the next
+/// request carrying every round, while a preflight fold hands it the bounded transcript.
+struct BigRoundProvider {
+    calls: AtomicUsize,
+    prompt_chars: std::sync::Mutex<Vec<usize>>,
+    big: String,
+    big_rounds: usize,
+}
+
+#[async_trait]
+impl ModelProvider for BigRoundProvider {
+    fn provider_id(&self) -> &str {
+        "big_round"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["big-round-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let chars: usize = messages
+            .iter()
+            .map(|message| {
+                message.content.as_deref().map_or(0, str::len)
+                    + message.reasoning.as_deref().map_or(0, str::len)
+                    + message
+                        .tool_result
+                        .as_ref()
+                        .map_or(0, |result| result.content.len())
+                    + message
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.arguments.to_string().len())
+                        .sum::<usize>()
+            })
+            .sum();
+        self.prompt_chars.lock().unwrap().push(chars);
+
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < self.big_rounds {
+            let mut message = Message::assistant(self.big.clone());
+            message.tool_calls = vec![ToolCall {
+                id: format!("call_{n}"),
+                name: "no_such_tool".to_string(),
+                arguments: serde_json::json!({}),
+                signature: None,
+            }];
+            return Ok(message);
+        }
+        Ok(Message::assistant("done"))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Slow enough that a background fold cannot land between the spawn and the next model call.
+struct SlowSummariser {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for SlowSummariser {
+    fn provider_id(&self) -> &str {
+        "slow-canned"
+    }
+
+    async fn fetch_models(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(vec!["slow-canned-model".to_string()])
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(Message::assistant("FOLDED"))
+    }
+
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, HarnessError> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn an_over_window_turn_folds_before_the_next_model_call() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+    let store = Arc::new(SqliteSessionStore::new(Some(path.clone())).expect("open store"));
+    store.ensure_session("s1").await.unwrap();
+
+    // 120k chars is about 30k heuristic tokens per round. Two rounds fit under the 70k bar and
+    // the 90k urgent ceiling; three cross both, and the urgent path must win.
+    let main = Arc::new(BigRoundProvider {
+        calls: AtomicUsize::new(0),
+        prompt_chars: std::sync::Mutex::new(Vec::new()),
+        big: "x".repeat(120_000),
+        big_rounds: 3,
+    });
+    let summariser = Arc::new(SlowSummariser {
+        calls: AtomicUsize::new(0),
+    });
+
+    let cfg = AgentConfig {
+        context_window: Some(100_000),
+        compact_at_tokens: 1_000_000,
+        keep_recent_turns: 1,
+        auto_compact_enabled: true,
+        auto_compact_threshold: 1_000_000,
+        auto_compact_percent: Some(70),
+        auto_compact_turns: 1,
+        ..AgentConfig::default()
+    };
+
+    let agent = Agent::new(
+        main.clone(),
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        cfg,
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 500,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser.clone(),
+        model: "slow-canned-model".to_string(),
+    });
+
+    agent
+        .run_turn("hello", CancellationToken::new())
+        .await
+        .unwrap();
+
+    let prompts = main.prompt_chars.lock().unwrap().clone();
+    assert!(
+        prompts.len() >= 4,
+        "the turn runs until the model stops asking for tools: {prompts:?}"
+    );
+    assert!(
+        prompts[2] > 200_000,
+        "two big rounds are in the third request: {prompts:?}"
+    );
+    assert!(
+        prompts[3] < 160_000,
+        "the fourth request is folded before it is sent, not after: {prompts:?}"
+    );
+    assert!(
+        summariser.calls.load(Ordering::SeqCst) >= 1,
+        "the preflight fold ran a summary call"
+    );
+    assert!(count_summaries(&path) >= 1, "the fold wrote a summary row");
+}

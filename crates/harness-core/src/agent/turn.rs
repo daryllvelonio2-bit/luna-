@@ -11,7 +11,7 @@ use super::dispatch::DispatchState;
 use super::{retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome, TurnToolCall};
 use crate::error::HarnessError;
 use crate::hooks::HookEvent;
-use crate::session::{estimate_tokens, last_fold_seq, sendable_messages};
+use crate::session::{estimate_tokens, last_fold_seq};
 use crate::traits::*;
 use crate::types::*;
 
@@ -137,7 +137,7 @@ where
         let (history, replay_notice) = self.load_history().await?;
         let mut messages = Vec::with_capacity(history.len() + 3);
         messages.push(Message::system(system_text.clone()));
-        messages.extend(sendable_messages(&history));
+        messages.extend(self.replay_messages(&history));
         messages.push(Message::user(user_input));
 
         // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
@@ -159,7 +159,22 @@ where
         // stored transcript, and the checks below use this to tell "still over the bar" from "over
         // the bar a fold has already answered".
         let mut fold_watermark = last_fold_seq(&history);
-        let fold_spawned_at_start = self.spawn_fold_if_needed(&messages, &history, fold_policy);
+        // Past the hard ceiling the request may be refused, so the fold is not left behind: wait
+        // for it and continue on the bounded vector. Below it the ordinary background path runs.
+        let preflight_folded = self
+            .preflight_fold_if_needed(
+                &mut messages,
+                &history,
+                &system_text,
+                fold_policy,
+                &mut fold_watermark,
+            )
+            .await;
+        let fold_spawned_at_start = if preflight_folded {
+            false
+        } else {
+            self.spawn_fold_if_needed(&messages, &history, fold_policy)
+        };
 
         // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
         //    ones, so a later turn cannot silently capture into the wrong checkpoint.
@@ -255,8 +270,21 @@ where
             }
 
             if current_tokens as usize > fold_policy.threshold {
-                self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
+                let urgent = fold_policy
+                    .ceiling
+                    .is_some_and(|ceiling| current_tokens as usize > ceiling);
+                if urgent {
+                    self.fold_now_from_stored(
+                        &mut messages,
+                        &system_text,
+                        fold_policy,
+                        &mut fold_watermark,
+                    )
                     .await;
+                } else {
+                    self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
+                        .await;
+                }
             }
 
             debug!(

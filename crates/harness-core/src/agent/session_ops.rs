@@ -122,6 +122,20 @@ where
         crate::session::summarize_session(provider, model, &replay.history).await
     }
 
+    /// The replayed transcript as one request should carry it: sendable rows, bounded by the
+    /// model's replay budget.
+    ///
+    /// [`sendable_messages`] removes rows no provider will accept (orphaned results, unanswered
+    /// calls) and elides what the conversation has moved past. This adds the token bound — the row
+    /// limit alone let a 200-row agentic window reach ~365k heuristic tokens on a 256k model.
+    pub(super) fn replay_messages(&self, history: &[StoredMessage]) -> Vec<Message> {
+        let messages = sendable_messages(history);
+        match crate::agent::replay_token_budget(self.config.context_window) {
+            Some(budget) => crate::session::trim_messages_to_tokens(messages, budget),
+            None => messages,
+        }
+    }
+
     /// Get the estimated token count for the current session's conversation history.
     ///
     /// This is [`estimate_tokens`] over the messages the next request would actually send, which is
@@ -135,10 +149,14 @@ where
     /// left the transcript.
     pub async fn estimate_session_tokens(&self) -> Result<u32, HarnessError> {
         let (history, _replay_notice) = self.load_history().await?;
-        Ok(estimate_tokens(&sendable_messages(&history)).tokens)
+        Ok(estimate_tokens(&self.replay_messages(&history)).tokens)
     }
 
     /// The session's recent transcript, plus the notice the console prints about the bound.
+    ///
+    /// This is the row-bounded replay, not the token-bounded send vector: a fold must act on the
+    /// rows the store holds, while a request is assembled from what fits the model. Callers that
+    /// build a request pass the sendable messages through [`crate::session::trim_messages_to_tokens`].
     pub(super) async fn load_history(
         &self,
     ) -> Result<(Vec<StoredMessage>, Option<ReplayNotice>), HarnessError> {
