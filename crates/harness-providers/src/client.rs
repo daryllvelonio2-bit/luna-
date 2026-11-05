@@ -788,7 +788,25 @@ impl ModelProvider for GenericProviderClient {
                     .get("arguments")
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
-                let args: serde_json::Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
+                // An empty fragment is "no arguments"; a non-empty fragment that is not JSON is a
+                // tool call the provider cut off. Running it as `{}` is how a truncated
+                // `read_file` became a missing-argument error instead of a retry.
+                let args: serde_json::Value = if args_raw.trim().is_empty() {
+                    json!({})
+                } else {
+                    match serde_json::from_str(args_raw) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Err(HarnessError::ProviderError {
+                                provider: self.provider_id.clone(),
+                                message: format!(
+                                    "Model returned an incomplete tool call for '{name}': its \
+                                     arguments were not valid JSON ({error}). The call was not run."
+                                ),
+                            });
+                        }
+                    }
+                };
                 tool_calls.push(ToolCall {
                     id,
                     name,

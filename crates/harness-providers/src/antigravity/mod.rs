@@ -438,10 +438,25 @@ pub async fn execute_antigravity_completion(
                 signature,
                 ..
             } => {
-                let arguments = arguments_delta
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str(raw).ok())
-                    .unwrap_or_else(|| json!({}));
+                let raw = arguments_delta.as_deref().unwrap_or("");
+                // Empty means "no arguments"; unparseable non-empty means the provider cut the
+                // call off mid-JSON. Never dispatch the latter as `{}`.
+                let arguments = if raw.trim().is_empty() {
+                    json!({})
+                } else {
+                    match serde_json::from_str(raw) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Err(HarnessError::ProviderError {
+                                provider: "antigravity".to_string(),
+                                message: format!(
+                                    "Model returned an incomplete tool call for '{name}': its \
+                                     arguments were not valid JSON ({error}). The call was not run."
+                                ),
+                            });
+                        }
+                    }
+                };
                 tool_calls.push(ToolCall {
                     id: id.unwrap_or_else(|| "call_agy".to_string()),
                     name,

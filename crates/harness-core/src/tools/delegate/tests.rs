@@ -348,6 +348,37 @@ async fn test_subagent_child_approver_fails_closed() {
     assert!(matches!(err, HarnessError::ApprovalRejected(_)));
 }
 
+/// A background child has no stdin, but it must still inherit the session's standing answer.
+/// `--yes` / `tools.approval = allow` used to be ignored by every delegated child, which denied
+/// its writes even though the user had already said yes.
+#[tokio::test]
+async fn a_delegated_child_honours_the_session_approval_mode() {
+    use crate::approval::{ApprovalDecision, ApprovalMode, ApprovalRequest};
+
+    let req = ApprovalRequest::default();
+
+    let allow = super::subagent_approver(ApprovalMode::Allow, None);
+    assert_eq!(
+        allow.approve(&req).await.unwrap(),
+        ApprovalDecision::Run,
+        "an allow session must not turn into a denial in the child"
+    );
+
+    let deny = super::subagent_approver(ApprovalMode::Deny, None);
+    assert_eq!(
+        deny.approve(&req).await.unwrap(),
+        ApprovalDecision::Deny,
+        "a deny session stays denied"
+    );
+
+    let ask = super::subagent_approver(ApprovalMode::Ask, None);
+    let err = ask.approve(&req).await.unwrap_err();
+    assert!(
+        matches!(err, HarnessError::ApprovalRejected(_)),
+        "ask in the background fails closed: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_watchdog_does_not_timeout_while_tool_is_running() {
     let tracker =

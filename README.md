@@ -155,7 +155,7 @@ still keep the read/write/search tools:
 tools:
   enabled: [read_file, write_file, patch, search_files, list_files]
   read_max_chars: 100_000
-  terminal_timeout_secs: 120
+  terminal_timeout_secs: 300
   terminal_output_max_bytes: 50_000
 ```
 

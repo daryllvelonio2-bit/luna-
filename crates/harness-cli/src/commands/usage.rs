@@ -184,7 +184,7 @@ fn print_totals(totals: &UsageTotals) {
     println!("  time in turns    {}", format_duration(totals.duration_ms));
     if totals.failed_turns > 0 || totals.denied_calls > 0 {
         println!(
-            "  trouble          {} failed turn(s), {} denied call(s)",
+            "  trouble          {} turn(s) hit a tool error, {} denied call(s)",
             totals.failed_turns, totals.denied_calls
         );
     }

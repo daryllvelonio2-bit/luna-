@@ -165,7 +165,8 @@ pub struct UsageRecord {
     pub duration_ms: u64,
     pub tool_calls: u32,
     pub denied_calls: u32,
-    /// False when a tool failed or a call was denied: the tokens were still spent.
+    /// False when a tool call failed. A call the gate or a rule refused is reported separately in
+    /// `denied_calls` and does not make the turn dirty: a denial is a decision, not a malfunction.
     pub ok: bool,
     pub source: String,
 }
@@ -288,6 +289,8 @@ pub struct UsageTotals {
     /// Rows with no known price; their tokens are counted above, their cost is not in `cost_usd`.
     pub unpriced_turns: u64,
     pub duration_ms: u64,
+    /// Turns with at least one *failed* tool call. A denied call is counted in `denied_calls`
+    /// instead, not here.
     pub failed_turns: u64,
     pub denied_calls: u64,
 }
@@ -493,7 +496,13 @@ impl UsageLedger {
         record.session_id = session_id.map(|id| id.to_string());
         record.tool_calls = outcome.tool_calls.len() as u32;
         record.denied_calls = outcome.tool_calls.iter().filter(|call| call.denied).count() as u32;
-        record.ok = outcome.tool_calls.iter().all(|call| !call.is_error);
+        // A denial is the human saying no on purpose, and dispatch already excludes it from the
+        // failure guardrail. Counting it here made "turns with a failed tool" include turns where
+        // every tool behaved and the user simply refused one call.
+        record.ok = outcome
+            .tool_calls
+            .iter()
+            .all(|call| !call.is_error || call.denied);
         record.source = source.to_string();
         self.record(&record).await
     }

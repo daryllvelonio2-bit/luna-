@@ -140,7 +140,7 @@ fn totals_lines(totals: &UsageTotals) -> Vec<String> {
     ));
     if totals.failed_turns > 0 || totals.denied_calls > 0 {
         lines.push(format!(
-            "trouble          {} failed turn(s), {} denied call(s)",
+            "trouble          {} turn(s) hit a tool error, {} denied call(s)",
             totals.failed_turns, totals.denied_calls
         ));
     }

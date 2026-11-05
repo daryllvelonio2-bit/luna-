@@ -940,13 +940,31 @@ where
         }
 
         calls.sort_by_key(|(index, _)| *index);
+        // A tool call whose arguments are not valid JSON was never finished by the provider — the
+        // stream was cut, or the output cap landed mid-object. It must not be run with `{}`: a
+        // truncated `read_file` then reports a misleading missing argument, and a truncated
+        // `write_file`/`patch` would apply the wrong edit. Remember it, finish assembling, and
+        // fail the call so the turn loop's retry asks again.
+        let mut incomplete: Option<(String, String)> = None;
         let tool_calls: Vec<ToolCall> = calls
             .into_iter()
             .enumerate()
             .map(|(position, (_, mut call))| {
                 call.arguments = match call.arguments {
                     serde_json::Value::String(raw) => {
-                        serde_json::from_str(&raw).unwrap_or(json!({}))
+                        // An empty fragment means "no arguments", which is valid for a tool that
+                        // takes none; only a non-empty fragment that fails to parse is truncated.
+                        if raw.trim().is_empty() {
+                            json!({})
+                        } else {
+                            match serde_json::from_str(&raw) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    incomplete = Some((call.name.clone(), error.to_string()));
+                                    json!({})
+                                }
+                            }
+                        }
                     }
                     value => value,
                 };
@@ -956,6 +974,20 @@ where
                 call
             })
             .collect();
+
+        if let Some((name, error)) = incomplete {
+            warn!(
+                tool = %name,
+                "dropping incomplete tool call: arguments were not valid JSON ({error})"
+            );
+            return Err(HarnessError::ProviderError {
+                provider: self.provider.provider_id().to_string(),
+                message: format!(
+                    "Model returned an incomplete tool call for '{name}': its arguments were not \
+                     valid JSON ({error}). The call was not run."
+                ),
+            });
+        }
 
         if content.trim().is_empty()
             && tool_calls.is_empty()

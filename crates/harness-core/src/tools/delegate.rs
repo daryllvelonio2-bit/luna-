@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::{Agent, AgentEvent, SessionBinding};
-use crate::approval::{ApprovalSettings, Approver, NonInteractive};
+use crate::approval::{
+    AllowAll, ApprovalMode, ApprovalSettings, Approver, DenyAll, NonInteractive,
+};
 use crate::config::{Config, WorkerProfile};
 use crate::error::HarnessError;
 use crate::registry::DefaultToolRegistry;
@@ -738,6 +740,25 @@ fn clip_subagent_reply(reply: &str, log_path: &std::path::Path) -> String {
     crate::tools::clip_middle(reply, SUBAGENT_REPLY_CHARS, &marker)
 }
 
+/// The approver a delegated child runs under when its caller supplied none.
+///
+/// A background child has no stdin to prompt on, but the *session's* approval mode still applies.
+/// `tools.approval = allow` (or `--yes`) is the user's standing "yes" to mutations, so the child
+/// must honour it instead of denying every write. `deny` refuses as it says. Only `ask` fails
+/// closed, because there is nobody to ask.
+fn subagent_approver(mode: ApprovalMode, provided: Option<Arc<dyn Approver>>) -> Arc<dyn Approver> {
+    if let Some(approver) = provided {
+        return approver;
+    }
+    match mode {
+        ApprovalMode::Allow => Arc::new(AllowAll),
+        ApprovalMode::Deny => Arc::new(DenyAll),
+        ApprovalMode::Ask => Arc::new(NonInteractive::new(
+            "delegated subagent: interactive approval is unavailable in background execution",
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_subagent(
     provider: Arc<dyn ModelProvider>,
@@ -813,11 +834,7 @@ async fn run_single_subagent(
 
     let observer_tracker = tracker.clone();
     let log_obs = logger.clone();
-    let approver: Arc<dyn Approver> = approver.unwrap_or_else(|| {
-        Arc::new(NonInteractive::new(
-            "delegated subagent: interactive approval is unavailable in background execution",
-        ))
-    });
+    let approver: Arc<dyn Approver> = subagent_approver(config.tools.approval, approver);
     let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
         .with_permissions(
             crate::permission::PermissionEngine::validate(config.tools.permissions.clone())

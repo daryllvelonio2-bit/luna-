@@ -128,6 +128,9 @@ impl HarnessError {
                     || lower.contains("broken pipe")
                     || lower.contains("empty response")
                     || lower.contains("returned no answer")
+                    // A tool call cut off mid-JSON is retryable: the identical request can finish
+                    // the arguments, while running them as `{}` silently does the wrong thing.
+                    || lower.contains("incomplete tool call")
                     || lower.contains("sse stream error")
                     || lower.contains("transport error")
                     || lower.contains("error decoding response body")
@@ -173,5 +176,17 @@ mod tests {
             exhausted.to_string().contains("output-token limit"),
             "{exhausted}"
         );
+    }
+
+    /// A tool call the provider cut off mid-JSON must be retried, never dispatched as `{}`.
+    #[test]
+    fn an_incomplete_tool_call_is_retryable() {
+        let incomplete = HarnessError::ProviderError {
+            provider: "antigravity".to_string(),
+            message: "Model returned an incomplete tool call for 'read_file': its arguments were \
+                      not valid JSON (EOF while parsing an object). The call was not run."
+                .to_string(),
+        };
+        assert!(incomplete.is_retryable(), "{incomplete}");
     }
 }

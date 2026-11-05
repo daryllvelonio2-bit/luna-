@@ -524,3 +524,80 @@ async fn a_turn_the_provider_did_not_measure_writes_no_row() {
         0
     );
 }
+
+/// A denied call is a decision, not a malfunction: it is reported in `denied_calls`, and the turn
+/// is not counted among "turns that hit a tool error". Counting it there is what made the summary
+/// read as a harness failure when the user had simply refused a prompt.
+#[tokio::test]
+async fn a_denied_call_does_not_make_the_turn_a_tool_error() {
+    let ledger = UsageLedger::open(None).unwrap();
+    let outcome = TurnOutcome {
+        reply: "ok".to_string(),
+        reasoning: None,
+        tool_calls: vec![TurnToolCall {
+            name: "terminal".to_string(),
+            arguments: serde_json::json!({ "command": "rm -rf build" }),
+            output: "approval denied: denied at the prompt".to_string(),
+            is_error: true,
+            denied: true,
+        }],
+        replayed: None,
+        usage: Some(TokenUsage::estimated(10, 5)),
+        duration_ms: 10,
+    };
+    ledger
+        .record_turn(
+            "openai",
+            "gpt-4o",
+            Some("s1"),
+            &outcome,
+            SOURCE_CHAT,
+            &PriceTable::builtin(),
+        )
+        .await
+        .unwrap();
+
+    let totals = ledger.totals(&UsageFilter::default()).await.unwrap();
+    assert_eq!(totals.denied_calls, 1);
+    assert_eq!(
+        totals.failed_turns, 0,
+        "a refusal is not a failed tool call"
+    );
+
+    let rows = ledger.recent(&UsageFilter::default(), 1).await.unwrap();
+    assert!(rows[0].ok, "the turn itself was clean");
+}
+
+#[tokio::test]
+async fn a_failed_tool_call_still_marks_the_turn() {
+    let ledger = UsageLedger::open(None).unwrap();
+    let outcome = TurnOutcome {
+        reply: "ok".to_string(),
+        reasoning: None,
+        tool_calls: vec![TurnToolCall {
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "missing.rs" }),
+            output: "File not found: 'missing.rs'".to_string(),
+            is_error: true,
+            denied: false,
+        }],
+        replayed: None,
+        usage: Some(TokenUsage::estimated(10, 5)),
+        duration_ms: 10,
+    };
+    ledger
+        .record_turn(
+            "openai",
+            "gpt-4o",
+            Some("s1"),
+            &outcome,
+            SOURCE_CHAT,
+            &PriceTable::builtin(),
+        )
+        .await
+        .unwrap();
+
+    let totals = ledger.totals(&UsageFilter::default()).await.unwrap();
+    assert_eq!(totals.failed_turns, 1);
+    assert_eq!(totals.denied_calls, 0);
+}

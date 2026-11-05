@@ -72,7 +72,7 @@ automatically actually gets a prefix worth caching.
 | `cached_tokens` | how many of `prompt_tokens` the provider served from its prompt cache (0 when it said nothing) |
 | `duration_ms` | wall clock for the turn, including tool execution and retry backoff |
 | `tool_calls` / `denied_calls` | how many ran, how many the gate or a rule refused |
-| `ok` | false when a tool failed or a call was denied — the tokens were spent either way |
+| `ok` | false when a tool call failed — a denied call is reported in `denied_calls`, not here, because a refusal is a decision rather than a malfunction |
 | `source` | `chat`, `exec`, `voice`, `delegate` |
 
 A turn the provider did not report usage for writes **no row**. `None` (unknown) is not zero, and a
