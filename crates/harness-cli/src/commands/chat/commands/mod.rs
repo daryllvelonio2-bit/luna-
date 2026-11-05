@@ -783,6 +783,7 @@ pub(crate) async fn execute_slash_command(
                 key_rx,
                 bg_queue,
                 delegate_tool,
+                store.as_ref(),
                 ui,
                 turns,
                 *process_expanded,

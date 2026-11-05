@@ -288,14 +288,29 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
 /// When `expanded` is false, intermediate processes (reasoning + tools) collapse into a single line.
 /// When `expanded` is true (toggled via Ctrl+O), full reasoning and tool logs are rendered inline.
 pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
+    for line in render_turn_lines(turns, expanded, width) {
+        println!("{line}");
+    }
+}
+
+/// The transcript as physical rows, one entry per terminal line.
+///
+/// [`render_all_turns`] prints this vector; the background-task viewer paints the same rows in
+/// its own frame. Sharing the vector is what keeps a delegated child's conversation identical to
+/// the parent CLI transcript instead of a second, log-shaped renderer.
+pub fn render_turn_lines(turns: &[TurnRecord], expanded: bool, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
     for (i, turn) in turns.iter().enumerate() {
         if i > 0 {
-            println!();
+            lines.push(String::new());
         }
         // A turn that carries no user line (the replay opened inside a turn) shows Luna's side
         // alone: there was no user message to put on the right.
         if !turn.user_query.trim().is_empty() {
-            println!("{}", right_aligned_user_message(&turn.user_query, width));
+            push_rows(
+                &mut lines,
+                &right_aligned_user_message(&turn.user_query, width),
+            );
         }
 
         let has_reasoning = turn
@@ -306,7 +321,7 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
         let has_tools = !turn.tools.is_empty() || !turn.tool_items.is_empty();
 
         if has_reasoning || has_tools {
-            println!();
+            lines.push(String::new());
             let tool_names: Vec<String> = if !turn.tools.is_empty() {
                 turn.tools.iter().map(|t| t.name.clone()).collect()
             } else {
@@ -331,22 +346,22 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                 tool_names.len()
             };
 
-            println!(
-                "{}",
-                format_process_header(
+            push_rows(
+                &mut lines,
+                &format_process_header(
                     expanded,
                     tools_count,
                     &tool_names,
                     Some(turn.duration),
-                    has_reasoning
-                )
+                    has_reasoning,
+                ),
             );
 
             if expanded {
                 if let Some(r) = &turn.reasoning {
                     if !r.trim().is_empty() {
                         for row in reasoning_rows(r, width) {
-                            println!("{}", row);
+                            push_rows(&mut lines, &row);
                         }
                     }
                 }
@@ -366,9 +381,9 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
                             };
                             call.push_str(&status);
                         }
-                        println!("{}", call);
+                        push_rows(&mut lines, &call);
                         for diff_line in &item.diff_lines {
-                            println!("{}", diff_line);
+                            push_rows(&mut lines, diff_line);
                         }
                     }
                 }
@@ -376,14 +391,18 @@ pub fn render_all_turns(turns: &[TurnRecord], expanded: bool, width: usize) {
         }
 
         if !turn.reply.is_empty() {
-            println!();
-            println!(
-                "{}\n{}",
-                LUNA_LABEL.bold().green(),
-                reply_for_display(&turn.reply)
-            );
+            lines.push(String::new());
+            push_rows(&mut lines, &LUNA_LABEL.bold().green().to_string());
+            push_rows(&mut lines, reply_for_display(&turn.reply));
         }
     }
+    lines
+}
+
+/// Add a rendered block as physical rows, so a block that already contains newlines does not make
+/// the viewer's scroll arithmetic count one row where the terminal draws several.
+fn push_rows(lines: &mut Vec<String>, text: &str) {
+    lines.extend(text.split('\n').map(str::to_string));
 }
 
 /// The core stores a neutral placeholder when a model reasons but emits no text. `Ctrl+O` is this

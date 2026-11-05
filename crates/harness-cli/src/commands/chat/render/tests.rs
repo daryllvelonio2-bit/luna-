@@ -1277,6 +1277,71 @@ fn the_empty_input_prompt_is_blue_too() {
     assert!(msg.ends_with("\u{1b}[0m"), "style is closed: {msg:?}");
 }
 
+#[test]
+fn the_transcript_rows_are_the_cli_ui_and_hold_one_line_each() {
+    use harness_core::{Message, ToolResult};
+
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("audit the delegate viewer"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("I should read the viewer first.".to_string()),
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "viewer.rs" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::tool(ToolResult::success("c1", "fn viewer() {}")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::assistant("The viewer now uses the CLI transcript."),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    let rows = render_turn_lines(&turns, true, 100);
+
+    assert!(
+        rows.iter().all(|row| !row.contains('\n')),
+        "each entry is one physical row: {rows:?}"
+    );
+    let text = rows
+        .iter()
+        .map(|row| plain(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("audit the delegate viewer"), "{text}");
+    assert!(text.contains("read") && text.contains("viewer.rs"), "{text}");
+    assert!(text.contains("I should read the viewer first."), "{text}");
+    assert!(text.contains(LUNA_LABEL), "{text}");
+    assert!(
+        text.contains("The viewer now uses the CLI transcript."),
+        "{text}"
+    );
+}
+
 /// `colored::control::set_override` is process-global and these tests run in parallel, so the
 /// blue tests can flip it on while a width test is mid-assertion. Anything that measures
 /// geometry must therefore strip escapes first — the same way `ui::visible_width` does in the

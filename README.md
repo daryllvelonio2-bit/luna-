@@ -332,7 +332,11 @@ be able to reach the internet through the agent's own sockets. Details:
 row for every running child, showing its task id, goal, and current model/tool activity; the row
 is removed when the child finishes. Progress repaints that one row in place — a child's tool
 calls never append a line each to the transcript — so a long delegation leaves the conversation
-readable, and one verdict line is printed when the child ends. A child fails only after **180
+readable, and one verdict line is printed when the child ends. `/tasks` (or `Ctrl+Shift+B`) opens
+the viewer: a delegated child or a worker is painted with the **same transcript renderer as the
+main CLI** — user line, process block, tool calls, reasoning and reply — while a shell background
+job keeps its raw log. A worker is a conversation fork, so its viewer shows the worker's latest
+turn rather than pasting the parent history underneath the task. A child fails only after **180
 seconds with no model or tool activity**. Every streamed response and every tool event resets
 that inactivity timer, so a long
 task is not killed merely because it ran for a long time. `delegate_task(action: "wait")` waits

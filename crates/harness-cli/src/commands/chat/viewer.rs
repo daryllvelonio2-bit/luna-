@@ -6,16 +6,26 @@ use std::io::{self, Write};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use harness_core::session::SessionStore;
 use harness_core::tasks::{BackgroundTaskQueue, JobSummary};
 
 use super::keys::AppKey;
-use super::render::{render_all_turns, TurnRecord};
+use super::render::{parse_turns_from_history, render_all_turns, render_turn_lines, TurnRecord};
 use super::ui::ChatUi;
+
+/// What the viewer paints below its header for one task.
+struct TaskBody {
+    /// Physical rows, already formatted for the terminal.
+    lines: Vec<String>,
+    /// The compact figures shown beside the task's status and goal.
+    progress: String,
+}
 
 pub async fn show_background_task_viewer(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
     bg_queue: Option<&BackgroundTaskQueue>,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
+    store: &dyn SessionStore,
     ui: &ChatUi,
     turns: &[TurnRecord],
     process_expanded: bool,
@@ -42,172 +52,11 @@ pub async fn show_background_task_viewer(
     let mut auto_scroll = true;
     let mut refresh_interval = tokio::time::interval(Duration::from_millis(500));
 
-    let render = |task: &JobSummary,
-                  all_tasks: &[JobSummary],
-                  cur_idx: usize,
-                  offset: usize|
-     -> (usize, usize) {
-        print!("\x1b[H\x1b[2J");
-        let width = super::ui::get_terminal_width().max(40);
-        let term_height = super::ui::get_terminal_height().max(10);
-
-        let divider = "─".repeat(width).dimmed().to_string();
-        let mut header_lines = Vec::new();
-
-        // Read the log once per frame: it is both the body of the view and the source of the
-        // progress figures (line count, size, and how recently the task last wrote).
-        let log = std::fs::read_to_string(&task.log_path);
-        let (log_lines, log_bytes) = match &log {
-            Ok(text) => (text.lines().count(), text.len()),
-            Err(_) => (0, 0),
-        };
-        let updated_secs = std::fs::metadata(&task.log_path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .map(|age| age.as_secs_f64())
-            .unwrap_or(0.0);
-        let progress = if task.status == "running" {
-            format!(
-                "{} lines · {} · updated {:.1}s ago",
-                log_lines,
-                format_bytes(log_bytes),
-                updated_secs
-            )
-        } else {
-            format!("{} lines · {}", log_lines, format_bytes(log_bytes))
-        };
-
-        // 1. Top bar: Summary & Controls
-        let running_count = all_tasks.iter().filter(|t| t.status == "running").count();
-        let header_left = format!(
-            "{} {} {}",
-            "●".cyan().bold(),
-            "BACKGROUND OUTPUT".bold(),
-            format!("[{} active • {} total]", running_count, all_tasks.len()).dimmed()
-        );
-        let header_right = "[Tab: next • x: kill • q: close]".dimmed().to_string();
-        let left_len = dialoguer::console::strip_ansi_codes(&header_left)
-            .chars()
-            .count();
-        let right_len = dialoguer::console::strip_ansi_codes(&header_right)
-            .chars()
-            .count();
-        let spaces = width.saturating_sub(left_len + right_len);
-        header_lines.push(format!(
-            "  {}{}{}",
-            header_left,
-            " ".repeat(spaces.max(1)),
-            header_right
-        ));
-        header_lines.push(divider.clone());
-
-        // 2. Task switcher tabs (if multiple tasks)
-        if all_tasks.len() > 1 {
-            let mut tabs_line = String::from("  ");
-            for (i, t) in all_tasks.iter().enumerate() {
-                let is_sel = i == cur_idx;
-                let num = i + 1;
-                let dot = if t.status == "running" {
-                    "●".cyan()
-                } else {
-                    "○".dimmed()
-                };
-                let short_id = t.id.as_str();
-                let tab_label = if is_sel {
-                    format!("[{num}] {dot} {short_id}*")
-                        .bold()
-                        .cyan()
-                        .to_string()
-                } else {
-                    format!("[{num}] {dot} {short_id}").dimmed().to_string()
-                };
-                tabs_line.push_str(&tab_label);
-                tabs_line.push_str("   ");
-            }
-            let truncated_tabs = dialoguer::console::truncate_str(&tabs_line, width - 2, "…");
-            header_lines.push(truncated_tabs.to_string());
-            header_lines.push(divider.clone());
-        }
-
-        // 3. One compact summary line. The old metadata card spent five rows on goal, status,
-        // type and log path; status, progress and what the task is doing fit on one, leaving the
-        // rest of the screen for the log itself.
-        header_lines.push(format_task_summary(task, width, &progress));
-        header_lines.push(divider.clone());
-
-        // 4. Output / Logs Content
-        let mut content_lines = Vec::new();
-        match &log {
-            Ok(s) => {
-                let lines: Vec<&str> = s.lines().collect();
-                if lines.is_empty() {
-                    content_lines.push("  (waiting for output...)".dimmed().to_string());
-                } else {
-                    for l in lines {
-                        content_lines.push(format!("  {}", l));
-                    }
-                }
-            }
-            Err(e) => {
-                content_lines.push(
-                    format!("  (unable to read log file: {})", e)
-                        .dimmed()
-                        .to_string(),
-                );
-            }
-        }
-
-        // The log ends when the child stops writing, not when its last tool call returned. A
-        // finished task therefore gets an explicit terminal marker, so the last "▶ Tool Call"
-        // line cannot read as work that is still in flight.
-        if task.status != "running" {
-            content_lines.push(String::new());
-            content_lines.push(format!(
-                "  {}  {}",
-                format_process_status(&task.status),
-                format!("finished after {}s", task.elapsed_secs).dimmed()
-            ));
-        }
-
-        let footer_lines_count = 2;
-        let view_height = term_height
-            .saturating_sub(header_lines.len() + footer_lines_count)
-            .max(3);
-
-        let total_lines = content_lines.len();
-        let max_offset = total_lines.saturating_sub(view_height);
-        let eff_offset = offset.min(max_offset);
-
-        for h in &header_lines {
-            println!("{}", h);
-        }
-
-        let visible = &content_lines[eff_offset..total_lines.min(eff_offset + view_height)];
-        for line in visible {
-            let truncated = dialoguer::console::truncate_str(line, width - 1, "…");
-            println!("{}", truncated);
-        }
-
-        for _ in visible.len()..view_height {
-            println!();
-        }
-
-        println!("{}", divider);
-        let pos_str = format!(
-            "Lines {}-{} of {} • [↑/↓ j/k: scroll • Tab: switch task • x: kill • q: exit]",
-            if total_lines == 0 { 0 } else { eff_offset + 1 },
-            (eff_offset + visible.len()).min(total_lines),
-            total_lines
-        );
-        print!("  {}", pos_str.dimmed());
-        let _ = io::stdout().flush();
-
-        (eff_offset, max_offset)
-    };
+    let mut width = super::ui::get_terminal_width().max(40);
+    let mut body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
 
     // Initial render
-    let (eff, mut max_offset) = render(
+    let (eff, mut max_offset) = render_viewer_frame(
         &tasks[selected_idx],
         &tasks,
         selected_idx,
@@ -216,23 +65,36 @@ pub async fn show_background_task_viewer(
         } else {
             scroll_offset
         },
+        &body,
+        width,
     );
     scroll_offset = eff;
 
     loop {
         tokio::select! {
             _ = refresh_interval.tick() => {
-                // Periodically refresh job statuses and logs
+                // Periodically refresh job statuses and transcripts. A child still writing gets a
+                // new stored row, so the CLI transcript below the header follows it live.
                 tasks = collect_tasks(bg_queue, delegate_tool).await;
+                if tasks.is_empty() {
+                    break;
+                }
                 if selected_idx >= tasks.len() {
                     selected_idx = tasks.len().saturating_sub(1);
                 }
-                if let Some(current) = tasks.get(selected_idx) {
-                    let target_offset = if auto_scroll { usize::MAX } else { scroll_offset };
-                    let (eff, max) = render(current, &tasks, selected_idx, target_offset);
-                    scroll_offset = eff;
-                    max_offset = max;
-                }
+                width = super::ui::get_terminal_width().max(40);
+                body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
+                let target_offset = if auto_scroll { usize::MAX } else { scroll_offset };
+                let (eff, max) = render_viewer_frame(
+                    &tasks[selected_idx],
+                    &tasks,
+                    selected_idx,
+                    target_offset,
+                    &body,
+                    width,
+                );
+                scroll_offset = eff;
+                max_offset = max;
             }
             maybe_key = key_rx.recv() => {
                 let key = match maybe_key {
@@ -244,10 +106,15 @@ pub async fn show_background_task_viewer(
                         auto_scroll = false;
                         if scroll_offset > 0 {
                             scroll_offset = scroll_offset.saturating_sub(1);
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                            }
+                            let (eff, _) = render_viewer_frame(
+                                &tasks[selected_idx],
+                                &tasks,
+                                selected_idx,
+                                scroll_offset,
+                                &body,
+                                width,
+                            );
+                            scroll_offset = eff;
                         }
                     }
                     AppKey::Down | AppKey::Char('j') | AppKey::Char('J') => {
@@ -256,73 +123,108 @@ pub async fn show_background_task_viewer(
                             if scroll_offset >= max_offset {
                                 auto_scroll = true;
                             }
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                            }
+                            let (eff, _) = render_viewer_frame(
+                                &tasks[selected_idx],
+                                &tasks,
+                                selected_idx,
+                                scroll_offset,
+                                &body,
+                                width,
+                            );
+                            scroll_offset = eff;
                         }
                     }
                     AppKey::PageUp | AppKey::Char('b') => {
                         auto_scroll = false;
                         scroll_offset = scroll_offset.saturating_sub(10);
-                        if let Some(current) = tasks.get(selected_idx) {
-                            let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                            scroll_offset = eff;
-                        }
+                        let (eff, _) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
                     }
                     AppKey::PageDown | AppKey::Char('f') | AppKey::Char(' ') => {
                         scroll_offset = (scroll_offset + 10).min(max_offset);
                         if scroll_offset >= max_offset {
                             auto_scroll = true;
                         }
-                        if let Some(current) = tasks.get(selected_idx) {
-                            let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                            scroll_offset = eff;
-                        }
+                        let (eff, _) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
                     }
                     AppKey::Home | AppKey::Char('g') => {
                         auto_scroll = false;
                         scroll_offset = 0;
-                        if let Some(current) = tasks.get(selected_idx) {
-                            let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                            scroll_offset = eff;
-                        }
+                        let (eff, _) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
                     }
                     AppKey::End | AppKey::Char('G') => {
                         auto_scroll = true;
                         scroll_offset = max_offset;
-                        if let Some(current) = tasks.get(selected_idx) {
-                            let (eff, _) = render(current, &tasks, selected_idx, scroll_offset);
-                            scroll_offset = eff;
-                        }
+                        let (eff, _) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
                     }
                     AppKey::Tab | AppKey::Right | AppKey::Char('l') | AppKey::Char('L') => {
-                        if !tasks.is_empty() {
-                            selected_idx = (selected_idx + 1) % tasks.len();
-                            auto_scroll = true;
-                            scroll_offset = usize::MAX;
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                                max_offset = max;
-                            }
-                        }
+                        selected_idx = (selected_idx + 1) % tasks.len();
+                        auto_scroll = true;
+                        scroll_offset = usize::MAX;
+                        width = super::ui::get_terminal_width().max(40);
+                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
+                        let (eff, max) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
+                        max_offset = max;
                     }
                     AppKey::BackTab | AppKey::Left | AppKey::Char('h') | AppKey::Char('H') => {
-                        if !tasks.is_empty() {
-                            selected_idx = if selected_idx == 0 {
-                                tasks.len() - 1
-                            } else {
-                                selected_idx - 1
-                            };
-                            auto_scroll = true;
-                            scroll_offset = usize::MAX;
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                                max_offset = max;
-                            }
-                        }
+                        selected_idx = if selected_idx == 0 {
+                            tasks.len() - 1
+                        } else {
+                            selected_idx - 1
+                        };
+                        auto_scroll = true;
+                        scroll_offset = usize::MAX;
+                        width = super::ui::get_terminal_width().max(40);
+                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
+                        let (eff, max) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
+                        max_offset = max;
                     }
                     AppKey::Char(c @ '1'..='9') => {
                         let idx = (c as usize) - ('1' as usize);
@@ -330,29 +232,50 @@ pub async fn show_background_task_viewer(
                             selected_idx = idx;
                             auto_scroll = true;
                             scroll_offset = usize::MAX;
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                                max_offset = max;
-                            }
+                            width = super::ui::get_terminal_width().max(40);
+                            body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
+                            let (eff, max) = render_viewer_frame(
+                                &tasks[selected_idx],
+                                &tasks,
+                                selected_idx,
+                                scroll_offset,
+                                &body,
+                                width,
+                            );
+                            scroll_offset = eff;
+                            max_offset = max;
                         }
                     }
                     AppKey::Char('x') | AppKey::Char('X') => {
                         // Kill / cancel active job or subagent
-                        if let Some(task) = tasks.get(selected_idx) {
+                        let task = tasks.get(selected_idx);
+                        if let Some(task) = task {
                             if let Some(q) = bg_queue {
                                 let _ = q.kill(&task.id);
                             }
                             if let Some(dt) = delegate_tool {
                                 let _ = dt.kill(&task.id).await;
                             }
-                            tasks = collect_tasks(bg_queue, delegate_tool).await;
-                            if let Some(current) = tasks.get(selected_idx) {
-                                let (eff, max) = render(current, &tasks, selected_idx, scroll_offset);
-                                scroll_offset = eff;
-                                max_offset = max;
-                            }
                         }
+                        tasks = collect_tasks(bg_queue, delegate_tool).await;
+                        if tasks.is_empty() {
+                            break;
+                        }
+                        if selected_idx >= tasks.len() {
+                            selected_idx = tasks.len().saturating_sub(1);
+                        }
+                        width = super::ui::get_terminal_width().max(40);
+                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
+                        let (eff, max) = render_viewer_frame(
+                            &tasks[selected_idx],
+                            &tasks,
+                            selected_idx,
+                            scroll_offset,
+                            &body,
+                            width,
+                        );
+                        scroll_offset = eff;
+                        max_offset = max;
                     }
                     AppKey::Escape
                     | AppKey::Char('q')
@@ -377,6 +300,232 @@ pub async fn show_background_task_viewer(
         println!("{}", err);
     }
     ui.draw_initial_box();
+}
+
+/// The rows for one task.
+///
+/// A delegated subagent or a worker is an actual agent turn stored in `sessions.db`, so its body
+/// is the CLI transcript itself: the same user line, process header, tool calls, reasoning and
+/// Luna reply that the parent chat renders. Shell jobs have no conversation, so they keep the
+/// raw log they stream.
+async fn task_body(
+    task: &JobSummary,
+    store: &dyn SessionStore,
+    expanded: bool,
+    width: usize,
+) -> TaskBody {
+    if task_is_subagent(task) {
+        return transcript_body(task, store, expanded, width).await;
+    }
+    log_body(task)
+}
+
+/// Render the child session behind a delegate/worker with the parent CLI's own renderer.
+///
+/// The viewer deliberately reads the display transcript (`replay_transcript`) rather than the
+/// model replay: compacted rows still belong on screen, and summary rows are internal artifacts,
+/// not conversation turns.
+async fn transcript_body(
+    task: &JobSummary,
+    store: &dyn SessionStore,
+    expanded: bool,
+    width: usize,
+) -> TaskBody {
+    match store.replay_transcript(&task.id, usize::MAX).await {
+        Ok(outcome) => {
+            let messages = outcome.history.len();
+            // A worker is a fork: its session holds the parent conversation as context before the
+            // task prompt. The viewer is about what the worker did, so show the latest turn — the
+            // task and its work — rather than pasting the parent transcript underneath a header
+            // that says "worker". A delegate child starts empty, so this is its one turn too.
+            let mut turns = parse_turns_from_history(&outcome.history);
+            let turn_count = turns.len();
+            let turns = turns.split_off(turn_count.saturating_sub(1));
+            let mut lines = render_turn_lines(&turns, expanded, width);
+            if lines.is_empty() {
+                lines.push("  (waiting for the first message...)".dimmed().to_string());
+            }
+            let progress = format!(
+                "{} message{} · {} turn{}",
+                messages,
+                if messages == 1 { "" } else { "s" },
+                turns.len(),
+                if turns.len() == 1 { "" } else { "s" }
+            );
+            TaskBody { lines, progress }
+        }
+        Err(error) => TaskBody {
+            lines: vec![format!("  (unable to load the child transcript: {error})")
+                .dimmed()
+                .to_string()],
+            progress: "transcript unavailable".to_string(),
+        },
+    }
+}
+
+/// The raw output of a shell background job, which has no stored conversation.
+fn log_body(task: &JobSummary) -> TaskBody {
+    let log = std::fs::read_to_string(&task.log_path);
+    let (log_lines, log_bytes) = match &log {
+        Ok(text) => (text.lines().count(), text.len()),
+        Err(_) => (0, 0),
+    };
+    let updated_secs = std::fs::metadata(&task.log_path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+        .map(|age| age.as_secs_f64())
+        .unwrap_or(0.0);
+    let progress = if task.status == "running" {
+        format!(
+            "{} lines · {} · updated {:.1}s ago",
+            log_lines,
+            format_bytes(log_bytes),
+            updated_secs
+        )
+    } else {
+        format!("{} lines · {}", log_lines, format_bytes(log_bytes))
+    };
+
+    let mut lines = Vec::new();
+    match &log {
+        Ok(text) => {
+            let log_lines: Vec<&str> = text.lines().collect();
+            if log_lines.is_empty() {
+                lines.push("  (waiting for output...)".dimmed().to_string());
+            } else {
+                for line in log_lines {
+                    lines.push(format!("  {line}"));
+                }
+            }
+        }
+        Err(error) => lines.push(
+            format!("  (unable to read log file: {error})")
+                .dimmed()
+                .to_string(),
+        ),
+    }
+
+    // The log ends when the child stops writing, not when its last tool call returned. A finished
+    // task therefore gets an explicit terminal marker, so the last "▶ Tool Call" line cannot read
+    // as work that is still in flight.
+    if task.status != "running" {
+        lines.push(String::new());
+        lines.push(format!(
+            "  {}  {}",
+            format_process_status(&task.status),
+            format!("finished after {}s", task.elapsed_secs).dimmed()
+        ));
+    }
+
+    TaskBody { lines, progress }
+}
+
+/// Paint one frame: viewer chrome, the selected task's body, and the scroll position.
+fn render_viewer_frame(
+    task: &JobSummary,
+    all_tasks: &[JobSummary],
+    cur_idx: usize,
+    offset: usize,
+    body: &TaskBody,
+    width: usize,
+) -> (usize, usize) {
+    print!("\x1b[H\x1b[2J");
+    let term_height = super::ui::get_terminal_height().max(10);
+
+    let divider = "─".repeat(width).dimmed().to_string();
+    let mut header_lines = Vec::new();
+
+    // 1. Top bar: Summary & Controls
+    let running_count = all_tasks.iter().filter(|t| t.status == "running").count();
+    let header_left = format!(
+        "{} {} {}",
+        "●".cyan().bold(),
+        "BACKGROUND TASKS".bold(),
+        format!("[{} active • {} total]", running_count, all_tasks.len()).dimmed()
+    );
+    let header_right = "[Tab: next • x: kill • q: close]".dimmed().to_string();
+    let left_len = dialoguer::console::strip_ansi_codes(&header_left)
+        .chars()
+        .count();
+    let right_len = dialoguer::console::strip_ansi_codes(&header_right)
+        .chars()
+        .count();
+    let spaces = width.saturating_sub(left_len + right_len);
+    header_lines.push(format!(
+        "  {}{}{}",
+        header_left,
+        " ".repeat(spaces.max(1)),
+        header_right
+    ));
+    header_lines.push(divider.clone());
+
+    // 2. Task switcher tabs (if multiple tasks)
+    if all_tasks.len() > 1 {
+        let mut tabs_line = String::from("  ");
+        for (i, t) in all_tasks.iter().enumerate() {
+            let is_sel = i == cur_idx;
+            let num = i + 1;
+            let dot = if t.status == "running" {
+                "●".cyan()
+            } else {
+                "○".dimmed()
+            };
+            let short_id = t.id.as_str();
+            let tab_label = if is_sel {
+                format!("[{num}] {dot} {short_id}*")
+                    .bold()
+                    .cyan()
+                    .to_string()
+            } else {
+                format!("[{num}] {dot} {short_id}").dimmed().to_string()
+            };
+            tabs_line.push_str(&tab_label);
+            tabs_line.push_str("   ");
+        }
+        let truncated_tabs = dialoguer::console::truncate_str(&tabs_line, width - 2, "…");
+        header_lines.push(truncated_tabs.to_string());
+        header_lines.push(divider.clone());
+    }
+
+    // 3. One compact summary line: status, progress, kind and subject.
+    header_lines.push(format_task_summary(task, width, &body.progress));
+    header_lines.push(divider.clone());
+
+    let footer_lines_count = 2;
+    let view_height = term_height
+        .saturating_sub(header_lines.len() + footer_lines_count)
+        .max(3);
+
+    let total_lines = body.lines.len();
+    let max_offset = total_lines.saturating_sub(view_height);
+    let eff_offset = offset.min(max_offset);
+
+    for header in &header_lines {
+        println!("{header}");
+    }
+
+    let visible = &body.lines[eff_offset..total_lines.min(eff_offset + view_height)];
+    for line in visible {
+        let truncated = dialoguer::console::truncate_str(line, width - 1, "…");
+        println!("{truncated}");
+    }
+
+    for _ in visible.len()..view_height {
+        println!();
+    }
+
+    println!("{divider}");
+    let pos_str = format!(
+        "Lines {}-{} of {} • [↑/↓ j/k: scroll • Tab: switch task • x: kill • q: exit]",
+        if total_lines == 0 { 0 } else { eff_offset + 1 },
+        (eff_offset + visible.len()).min(total_lines),
+        total_lines
+    );
+    print!("  {}", pos_str.dimmed());
+    let _ = io::stdout().flush();
+
+    (eff_offset, max_offset)
 }
 
 pub(crate) async fn collect_tasks(
@@ -566,6 +715,74 @@ mod tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn workers_and_subagents_share_the_transcript_body() {
+        let mut subagent = task("subagent: audit the parser", "completed");
+        subagent.id = "sub_20261105_120000_1".to_string();
+        assert!(task_is_subagent(&subagent));
+
+        let worker = task("worker: fix the tests", "running");
+        assert!(task_is_subagent(&worker));
+
+        let job = task("shell: cargo test", "running");
+        assert!(!task_is_subagent(&job));
+    }
+
+    #[tokio::test]
+    async fn a_worker_body_is_the_cli_transcript_not_its_log() {
+        use harness_core::{Message, SessionStore, SqliteSessionStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteSessionStore::new(Some(dir.path().join("sessions.db"))).unwrap();
+        store.ensure_session("se42f23").await.unwrap();
+        // The fork carries the parent's turns as context; the viewer only shows the worker's own.
+        store
+            .append("se42f23", &Message::user("parent question"), false)
+            .await
+            .unwrap();
+        store
+            .append("se42f23", &Message::assistant("parent answer"), false)
+            .await
+            .unwrap();
+        store
+            .append("se42f23", &Message::user("remove the model name"), false)
+            .await
+            .unwrap();
+        store
+            .append(
+                "se42f23",
+                &Message::assistant("Removed it from .env."),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut worker = task("worker: remove the model name", "completed");
+        worker.id = "se42f23".to_string();
+        worker.log_path = dir.path().join("missing.log").display().to_string();
+
+        let body = task_body(&worker, &store, true, 100).await;
+        let text = body
+            .lines
+            .iter()
+            .map(|row| dialoguer::console::strip_ansi_codes(row).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("remove the model name"), "{text}");
+        assert!(text.contains("Luna"), "the CLI reply label is used: {text}");
+        assert!(text.contains("Removed it from .env."), "{text}");
+        assert!(
+            !text.contains("parent question"),
+            "the viewer shows the worker's turn, not the fork's parent history: {text}"
+        );
+        assert!(
+            !text.contains("unable to read log"),
+            "the worker no longer reads its log: {text}"
+        );
+        assert_eq!(body.progress, "4 messages · 1 turn");
     }
 
     #[test]
