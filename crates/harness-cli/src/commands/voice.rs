@@ -198,6 +198,11 @@ pub async fn run_voice_loop(
     agent_cfg.skills_summary = skills_summary;
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     agent_cfg.memory_mode = config.memory.mode;
+    agent_cfg.context_window = Some(super::context_window::context_window_for(
+        &config,
+        &provider_id,
+        &config.model.default,
+    ) as usize);
 
     let agent = Arc::new(
         Agent::new(provider, memory, notes, registry, agent_cfg)

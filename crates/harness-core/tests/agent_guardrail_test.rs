@@ -620,8 +620,8 @@ impl ModelProvider for ToolResultCappingProvider {
         if attempt > 0 {
             for msg in messages {
                 if let Some(ref content) = msg.content {
-                    if content.contains("[Tool output truncated: exceeded 200000 characters")
-                        && content.len() < 210_000
+                    if content.contains("[tool output clipped: middle omitted")
+                        && content.len() <= 100_000
                     {
                         self.observed_truncated.store(true, Ordering::SeqCst);
                     }
@@ -660,7 +660,7 @@ async fn test_huge_tool_result_is_capped_in_dispatch() {
     assert_eq!(outcome.reply, "Done");
     assert!(
         observed.load(Ordering::SeqCst),
-        "Tool output >200,000 chars must be capped before feeding back to the model"
+        "Tool output >100,000 chars must be capped before feeding back to the model"
     );
 }
 

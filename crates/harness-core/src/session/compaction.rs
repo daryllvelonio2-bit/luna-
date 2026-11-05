@@ -93,18 +93,30 @@ pub fn text_content_chars(text: &str) -> usize {
     chars
 }
 
-/// Characters that will be sent for one message: content, tool call names and arguments, tool
-/// result.
+/// Characters that will be sent for one message: content, reasoning, tool call names, arguments
+/// and thought signatures, and the tool result.
+///
+/// Every field here reaches the provider. Reasoning is replayed as a thought part by the
+/// Antigravity route and as `reasoning_content` by the OpenAI-compatible one; a Gemini thought
+/// signature is opaque, megabytes in a long session, and replayed beside its call. Leaving either
+/// out understated a long transcript badly enough that the fold bar could be crossed without the
+/// estimator noticing.
 fn message_chars(message: &Message) -> usize {
     let mut chars = message
         .content
         .as_ref()
         .map_or(0, |s| text_content_chars(s));
+    if let Some(reasoning) = &message.reasoning {
+        chars += reasoning.len();
+    }
     if let Some(result) = &message.tool_result {
         chars += text_content_chars(&result.content);
     }
     for call in &message.tool_calls {
         chars += call.name.len() + call.arguments.to_string().len();
+        if let Some(signature) = &call.signature {
+            chars += signature.len();
+        }
     }
     chars
 }
@@ -795,6 +807,8 @@ pub async fn summarize_session(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn stored(seq: i64, message: Message) -> StoredMessage {
@@ -836,6 +850,26 @@ mod tests {
     fn a_data_url_that_carries_no_payload_is_left_alone() {
         let text = "see data:image/png;base64 not the format";
         assert_eq!(elide_image_data(text), text);
+    }
+
+    /// The estimator measures what the provider is sent, including the two fields that dominate a
+    /// long thinking session: replayed reasoning and Gemini thought signatures.
+    #[test]
+    fn reasoning_and_signatures_count_towards_the_estimate() {
+        let mut message = Message::assistant_with_tools(vec![crate::types::ToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": "a.rs" }),
+            signature: Some("s".repeat(4_000)),
+        }]);
+        message.reasoning = Some("r".repeat(4_000));
+        message.content = Some("answer".to_string());
+
+        let without_extra = message_chars(&Message::assistant("answer"));
+        assert!(
+            message_chars(&message) >= without_extra + 8_000,
+            "4k of reasoning and 4k of signature are 2k tokens the provider would be charged for"
+        );
     }
 
     /// Eliding first and clipping second is what keeps a message's meaning: a data URL is one

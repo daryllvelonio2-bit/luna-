@@ -42,6 +42,15 @@ const SUBAGENT_IDLE_CHECK_INTERVAL_SECS: u64 = 1;
 /// turn the watchdog into a busy loop on the runtime.
 const SUBAGENT_IDLE_CHECK_FLOOR_MS: u64 = 10;
 
+/// How much of a subagent's final reply is copied into the parent's transcript.
+///
+/// The reply is stored on the task and pasted into the parent's conversation every time it is
+/// polled, listed or waited on. A long report belongs in the job log, which keeps every byte; the
+/// parent needs the conclusion, not another copy of the investigation. 24k characters is roughly
+/// 6k tokens, enough for a detailed report and small enough that a forgotten subagent cannot pin
+/// the parent's context.
+const SUBAGENT_REPLY_CHARS: usize = 24_000;
+
 /// What a delegated child is doing right now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -717,6 +726,18 @@ impl DelegateTaskTool {
     }
 }
 
+/// Keep a subagent reply within [`SUBAGENT_REPLY_CHARS`], naming the job log that holds the rest.
+fn clip_subagent_reply(reply: &str, log_path: &std::path::Path) -> String {
+    if reply.len() <= SUBAGENT_REPLY_CHARS {
+        return reply.to_string();
+    }
+    let marker = format!(
+        "\n\n[subagent reply clipped to {SUBAGENT_REPLY_CHARS} characters; the full report is in {}]",
+        log_path.display()
+    );
+    crate::tools::clip_middle(reply, SUBAGENT_REPLY_CHARS, &marker)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_subagent(
     provider: Arc<dyn ModelProvider>,
@@ -873,6 +894,9 @@ async fn run_single_subagent(
             logger.append_line(&format!("Error: {e}"));
         }
     }
+
+    // The log above holds the whole reply; what travels back to the parent is bounded.
+    let outcome = outcome.map(|reply| clip_subagent_reply(&reply, &logger.path));
 
     (child_session_id, task.goal, outcome)
 }

@@ -373,3 +373,29 @@ async fn test_watchdog_does_not_timeout_while_tool_is_running() {
     assert_eq!(result.unwrap(), "success");
     assert!(!cancel.is_cancelled());
 }
+
+/// A long reply is clipped for the parent but points at the log that still holds every byte.
+#[test]
+fn a_long_subagent_reply_is_clipped_and_points_at_the_log() {
+    let log = std::path::Path::new("/tmp/luna/jobs/sub_long.log");
+    let reply = format!("FINDING{}CONCLUSION", "x".repeat(100_000));
+
+    let clipped = clip_subagent_reply(&reply, log);
+
+    assert!(clipped.len() <= SUBAGENT_REPLY_CHARS);
+    assert!(clipped.starts_with("FINDING"), "the opening survives");
+    assert!(clipped.ends_with("CONCLUSION"), "the conclusion survives");
+    assert!(
+        clipped.contains("sub_long.log"),
+        "the full report is locatable"
+    );
+}
+
+/// A reply that already fits is passed through untouched — no marker, no copy.
+#[test]
+fn a_short_subagent_reply_is_not_rewritten() {
+    let log = std::path::Path::new("/tmp/luna/jobs/sub_short.log");
+    let reply = "all done";
+
+    assert_eq!(clip_subagent_reply(reply, log), reply);
+}

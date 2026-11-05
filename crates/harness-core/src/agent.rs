@@ -27,6 +27,30 @@ use crate::session::{CompactionOutcome, SessionStore};
 use crate::traits::*;
 use crate::types::*;
 
+/// Fraction of a model's context window a fold may fill before it fires.
+///
+/// The remaining 30% is headroom, not waste: the summary call itself replays part of the folded
+/// transcript plus the provider's system prompt, and the turn that crosses the bar still has to
+/// finish with a reply and another tool round. A threshold at 100% is not a bound — it is a
+/// request that fails.
+pub const FOLD_CONTEXT_FRACTION_NUMERATOR: usize = 7;
+pub const FOLD_CONTEXT_FRACTION_DENOMINATOR: usize = 10;
+
+/// The threshold a fold actually fires at: `configured`, tightened when the model's window is
+/// known.
+///
+/// A bar above the window is not a bound — it fires only after the provider has refused the
+/// request — so the window wins whenever it is lower.
+pub fn fold_threshold(configured: usize, context_window: Option<usize>) -> usize {
+    match context_window {
+        Some(window) if window > 0 => configured.min(
+            window.saturating_mul(FOLD_CONTEXT_FRACTION_NUMERATOR)
+                / FOLD_CONTEXT_FRACTION_DENOMINATOR,
+        ),
+        _ => configured,
+    }
+}
+
 /// Agent-loop tunables. Deserialized from the `agent:` section of `~/.luna/config.yaml`
 /// (see `crate::config`), which is why the defaults below are the single source of truth for the
 /// config file's `agent.*` defaults.
@@ -75,6 +99,16 @@ pub struct AgentConfig {
     /// Number of newest turns each auto-compaction fold keeps verbatim.
     #[serde(default = "default_auto_compact_turns")]
     pub auto_compact_turns: usize,
+    /// The active model's context window in tokens, when the caller knows it.
+    ///
+    /// Compaction is a bound on the model's context, so one fixed token bar cannot be right for
+    /// every model: 300k folds late on a 256k window and early on a 1M one. When set, the fold
+    /// threshold is clamped to [`FOLD_CONTEXT_FRACTION_NUMERATOR`] /
+    /// [`FOLD_CONTEXT_FRACTION_DENOMINATOR`] of this, leaving room for the summary request, the
+    /// reply, and the next tool round. `None` keeps the configured thresholds as they are — the
+    /// host may not know the window (tests, embedded callers, a new provider).
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 fn default_auto_compact_percent() -> Option<usize> {
@@ -140,6 +174,7 @@ impl Default for AgentConfig {
             auto_compact_threshold: 150_000,
             auto_compact_percent: None,
             auto_compact_turns: 20,
+            context_window: None,
         }
     }
 }
@@ -456,6 +491,16 @@ where
         )
     }
 
+    /// The largest transcript the fold may wait for: the configured bar, tightened to
+    /// [`FOLD_CONTEXT_FRACTION_NUMERATOR`]/[`FOLD_CONTEXT_FRACTION_DENOMINATOR`] of the model's
+    /// context window when the host reported one.
+    ///
+    /// A configured bar can be above the window — one live config asks for 300k on a model with a
+    /// 256k window — and a fold that waits for a request the model cannot accept is not a bound.
+    fn bounded_threshold(&self, configured: usize) -> usize {
+        fold_threshold(configured, self.config.context_window)
+    }
+
     /// Which threshold and kept-tail the fold uses this turn.
     ///
     /// Auto-compact is not a second mechanism, only a lower bar: with it on, the fold fires at the
@@ -468,15 +513,16 @@ where
                 None => FoldTarget::Turns(self.config.auto_compact_turns),
             };
             FoldPolicy {
-                threshold: self
-                    .config
-                    .auto_compact_threshold
-                    .min(self.config.compact_at_tokens),
+                threshold: self.bounded_threshold(
+                    self.config
+                        .auto_compact_threshold
+                        .min(self.config.compact_at_tokens),
+                ),
                 target,
             }
         } else {
             FoldPolicy {
-                threshold: self.config.compact_at_tokens,
+                threshold: self.bounded_threshold(self.config.compact_at_tokens),
                 target: FoldTarget::Turns(self.config.keep_recent_turns),
             }
         }
@@ -490,7 +536,7 @@ where
             None => FoldTarget::Turns(self.config.keep_recent_turns),
         };
         FoldPolicy {
-            threshold: self.config.compact_at_tokens,
+            threshold: self.bounded_threshold(self.config.compact_at_tokens),
             target,
         }
     }
@@ -532,6 +578,14 @@ where
     /// Update the reasoning effort setting dynamically during a session.
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
+    }
+
+    /// Update the context window bound when the model changes mid-session.
+    ///
+    /// The fold threshold is clamped to this, so a switch from a 1M-token model to a 256k one must
+    /// carry the new number with it; otherwise the next turn folds against the old model's room.
+    pub fn set_context_window(&mut self, context_window: Option<usize>) {
+        self.config.context_window = context_window;
     }
 
     /// Current reasoning effort setting.
@@ -665,5 +719,20 @@ where
 
     pub fn compaction(&self) -> Option<&CompactionSetup> {
         self.compaction.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configured bar above the model window is clamped below it; a bar that already fits, or a
+    /// host that does not know the window, is left exactly as configured.
+    #[test]
+    fn the_fold_bar_never_sits_above_the_model_window() {
+        assert_eq!(fold_threshold(300_000, Some(256_000)), 179_200);
+        assert_eq!(fold_threshold(150_000, Some(1_000_000)), 150_000);
+        assert_eq!(fold_threshold(300_000, None), 300_000);
+        assert_eq!(fold_threshold(300_000, Some(0)), 300_000);
     }
 }

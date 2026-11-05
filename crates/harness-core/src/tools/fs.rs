@@ -103,6 +103,26 @@ pub fn char_safe_cut(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
+/// The head and tail of `s` within `max_chars` bytes, with `marker` standing in for the middle.
+///
+/// A plain head cut keeps the beginning of a tool result and throws away the end, which is often
+/// the part that matters: an error's last line, a test run's summary, a diff's closing hunk. This
+/// keeps both ends and drops the middle, which is where the repetitive bulk usually sits. Returns
+/// the input unchanged when it already fits, and never splits a UTF-8 character at either cut.
+pub fn clip_middle(s: &str, max_chars: usize, marker: &str) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    let budget = max_chars.saturating_sub(marker.len());
+    let head_budget = budget / 2;
+    let head = char_safe_cut(s, head_budget);
+    let mut tail_start = s.len().saturating_sub(budget - head.len());
+    while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}{marker}{}", &s[tail_start..])
+}
+
 /// Opt-in extra reach for every filesystem tool: `paths.extra_roots`.
 ///
 /// The default is the workspace and nothing else. An operator who wants `/tmp` (or a scratch
@@ -1049,6 +1069,13 @@ fn scan_files(
 /// read by a model rather than a pager, so an unbounded one floods the transcript.
 const MAX_LISTED_ENTRIES: usize = 1_000;
 
+/// Character budget for a listing, independent of the entry count.
+///
+/// A thousand entries is not a bound on bytes: nested paths, wide trees and generated files turned
+/// one `list_files` call into 9 MB of transcript in a real session. The entry cap still decides
+/// which entries are shown; this cap decides how much text one answer may carry.
+const MAX_LISTED_OUTPUT_CHARS: usize = 40_000;
+
 /// How many entries the walk collects before it stops, independent of `MAX_LISTED_ENTRIES`.
 /// The display cap is applied *after* sorting, so the walk has to see enough of the tree to
 /// guarantee the alphabetically-first entries are found, while a pathological tree still
@@ -1157,6 +1184,13 @@ impl Tool for ListFilesTool {
             output.push_str(&format!(
                 "[listing stopped after {MAX_LISTED_ENTRIES} entries; narrow 'path' or add 'glob']"
             ));
+        }
+        if output.len() > MAX_LISTED_OUTPUT_CHARS {
+            output = clip_middle(
+                &output,
+                MAX_LISTED_OUTPUT_CHARS,
+                "\n[listing clipped: middle omitted; narrow 'path' or add 'glob']\n",
+            );
         }
 
         Ok(ToolResult::success(call_id, output))
@@ -1304,6 +1338,27 @@ mod tests {
             nothing.is_empty(),
             "an unmatched glob returns nothing, not a guess"
         );
+    }
+
+    #[test]
+    fn clip_middle_keeps_both_ends_and_stays_within_budget() {
+        let text = format!("HEAD{}TAIL", "m".repeat(10_000));
+        let out = clip_middle(&text, 200, "[...]");
+        assert!(out.starts_with("HEAD"), "the head survives");
+        assert!(out.ends_with("TAIL"), "the tail survives");
+        assert!(out.contains("[...]"), "the omission is announced");
+        assert!(out.len() <= 200, "the result fits the budget");
+        assert_eq!(clip_middle("fits", 200, "[...]"), "fits");
+    }
+
+    /// The cut lands on a character boundary at both ends, so a CJK or emoji listing cannot turn
+    /// a bounded answer into a panic or a broken string.
+    #[test]
+    fn clip_middle_never_splits_a_multibyte_character() {
+        let text = "é".repeat(500);
+        let out = clip_middle(&text, 101, "[...]");
+        assert!(out.len() <= 101);
+        assert!(out.chars().all(|c| c == 'é' || "[...]".contains(c)));
     }
 
     #[test]

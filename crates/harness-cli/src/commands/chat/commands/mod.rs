@@ -982,6 +982,12 @@ pub(crate) async fn handle_model_switch(
         let mut ag = agent.lock().await;
         ag.set_provider(new_provider);
         ag.set_reasoning_effort(chosen_effort);
+        ag.set_context_window(Some(context_window(
+            config,
+            discovery,
+            &chosen_provider,
+            &chosen_model,
+        ) as usize));
     }
 
     *current_provider = chosen_provider.clone();

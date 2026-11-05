@@ -9,7 +9,7 @@ pub mod web;
 
 pub use delegate::DelegateTaskTool;
 pub use fs::{
-    char_safe_cut, ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool,
+    char_safe_cut, clip_middle, ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool,
     WriteFileTool,
 };
 pub use process::ProcessTool;

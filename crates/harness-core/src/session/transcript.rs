@@ -91,6 +91,9 @@ pub fn sendable_messages(history: &[StoredMessage]) -> Vec<Message> {
         messages.push(message);
     }
     elide_replayed_images(&mut messages);
+    elide_stale_tool_results(&mut messages);
+    elide_stale_reasoning(&mut messages);
+    elide_stale_signatures(&mut messages);
     messages
 }
 
@@ -181,6 +184,110 @@ fn without_inline_images(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// How many of the newest tool results keep their full text when replayed.
+///
+/// A result is read once, right after it arrives. The transcript keeps it forever, though, so an
+/// older result is re-sent on every request long after the conversation moved past it: measured
+/// over recent sessions, the newest ten tool results were 2.7% of the live payload, and the rest
+/// was context re-sent on every model call for the rest of the session. Six rounds keeps the work
+/// in flight and its immediate context verbatim, and clips only what the model has already used.
+const REPLAYED_TOOL_RESULTS: usize = 6;
+
+/// Characters kept from a tool result older than [`REPLAYED_TOOL_RESULTS`]: head, marker, tail.
+const STALE_TOOL_RESULT_CHARS: usize = 4_000;
+
+/// What sits between the head and tail of a clipped tool result.
+const TOOL_RESULT_CLIPPED: &str = "\n\n[tool result clipped when replayed: middle omitted]\n\n";
+
+/// How many of the newest assistant reasoning blocks keep their text when replayed.
+///
+/// Reasoning is re-sent as a thought part by the Antigravity route and as `reasoning_content` by
+/// the OpenAI-compatible one. It is valuable for the round it belongs to and dead weight for every
+/// later round, which is why only the newest few keep it.
+const REPLAYED_REASONING: usize = 4;
+
+/// How many of the newest signed calls keep their thought signature when replayed.
+///
+/// A Gemini thought signature is opaque, often tens of kilobytes for a single call, and was 59% of
+/// all live tool-call JSON. Strict Gemini requires a signature beside a replayed call, but accepts
+/// Google's documented dummy value for a call whose original is gone; the provider layer already
+/// substitutes it when the field is `None`. Keeping the newest few preserves the chain of thought
+/// where it still matters.
+const REPLAYED_SIGNATURES: usize = 8;
+
+/// Keep the head and tail of tool results older than the newest few, dropping the middle.
+///
+/// Both `content` and `tool_result.content` are written, because `Message::tool` stores the same
+/// text in both and different routes serialize one or the other.
+fn elide_stale_tool_results(messages: &mut [Message]) {
+    let mut seen = 0usize;
+    for message in messages.iter_mut().rev() {
+        let Some(result) = message.tool_result.as_mut() else {
+            continue;
+        };
+        if seen < REPLAYED_TOOL_RESULTS {
+            seen += 1;
+            continue;
+        }
+        let clipped = crate::tools::clip_middle(
+            &result.content,
+            STALE_TOOL_RESULT_CHARS,
+            TOOL_RESULT_CLIPPED,
+        );
+        if clipped.len() == result.content.len() {
+            continue;
+        }
+        result.content = clipped.clone();
+        if message.content.is_some() {
+            message.content = Some(clipped);
+        }
+    }
+}
+
+/// Drop the reasoning of assistant messages older than the newest [`REPLAYED_REASONING`].
+///
+/// A message left with neither content nor a call keeps its reasoning: stripping it would make the
+/// message empty, and an empty assistant turn is worse than a little dead context.
+fn elide_stale_reasoning(messages: &mut [Message]) {
+    let mut seen = 0usize;
+    for message in messages.iter_mut().rev() {
+        let has_reasoning = matches!(
+            message.reasoning.as_deref(),
+            Some(reasoning) if !reasoning.is_empty()
+        );
+        if !has_reasoning {
+            continue;
+        }
+        if seen < REPLAYED_REASONING {
+            seen += 1;
+            continue;
+        }
+        if message.content.is_some() || !message.tool_calls.is_empty() {
+            message.reasoning = None;
+        }
+    }
+}
+
+/// Clear the thought signature of every signed call older than the newest
+/// [`REPLAYED_SIGNATURES`], so the provider sends its documented dummy instead of kilobytes of
+/// opaque state for a round that is already behind the conversation.
+fn elide_stale_signatures(messages: &mut [Message]) {
+    let mut seen = 0usize;
+    for message in messages.iter_mut().rev() {
+        for call in message.tool_calls.iter_mut().rev() {
+            let has_signature = matches!(call.signature.as_deref(), Some(sig) if !sig.is_empty());
+            if !has_signature {
+                continue;
+            }
+            if seen < REPLAYED_SIGNATURES {
+                seen += 1;
+            } else {
+                call.signature = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +458,109 @@ mod tests {
             messages[1].content.as_deref(),
             Some("never mind, do something else")
         );
+    }
+
+    fn tool_round(seq: i64, id: &str, body: &str) -> Vec<StoredMessage> {
+        vec![
+            stored(seq, Message::assistant_with_tools(vec![call(id)])),
+            stored(
+                seq + 1,
+                Message::tool(crate::types::ToolResult::success(id, body)),
+            ),
+        ]
+    }
+
+    /// Old tool results are clipped to a head and tail; the newest few stay whole, because they are
+    /// the work the model is still acting on.
+    #[test]
+    fn only_the_newest_tool_results_keep_their_text() {
+        let body = format!("begin{}end", "x".repeat(20_000));
+        let mut history = vec![stored(1, Message::user("go"))];
+        for index in 0..8 {
+            let id = format!("call-{index}");
+            history.extend(tool_round(2 + index as i64 * 2, &id, &body));
+        }
+
+        let messages = sendable_messages(&history);
+        let results: Vec<&Message> = messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert_eq!(results.len(), 8);
+
+        for result in &results[..2] {
+            let text = &result.tool_result.as_ref().unwrap().content;
+            assert!(text.len() < body.len(), "older result is clipped");
+            assert!(text.contains(TOOL_RESULT_CLIPPED), "{text}");
+            assert!(text.starts_with("begin"), "the head survives");
+            assert!(text.ends_with("end"), "the tail survives");
+            assert_eq!(
+                result.content.as_deref(),
+                Some(text.as_str()),
+                "both copies of the text are clipped"
+            );
+        }
+        for result in &results[2..] {
+            assert_eq!(&result.tool_result.as_ref().unwrap().content, &body);
+        }
+    }
+
+    /// Old reasoning is no longer replayed; the newest blocks keep theirs.
+    #[test]
+    fn only_the_newest_reasoning_is_replayed() {
+        let mut history = vec![stored(1, Message::user("go"))];
+        for index in 0..6 {
+            let mut message = Message::assistant(format!("answer {index}"));
+            message.reasoning = Some(format!("thought {index} {}", "r".repeat(2_000)));
+            history.push(stored(2 + index, message));
+        }
+
+        let messages = sendable_messages(&history);
+        let assistant: Vec<&Message> = messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .collect();
+        assert_eq!(assistant.len(), 6);
+
+        for message in &assistant[..2] {
+            assert!(message.reasoning.is_none(), "older reasoning is dropped");
+            assert!(message.content.as_deref().unwrap().starts_with("answer"));
+        }
+        for message in &assistant[2..] {
+            assert!(message.reasoning.is_some(), "newest reasoning is kept");
+        }
+    }
+
+    /// Old thought signatures are cleared, so the provider sends its documented dummy instead of
+    /// replaying opaque state for a round the conversation has left behind.
+    #[test]
+    fn only_the_newest_thought_signatures_are_replayed() {
+        let mut history = vec![stored(1, Message::user("go"))];
+        for index in 0..12 {
+            let id = format!("call-{index}");
+            let mut tool_call = call(&id);
+            tool_call.signature = Some(format!("sig-{index}-{}", "s".repeat(2_000)));
+            history.push(stored(
+                2 + index * 2,
+                Message::assistant_with_tools(vec![tool_call]),
+            ));
+            history.push(stored(
+                3 + index * 2,
+                Message::tool(crate::types::ToolResult::success(&id, "ok")),
+            ));
+        }
+
+        let messages = sendable_messages(&history);
+        let calls: Vec<&crate::types::ToolCall> = messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .collect();
+        assert_eq!(calls.len(), 12);
+        for tool_call in &calls[..4] {
+            assert!(tool_call.signature.is_none(), "old signature is cleared");
+        }
+        for tool_call in &calls[4..] {
+            assert!(tool_call.signature.is_some(), "newest keep theirs");
+        }
     }
 }

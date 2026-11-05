@@ -293,14 +293,18 @@ where
         // silently guards nothing, which is worse than no hook at all.
         let mut execution_result = execution_result;
 
-        // Safety cap: Never allow an unbounded tool result (from any tool, MCP, or plugin)
-        // to blow past model context limits.
-        const MAX_TOOL_RESULT_CHARS: usize = 200_000;
+        // Safety cap: never allow an unbounded tool result (from any tool, MCP, or plugin) to blow
+        // past model context limits. The middle is dropped rather than the tail: a long build log
+        // or listing is mostly repetition, while its last lines carry the outcome. Results this
+        // large are rare; the median is around 1 KB.
+        const MAX_TOOL_RESULT_CHARS: usize = 100_000;
+        const TOOL_RESULT_CLIPPED: &str =
+            "\n\n[tool output clipped: middle omitted to protect the context window]\n\n";
         if execution_result.content.len() > MAX_TOOL_RESULT_CHARS {
-            let cut = crate::tools::char_safe_cut(&execution_result.content, MAX_TOOL_RESULT_CHARS);
-            execution_result.content = format!(
-                "{}\n\n[Tool output truncated: exceeded {} characters to protect context window]",
-                cut, MAX_TOOL_RESULT_CHARS
+            execution_result.content = crate::tools::clip_middle(
+                &execution_result.content,
+                MAX_TOOL_RESULT_CHARS,
+                TOOL_RESULT_CLIPPED,
             );
         }
         if let Some(hooks) = self.hooks.as_ref() {

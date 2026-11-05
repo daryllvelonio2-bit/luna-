@@ -207,6 +207,10 @@ pub async fn run_exec(
     agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     agent_cfg.memory_mode = config.memory.mode;
+    // Follow the model's real window rather than the config's fixed bar; a headless run must fold
+    // before the provider rejects the request, not after.
+    agent_cfg.context_window =
+        Some(super::context_window::context_window_for(&config, &provider_id, &model_id) as usize);
     if let Some(skills_summary) = skills_summary(&config) {
         agent_cfg.skills_summary = Some(skills_summary);
     }

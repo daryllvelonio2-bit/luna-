@@ -382,6 +382,13 @@ pub async fn run_gateway(
                         agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
                         agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
                         agent_cfg.memory_mode = config.memory.mode;
+                        agent_cfg.context_window = Some(
+                            crate::commands::context_window::context_window_for(
+                                &config,
+                                &provider_id,
+                                &model_id,
+                            ) as usize,
+                        );
 
                         let hooks = Arc::new(harness_core::HookRunner::load(
                             &config.paths.workspace_root,

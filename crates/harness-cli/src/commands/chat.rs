@@ -232,6 +232,12 @@ pub async fn run_interactive_chat(
         ));
     }
 
+    // Fold against the model's own window, not a fixed bar: a 300k threshold on a 256k model only
+    // folds after the provider has already refused the request. Keeping the number on the shared
+    // config also hands the same ceiling to delegated subagents, which clone this config.
+    config.agent.context_window =
+        Some(context_window(&config, &discovery, &current_provider, &current_model) as usize);
+
     // Stamp the model this session starts on (a fresh session, or a row written before model
     // persistence existed) so the choice stays durable even after the config default changes.
     if record.model.is_none() {
