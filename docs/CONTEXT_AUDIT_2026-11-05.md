@@ -223,6 +223,87 @@ Test: `list_entries_stops_at_the_depth_limit`.
 
 ---
 
+## Measured savings
+
+Method: the replay rules were re-applied to rows already stored in `~/.luna/sessions.db` and the
+result compared with the unclipped sendable vector for the same rows. This is a counterfactual
+measurement, not two live runs: it holds the conversation fixed and changes only what is replayed.
+The token figures use the repository's 4-chars-per-token heuristic. Inline images and non-ASCII
+text are the only places where the Python replica can differ from the Rust rules by a rounding
+amount.
+
+### Recent replay windows (12 most recently updated live sessions)
+
+| Measure | Before | After | Improvement |
+| --- | ---: | ---: | ---: |
+| Replayed payload | 5.39 MB | 2.29 MB | **−57.6%** (2.36× smaller) |
+| Heuristic tokens | ~1,348,600 | ~572,300 | **−57.6%** |
+| Tool results, both stored copies | 3.33 MB | 1.46 MB | **−56.0%** |
+| Tool-call arguments | 202 KB | 98 KB | **−51.3%** |
+| Thought signatures | 878 KB | 13 KB | **−98.6%** |
+| Reasoning | 108 KB | 20 KB | **−81.1%** |
+| Inline-image payloads | 182 KB | ~0 | older images not re-sent |
+
+Contribution to the 3.11 MB saved: tool-result text **60.1%**, thought signatures **27.9%**,
+inline images **5.9%**, arguments **3.3%**, reasoning **2.8%**.
+
+### Token-bounded replay
+
+The audit's 200-row window was ~365k heuristic tokens. With a 256k model the replay budget is
+**153,600 tokens** (3/5 of the window), a **−57.9%** cut against that window. On the current
+largest recent 200-row window (`se42f23`), 341,098 tokens fall to 197,643 after clipping and to
+153,600 after the budget: **−55.0%** overall, 2.22× smaller. A 120,702-token window
+(`sb6989a71`) is already under budget, so the trim removes nothing there.
+
+### Fold thresholds
+
+For the live 256k model with a configured 300k bar:
+
+| Bar | Tokens | Change |
+| --- | ---: | ---: |
+| Configured before | 300,000 | 117% of the window |
+| Ordinary fold now | 179,200 | **−40.3%** vs before, 70% of window |
+| Urgent ceiling now | 230,400 | **−23.2%** vs before, 90% of window |
+
+The ordinary bar is 40.3% lower, and the urgent ceiling still leaves 10% of the window for the
+summary request and the reply.
+
+### Estimator coverage
+
+Reasoning and signatures accounted for 9.89 MB of the 72.3 MB measured live payload. The estimator
+now counts both: reported coverage rises from **86.3% to 100%** of that payload, **+13.7
+percentage points** of previously invisible context.
+
+### Summariser coverage
+
+Tool rows no longer render the same answer twice, so the fixed 60,000-character summary
+transcript holds more of the conversation. Replaying the same folds:
+
+| Session | Messages covered before | After | Improvement |
+| --- | ---: | ---: | ---: |
+| `se42f23` | 38 | 64 | **+68%** |
+| `sb6989a71` | 85 | 107 | **+26%** |
+| `saac38806` | 54 | 70 | **+30%** |
+
+Per tool row, the duplicate copy was half the rendered text, so the tool-heavy part of a fold is
+**up to 50% smaller** for the same number of messages.
+
+### Smaller bounds
+
+| Change | Before | After | Improvement |
+| --- | ---: | ---: | ---: |
+| Central tool-result cap | 200k chars | 100k chars | **−50%** per result |
+| One measured `list_files` call | 9.27 MB | 40 KB cap | **−99.6%** |
+| Delegated reply pasted into the parent | unbounded | 24,000 chars | bounded; full reply stays in the job log |
+| Retained reasoning block | 137,791 chars observed | 16,000-char cap | **−88.4%** for that block |
+| Replayed old tool-call arguments | whole value | 512 chars per string | **−51.3%** across measured arguments |
+
+The largest single wins are not marginal: signatures are effectively eliminated from old replay
+(−98.6%), reasoning drops by four fifths, and the fixed replay window is more than twice as small.
+On a long session the token budget then caps whatever clipping alone leaves over.
+
+---
+
 ## Re-measuring
 
 ```bash
