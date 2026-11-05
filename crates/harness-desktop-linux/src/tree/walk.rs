@@ -45,10 +45,11 @@ fn walk_at(
         Vec::new()
     };
 
-    let bounds = if raw
-        .interfaces
-        .iter()
-        .any(|interface| interface == COMPONENT_INTERFACE)
+    let bounds = if !options.compact
+        && raw
+            .interfaces
+            .iter()
+            .any(|interface| interface == COMPONENT_INTERFACE)
     {
         read_extents(connection, element).ok().flatten()
     } else {
@@ -59,9 +60,9 @@ fn walk_at(
         ref_id: None,
         role: raw.role.clone(),
         identity: NodeIdentity {
-            name: raw.name.clone(),
+            name: raw.name.clone().filter(|s| !s.trim().is_empty()),
             value: None,
-            description: raw.description.clone(),
+            description: raw.description.clone().filter(|s| !s.trim().is_empty()),
             native_id: raw
                 .accessible_id
                 .clone()
@@ -75,7 +76,7 @@ fn walk_at(
         handle: Some(harness_desktop::tree::node::ElementHandle::new(
             element.encode(),
         )),
-        children_count: Some(raw.children.len() as u32),
+        children_count: None,
         subtree_truncated: false,
         children: Vec::new(),
     };
@@ -87,6 +88,9 @@ fn walk_at(
 
     if cut_by_depth || cut_by_skeleton {
         node.subtree_truncated = !raw.children.is_empty();
+        if node.subtree_truncated {
+            node.children_count = Some(raw.children.len() as u32);
+        }
         return Ok(node);
     }
 

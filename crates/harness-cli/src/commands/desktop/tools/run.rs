@@ -204,7 +204,7 @@ fn snapshot_options(arguments: &Value) -> harness_desktop::tree::options::TreeOp
         interactive_only: arguments
             .get("interactive")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(true),
         skeleton: arguments
             .get("skeleton")
             .and_then(Value::as_bool)
@@ -212,7 +212,7 @@ fn snapshot_options(arguments: &Value) -> harness_desktop::tree::options::TreeOp
         compact: arguments
             .get("compact")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(true),
         ..Default::default()
     };
     if let Some(depth) = arguments.get("max_depth").and_then(Value::as_u64) {

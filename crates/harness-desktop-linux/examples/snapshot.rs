@@ -14,6 +14,7 @@ fn main() {
     let engine = DesktopEngine::new(Arc::new(LinuxDesktopAdapter::new()));
     let options = TreeOptions {
         interactive_only: true,
+        compact: true,
         ..Default::default()
     };
     let response = commands::snapshot(&engine, &app, &options);

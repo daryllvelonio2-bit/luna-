@@ -54,6 +54,9 @@ const STATE_NAMES: &[&str] = &[
 pub fn state_names(bits: &[u32]) -> Vec<String> {
     bits.iter()
         .filter_map(|bit| {
+            if *bit == 0 {
+                return None;
+            }
             STATE_NAMES
                 .get(*bit as usize)
                 .map(|name| (*name).to_string())
