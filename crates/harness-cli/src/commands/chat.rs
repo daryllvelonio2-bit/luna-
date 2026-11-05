@@ -713,7 +713,9 @@ pub async fn run_interactive_chat(
                     ui_obs.emit_above(&format!("{} Compaction failed: {}", "✖".red(), err));
                 } else if let Some(notice) = folded {
                     // A fold really retired history, so the gauge may fall — but not while this
-                    // turn is still on the transcript it replaced. Defer the drop to the boundary.
+                    // turn is still on the transcript it replaced. Defer the drop to the boundary,
+                    // where it lands if the turn never adopts the fold. A turn that does adopt it
+                    // reports the folded size with `reset: true` and the gauge drops immediately.
                     ui_obs.defer_context_drop();
                     ui_obs.emit_above(&compaction_report(&notice));
                 }

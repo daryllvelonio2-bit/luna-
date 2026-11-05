@@ -431,14 +431,18 @@ where
         self.append(&tool_message, false).await?;
         state.messages.push(tool_message);
 
-        self.try_rebind_completed_fold(state.messages, state.fold_watermark, state.system_text)
+        let rebound = self
+            .try_rebind_completed_fold(state.messages, state.fold_watermark, state.system_text)
             .await;
 
         let current_tokens = estimate_tokens(state.messages).tokens;
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::ContextTokensUpdated {
                 tokens_used: current_tokens,
-                reset: false,
+                // The fold grew the live transcript from `state.messages`, which the rebind has
+                // just replaced with what the store now holds. Let the gauge fall to that size
+                // during the turn rather than waiting for the boundary.
+                reset: rebound,
             });
         }
 

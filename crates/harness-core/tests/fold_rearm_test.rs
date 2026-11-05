@@ -404,8 +404,8 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
         AgentEvent::CompactionStarted { .. } => {
             started_watcher.fetch_add(1, Ordering::SeqCst);
         }
-        AgentEvent::ContextTokensUpdated { tokens_used, .. } => {
-            tokens_watcher.lock().unwrap().push(tokens_used);
+        AgentEvent::ContextTokensUpdated { tokens_used, reset } => {
+            tokens_watcher.lock().unwrap().push((tokens_used, reset));
         }
         _ => {}
     }));
@@ -431,10 +431,19 @@ async fn auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn() {
 
     let updates = token_updates.lock().unwrap().clone();
     // The final context token updates must reflect the compacted transcript, not the stale 150k usage
-    let last_update = *updates.last().unwrap();
+    let last_update = updates.last().unwrap().0;
     assert!(
         last_update < 50_000,
         "context gauge at end of turn must reflect compacted tokens (<50k), got {last_update}"
+    );
+    // The turn adopted the fold between rounds (the provider above verifies it saw the folded
+    // transcript). That measurement is not a stale report the turn will contradict, so it must be
+    // allowed to lower the gauge immediately rather than waiting for the turn boundary.
+    assert!(
+        updates
+            .iter()
+            .any(|(tokens, reset)| *reset && *tokens < 50_000),
+        "an adopted fold must reset the context gauge mid-turn: {updates:?}"
     );
 }
 

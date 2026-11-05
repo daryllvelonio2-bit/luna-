@@ -2318,11 +2318,13 @@ async fn auto_compact_folds_when_the_turn_itself_crosses_the_bar() {
 }
 
 /// An automatic fold is a bound on the *next* request, not an announcement about the current turn.
-/// It lands while the turn still holds the transcript it replaced, so it must not hand the gauge
-/// its shrunken size: the turn's own next report would restore the larger figure, which is the
-/// drop-then-jump the gauge showed around a soft interrupt. The drop waits for the boundary.
+/// Until the running turn adopts it, the turn still holds the transcript it replaced, so the fold
+/// must not hand the gauge its shrunken size: the turn's own next report would restore the larger
+/// figure, which is the drop-then-jump the gauge showed around a soft interrupt. Once the turn does
+/// adopt the fold (covered by `auto_compact_does_not_repeat_and_updates_context_gauge_mid_turn`),
+/// the measurement is honest and resets immediately.
 #[tokio::test]
-async fn an_automatic_fold_does_not_reset_the_gauge_mid_turn() {
+async fn an_unadopted_automatic_fold_does_not_reset_the_gauge_mid_turn() {
     let (_dir, _path, store) = seeded_store(3).await;
     let main = Arc::new(RecordingProvider::new(&"x".repeat(2_000_000)));
     let summariser = Arc::new(CannedProvider::new("FOLDED WITHOUT BEING ASKED"));

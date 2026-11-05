@@ -252,12 +252,14 @@ pub enum AgentEvent {
         folded: Option<CompactionNotice>,
         error: Option<String>,
     },
-    /// The transcript's own estimate changed. `reset` is true only when a fold retired history,
-    /// which is the one ordinary reason the number may *fall*: an ordinary update can recompute a
-    /// smaller figure at a turn boundary (the provider counts a prompt more tightly than the
-    /// character heuristic, or the newest stored report does not cover the tail), and a gauge that
-    /// fell there read as a reset rather than as a measurement. A UI that holds a high-water mark
-    /// must still take a `reset` value even when it is lower.
+    /// The transcript's own estimate changed. `reset` is true only when a fold retired history and
+    /// the figure describes the transcript that will be sent next — an explicit `/compact` between
+    /// turns, or an automatic fold the running turn has just adopted. Those are the reasons the
+    /// number may *fall*: an ordinary update can recompute a smaller figure at a turn boundary (the
+    /// provider counts a prompt more tightly than the character heuristic, or the newest stored
+    /// report does not cover the tail), and a gauge that fell there read as a reset rather than as
+    /// a measurement. A UI that holds a high-water mark must still take a `reset` value even when
+    /// it is lower.
     ContextTokensUpdated { tokens_used: u32, reset: bool },
 }
 

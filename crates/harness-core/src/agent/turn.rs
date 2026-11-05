@@ -234,16 +234,23 @@ where
                 }
             }
 
-            if loop_rounds > 0 {
+            let rebound = if loop_rounds > 0 {
                 self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
-                    .await;
-            }
+                    .await
+            } else {
+                false
+            };
 
             let current_tokens = estimate_tokens(&messages).tokens;
             if let Some(ref observer) = self.observer {
                 observer(AgentEvent::ContextTokensUpdated {
                     tokens_used: current_tokens,
-                    reset: false,
+                    // A fold that landed while this turn ran has just been adopted: the messages
+                    // above are the folded transcript, so the smaller figure is a measurement of
+                    // what will be sent, not a stale report the turn will contradict. Without the
+                    // reset the gauge held its pre-fold high-water mark until the turn boundary,
+                    // which read as "compaction did nothing".
+                    reset: rebound,
                 });
             }
 
@@ -398,7 +405,11 @@ where
             if let Some(ref observer) = self.observer {
                 observer(AgentEvent::ContextTokensUpdated {
                     tokens_used: actual_tokens,
-                    reset: false,
+                    // A rebound replaced `messages` with the folded transcript and dropped the
+                    // usage of the prompt that was sent before the fold, so the figure above is
+                    // the honest size of what the turn will send next. Let the gauge take it now
+                    // instead of holding the pre-fold high-water mark to the end of the turn.
+                    reset: rebound,
                 });
             }
 
