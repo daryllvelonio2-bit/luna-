@@ -30,7 +30,8 @@ pub fn do_action(
     names: &[String],
     wanted: &[&str],
 ) -> Result<bool, DesktopError> {
-    let Some(index) = action_index_any(names, wanted) else {
+    let index = action_index_any(names, wanted).or((names.len() == 1).then_some(0));
+    let Some(index) = index else {
         return Err(DesktopError::new(
             harness_desktop::error::ErrorCode::ActionNotSupported,
             format!(

@@ -140,7 +140,7 @@ fn mint_refs(
     if node.is_addressable() {
         *counter += 1;
         let local_ref = format!("@e{counter}");
-        let identity: ElementIdentity = node.identity.key(&node.role);
+        let identity: ElementIdentity = node.element_identity();
         node.ref_id = Some(qualify_ref_id(snapshot_id, &local_ref));
         store.insert(RefEntry::new(snapshot_id, &local_ref, app, identity));
     }

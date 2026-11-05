@@ -77,6 +77,15 @@ pub trait ObservationOps: Send + Sync {
         tree: &'a AccessibilityNode,
         identity: &ElementIdentity,
     ) -> Result<&'a AccessibilityNode, DesktopError> {
+        if let Some(target_handle) = &identity.handle {
+            if let Some(node) = tree.flatten().into_iter().find(|n| {
+                n.handle.as_ref().map(|h| &h.token) == Some(target_handle)
+                    && n.role == identity.role
+            }) {
+                return Ok(node);
+            }
+        }
+
         let mut matches = tree.flatten().into_iter().filter(|node| {
             node.identity.key(&node.role).matches(identity)
         });
@@ -177,5 +186,24 @@ mod tests {
         };
         let error = Noop.resolve_identity(&root, &identity).expect_err("two matches");
         assert_eq!(error.code, crate::error::ErrorCode::AmbiguousTarget);
+    }
+
+    #[test]
+    fn handle_disambiguates_identical_elements() {
+        let mut root = node("window", "Calculator");
+        let mut btn1 = node("push button", "7");
+        btn1.handle = Some(crate::tree::node::ElementHandle::new("app|btn1"));
+        let mut btn2 = node("push button", "7");
+        btn2.handle = Some(crate::tree::node::ElementHandle::new("app|btn2"));
+        root.children.push(btn1);
+        root.children.push(btn2);
+        let identity = ElementIdentity {
+            role: "push button".to_string(),
+            name: Some("7".to_string()),
+            handle: Some("app|btn2".to_string()),
+            ..Default::default()
+        };
+        let found = Noop.resolve_identity(&root, &identity).expect("resolves via handle");
+        assert_eq!(found.handle.as_ref().unwrap().token, "app|btn2");
     }
 }

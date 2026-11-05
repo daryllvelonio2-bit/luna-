@@ -60,10 +60,22 @@ impl AccessibilityNode {
     /// it is a text field the agent can write into. Everything else — static
     /// labels, layout containers — is read-only context.
     pub fn is_addressable(&self) -> bool {
-        if !self.presentation.available_actions.is_empty() {
+        let has_real_action = self
+            .presentation
+            .available_actions
+            .iter()
+            .any(|a| !a.eq_ignore_ascii_case("clickancestor"));
+        if has_real_action {
             return true;
         }
         is_editable_role(&self.role)
+    }
+
+    /// The resolution identity for this node, including its platform handle if present.
+    pub fn element_identity(&self) -> super::identity::ElementIdentity {
+        let mut id = self.identity.key(&self.role);
+        id.handle = self.handle.as_ref().map(|h| h.token.clone());
+        id
     }
 
     /// This node and every node below it, in tree order.
@@ -113,6 +125,12 @@ mod tests {
     #[test]
     fn a_node_with_an_action_is_addressable() {
         assert!(node("push button", &["click"]).is_addressable());
+    }
+
+    #[test]
+    fn a_node_with_only_click_ancestor_is_not_addressable() {
+        assert!(!node("section", &["clickAncestor"]).is_addressable());
+        assert!(node("section", &["clickAncestor", "jump"]).is_addressable());
     }
 
     #[test]

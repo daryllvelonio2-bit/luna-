@@ -25,8 +25,10 @@ use crate::tree::walk::walk;
 ///
 /// A toolkit calls the same thing "click", "press" or "activate" depending on
 /// the widget, so the adapter asks for all three rather than insisting on one.
-const CLICK_VERBS: &[&str] = &["click", "press", "activate"];
-const TOGGLE_VERBS: &[&str] = &["toggle", "click", "press"];
+const CLICK_VERBS: &[&str] = &[
+    "click", "press", "activate", "jump", "open", "openlink", "open link", "select",
+];
+const TOGGLE_VERBS: &[&str] = &["toggle", "click", "press", "check"];
 
 /// The Linux adapter.
 pub struct LinuxDesktopAdapter;

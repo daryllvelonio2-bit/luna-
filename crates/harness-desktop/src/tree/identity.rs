@@ -30,6 +30,8 @@ pub struct ElementIdentity {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 
 impl ElementIdentity {
@@ -60,6 +62,7 @@ impl NodeIdentity {
             native_id: self.native_id.clone(),
             name: self.name.clone(),
             description: self.description.clone(),
+            handle: None,
         }
     }
 }
@@ -74,6 +77,7 @@ mod tests {
             native_id: None,
             name: Some("Save".to_string()),
             description: Some("Save the document".to_string()),
+            handle: None,
         }
     }
 

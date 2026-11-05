@@ -110,8 +110,14 @@ impl DesktopCommand {
         }
         let reference = arguments.get("ref").and_then(Value::as_str)?;
         let detail = match self {
-            Self::Type => arguments.get("text").and_then(Value::as_str),
-            Self::SetValue => arguments.get("value").and_then(Value::as_str),
+            Self::Type => arguments
+                .get("text")
+                .or_else(|| arguments.get("value"))
+                .and_then(Value::as_str),
+            Self::SetValue => arguments
+                .get("value")
+                .or_else(|| arguments.get("text"))
+                .and_then(Value::as_str),
             Self::Toggle => Some("toggle"),
             _ => None,
         };
@@ -142,12 +148,12 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
         DesktopCommand::Type => commands::type_text(
             engine,
             &reference(arguments),
-            &required_str(arguments, "text"),
+            &value_or_text(arguments, "text", "value"),
         ),
         DesktopCommand::SetValue => commands::set_value(
             engine,
             &reference(arguments),
-            &required_str(arguments, "value"),
+            &value_or_text(arguments, "value", "text"),
         ),
         DesktopCommand::Toggle => commands::toggle(
             engine,
@@ -155,6 +161,15 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
             arguments.get("checked").and_then(Value::as_bool),
         ),
     }
+}
+
+fn value_or_text(arguments: &Value, primary: &str, secondary: &str) -> String {
+    arguments
+        .get(primary)
+        .or_else(|| arguments.get(secondary))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The application the command works on.
