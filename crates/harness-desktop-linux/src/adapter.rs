@@ -27,8 +27,9 @@ use crate::tree::walk::walk;
 /// the widget, so the adapter asks for all three rather than insisting on one.
 const CLICK_VERBS: &[&str] = &[
     "click", "press", "activate", "jump", "open", "openlink", "open link", "select",
+    "switch", "toggle", "expand", "collapse", "check", "uncheck",
 ];
-const TOGGLE_VERBS: &[&str] = &["toggle", "click", "press", "check"];
+const TOGGLE_VERBS: &[&str] = &["toggle", "click", "press", "activate", "check", "uncheck"];
 
 /// The Linux adapter.
 pub struct LinuxDesktopAdapter;
@@ -192,7 +193,7 @@ impl ActionOps for LinuxDesktopAdapter {
                     .with_suggestion("The field may be read-only; check its states")
                     .not_delivered());
                 }
-                let written = read_text(&connection, &element)?;
+                let written = read_text(&connection, &element).ok().flatten();
                 if written.as_deref() == Some(text.as_str()) {
                     Ok(ActionOutcome::verified(vec![
                         "EditableText.SetTextContents".to_string(),

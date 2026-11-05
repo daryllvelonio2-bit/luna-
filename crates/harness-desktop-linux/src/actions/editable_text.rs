@@ -15,12 +15,11 @@ pub fn read_text(
     connection: &Connection,
     element: &AtspiElement,
 ) -> Result<Option<String>, DesktopError> {
-    let count: i32 = call(connection, element, TEXT_INTERFACE, "GetCharacterCount", &())?;
-    if count <= 0 {
-        return Ok(Some(String::new()));
+    match call::<String>(connection, element, TEXT_INTERFACE, "GetText", &(0i32, -1i32)) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.code == harness_desktop::error::ErrorCode::ActionNotSupported => Ok(None),
+        Err(err) => Err(err),
     }
-    let text: String = call(connection, element, TEXT_INTERFACE, "GetText", &(0, count))?;
-    Ok(Some(text))
 }
 
 /// The value of an element, from whichever interface offers one.
