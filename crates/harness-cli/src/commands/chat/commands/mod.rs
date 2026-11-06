@@ -130,6 +130,32 @@ pub fn command_entries(config: &Config, skills: &[harness_plugins::Skill]) -> Ve
     entries
 }
 
+/// Whether a line that begins with `/` is a filesystem path rather than a slash command.
+///
+/// The composer routes every line starting with `/` to the command dispatcher, which rejects an
+/// absolute path such as `/home/me/notes.txt` as an unknown command before it can reach the agent.
+/// A line is a path when its first token — the only part that can name a command — starts with `/`
+/// and either contains a second separator or names an existing absolute path. A command with a
+/// path argument (`/dir /tmp`) is still a command because only the first token is inspected.
+pub(crate) fn looks_like_path(line: &str) -> bool {
+    // Quotes are how a path with spaces arrives from a paste; they are not part of the path.
+    let unquoted = line.trim_start().trim_start_matches(['"', '\'', '`']);
+    let token = unquoted.split_whitespace().next().unwrap_or_default();
+    let Some(rest) = token.strip_prefix('/') else {
+        return false;
+    };
+    if rest.is_empty() {
+        // A bare `/` opens the command menu; it is not a path.
+        return false;
+    }
+    // `/home/me/notes.txt` — a second separator settles it without touching the filesystem.
+    if rest.contains('/') {
+        return true;
+    }
+    // `/tmp`, `/etc`: a single component can still be a real path.
+    std::path::Path::new(token).exists()
+}
+
 /// Keep the slash menu and `/help` scannable: skill descriptions are written for the model and can
 /// run to a paragraph, so the command list shows only the first line, capped.
 fn skill_command_details(description: &str) -> String {
@@ -2720,5 +2746,56 @@ mod value_box_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::looks_like_path;
+
+    /// A command name and its argument are still a command, even when the argument is a path.
+    #[test]
+    fn commands_are_not_paths() {
+        for line in [
+            "/help",
+            "/model",
+            "/model gpt-5",
+            "/dir /tmp",
+            "/queue hello",
+            "exit",
+        ] {
+            assert!(!looks_like_path(line), "{line:?} should be a command");
+        }
+    }
+
+    /// Anything with a second separator in its first token is a path, and so is a quoted path
+    /// whose first segment would otherwise look like a command.
+    #[test]
+    fn multi_segment_absolute_paths_are_paths() {
+        for line in [
+            "/home/janelle/notes.txt",
+            "/var/log/luna/luna.log and explain it",
+            "\"/home/me/a file with spaces.txt\"",
+            "  /usr/local/bin/luna",
+        ] {
+            assert!(looks_like_path(line), "{line:?} should be a path");
+        }
+    }
+
+    /// A bare slash opens the menu, and an unknown single word is still a mistyped command.
+    #[test]
+    fn a_bare_slash_is_not_a_path() {
+        assert!(!looks_like_path("/"));
+        assert!(!looks_like_path("   /   "));
+        assert!(!looks_like_path("/definitely-not-a-command"));
+    }
+
+    /// A single-component absolute path that exists on disk is a path too, so `/tmp` reaches the
+    /// agent instead of being rejected as an unknown command.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_single_component_is_a_path() {
+        assert!(looks_like_path("/tmp"));
+        assert!(looks_like_path("/etc"));
     }
 }

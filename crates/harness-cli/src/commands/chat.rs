@@ -47,7 +47,8 @@ use commands::{
     handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
     handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
     handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
-    handle_thinking_switch, handle_usage_command, select_slash_command, SlashOutcome,
+    handle_thinking_switch, handle_usage_command, looks_like_path, select_slash_command,
+    SlashOutcome,
 };
 use keys::AppKey;
 use render::{
@@ -1245,7 +1246,8 @@ pub async fn run_interactive_chat(
             // turn path below run it, exactly as if the user had typed the instructions.
             let skill_prompt = crate::commands::skills::invocation_prompt(query, skills);
             let query = skill_prompt.as_deref().unwrap_or(query);
-            if query.starts_with('/') {
+            // An absolute path is input, not a command: `/home/me/notes.txt` goes to the agent.
+            if query.starts_with('/') && !looks_like_path(query) {
                 eprintln!(
                     "{} Unrecognized command '{}'. Type /help for available commands.",
                     "✖".red().bold(),
@@ -2020,7 +2022,7 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
-                        if command_query.starts_with('/')
+                        if (command_query.starts_with('/') && !looks_like_path(command_query))
                             || command_query.eq_ignore_ascii_case("exit")
                             || command_query.eq_ignore_ascii_case("quit")
                         {

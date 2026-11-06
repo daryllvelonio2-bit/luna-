@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use colored::Colorize;
 use tokio::sync::mpsc;
 
-use super::CommandEntry;
+use super::{looks_like_path, CommandEntry};
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::render::PROMPT;
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
@@ -267,6 +267,11 @@ pub(crate) async fn select_slash_command(
                 draw_menu(selected, &filter_str, &filter_str);
             }
             AppKey::Enter => {
+                // A path pasted into the menu is not a command: leave it in the composer so the
+                // next Enter submits it as a prompt instead of rejecting it as an unknown command.
+                if looks_like_path(&filter_str) {
+                    break;
+                }
                 if !filtered.is_empty() && selected < filtered.len() {
                     let cmd_name = &filtered[selected].1.name;
                     let trimmed = filter_str.trim();
@@ -325,7 +330,9 @@ pub(crate) async fn select_slash_command(
                 drop(b);
                 ui.redraw_input_line();
 
-                if is_empty {
+                // Close once the line is empty, a path, or no longer matches a command; the
+                // composer owns it from then on and Enter sends it as a prompt.
+                if is_empty || looks_like_path(&new_buf) || get_filtered(&new_buf).is_empty() {
                     break;
                 } else {
                     selected = 0;
@@ -386,6 +393,12 @@ pub(crate) async fn select_slash_command(
                 drop(b);
                 ui.redraw_input_line();
                 selected = 0;
+                // Pasting an absolute path must not be swallowed by the command menu. As soon as
+                // the line can no longer name a command, close the menu and leave the text in the
+                // composer: the next Enter sends it to the agent as a prompt.
+                if looks_like_path(&new_buf) || get_filtered(&new_buf).is_empty() {
+                    break;
+                }
                 draw_menu(selected, &new_buf, &new_buf);
             }
             _ => continue,
