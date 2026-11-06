@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approval::ToolPreview;
 use crate::error::HarnessError;
-use crate::traits::{Tool, ToolMiddleware, ToolRegistry};
+use crate::traits::{Tool, ToolMiddleware, ToolProgress, ToolRegistry};
 use crate::types::{ToolCall, ToolDefinition, ToolResult};
 
 #[derive(Default)]
@@ -112,6 +112,15 @@ impl ToolRegistry for DefaultToolRegistry {
         call: &ToolCall,
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
+        self.execute_with_progress(call, cancel_token, None).await
+    }
+
+    async fn execute_with_progress(
+        &self,
+        call: &ToolCall,
+        cancel_token: &CancellationToken,
+        progress: Option<&ToolProgress>,
+    ) -> Result<ToolResult, HarnessError> {
         let (tool, mws) = {
             let map = self.tools.read().await;
             let mws = self.middlewares.read().await.clone();
@@ -139,8 +148,13 @@ impl ToolRegistry for DefaultToolRegistry {
 
         let mut result = match tool {
             Some(t) => {
-                t.execute(&active_call.id, &active_call.arguments, cancel_token)
-                    .await?
+                t.execute_with_progress(
+                    &active_call.id,
+                    &active_call.arguments,
+                    cancel_token,
+                    progress,
+                )
+                .await?
             }
             None => return Err(HarnessError::ToolNotFound(call.name.clone())),
         };

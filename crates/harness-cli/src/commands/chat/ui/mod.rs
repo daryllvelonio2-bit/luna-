@@ -129,6 +129,134 @@ struct Activity {
     frame: usize,
 }
 
+/// How many lines of a running command's output the live region keeps.
+///
+/// A tail, not a log: the composer has to stay usable while a build prints thousands of lines. The
+/// full output still reaches the model with the result; this is only the live view.
+const TOOL_TAIL_LINES: usize = 8;
+
+/// Longest single line the tail keeps before forcing a break. A progress bar that never emits a
+/// newline must not grow the buffer for the length of the command.
+const TOOL_TAIL_LINE_CHARS: usize = 2048;
+
+/// The newest lines of a running command's output.
+///
+/// Chunks arrive at arbitrary boundaries, so the last line is held back until a newline (or the
+/// line cap) completes it. Carriage returns count as line breaks: progress bars redraw with `\r`,
+/// and showing the last update is the point of a tail.
+#[derive(Default)]
+struct ToolTail {
+    lines: std::collections::VecDeque<String>,
+    partial: String,
+    escape: Escape,
+}
+
+/// Where a chunk sits inside an ANSI escape sequence.
+///
+/// A sequence can be split across two reads, so the state has to outlive a chunk: dropping only
+/// the ESC byte would leave `[31m` behind and paint that into the composer as text.
+#[derive(Default, Clone, Copy)]
+enum Escape {
+    #[default]
+    None,
+    Esc,
+    Csi,
+    Osc,
+    OscEsc,
+}
+
+impl ToolTail {
+    fn push(&mut self, chunk: &str) {
+        let mut chars = chunk.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match self.escape {
+                Escape::None => match ch {
+                    '\x1b' => self.escape = Escape::Esc,
+                    '\n' => self.break_line(),
+                    '\r' => {
+                        // CRLF is one break, not two; a lone `\r` is a progress-bar redraw.
+                        if chars.peek() != Some(&'\n') {
+                            self.break_line();
+                        }
+                    }
+                    '\t' => self.partial.push_str("    "),
+                    c if c.is_control() => {}
+                    c => self.partial.push(c),
+                },
+                Escape::Esc => {
+                    self.escape = match ch {
+                        '[' => Escape::Csi,
+                        ']' => Escape::Osc,
+                        _ => Escape::None,
+                    };
+                }
+                Escape::Csi => {
+                    // CSI ends on the first byte in the final-byte range (`m`, `K`, `H`, …).
+                    if ('@'..='~').contains(&ch) {
+                        self.escape = Escape::None;
+                    }
+                }
+                Escape::Osc => match ch {
+                    '\x07' => self.escape = Escape::None,
+                    '\x1b' => self.escape = Escape::OscEsc,
+                    _ => {}
+                },
+                Escape::OscEsc => {
+                    self.escape = if ch == '\\' { Escape::None } else { Escape::Osc };
+                }
+            }
+            if self.partial.len() >= TOOL_TAIL_LINE_CHARS {
+                self.break_line();
+            }
+        }
+    }
+
+    fn break_line(&mut self) {
+        let line = std::mem::take(&mut self.partial);
+        let line = line.trim_end().to_string();
+        // A run of blank lines (a CRLF split across chunks, a banner) costs rows and says nothing.
+        if line.is_empty() && self.lines.back().is_none_or(|last| last.is_empty()) {
+            return;
+        }
+        self.lines.push_back(line);
+        while self.lines.len() > TOOL_TAIL_LINES {
+            self.lines.pop_front();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.partial.clear();
+        self.escape = Escape::None;
+    }
+
+    /// The tail as composer rows, newest last, each one physical row wide.
+    fn rows(&self, width: usize) -> Vec<String> {
+        let budget = width.saturating_sub(4).max(8);
+        let mut rows: Vec<String> = self
+            .lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                format!(
+                    "  {} {}",
+                    "│".dimmed(),
+                    truncate_to_cells(line, budget).dimmed()
+                )
+            })
+            .collect();
+        let partial = self.partial.trim_end();
+        if !partial.is_empty() {
+            rows.push(format!(
+                "  {} {}",
+                "│".dimmed(),
+                truncate_to_cells(partial, budget).dimmed()
+            ));
+        }
+        rows
+    }
+}
+
 /// A delegated child that is still running, as far as the composer is concerned.
 #[derive(Clone)]
 struct DelegateTaskView {
@@ -175,6 +303,8 @@ struct Compaction {
 struct LiveRegion {
     reasoning: String,
     activity: Option<Activity>,
+    /// The newest lines of the running tool's output, drawn under its activity row.
+    tool_output: ToolTail,
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     compaction: Option<Compaction>,
@@ -257,7 +387,9 @@ fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<Strin
         reasoning_rows(&live.reasoning, width)
     };
     let height = get_terminal_height();
-    let reserved = usize::from(live.activity.is_some()) + usize::from(live.compaction.is_some());
+    let reserved = usize::from(live.activity.is_some())
+        + usize::from(live.compaction.is_some())
+        + live.tool_output.rows(width).len();
     let budget = height
         .saturating_sub(chrome + reserved + 1)
         .max(MIN_LIVE_REASONING_ROWS);
@@ -330,6 +462,12 @@ pub struct ChatUi {
     paints_in_flight: Arc<AtomicUsize>,
     /// Transcript lines produced while a modal owned the screen, written once it is gone.
     pending_above: Arc<Mutex<Vec<String>>>,
+    /// Lines a slash command emitted while [`ChatUi::begin_command_capture`] had it open.
+    ///
+    /// The command's text is already printed above the composer as it runs; this copy is what
+    /// lets the chat loop keep the command and its result in the transcript, where a Ctrl+O
+    /// redraw can render them again instead of losing them.
+    command_capture: Arc<Mutex<Option<Vec<String>>>>,
     pub is_attended: bool,
 }
 
@@ -393,6 +531,7 @@ impl ChatUi {
             modal_active: Arc::new(AtomicBool::new(false)),
             paints_in_flight: Arc::new(AtomicUsize::new(0)),
             pending_above: Arc::new(Mutex::new(Vec::new())),
+            command_capture: Arc::new(Mutex::new(None)),
             is_attended,
         }
     }
@@ -419,6 +558,25 @@ impl ChatUi {
     /// Whether an interactive prompt currently owns the screen.
     pub fn modal_active(&self) -> bool {
         self.modal_active.load(Ordering::SeqCst)
+    }
+
+    /// Start recording everything [`Self::emit_above`] writes.
+    ///
+    /// Called around a slash command so the chat loop can turn what the command printed into a
+    /// transcript turn. A capture already open is replaced: only the innermost command owns it.
+    pub fn begin_command_capture(&self) {
+        *self
+            .command_capture
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+    }
+
+    /// Stop recording and return the captured lines, or `None` when no capture was open.
+    pub fn end_command_capture(&self) -> Option<Vec<String>> {
+        self.command_capture
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Count one paint as running until the returned guard is dropped.
@@ -632,6 +790,7 @@ impl ChatUi {
 
     pub fn start_activity(&self, call: &str, name: &str, arguments: &serde_json::Value) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.tool_output.clear();
         live.activity = Some(Activity {
             call: call.to_string(),
             detail: tool_activity_detail(name, arguments),
@@ -641,7 +800,22 @@ impl ChatUi {
     }
 
     pub fn stop_activity(&self) {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).activity = None;
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.activity = None;
+        live.tool_output.clear();
+    }
+
+    /// Add a chunk of a running tool's output to the tail under its activity row.
+    ///
+    /// Called from the agent's observer, which fires on the tool's reader task: this only buffers
+    /// text and takes a short lock. The animation tick is what draws it, so a fast stream cannot
+    /// turn every chunk into a repaint.
+    pub fn push_tool_output(&self, chunk: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_output
+            .push(chunk);
     }
 
     /// A fold of the oldest turns has started: animate it until [`Self::finish_compaction`].
@@ -697,6 +871,7 @@ impl ChatUi {
         live.reasoning.clear();
         live.rows.clear();
         live.activity = None;
+        live.tool_output.clear();
         live.compaction = None;
     }
 
@@ -1111,6 +1286,16 @@ impl ChatUi {
 
     pub fn emit_above(&self, text: &str) {
         let _paint = self.paint_in_flight();
+        // Record before the early returns below: a line held for a modal is still the command's
+        // output, and the turn must keep it even though the screen does not show it yet.
+        if let Some(capture) = self
+            .command_capture
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            capture.push(text.to_string());
+        }
         if !self.is_attended {
             println!("{}", text);
             return;
@@ -1325,6 +1510,8 @@ impl ChatUi {
                     activity.started.elapsed(),
                     width,
                 ));
+                // The newest lines of what the call is printing, under the call itself.
+                rows.extend(live.tool_output.rows(width));
             }
 
             if let Some(compaction) = &mut live.compaction {

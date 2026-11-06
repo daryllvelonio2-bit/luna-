@@ -15,6 +15,80 @@ fn a_snapshot() -> TodoSnapshot {
 }
 
 #[test]
+fn a_running_command_keeps_only_its_newest_lines() {
+    let ui = ChatUi::new(true);
+    ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));
+    for i in 0..20 {
+        ui.push_tool_output(&format!("line {i}\n"));
+    }
+
+    let live = ui.live.lock().unwrap();
+    let rows = live.tool_output.rows(80);
+    assert_eq!(rows.len(), TOOL_TAIL_LINES, "the tail is bounded: {rows:?}");
+    assert!(rows.last().unwrap().contains("line 19"));
+    assert!(
+        !rows.iter().any(|row| row.contains("line 11")),
+        "the oldest lines fall off the tail: {rows:?}"
+    );
+}
+
+#[test]
+fn the_tool_tail_drops_ansi_and_keeps_the_newest_progress_update() {
+    let ui = ChatUi::new(true);
+    ui.start_activity("$ make", "terminal", &serde_json::json!({}));
+    ui.push_tool_output("\x1b[31mbuilding\x1b[0m\n");
+    ui.push_tool_output("10%\r50%\r");
+
+    let live = ui.live.lock().unwrap();
+    let plain: Vec<String> = live
+        .tool_output
+        .rows(80)
+        .iter()
+        .map(|row| dialoguer::console::strip_ansi_codes(row).to_string())
+        .collect();
+    assert!(plain.iter().any(|row| row.contains("building")));
+    assert!(
+        plain.iter().any(|row| row.contains("50%")),
+        "a `\\r` redraw leaves a line the tail can show: {plain:?}"
+    );
+    assert!(
+        !plain.iter().any(|row| row.contains("[31m") || row.contains("[0m")),
+        "escape sequences are not text: {plain:?}"
+    );
+}
+
+#[test]
+fn a_new_tool_call_starts_with_an_empty_tail() {
+    let ui = ChatUi::new(true);
+    ui.start_activity("$ one", "terminal", &serde_json::json!({}));
+    ui.push_tool_output("old output\n");
+
+    ui.start_activity("$ two", "terminal", &serde_json::json!({}));
+    assert!(
+        ui.live.lock().unwrap().tool_output.rows(80).is_empty(),
+        "the previous call's output does not leak into the next one"
+    );
+}
+
+#[test]
+fn a_command_capture_keeps_what_the_command_printed() {
+    let ui = ChatUi::new(false);
+    ui.begin_command_capture();
+    ui.emit_above("first line");
+    ui.emit_above("second line");
+
+    assert_eq!(
+        ui.end_command_capture(),
+        Some(vec!["first line".to_string(), "second line".to_string()])
+    );
+    assert_eq!(
+        ui.end_command_capture(),
+        None,
+        "a finished capture is taken, not read twice"
+    );
+}
+
+#[test]
 fn the_todo_panel_is_drawn_above_the_composer() {
     let ui = ChatUi::new(true);
     ui.set_todo_panel(Some(a_snapshot()));

@@ -19,6 +19,8 @@
 
 use tracing::{debug, error, warn};
 
+use std::sync::Arc;
+
 use super::gate::{GateOutcome, GateVerdict};
 use super::{Agent, AgentEvent, TurnToolCall};
 use crate::error::HarnessError;
@@ -54,6 +56,21 @@ where
     N: NotesEngine + 'static,
     R: ToolRegistry + 'static,
 {
+    /// Build the sink that turns a running tool's output into [`AgentEvent::ToolOutput`].
+    ///
+    /// The name is bound here, not by the tool: a tool reports text, the agent knows which call it
+    /// belongs to, and the UI matches it to the activity row it is already showing.
+    fn progress_sink(&self, name: &str) -> Option<ToolProgress> {
+        let observer = self.observer.clone()?;
+        let name = name.to_string();
+        Some(Arc::new(move |chunk: &str| {
+            observer(AgentEvent::ToolOutput {
+                name: name.clone(),
+                chunk: chunk.to_string(),
+            });
+        }))
+    }
+
     /// Run every tool call the model asked for, in the order it asked for them, with consecutive
     /// read-only calls in flight together.
     pub(super) async fn dispatch_tool_calls(
@@ -182,7 +199,11 @@ where
 
         let results: Vec<Result<ToolResult, HarnessError>> = if batch.len() == 1 {
             let (call, _) = &batch[0];
-            vec![self.registry.execute(call, &cancel).await]
+            let progress = self.progress_sink(&call.name);
+            vec![self
+                .registry
+                .execute_with_progress(call, &cancel, progress.as_ref())
+                .await]
         } else {
             debug!(
                 calls = batch.len(),
@@ -192,7 +213,12 @@ where
             let futures = batch.iter().map(|(call, _)| {
                 let call = call.clone();
                 let token = cancel.clone();
-                async move { self.registry.execute(&call, &token).await }
+                let progress = self.progress_sink(&call.name);
+                async move {
+                    self.registry
+                        .execute_with_progress(&call, &token, progress.as_ref())
+                        .await
+                }
             });
             tokio::select! {
                 _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
@@ -254,7 +280,10 @@ where
                     arguments: edited.unwrap_or_else(|| effective_arguments.clone()),
                     ..tool_call.clone()
                 };
-                self.registry.execute(&call, state.cancel_token).await
+                let progress = self.progress_sink(&tool_call.name);
+                self.registry
+                    .execute_with_progress(&call, state.cancel_token, progress.as_ref())
+                    .await
             }
         };
 

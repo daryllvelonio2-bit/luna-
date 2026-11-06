@@ -301,6 +301,15 @@ pub enum AgentEvent {
         name: String,
         arguments: serde_json::Value,
     },
+    /// A chunk of a running tool's output, emitted as it arrives.
+    ///
+    /// Only tools that override [`crate::traits::Tool::execute_with_progress`] produce this; the
+    /// chunk boundaries are the reader's, not the tool's, so a consumer should buffer text rather
+    /// than assume lines. The complete output still arrives with `ToolExecuted`.
+    ToolOutput {
+        name: String,
+        chunk: String,
+    },
     ToolExecuted {
         name: String,
         output: String,

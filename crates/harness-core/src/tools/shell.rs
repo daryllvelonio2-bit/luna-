@@ -3,12 +3,12 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::ToolPreview;
 use crate::error::HarnessError;
-use crate::traits::Tool;
+use crate::traits::{Tool, ToolProgress};
 use crate::types::ToolResult;
 
 /// How long the `rtk rewrite` helper gets before the command runs unrewritten.
@@ -419,6 +419,68 @@ pub(crate) fn kill_process_group(leader: Option<u32>) {
 #[cfg(not(any(unix, windows)))]
 fn kill_process_group(_leader: Option<u32>) {}
 
+/// Read one of a child's pipes to the end, keeping the first `cap` bytes for the result while
+/// forwarding everything as it arrives.
+///
+/// Reading has to continue after the result cap is reached: a child blocked on a full pipe would
+/// never exit, and the command would time out for no reason. The progress stream is also kept
+/// whole past the cap — the result the model receives is the truncated copy, but the live tail is
+/// the newest lines, which are exactly the ones the cap would have dropped.
+async fn drain_pipe<R>(pipe: Option<R>, progress: Option<ToolProgress>, cap: usize) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut collected = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return collected;
+    };
+
+    // A chunk can end in the middle of a multi-byte character. Hold the incomplete tail back
+    // instead of decoding it as replacement characters on both sides of the split.
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let chunk = &buf[..n];
+                if collected.len() < cap {
+                    let room = cap - collected.len();
+                    collected.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
+                if let Some(progress) = &progress {
+                    pending.extend_from_slice(chunk);
+                    match std::str::from_utf8(&pending) {
+                        Ok(text) => {
+                            if !text.is_empty() {
+                                progress(text);
+                            }
+                            pending.clear();
+                        }
+                        Err(error) => {
+                            let valid = error.valid_up_to();
+                            if valid > 0 {
+                                // SAFETY: `valid_up_to` is always a UTF-8 boundary.
+                                if let Ok(text) = std::str::from_utf8(&pending[..valid]) {
+                                    progress(text);
+                                }
+                                pending.drain(..valid);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Some(progress) = &progress {
+        if !pending.is_empty() {
+            progress(&String::from_utf8_lossy(&pending));
+        }
+    }
+    collected
+}
+
 #[async_trait]
 impl Tool for TerminalTool {
     fn name(&self) -> &str {
@@ -467,6 +529,17 @@ impl Tool for TerminalTool {
         call_id: &str,
         args: &serde_json::Value,
         cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        self.execute_with_progress(call_id, args, cancel_token, None)
+            .await
+    }
+
+    async fn execute_with_progress(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        cancel_token: &CancellationToken,
+        progress: Option<&ToolProgress>,
     ) -> Result<ToolResult, HarnessError> {
         let command = match args.get("command").and_then(|c| c.as_str()) {
             Some(c) => c,
@@ -640,16 +713,31 @@ impl Tool for TerminalTool {
             }
         }
 
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let progress = progress.cloned();
+        let output_cap = self.output_max_bytes.saturating_add(1);
+
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 kill_process_group(child_pid);
                 Ok(ToolResult::error(call_id, "Command cancelled"))
             }
-            res = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()) => {
+            res = tokio::time::timeout(Duration::from_secs(timeout_secs), async move {
+                // Drain both pipes while the child runs. `wait_with_output` did this too, but it
+                // handed the bytes back only once the process was gone; here every chunk is also
+                // forwarded, which is what makes a long build visible while it is still running.
+                let (stdout, stderr, status) = tokio::join!(
+                    drain_pipe(stdout_pipe, progress.clone(), output_cap),
+                    drain_pipe(stderr_pipe, progress, output_cap),
+                    child.wait(),
+                );
+                (stdout, stderr, status)
+            }) => {
                 match res {
-                    Ok(Ok(output)) => {
-                        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
+                        let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+                        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
                         if !stderr.is_empty() {
                             if !stdout.is_empty() {
                                 stdout.push('\n');
@@ -662,13 +750,13 @@ impl Tool for TerminalTool {
                             stdout.push_str("\n\n[Truncated: output limit reached]");
                         }
 
-                        if output.status.success() {
+                        if status.success() {
                             Ok(ToolResult::success(call_id, stdout))
                         } else {
                             if is_sudo_auth_failure(&stdout) {
                                 *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             }
-                            let code = output.status.code().unwrap_or(-1);
+                            let code = status.code().unwrap_or(-1);
                             if is_benign_exit(&final_exec_command, code) {
                                 let content = if stdout.trim().is_empty() {
                                     "(no matches found)".to_string()
@@ -685,7 +773,7 @@ impl Tool for TerminalTool {
                             }
                         }
                     }
-                    Ok(Err(e)) => {
+                    Ok((_, _, Err(e))) => {
                         Ok(ToolResult::error(call_id, format!("Process error: {}", e)))
                     }
                     Err(_) => {

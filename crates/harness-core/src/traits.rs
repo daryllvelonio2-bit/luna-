@@ -159,6 +159,13 @@ pub trait NotesEngine: Send + Sync {
     async fn delete_note(&self, id: &str) -> Result<bool, HarnessError>;
 }
 
+/// Receives a tool's output while it is still running, so a UI can show progress instead of
+/// waiting for the call to finish.
+///
+/// Chunks are raw and may split lines (or even a UTF-8 character, for a caller that forwards
+/// bytes): consumers must treat the stream as text to sanitize and buffer, not as whole lines.
+pub type ToolProgress = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Unique name of the tool
@@ -177,6 +184,22 @@ pub trait Tool: Send + Sync {
         arguments: &serde_json::Value,
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError>;
+
+    /// Execute the tool, reporting output as it arrives.
+    ///
+    /// The default runs [`Tool::execute`] and reports nothing: only a tool that produces a stream
+    /// worth watching (a command, a long build) needs to override it. The returned result must
+    /// still be the complete output, so a caller that ignores progress sees exactly what it did
+    /// before.
+    async fn execute_with_progress(
+        &self,
+        call_id: &str,
+        arguments: &serde_json::Value,
+        cancel_token: &CancellationToken,
+        _progress: Option<&ToolProgress>,
+    ) -> Result<ToolResult, HarnessError> {
+        self.execute(call_id, arguments, cancel_token).await
+    }
 
     /// Whether running this tool can change the machine or the repository — write a file, run a
     /// command, apply a patch, mutate stored state. Read-only tools must not override this.
@@ -260,4 +283,18 @@ pub trait ToolRegistry: Send + Sync {
         call: &ToolCall,
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError>;
+
+    /// Dispatch a tool call, forwarding output as it arrives.
+    ///
+    /// A registry that does not forward progress still runs the call; the default is exactly
+    /// [`ToolRegistry::execute`]. Registries that hold real tools should override this so the
+    /// stream reaches the observer.
+    async fn execute_with_progress(
+        &self,
+        call: &ToolCall,
+        cancel_token: &CancellationToken,
+        _progress: Option<&ToolProgress>,
+    ) -> Result<ToolResult, HarnessError> {
+        self.execute(call, cancel_token).await
+    }
 }

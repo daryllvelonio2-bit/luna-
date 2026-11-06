@@ -308,6 +308,46 @@ async fn test_terminal_exit_code_and_timeout() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn terminal_forwards_output_while_the_command_runs() {
+    let dir = tempdir().unwrap();
+    let term = TerminalTool::new(dir.path().to_path_buf(), 5, 50_000);
+    let cancel = CancellationToken::new();
+
+    let streamed = Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = streamed.clone();
+    let progress: harness_core::ToolProgress =
+        Arc::new(move |chunk: &str| sink.lock().unwrap().push_str(chunk));
+
+    // Both pipes are forwarded, because a compiler writes half its diagnosis to stderr.
+    let res = term
+        .execute_with_progress(
+            "call_stream",
+            &json!({ "command": "printf 'alpha\\nbeta\\n'; printf 'gamma\\n' >&2" }),
+            &cancel,
+            Some(&progress),
+        )
+        .await
+        .unwrap();
+
+    assert!(!res.is_error, "{}", res.content);
+    for line in ["alpha", "beta", "gamma"] {
+        assert!(
+            res.content.contains(line),
+            "the result still carries the whole output ({line} missing): {}",
+            res.content
+        );
+    }
+    let streamed = streamed.lock().unwrap().clone();
+    for line in ["alpha", "beta", "gamma"] {
+        assert!(
+            streamed.contains(line),
+            "the live stream saw {line}: {streamed:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_timed_out_command_leaves_no_children_behind() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();

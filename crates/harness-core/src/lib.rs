@@ -52,7 +52,9 @@ pub use session::{
     CHECKPOINT_SECTIONS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use tasks::BackgroundTaskQueue;
-pub use traits::{MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolRegistry};
+pub use traits::{
+    MemoryEngine, ModelProvider, NotesEngine, Tool, ToolMiddleware, ToolProgress, ToolRegistry,
+};
 pub use types::*;
 pub use usage::{
     GroupBy, ModelPrice, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord,

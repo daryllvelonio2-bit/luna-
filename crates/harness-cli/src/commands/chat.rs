@@ -72,6 +72,42 @@ fn redraw_transcript(turns: &[TurnRecord], expanded: bool) {
     render_transcript(turns, expanded, get_terminal_width());
 }
 
+/// Keep a slash command's output in the transcript, then show it the way Ctrl+O would.
+///
+/// `execute_slash_command` prints its answer above the composer, which is enough until the screen
+/// is redrawn: those lines were never part of `turns`, so a Ctrl+O toggle or a later turn erased
+/// them. The capture turns them into a normal exchange — the typed command on the user's side,
+/// the printed text as Luna's reply — and an idle screen is redrawn immediately so the command
+/// and its output sit together instead of arriving as loose scrollback.
+fn finish_slash_command(
+    ui: &ChatUi,
+    turns: &mut Vec<TurnRecord>,
+    command: &str,
+    process_expanded: bool,
+    redraw: bool,
+) {
+    let Some(lines) = ui.end_command_capture() else {
+        return;
+    };
+    let reply = lines.join("\n");
+    if reply.trim().is_empty() {
+        return;
+    }
+    turns.push(TurnRecord {
+        user_query: command.trim().to_string(),
+        reasoning: None,
+        tools: Vec::new(),
+        tool_items: Vec::new(),
+        duration: std::time::Duration::ZERO,
+        reply,
+    });
+    if redraw && ui.is_attended {
+        crate::commands::clear_screen();
+        redraw_transcript(turns, process_expanded);
+        ui.draw_initial_box();
+    }
+}
+
 pub(crate) use history::clear_on_exit;
 use history::{append_prompt_history, load_prompt_history, KittyKeyboardGuard};
 use prompts::{prompt_approval_choice, prompt_sudo_password_dialog, ChatSudoPrompter};
@@ -607,6 +643,13 @@ pub async fn run_interactive_chat(
                             result_formatted: String::new(),
                             diff_lines,
                         });
+                }
+            }
+            harness_core::AgentEvent::ToolOutput { name, chunk } => {
+                // The tail under the running call. `todo_list` is invisible here for the same
+                // reason its call line is: the panel is its result, not a transcript entry.
+                if name != "todo_list" {
+                    ui_obs.push_tool_output(&chunk);
                 }
             }
             harness_core::AgentEvent::ToolExecuted {
@@ -1801,7 +1844,8 @@ pub async fn run_interactive_chat(
                                 .await;
                                 continue;
                             }
-                            match execute_slash_command(
+                            ui.begin_command_capture();
+                            let outcome = execute_slash_command(
                                 &cmd,
                                 &mut key_rx,
                                 &ui,
@@ -1825,8 +1869,15 @@ pub async fn run_interactive_chat(
                                 Some(delegate_tool.as_ref()),
                                 Some(&pending_images),
                             )
-                            .await?
-                            {
+                            .await?;
+                            finish_slash_command(
+                                &ui,
+                                &mut turns,
+                                &cmd,
+                                process_expanded,
+                                active_turn.is_none(),
+                            );
+                            match outcome {
                                 SlashOutcome::Exit => break,
                                 SlashOutcome::Turn { prompt, display } => launch_turn(
                                     &prompt,
@@ -1960,7 +2011,8 @@ pub async fn run_interactive_chat(
                                     .await;
                                     continue;
                                 }
-                                match execute_slash_command(
+                                ui.begin_command_capture();
+                                let outcome = execute_slash_command(
                                     &cmd,
                                     &mut key_rx,
                                     &ui,
@@ -1984,8 +2036,15 @@ pub async fn run_interactive_chat(
                                     Some(delegate_tool.as_ref()),
                                     Some(&pending_images),
                                 )
-                                .await?
-                                {
+                                .await?;
+                                finish_slash_command(
+                                    &ui,
+                                    &mut turns,
+                                    &cmd,
+                                    process_expanded,
+                                    active_turn.is_none(),
+                                );
+                                match outcome {
                                     SlashOutcome::Exit => break,
                                     SlashOutcome::Turn { prompt, display } => launch_turn(
                                         &prompt,
@@ -2054,7 +2113,8 @@ pub async fn run_interactive_chat(
                             || command_query.eq_ignore_ascii_case("exit")
                             || command_query.eq_ignore_ascii_case("quit")
                         {
-                            match execute_slash_command(
+                            ui.begin_command_capture();
+                            let outcome = execute_slash_command(
                                 command_query,
                                 &mut key_rx,
                                 &ui,
@@ -2078,8 +2138,15 @@ pub async fn run_interactive_chat(
                                 Some(delegate_tool.as_ref()),
                                 Some(&pending_images),
                             )
-                            .await?
-                            {
+                            .await?;
+                            finish_slash_command(
+                                &ui,
+                                &mut turns,
+                                command_query,
+                                process_expanded,
+                                active_turn.is_none(),
+                            );
+                            match outcome {
                                 SlashOutcome::Exit => break,
                                 SlashOutcome::Turn { prompt, display } => launch_turn(
                                     &prompt,
