@@ -150,6 +150,17 @@ fn an_untouched_turn_is_one_record() {
 }
 
 #[test]
+fn slash_commands_includes_default_model() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|cmd| cmd.name == "/default_model"),
+        "/default_model command must be registered in SLASH_COMMANDS"
+    );
+}
+
+#[test]
 fn slash_commands_includes_workers() {
     use super::commands::SLASH_COMMANDS;
     assert!(

@@ -44,11 +44,11 @@ mod tests;
 
 use commands::{
     command_entries, execute_slash_command, handle_auto_compact_command, handle_compact_command,
-    handle_compact_model_switch, handle_delete_command, handle_diff_command, handle_fork_command,
-    handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
-    handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
-    handle_thinking_switch, handle_usage_command, looks_like_path, select_slash_command,
-    SlashOutcome,
+    handle_compact_model_switch, handle_default_model_switch, handle_delete_command,
+    handle_diff_command, handle_fork_command, handle_model_switch, handle_name_command,
+    handle_new_command, handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
+    handle_summarize_and_new_command, handle_thinking_switch, handle_usage_command,
+    looks_like_path, select_slash_command, SlashOutcome,
 };
 use keys::AppKey;
 use render::{
@@ -937,6 +937,34 @@ pub async fn run_interactive_chat(
                     &current_model,
                     &mut compact_provider,
                     &mut compact_model,
+                    arg_opt,
+                )
+                .await?;
+                continue;
+            }
+            if query == "/default_model"
+                || query.starts_with("/default_model ")
+                || query == "/default-model"
+                || query.starts_with("/default-model ")
+            {
+                let arg = query
+                    .strip_prefix("/default_model")
+                    .or_else(|| query.strip_prefix("/default-model"))
+                    .unwrap_or("")
+                    .trim();
+                let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+                handle_default_model_switch(
+                    None,
+                    &ui,
+                    &mut config,
+                    &cred_manager,
+                    &discovery,
+                    &agent,
+                    store.as_ref(),
+                    &session_id,
+                    &mut current_provider,
+                    &mut current_model,
+                    &compact_model,
                     arg_opt,
                 )
                 .await?;

@@ -259,6 +259,8 @@ pub(crate) const RESERVED_COMMAND_NAMES: &[&str] = &[
     "/model",
     "/models",
     "/provider",
+    "/default_model",
+    "/default-model",
     "/compact-model",
     "/thinking",
     "/think",

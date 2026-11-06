@@ -784,6 +784,23 @@ async fn set_model_is_persisted_and_reported_by_get_and_list() {
 }
 
 #[tokio::test]
+async fn clear_model_drops_the_session_pin_and_reports_none() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+    store.set_model("s1", "deepseek", "glm-4.6").await.unwrap();
+
+    store.clear_model("s1").await.unwrap();
+    assert_eq!(
+        store.get("s1").await.unwrap().model,
+        None,
+        "a cleared pin follows the configured default again"
+    );
+
+    // Clearing a missing session is an error, same contract as set_model.
+    assert!(store.clear_model("nope").await.is_err());
+}
+
+#[tokio::test]
 async fn model_persistence_survives_reopening_the_database() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("sessions.db");

@@ -50,7 +50,7 @@ pub struct SessionRecord {
     /// The provider and model this session last ran with (`/model` switch, or the model in
     /// use when the session was created by `/new`). `None` until the session has a model of
     /// its own, so a session that never picked one resumes on the config default instead of
-    /// resurrecting a stale id.
+    /// resurrecting a stale id. `/default_model` global scope clears it again.
     pub model: Option<(String, String)>,
     /// The provider and model this session uses for compaction (`/compact-model`). `None`
     /// until a session-specific compaction model is set; defaults to global config or the active model.
@@ -101,6 +101,10 @@ pub trait SessionStore: Send + Sync {
     /// Record the provider and model this session runs with (`/model`). Both parts are stored
     /// together so a resume restores the exact pair, not a half.
     async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), HarnessError>;
+
+    /// Clear this session's model pin so it follows the configured default (`/default_model`
+    /// global scope). `None` is what a session that never picked its own model reports.
+    async fn clear_model(&self, id: &str) -> Result<(), HarnessError>;
 
     /// Record the provider and model this session uses for compaction (`/compact-model`).
     async fn set_compact_model(

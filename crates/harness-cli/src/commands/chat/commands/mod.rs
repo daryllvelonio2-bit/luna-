@@ -181,6 +181,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Switch provider and model",
     },
     SlashCommand {
+        name: "/default_model",
+        details: "Choose the default provider and model (this session or global)",
+    },
+    SlashCommand {
         name: "/compact-model",
         details: "Choose provider and model for context compaction",
     },
@@ -371,6 +375,32 @@ pub(crate) async fn execute_slash_command(
         .filter(|s| !s.is_empty());
 
     match name {
+        "/default_model" | "/default-model" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_default_model_switch(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                agent,
+                store,
+                session_id,
+                current_provider,
+                current_model,
+                compact_model,
+                arg,
+            )
+            .await
+            {
+                ui.emit_above(&format!(
+                    "{} Failed to set default model: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
+            Ok(SlashOutcome::Continue)
+        }
         "/model" | "/models" | "/provider" => {
             ui.redraw_input_line();
             if let Err(e) = handle_model_switch(
@@ -1069,6 +1099,240 @@ pub(crate) async fn handle_model_switch(
         .await;
     ui.clear_box_on_exit();
     ui.draw_initial_box();
+
+    Ok(())
+}
+
+/// `/default_model`: choose the provider/model new sessions start on.
+///
+/// The picker chain is the one `/model` uses — provider, then model — with a trailing scope
+/// choice. Session scope stamps the session row, exactly like `/model`; global scope writes
+/// `model.provider` / `model.default` and clears the session pin so every future session follows
+/// the configured default.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_default_model_switch(
+    mut key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
+    ui: &ChatUi,
+    config: &mut Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &SqliteSessionStore,
+    session_id: &str,
+    current_provider: &mut String,
+    current_model: &mut String,
+    compact_model: &Option<String>,
+    arg: Option<&str>,
+) -> Result<(), HarnessError> {
+    let scope = arg.map(|a| a.trim().to_ascii_lowercase());
+    let explicit_global = scope
+        .as_deref()
+        .is_some_and(|a| matches!(a, "global" | "--global" | "g"));
+    let explicit_session = scope
+        .as_deref()
+        .is_some_and(|a| matches!(a, "session" | "--session" | "this" | "local" | "s"));
+
+    let Some((chosen_provider, chosen_model)) = pick_provider_and_model(
+        key_rx.as_deref_mut(),
+        ui,
+        cred_manager,
+        discovery,
+        current_provider.as_str(),
+        current_model.as_str(),
+        true,
+    )
+    .await?
+    else {
+        ui.clear_box_on_exit();
+        ui.draw_initial_box();
+        return Ok(());
+    };
+
+    // Scope comes after the model picker, like `/compact-model`. An explicit argument skips the
+    // menu so `/default_model global` remains usable without another prompt.
+    let is_global = if explicit_global {
+        true
+    } else if explicit_session {
+        false
+    } else if let Some(ref mut rx) = key_rx {
+        let scope_options = [
+            "This session only (remember for this session)".to_string(),
+            "Globally (save as default for all sessions)".to_string(),
+        ];
+        while rx.try_recv().is_ok() {}
+        match select_from_rx(
+            rx,
+            ui,
+            "Default Model Scope",
+            &scope_options,
+            0,
+            true,
+            false,
+        )
+        .await
+        {
+            Some(1) => true,
+            Some(0) => false,
+            None => {
+                ui.clear_box_on_exit();
+                ui.draw_initial_box();
+                return Ok(());
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    // Resolve the config layers before touching live state: a broken config file should fail the
+    // command rather than half-apply it.
+    let layers = if is_global {
+        Some(harness_core::config::process_layers(
+            crate::commands::config::catalog_defaults(),
+        )?)
+    } else {
+        None
+    };
+
+    let new_provider = Arc::new(GenericProviderClient::new(
+        chosen_provider.clone(),
+        chosen_model.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&chosen_provider),
+    )?);
+
+    {
+        let mut ag = agent.lock().await;
+        ag.set_provider(new_provider);
+        ag.set_context_window(Some(context_window(
+            config,
+            discovery,
+            &chosen_provider,
+            &chosen_model,
+        ) as usize));
+    }
+
+    *current_provider = chosen_provider.clone();
+    *current_model = chosen_model.clone();
+
+    let mut persisted_globally = false;
+    if let Some(layers) = layers {
+        let provider_write =
+            harness_core::config::set_in_file(&layers, "model.provider", &chosen_provider);
+        let model_write =
+            harness_core::config::set_in_file(&layers, "model.default", &chosen_model);
+
+        match (&provider_write, &model_write) {
+            (Ok(_), Ok(_)) => {
+                config.model.provider = chosen_provider.clone();
+                config.model.default = chosen_model.clone();
+                // The session pin outranks the config default on resume, so drop it: "global"
+                // means this session follows the configured default too.
+                if let Err(error) = store.clear_model(session_id).await {
+                    ui.emit_above(&format!(
+                        "{} Default model saved globally, but clearing this session's model pin failed: {}",
+                        "⚠".yellow(),
+                        error
+                    ));
+                }
+                persisted_globally = true;
+            }
+            _ => {
+                if let Err(error) = &provider_write {
+                    ui.emit_above(&format!(
+                        "{} Failed to persist global provider: {}",
+                        "⚠".yellow(),
+                        error
+                    ));
+                }
+                if let Err(error) = &model_write {
+                    ui.emit_above(&format!(
+                        "{} Failed to persist global model: {}",
+                        "⚠".yellow(),
+                        error
+                    ));
+                }
+                // The global write failed, so at least keep the pair on this session's row.
+                if let Err(error) = store
+                    .set_model(session_id, &chosen_provider, &chosen_model)
+                    .await
+                {
+                    ui.emit_above(&format!(
+                        "{} Model switched, but persisting it for this session failed: {}",
+                        "⚠".yellow(),
+                        error
+                    ));
+                }
+            }
+        }
+    } else if let Err(error) = store
+        .set_model(session_id, &chosen_provider, &chosen_model)
+        .await
+    {
+        ui.emit_above(&format!(
+            "{} Model switched, but persisting it for this session failed: {}",
+            "⚠".yellow(),
+            error
+        ));
+    }
+
+    // Keep compaction on the active model while no dedicated compaction model is configured,
+    // matching `/model`.
+    if compact_model.is_none() {
+        if let Ok(comp_client) = GenericProviderClient::new(
+            chosen_provider.clone(),
+            chosen_model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&chosen_provider),
+        ) {
+            agent
+                .lock()
+                .await
+                .set_compaction(Some(harness_core::CompactionSetup {
+                    provider: Arc::new(comp_client),
+                    model: chosen_model.clone(),
+                }));
+        }
+    }
+
+    let context_max = context_window(config, discovery, &chosen_provider, &chosen_model);
+    let context_used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
+    ui.set_model(&chosen_model, context_used, context_max);
+    super::refresh_antigravity_status_if_needed(ui, &chosen_provider, &chosen_model, cred_manager)
+        .await;
+    ui.clear_box_on_exit();
+    ui.draw_initial_box();
+
+    if persisted_globally {
+        ui.emit_above(&format!(
+            "{} Default model set globally: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    } else if is_global {
+        // The warning above explains the failed write; name the live switch too.
+        ui.emit_above(&format!(
+            "{} Default model switched for this session: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Default model set for this session: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    }
 
     Ok(())
 }

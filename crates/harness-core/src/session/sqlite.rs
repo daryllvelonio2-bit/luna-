@@ -598,6 +598,23 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
+    async fn clear_model(&self, id: &str) -> Result<(), HarnessError> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let updated = conn
+                .execute("UPDATE sessions SET model = '' WHERE id = ?1", params![id])
+                .map_err(|error| session_error("failed to clear the session model", error))?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn set_compact_model(
         &self,
         id: &str,
