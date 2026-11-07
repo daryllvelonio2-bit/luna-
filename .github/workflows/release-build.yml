@@ -1,0 +1,28 @@
+name: Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or SHA to build'
+        required: false
+        default: 'main'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --bin luna
+
+      - name: Upload luna binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luna-binary
+          path: target/release/luna
