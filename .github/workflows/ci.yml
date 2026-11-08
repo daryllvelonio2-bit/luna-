@@ -23,6 +23,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install ALSA system dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev
+
       # Formatting is its own step so a whitespace failure reads as one line instead of
       # scrolling past in the middle of a compile log.
       - name: cargo fmt --check
