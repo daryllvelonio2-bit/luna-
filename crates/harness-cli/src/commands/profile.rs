@@ -212,68 +212,90 @@ pub fn handle_profile_command(
 ) -> Result<(), HarnessError> {
     let profiles_dir = config.paths.profiles_dir.clone();
     match command {
-        ProfileCommand::List => list(&profiles_dir),
+        ProfileCommand::List => {
+            println!("{}", list_text(&profiles_dir));
+            Ok(())
+        }
         ProfileCommand::Create { name } => {
             let dir = create_profile_interactive(name, global)?;
             println!("{} Created {}", "✔".green().bold(), dir.display());
             Ok(())
         }
-        ProfileCommand::Show { name, full } => show(
-            name.as_deref().unwrap_or(DEFAULT_PROFILE),
-            &profiles_dir,
-            full,
-        ),
+        ProfileCommand::Show { name, full } => {
+            println!(
+                "{}",
+                show_text(
+                    name.as_deref().unwrap_or(DEFAULT_PROFILE),
+                    &profiles_dir,
+                    full
+                )?
+            );
+            Ok(())
+        }
         ProfileCommand::Delete { name, force } => delete(&name, &profiles_dir, force),
-        ProfileCommand::Path { name } => path(name.as_deref().unwrap_or(DEFAULT_PROFILE), config),
+        ProfileCommand::Path { name } => {
+            println!(
+                "{}",
+                path_text(name.as_deref().unwrap_or(DEFAULT_PROFILE), config)?
+            );
+            Ok(())
+        }
     }
 }
 
-fn list(profiles_dir: &Path) -> Result<(), HarnessError> {
+/// The `profile list` body, as text the caller prints or hands to the chat UI.
+pub(crate) fn list_text(profiles_dir: &Path) -> String {
     let catalog = profiles::catalog(profiles_dir);
     if catalog.is_empty() {
-        println!("{}", "No profiles found.".yellow());
-        return Ok(());
+        return "No profiles found.".yellow().to_string();
     }
+    let mut out = String::new();
     for entry in catalog {
         let marker = if entry.builtin {
             format!(" {}", "◂ default".cyan())
         } else {
             String::new()
         };
-        println!(
-            "  {}{}  {}",
+        out.push_str(&format!(
+            "  {}{}  {}\n",
             entry.name.bold(),
             marker,
             entry.summary.dimmed()
-        );
+        ));
     }
-    Ok(())
+    out.trim_end_matches('\n').to_string()
 }
 
-fn show(name: &str, profiles_dir: &Path, full: bool) -> Result<(), HarnessError> {
+/// The `profile show` body, as text the caller prints or hands to the chat UI.
+pub(crate) fn show_text(
+    name: &str,
+    profiles_dir: &Path,
+    full: bool,
+) -> Result<String, HarnessError> {
     let profile = profiles::load(name, profiles_dir)?;
-    println!("{}", profile.name.bold());
+    let mut out = String::new();
+    out.push_str(&format!("{}\n", profile.name.bold()));
     if !profile.summary.is_empty() {
-        println!("{}", profile.summary.dimmed());
+        out.push_str(&format!("{}\n", profile.summary.dimmed()));
     }
     if let Some(dir) = &profile.dir {
-        println!("{} {}", "path:".dimmed(), dir.display());
+        out.push_str(&format!("{} {}\n", "path:".dimmed(), dir.display()));
     }
-    println!();
-    println!("{}", "Persona".cyan().bold());
-    println!("{}", profile.persona);
-    println!();
-    println!("{}", "Behavior".cyan().bold());
-    println!("{}", profile.behavior);
+    out.push('\n');
+    out.push_str(&format!("{}\n", "Persona".cyan().bold()));
+    out.push_str(&format!("{}\n", profile.persona));
+    out.push('\n');
+    out.push_str(&format!("{}\n", "Behavior".cyan().bold()));
+    out.push_str(&format!("{}\n", profile.behavior));
     if full {
-        println!();
-        println!(
-            "{}",
+        out.push('\n');
+        out.push_str(&format!(
+            "{}\n",
             "Static contract (not editable through a profile)".dimmed()
-        );
-        println!("{}", crate::commands::profile::static_contract_preview());
+        ));
+        out.push_str(&format!("{}\n", static_contract_preview()));
     }
-    Ok(())
+    Ok(out.trim_end_matches('\n').to_string())
 }
 
 /// The locked part of the system prompt, for `profile show --full`.
@@ -282,9 +304,10 @@ pub fn static_contract_preview() -> String {
         .unwrap_or_else(|error| format!("(could not load prompts.md: {error})"))
 }
 
-fn path(name: &str, config: &Config) -> Result<(), HarnessError> {
+/// The `profile path` body, as text the caller prints or hands to the chat UI.
+pub(crate) fn path_text(name: &str, config: &Config) -> Result<String, HarnessError> {
     if name == DEFAULT_PROFILE {
-        println!("{}", home_dir().join(".luna").display());
+        Ok(home_dir().join(".luna").display().to_string())
     } else {
         let dir = profiles::profile_dir(&config.paths.profiles_dir, name);
         if !dir.join(profiles::PROFILE_FILE).is_file() {
@@ -293,20 +316,11 @@ fn path(name: &str, config: &Config) -> Result<(), HarnessError> {
                 name
             )));
         }
-        println!("{}", dir.display());
+        Ok(dir.display().to_string())
     }
-    Ok(())
 }
 
 fn delete(name: &str, profiles_dir: &Path, force: bool) -> Result<(), HarnessError> {
-    profiles::validate_name(name)?;
-    let dir = profiles::profile_dir(profiles_dir, name);
-    if !dir.join(profiles::PROFILE_FILE).is_file() {
-        return Err(HarnessError::ConfigurationError(format!(
-            "profile '{}' not found",
-            name
-        )));
-    }
     if !force {
         if !std::io::stdin().is_terminal() {
             return Err(HarnessError::ConfigurationError(
@@ -324,11 +338,25 @@ fn delete(name: &str, profiles_dir: &Path, force: bool) -> Result<(), HarnessErr
             return Ok(());
         }
     }
+    delete_profile(name, profiles_dir)?;
+    println!("{} Deleted {}", "✔".green().bold(), name);
+    Ok(())
+}
+
+/// Remove a custom profile and its launcher. The caller owns any confirmation prompt.
+pub(crate) fn delete_profile(name: &str, profiles_dir: &Path) -> Result<(), HarnessError> {
+    profiles::validate_name(name)?;
+    let dir = profiles::profile_dir(profiles_dir, name);
+    if !dir.join(profiles::PROFILE_FILE).is_file() {
+        return Err(HarnessError::ConfigurationError(format!(
+            "profile '{}' not found",
+            name
+        )));
+    }
     std::fs::remove_dir_all(&dir).map_err(|error| {
         HarnessError::Io(format!("failed to remove {}: {}", dir.display(), error))
     })?;
     remove_launcher(name)?;
-    println!("{} Deleted {}", "✔".green().bold(), name);
     Ok(())
 }
 
@@ -420,6 +448,45 @@ pub fn create_profile_interactive(
         }
     }
 
+    create_profile_with(
+        &profiles_dir,
+        source,
+        &name,
+        summary,
+        persona,
+        behavior,
+        copy_providers,
+        &notes,
+        &memories,
+    )
+}
+
+/// Assemble a profile from already-collected answers and move it into place.
+///
+/// The interactive (dialoguer) and in-chat (modal) wizards both gather their answers differently
+/// but must produce the same profile, so the filesystem work lives here only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_profile_with(
+    profiles_dir: &Path,
+    source: &Config,
+    name: &str,
+    summary: String,
+    persona: String,
+    behavior: String,
+    copy_providers: bool,
+    notes: &[PathBuf],
+    memories: &[String],
+) -> Result<PathBuf, HarnessError> {
+    profiles::validate_name(name)?;
+    let dest = profiles::profile_dir(profiles_dir, name);
+    if dest.exists() {
+        return Err(HarnessError::ConfigurationError(format!(
+            "profile '{}' already exists at {}",
+            name,
+            dest.display()
+        )));
+    }
+
     let staging = profiles_dir.join(format!(".staging-{}-{}", name, std::process::id()));
     if staging.exists() {
         std::fs::remove_dir_all(&staging).ok();
@@ -440,7 +507,7 @@ pub fn create_profile_interactive(
     paths.ensure_dirs()?;
 
     let profile = Profile {
-        name: name.clone(),
+        name: name.to_string(),
         summary,
         persona,
         behavior,
@@ -461,8 +528,8 @@ pub fn create_profile_interactive(
     // Create the destination schema now so the profile opens without a first-write delay.
     // Sessions are never carried into a new profile.
     harness_core::session::SqliteSessionStore::new(Some(paths.sessions_db.clone()))?;
-    copy_notes(&notes, &paths.notes_dir)?;
-    copy_memories(&source.paths.memory_db, &paths.memory_db, &memories)?;
+    copy_notes(notes, &paths.notes_dir)?;
+    copy_memories(&source.paths.memory_db, &paths.memory_db, memories)?;
 
     if dest.exists() {
         return Err(HarnessError::ConfigurationError(format!(
@@ -478,7 +545,7 @@ pub fn create_profile_interactive(
         ))
     })?;
 
-    install_launcher(&name)?;
+    install_launcher(name)?;
     Ok(dest)
 }
 
@@ -501,7 +568,7 @@ fn prompt_line(message: &str, default: &str) -> Result<String, HarnessError> {
 
 /// Open the three editable sections in `$EDITOR` and read them back. A missing editor or a failed
 /// spawn leaves the seed text untouched rather than aborting creation.
-fn edit_prompts(name: &str, text: &ProfileText) -> Result<ProfileText, HarnessError> {
+pub(crate) fn edit_prompts(name: &str, text: &ProfileText) -> Result<ProfileText, HarnessError> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
@@ -529,6 +596,22 @@ fn edit_prompts(name: &str, text: &ProfileText) -> Result<ProfileText, HarnessEr
 struct NoteChoice {
     path: PathBuf,
     label: String,
+}
+
+/// The notes a new profile can inherit, as `(label, path)` pairs. Shared with the chat wizard.
+pub(crate) fn notes_for_copy(source: &Config) -> Vec<(String, PathBuf)> {
+    list_notes(&source.paths.notes_dir)
+        .into_iter()
+        .map(|choice| (choice.label, choice.path))
+        .collect()
+}
+
+/// The memories a new profile can inherit, as `(label, id)` pairs. Shared with the chat wizard.
+pub(crate) fn memories_for_copy(source: &Config) -> Vec<(String, String)> {
+    list_memories(&source.paths.memory_db)
+        .into_iter()
+        .map(|choice| (choice.label, choice.id))
+        .collect()
 }
 
 fn pick_notes(source: &Config) -> Result<Vec<PathBuf>, HarnessError> {

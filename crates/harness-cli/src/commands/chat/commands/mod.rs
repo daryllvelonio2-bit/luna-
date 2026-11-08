@@ -28,6 +28,7 @@ use crate::commands::sessions::{find_by_name, resolve_session, SessionSelection}
 mod picker;
 use picker::pick_provider_and_model;
 pub(crate) use picker::{input_from_rx, select_from_rx, select_slash_command};
+mod profile_wizard;
 mod usage;
 mod worker;
 pub(crate) use usage::handle_usage_command;
@@ -1122,44 +1123,33 @@ pub(crate) async fn execute_slash_command(
                     return Ok(SlashOutcome::Continue);
                 }
             };
-            // The chat's key reader owns stdin. Anything already queued belongs to the command
-            // line that was just submitted, not to the wizard, so drop it before the pause.
-            while key_rx.try_recv().is_ok() {}
-            // `handle_profile_command` uses `dialoguer`, which reads stdin directly. Without this
-            // pause the reader thread races it for every keystroke, and the first press in the
-            // wizard is stolen — which reads as having to press a key twice.
-            let _pause = super::keys::pause_input();
-            // The wizard (name, $EDITOR prompts, checkbox pickers) needs a cooked terminal.
-            let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-            if raw {
-                let _ = crossterm::terminal::disable_raw_mode();
-            }
-            let result = crate::commands::profile::handle_profile_command(command, config, &global);
-            if raw {
-                let _ = crossterm::terminal::enable_raw_mode();
-            }
-            match result {
-                Ok(()) => {
-                    if matches!(arg.map(str::trim), Some(value) if value.starts_with("create") || value.starts_with("new"))
-                    {
-                        let name = arg
-                            .and_then(|value| value.split_whitespace().nth(1))
-                            .unwrap_or("<name>");
-                        ui.emit_above(&format!(
-                            "{} Open the new profile with `luna {}` or `{}`.",
-                            "✔".green().bold(),
-                            name,
-                            name
-                        ));
-                    }
+            // Attend an interactive chat with the chat's own modal wizard: it reads the same key
+            // channel as approvals and pickers, so the terminal stays in raw mode and no second
+            // reader can race the first for a keystroke.
+            let result = if ui.is_attended {
+                profile_wizard::handle_profile_command(command, config, &global, key_rx, ui).await
+            } else {
+                // Non-interactive fallback: the plain CLI flow. The reader is paused because
+                // `dialoguer` reads stdin directly whenever a terminal is attached.
+                while key_rx.try_recv().is_ok() {}
+                let _pause = super::keys::pause_input();
+                let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+                if raw {
+                    let _ = crossterm::terminal::disable_raw_mode();
                 }
-                Err(error) => {
-                    ui.emit_above(&format!(
-                        "{} Profile command failed: {}",
-                        "✖".red().bold(),
-                        error
-                    ));
+                let result =
+                    crate::commands::profile::handle_profile_command(command, config, &global);
+                if raw {
+                    let _ = crossterm::terminal::enable_raw_mode();
                 }
+                result
+            };
+            if let Err(error) = result {
+                ui.emit_above(&format!(
+                    "{} Profile command failed: {}",
+                    "✖".red().bold(),
+                    error
+                ));
             }
             Ok(SlashOutcome::Continue)
         }

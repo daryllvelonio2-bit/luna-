@@ -30,7 +30,8 @@ const ESC_PEEK_TIMEOUT: Duration = Duration::from_millis(30);
 /// pause takes effect before a keystroke is lost, long enough to stay idle at rest.
 const READ_SLICE: Duration = Duration::from_millis(50);
 
-/// Non-zero while another part of the process owns stdin (`/profile create` runs `dialoguer`).
+/// Non-zero while another part of the process owns stdin (`$EDITOR` opened by the profile
+/// wizard, or `dialoguer` when the chat is not attended).
 ///
 /// The chat reads keys on its own thread. A prompt that reads stdin directly would race that
 /// thread for every keystroke, which shows up as keys that need pressing twice. A command that
