@@ -295,14 +295,6 @@ pub async fn run_interactive_chat(
     selection: SessionSelection,
     explicit_model: bool,
 ) -> Result<(), HarnessError> {
-    // The build check runs alongside setup rather than before it, so a launch never waits on the
-    // network for a notice. The line is printed once the first frame is on screen (below).
-    let update_task = if Term::stdout().features().is_attended() {
-        super::update::start(&config)
-    } else {
-        None
-    };
-
     // Every turn is appended to this session; a resumed one replays its recent transcript.
     // Resolved before the provider client so the session's stored model choice can take effect.
     let store = Arc::new(open_store(&config)?);
@@ -1593,14 +1585,6 @@ pub async fn run_interactive_chat(
     }
 
     ui.draw_initial_box();
-
-    // A notice, not a gate: the check was started at the top of the function and given the whole
-    // of setup to finish, and it never reports a failure.
-    if let Some(task) = update_task {
-        if let Some(status) = super::update::finish(task).await {
-            ui.emit_above(&status.notice());
-        }
-    }
 
     #[cfg(unix)]
     let mut sigwinch =

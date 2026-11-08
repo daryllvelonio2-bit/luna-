@@ -400,6 +400,39 @@ async fn main() -> Result<(), HarnessError> {
         commands::auth::handle_interactive_auth(cred_manager.clone()).await?;
         config = config::resolve(&layers)?.into_config();
     }
+
+    // The build question comes before the chat UI exists, so the first frame on screen is the
+    // answer to something the launch itself asked. It is only asked on an attended chat, and the
+    // check itself is silent unless a newer build was actually found.
+    if is_interactive_chat {
+        if let Some(status) = commands::update::check_at_launch(&config).await {
+            match commands::update::prompt(&status) {
+                commands::update::LaunchAction::Update => {
+                    match commands::update::install(&status, &config).await {
+                        Ok(path) => {
+                            println!(
+                                "{} Installed {} → {} at {}. Restart luna to use it.",
+                                "✔".green().bold(),
+                                commands::update::short(&status.current),
+                                commands::update::short(&status.latest),
+                                path.display()
+                            );
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            eprintln!("{} Update failed: {}", "✖".red().bold(), error);
+                            eprintln!(
+                                "  Run `python3 scripts/auto_build_install.py` to update manually."
+                            );
+                        }
+                    }
+                }
+                commands::update::LaunchAction::Remind => commands::update::remind(&status),
+                commands::update::LaunchAction::Later => {}
+            }
+        }
+    }
+
     let discovery = Arc::new(ModelDiscovery::new(
         Some(config.paths.models_cache.clone()),
         MODEL_CACHE_TTL_HOURS,

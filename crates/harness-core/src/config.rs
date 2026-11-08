@@ -834,6 +834,8 @@ pub struct UpdateSettings {
     pub branch: String,
     /// Workflow file name (or numeric id) that produces the binary.
     pub workflow: String,
+    /// Name of the uploaded artifact inside that workflow run.
+    pub artifact: String,
 }
 
 impl Default for UpdateSettings {
@@ -844,6 +846,7 @@ impl Default for UpdateSettings {
             repo: "daryllvelonio2-bit/luna-".to_string(),
             branch: "main".to_string(),
             workflow: "release-build.yml".to_string(),
+            artifact: "luna-binary".to_string(),
         }
     }
 }

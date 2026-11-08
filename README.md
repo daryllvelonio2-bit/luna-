@@ -366,15 +366,30 @@ each enabled server and prints the namespaced tools the agent actually sees.
 ### 2.16 Build updates at launch
 
 A binary built by the release workflow carries the commit it was built from, and `luna --version`
-reports it (`luna 0.1.4 (f6faaf8)`). On an attended chat launch, Luna asks GitHub for the newest
-successful `release-build` run and prints one line above the composer when its commit differs:
+reports it (`luna 0.1.4 (f6faaf8)`). Before an attended chat opens, Luna checks the newest
+successful `release-build` run and, when the commits differ, asks with a centred modal:
 
 ```
-↑ New build available: f6faaf8 → 3c1d9e2. Update with `scripts/auto_build_install.py`.
+╭─ Update available ────────────────────────────────────╮
+│  A newer build of Luna is ready to install.           │
+│  ┌─ Build ──────────────────────────────────────────┐ │
+│  │ running f6faaf8 → 3c1d9e2f                       │ │
+│  └──────────────────────────────────────────────────┘ │
+│  ❯ [u] Update now                                     │
+│    [r] Remind me on the next update                   │
+│    [l] Later                                          │
+╰───────────────────────────────────────────────────────╯
 ```
 
-The check runs beside startup, never delays the composer, fails silently offline, and caches its
-answer for six hours. It is configured in `~/.luna/config.yaml`:
+- **Update now** downloads the artifact that build already produced and swaps it in beside the
+  running binary. The next launch starts the new build (the running one is untouched). It needs a
+  GitHub token in `GITHUB_TOKEN`/`GH_TOKEN` or an authenticated `gh` CLI.
+- **Remind me on the next update** skips this build; an even newer one asks again.
+- **Later** asks again on the next launch.
+
+The check runs before the chat is built, gives up after two seconds, fails silently offline, and
+caches its answer for six hours. Disable it with `update.check: false` (or
+`LUNA_UPDATE_CHECK=false`). It is configured in `~/.luna/config.yaml`:
 
 ```yaml
 update:
@@ -383,6 +398,7 @@ update:
   repo: daryllvelonio2-bit/luna-
   branch: main
   workflow: release-build.yml
+  artifact: luna-binary
 ```
 
 ### 3. Interactive Chat REPL
