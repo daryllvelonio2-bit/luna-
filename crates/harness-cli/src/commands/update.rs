@@ -87,10 +87,33 @@ enum Choice {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateStatus {
     pub current: String,
+    /// The running build in `luna --version` form, e.g. `0.1.4 (6d5107c4)`.
+    pub current_version: String,
     pub latest: String,
+    /// The package version of the newer commit, or this build's version if it could not be read.
+    pub latest_version: String,
     /// The workflow run that produced `latest`; `None` when it came from an older cache format.
     pub run_id: Option<u64>,
 }
+
+impl UpdateStatus {
+    /// What the build in hand calls itself.
+    pub fn current_label(&self) -> &str {
+        &self.current_version
+    }
+
+    /// What the newer build calls itself: its manifest version plus the commit that carries it.
+    pub fn latest_label(&self) -> String {
+        format!("{} ({})", self.latest_version, short(&self.latest))
+    }
+}
+
+/// The running build as `luna --version` prints it.
+const CURRENT_DISPLAY: &str = env!("LUNA_VERSION");
+/// Used when the newer commit's manifest cannot be fetched; the package version changes rarely.
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Reading one small file from raw.githubusercontent should never hold up the question.
+const VERSION_TIMEOUT: Duration = Duration::from_millis(800);
 
 // ---------------------------------------------------------------- launch check
 
@@ -108,8 +131,13 @@ pub async fn check_at_launch(config: &Config) -> Option<UpdateStatus> {
         .as_ref()
         .filter(|entry| !entry.latest.is_empty() && now.saturating_sub(entry.checked_at) < ttl);
 
-    let (latest, run_id, skipped) = match fresh {
-        Some(entry) => (entry.latest.clone(), entry.run_id, entry.skipped.clone()),
+    let (latest, latest_version, run_id, skipped) = match fresh {
+        Some(entry) => (
+            entry.latest.clone(),
+            entry.latest_version.clone(),
+            entry.run_id,
+            entry.skipped.clone(),
+        ),
         None => {
             let build = fetch_latest(&config.update).await?;
             let skipped = previous.as_ref().and_then(|entry| entry.skipped.clone());
@@ -118,20 +146,41 @@ pub async fn check_at_launch(config: &Config) -> Option<UpdateStatus> {
                 &CacheEntry {
                     checked_at: now,
                     latest: build.sha.clone(),
+                    // Filled in below, and only when the question is actually going to be asked.
+                    latest_version: String::new(),
                     run_id: Some(build.run_id),
                     skipped: skipped.clone(),
                 },
             );
-            (build.sha, Some(build.run_id), skipped)
+            (build.sha, String::new(), Some(build.run_id), skipped)
         }
     };
 
     if latest == BUILD_SHA || skipped.as_deref() == Some(latest.as_str()) {
         return None;
     }
+
+    // Only a launch that is about to show the question pays for this; a normal launch never does.
+    // The answer is written back to the cache so repeated "Later"s do not refetch it.
+    let latest_version = match latest_version.is_empty() {
+        false => latest_version,
+        true => {
+            let fetched = fetch_remote_version(&config.update, &latest).await;
+            if let Some(version) = &fetched {
+                if let Some(mut entry) = read_cache(&cache).filter(|entry| entry.latest == latest) {
+                    entry.latest_version = version.clone();
+                    write_cache(&cache, &entry);
+                }
+            }
+            fetched.unwrap_or_else(|| PACKAGE_VERSION.to_string())
+        }
+    };
+
     Some(UpdateStatus {
         current: BUILD_SHA.to_string(),
+        current_version: CURRENT_DISPLAY.to_string(),
         latest,
+        latest_version,
         run_id,
     })
 }
@@ -142,6 +191,7 @@ pub fn remind(status: &UpdateStatus) {
     let mut entry = read_cache(&path).unwrap_or_default();
     entry.checked_at = now_secs();
     entry.latest = status.latest.clone();
+    entry.latest_version = status.latest_version.clone();
     entry.run_id = status.run_id.or(entry.run_id);
     entry.skipped = Some(status.latest.clone());
     write_cache(&path, &entry);
@@ -326,8 +376,8 @@ fn render_update_box(status: &UpdateStatus, selected: usize, width: usize) -> St
     lines.push(inner_row(&format!(
         "{} {} → {}",
         "running".dimmed(),
-        short(&status.current).bold(),
-        short(&status.latest).cyan().bold()
+        status.current_label().bold(),
+        status.latest_label().cyan().bold()
     )));
     lines.push(inner_bottom());
     lines.push(blank.clone());
@@ -414,8 +464,8 @@ struct ProgressHeader {
 impl ProgressHeader {
     fn new(status: &UpdateStatus) -> Self {
         Self {
-            current: short(&status.current).to_string(),
-            latest: short(&status.latest).to_string(),
+            current: status.current_label().to_string(),
+            latest: status.latest_label(),
         }
     }
 }
@@ -571,13 +621,6 @@ fn render_progress_box(header: &ProgressHeader, state: &ProgressState, width: us
         lines.push(box_row(total, &format!(" {} {}", mark, label)));
     }
 
-    lines.push(box_blank(total));
-    let footer = if state.stage == Stage::Done {
-        "Done. Closing this screen."
-    } else {
-        "Please wait — the build installs in place."
-    };
-    lines.push(box_row(total, &format!(" {}", footer.dimmed())));
     lines.push(format!("╰{}╯", "─".repeat(total.saturating_sub(2))));
     lines.join("\n") + "\n"
 }
@@ -1061,6 +1104,60 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
     })
 }
 
+/// Read the newer commit's package version from its workspace manifest.
+///
+/// This is best-effort and deliberately short: it only runs when the update question is about to be
+/// shown, and a timeout simply falls back to this build's version. The commit is pinned, so the
+/// answer is stable for that build.
+async fn fetch_remote_version(settings: &config::UpdateSettings, sha: &str) -> Option<String> {
+    let url = format!(
+        "https://raw.githubusercontent.com/{}/{}/Cargo.toml",
+        settings.repo, sha
+    );
+    let client = reqwest::Client::builder()
+        .timeout(VERSION_TIMEOUT)
+        .build()
+        .ok()?;
+    let response = client
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let manifest = response.text().await.ok()?;
+    parse_workspace_version(&manifest)
+}
+
+/// The `version` under `[workspace.package]`, which is what `CARGO_PKG_VERSION` resolves to for the
+/// crates that inherit it. Other `version` keys (dependencies, `[package]`) are ignored.
+fn parse_workspace_version(manifest: &str) -> Option<String> {
+    let mut in_workspace_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_workspace_package = line == "[workspace.package]";
+            continue;
+        }
+        if !in_workspace_package {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("version") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheEntry {
     /// Unix seconds when GitHub answered. `u64` because a clock before the epoch is not a reason
@@ -1069,6 +1166,9 @@ struct CacheEntry {
     checked_at: u64,
     #[serde(default)]
     latest: String,
+    /// The newer commit's package version, learned lazily when the question is shown.
+    #[serde(default)]
+    latest_version: String,
     /// The workflow run that produced `latest`, for the artifact download.
     #[serde(default)]
     run_id: Option<u64>,
@@ -1123,7 +1223,9 @@ mod tests {
     fn status() -> UpdateStatus {
         UpdateStatus {
             current: "1111111111111111".to_string(),
+            current_version: "0.1.4 (11111111)".to_string(),
             latest: "2222222222222222".to_string(),
+            latest_version: "0.1.4".to_string(),
             run_id: Some(7),
         }
     }
@@ -1132,11 +1234,30 @@ mod tests {
     fn the_popup_names_both_builds_and_every_action() {
         let frame = render_update_box(&status(), DEFAULT_ACTION, 76);
         assert!(frame.contains("Update available"));
-        assert!(frame.contains("11111111"));
-        assert!(frame.contains("22222222"));
+        assert!(frame.contains("0.1.4 (11111111)"));
+        assert!(frame.contains("0.1.4 (22222222)"));
         for action in ACTIONS {
             assert!(frame.contains(action), "missing {action}: {frame}");
         }
+    }
+
+    #[test]
+    fn the_workspace_version_is_parsed_from_the_manifest() {
+        assert_eq!(
+            parse_workspace_version("[workspace.package]\nversion = \"1.2.3\"\n"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            parse_workspace_version(
+                "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"0.9.0\"\n"
+            ),
+            Some("0.9.0".to_string())
+        );
+        assert_eq!(
+            parse_workspace_version("[package]\nversion = \"9.9.9\"\n"),
+            None
+        );
+        assert_eq!(parse_workspace_version(""), None);
     }
 
     #[test]

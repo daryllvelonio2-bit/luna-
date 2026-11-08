@@ -411,8 +411,8 @@ async fn main() -> Result<(), HarnessError> {
                     println!(
                         "{} Installed {} → {} at {}. Restart luna to use it.",
                         "✔".green().bold(),
-                        commands::update::short(&status.current),
-                        commands::update::short(&status.latest),
+                        status.current_label(),
+                        status.latest_label(),
                         path.display()
                     );
                     return Ok(());

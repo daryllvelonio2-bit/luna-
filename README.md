@@ -373,7 +373,7 @@ successful `release-build` run and, when the commits differ, asks with a centred
 ╭─ Update available ────────────────────────────────────╮
 │  A newer build of Luna is ready to install.           │
 │  ┌─ Build ──────────────────────────────────────────┐ │
-│  │ running f6faaf8 → 3c1d9e2f                       │ │
+│  │ running 0.1.4 (f6faaf8) → 0.1.4 (3c1d9e2f)       │ │
 │  └──────────────────────────────────────────────────┘ │
 │  ❯ [u] Update now                                     │
 │    [r] Remind me on the next update                   │
@@ -388,10 +388,10 @@ successful `release-build` run and, when the commits differ, asks with a centred
 
   ```
   ╭─ Updating Luna ───────────────────────────────────────╮
-  │  f6faaf8 → 3c1d9e2f                                   │
-  │  ┌─ Download ────────────────────────────────────────┐ │
+  │  0.1.4 (f6faaf8) → 0.1.4 (3c1d9e2f)                   │
+  │  ┌─ Download ───────────────────────────────────────┐ │
   │  │ ████████████████░░░░░░░░░░  47%  4.6 MB / 9.8 MB │ │
-  │  └───────────────────────────────────────────────────┘ │
+  │  └──────────────────────────────────────────────────┘ │
   │  ✔ Checking credentials                               │
   │  ✔ Finding the release build                          │
   │  ⠸ Downloading the build                              │
