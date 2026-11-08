@@ -173,6 +173,39 @@ fn counts_thinking_against_output(model: &str) -> bool {
     model.contains("gemini") || model.contains("thinking")
 }
 
+/// Make one tool's JSON Schema acceptable to Code Assist.
+///
+/// Google's `Schema.enum` is a list of *strings*. JSON Schema also permits an `enum` on a numeric
+/// property — `desktop_click_at` constrains `button` to `[0, 1, 2]` — and the numeric form arrives
+/// as a `TYPE_STRING` mismatch (`Invalid value at
+/// '...function_declarations[4].parameters.properties[0].value.enum[0]' (TYPE_STRING), 0`), which
+/// rejects the whole request before the model is called. Drop a non-string `enum` wherever it
+/// appears and keep the property: its type and description still say what it takes, and losing a
+/// constraint is a weaker prompt rather than a failed turn. A string `enum` — the shape the API
+/// accepts — is left untouched, including inside nested `items` and `properties`.
+fn gemini_safe_parameters(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let has_non_string_enum = map
+                .get("enum")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| !value.is_string()));
+            if has_non_string_enum {
+                map.remove("enum");
+            }
+            for child in map.values_mut() {
+                gemini_safe_parameters(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                gemini_safe_parameters(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build the Code Assist payload for one turn: messages translated to `contents`, tools to
 /// function declarations, and the reasoning effort to a thinking budget.
 pub(super) fn build_antigravity_payload(
@@ -441,10 +474,12 @@ pub(super) fn build_antigravity_payload(
         let func_decls: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
+                let mut parameters = t.parameters.clone();
+                gemini_safe_parameters(&mut parameters);
                 json!({
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters
+                    "parameters": parameters
                 })
             })
             .collect();

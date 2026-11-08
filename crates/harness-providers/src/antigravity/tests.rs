@@ -3,7 +3,8 @@
 use super::*;
 
 use harness_core::{
-    CompletionOptions, Message, ReasoningEffort, Role, StreamEvent, ToolCall, ToolResult,
+    CompletionOptions, Message, ReasoningEffort, Role, StreamEvent, ToolCall, ToolDefinition,
+    ToolResult,
 };
 use serde_json::json;
 
@@ -944,5 +945,73 @@ async fn a_credential_without_a_refresh_token_says_how_to_reimport_it() {
     assert!(
         message.contains("luna auth antigravity copy"),
         "the failure names the way back: {message}"
+    );
+}
+
+/// Code Assist parses `parameters` as Google's `Schema`, whose `enum` is a list of *strings*. A
+/// JSON Schema may constrain an integer with a numeric enum — `desktop_click_at` does,
+/// `button: [0, 1, 2]` — and the API answers `Invalid value at ... enum[0] (TYPE_STRING), 0`, a
+/// 400 that fails the turn before the model is called. The enum is dropped; the tool and the
+/// property stay, and string enums (the accepted shape) survive untouched.
+#[test]
+fn a_numeric_enum_is_dropped_before_code_assist_rejects_the_request() {
+    let tools = vec![ToolDefinition {
+        name: "desktop_click_at".to_string(),
+        description: "Click at a ref or coordinates.".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "button": {
+                    "type": "integer",
+                    "enum": [0, 1, 2],
+                    "description": "0 for left, 1 for right, 2 for middle."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "value", "paste"],
+                    "description": "How to write."
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": { "type": "integer", "enum": [0, 1] }
+                        }
+                    }
+                }
+            }
+        }),
+    }];
+
+    let payload = build_antigravity_payload(
+        &[Message::user("click")],
+        &tools,
+        &CompletionOptions::default(),
+        "gemini-3.8-flash",
+    );
+
+    let declarations = payload["request"]["tools"][0]["functionDeclarations"]
+        .as_array()
+        .expect("function declarations");
+    let parameters = &declarations[0]["parameters"];
+
+    let button = &parameters["properties"]["button"];
+    assert_eq!(button["type"], "integer", "the property itself is kept");
+    assert!(
+        button.get("enum").is_none(),
+        "a numeric enum is a TYPE_STRING mismatch: {button}"
+    );
+
+    let action = &parameters["properties"]["steps"]["items"]["properties"]["action"];
+    assert!(
+        action.get("enum").is_none(),
+        "the same rule applies inside items: {action}"
+    );
+
+    assert_eq!(
+        parameters["properties"]["mode"]["enum"],
+        json!(["auto", "value", "paste"]),
+        "a string enum is the shape Code Assist accepts and must survive"
     );
 }
