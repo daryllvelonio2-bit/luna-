@@ -360,11 +360,11 @@ mod tests {
 
     #[test]
     fn a_boolean_argument_is_read_from_a_bool_or_a_string() {
-        assert_eq!(flag(&json!({ "exact": true }), "exact", false), true);
-        assert_eq!(flag(&json!({ "exact": "true" }), "exact", false), true);
-        assert_eq!(flag(&json!({ "exact": "false" }), "exact", true), false);
-        assert_eq!(flag(&json!({ "exact": 0 }), "exact", true), false);
-        assert_eq!(flag(&json!({}), "exact", true), true);
+        assert!(flag(&json!({ "exact": true }), "exact", false));
+        assert!(flag(&json!({ "exact": "true" }), "exact", false));
+        assert!(!flag(&json!({ "exact": "false" }), "exact", true));
+        assert!(!flag(&json!({ "exact": 0 }), "exact", true));
+        assert!(flag(&json!({}), "exact", true));
     }
 
     #[test]

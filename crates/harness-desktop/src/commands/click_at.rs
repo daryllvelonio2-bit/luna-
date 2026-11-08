@@ -16,7 +16,7 @@ pub fn click_at(
     y: Option<i32>,
     button: u8,
 ) -> Response {
-    if !matches!(button, 0 | 1 | 2) {
+    if !matches!(button, 0..=2) {
         return Response::err(
             "click-at",
             &crate::error::DesktopError::invalid_args(format!(

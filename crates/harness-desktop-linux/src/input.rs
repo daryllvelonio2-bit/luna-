@@ -127,7 +127,7 @@ pub(crate) fn active_window() -> Result<Option<WindowRef>, DesktopError> {
         )
         .with_platform_detail(text)
     })?;
-    if value.as_object().map_or(true, |object| object.is_empty()) {
+    if value.as_object().is_none_or(|object| object.is_empty()) {
         return Ok(None);
     }
     let client: HyprClient = serde_json::from_value(value).map_err(|error| {
