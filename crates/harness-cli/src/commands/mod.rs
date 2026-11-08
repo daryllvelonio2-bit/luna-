@@ -19,6 +19,7 @@ pub mod sessions;
 pub mod skill;
 pub mod skills;
 pub mod supervisor;
+pub mod update;
 pub mod usage;
 pub mod voice;
 

@@ -363,6 +363,28 @@ server that fails to start or list its tools is reported and skipped — it neve
 `luna mcp list` prints the configured servers from the config alone; `luna mcp tools` spawns
 each enabled server and prints the namespaced tools the agent actually sees.
 
+### 2.16 Build updates at launch
+
+A binary built by the release workflow carries the commit it was built from, and `luna --version`
+reports it (`luna 0.1.4 (f6faaf8)`). On an attended chat launch, Luna asks GitHub for the newest
+successful `release-build` run and prints one line above the composer when its commit differs:
+
+```
+↑ New build available: f6faaf8 → 3c1d9e2. Update with `scripts/auto_build_install.py`.
+```
+
+The check runs beside startup, never delays the composer, fails silently offline, and caches its
+answer for six hours. It is configured in `~/.luna/config.yaml`:
+
+```yaml
+update:
+  check: true               # false = no network call at launch
+  check_interval_hours: 6   # 0 = check on every launch
+  repo: daryllvelonio2-bit/luna-
+  branch: main
+  workflow: release-build.yml
+```
+
 ### 3. Interactive Chat REPL
 Start an unbounded, stateful agent session (running `luna` opens the CLI automatically):
 ```bash

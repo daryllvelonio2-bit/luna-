@@ -67,6 +67,9 @@ pub struct Config {
     pub session: SessionSettings,
     pub telemetry: TelemetrySettings,
     pub usage: UsageSettings,
+    /// Whether a launch asks GitHub for a newer build of this binary. See [`UpdateSettings`].
+    #[serde(default)]
+    pub update: UpdateSettings,
     /// Who writes durable memory, and with what budget. See [`MemorySettings`].
     pub memory: MemorySettings,
     /// Deprecated: the persona the old onboarding flow used to select. Accepted so a config
@@ -145,6 +148,7 @@ impl Default for Config {
             session: SessionSettings::default(),
             telemetry: TelemetrySettings::default(),
             usage: UsageSettings::default(),
+            update: UpdateSettings::default(),
             memory: MemorySettings::default(),
             persona: serde_yaml::Value::Null,
             first_run: true,
@@ -805,6 +809,42 @@ impl Default for UsageSettings {
 impl UsageSettings {
     pub fn price_table(&self) -> crate::usage::PriceTable {
         crate::usage::PriceTable::with_overrides(&self.prices)
+    }
+}
+
+/// The launch-time build check.
+///
+/// Builds are produced by a GitHub Actions workflow, so the newest published binary is the newest
+/// successful run of that workflow. The check compares the commit the binary was built from (baked
+/// in by `harness-cli/build.rs`) with that run's commit and prints one line when they differ.
+///
+/// It is deliberately cheap: the answer is cached for `check_interval_hours`, one request times
+/// out after a couple of seconds, and any failure is silent. A launch notice must never stand
+/// between the user and the composer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateSettings {
+    /// Master switch. `false` makes `luna` launch without any network call.
+    pub check: bool,
+    /// How long a cached answer is reused before asking GitHub again. `0` checks every launch.
+    pub check_interval_hours: u64,
+    /// The repository whose workflow publishes the binary, as `owner/repo`.
+    pub repo: String,
+    /// The branch the workflow builds.
+    pub branch: String,
+    /// Workflow file name (or numeric id) that produces the binary.
+    pub workflow: String,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check: true,
+            check_interval_hours: 6,
+            repo: "daryllvelonio2-bit/luna-".to_string(),
+            branch: "main".to_string(),
+            workflow: "release-build.yml".to_string(),
+        }
     }
 }
 

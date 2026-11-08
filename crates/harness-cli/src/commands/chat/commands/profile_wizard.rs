@@ -174,8 +174,8 @@ async fn create(
         review_row("name", &name),
         review_row("summary", &summary),
         review_row("providers", if copy_providers { "same" } else { "fresh" }),
-        review_row("notes", &notes.len().to_string()),
-        review_row("memories", &memories.len().to_string()),
+        review_row("notes", &profile_cmd::count_or_fresh(notes.len())),
+        review_row("memories", &profile_cmd::count_or_fresh(memories.len())),
     ];
     let Some(proceed) = choice_step_with_body(
         ui,
@@ -274,7 +274,8 @@ fn edit_prompts(
     result.ok()
 }
 
-/// If the profile has notes and memories, ask which ones to carry over.
+/// Ask whether to carry notes over at all, then which ones. A new profile starts with an empty
+/// notebook unless the user opted in, and the picker only appears after they did.
 async fn pick_notes(
     source: &Config,
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
@@ -282,7 +283,22 @@ async fn pick_notes(
 ) -> Option<Vec<std::path::PathBuf>> {
     let choices = profile_cmd::notes_for_copy(source);
     if choices.is_empty() {
-        ui.emit_above(&format!("{} No notes to copy.", "•".dimmed()));
+        ui.emit_above(&format!(
+            "{} No notes found — the new profile starts fresh.",
+            "•".dimmed()
+        ));
+        return Some(Vec::new());
+    }
+    let choice = choice_step(
+        ui,
+        key_rx,
+        "Create Profile — Notes",
+        "Copy notes into the new profile, or start with an empty notebook?",
+        &["Start fresh", "Choose notes to copy"],
+        0,
+    )
+    .await?;
+    if choice == 0 {
         return Some(Vec::new());
     }
     let labels: Vec<String> = choices.iter().map(|(label, _)| label.clone()).collect();
@@ -290,7 +306,7 @@ async fn pick_notes(
         ui,
         key_rx,
         "Create Profile — Notes",
-        "Notes to copy into the new profile.",
+        "Space toggles a note. Copied notes are new files in the new profile.",
         &labels,
     )
     .await?;
@@ -310,7 +326,22 @@ async fn pick_memories(
 ) -> Option<Vec<String>> {
     let choices = profile_cmd::memories_for_copy(source);
     if choices.is_empty() {
-        ui.emit_above(&format!("{} No memories to copy.", "•".dimmed()));
+        ui.emit_above(&format!(
+            "{} No memories found — the new profile starts fresh.",
+            "•".dimmed()
+        ));
+        return Some(Vec::new());
+    }
+    let choice = choice_step(
+        ui,
+        key_rx,
+        "Create Profile — Memories",
+        "Copy memories into the new profile, or start with an empty memory store?",
+        &["Start fresh", "Choose memories to copy"],
+        0,
+    )
+    .await?;
+    if choice == 0 {
         return Some(Vec::new());
     }
     let labels: Vec<String> = choices.iter().map(|(label, _)| label.clone()).collect();
@@ -318,7 +349,7 @@ async fn pick_memories(
         ui,
         key_rx,
         "Create Profile — Memories",
-        "Memories to copy into the new profile.",
+        "Space toggles a memory. Copied memories keep their links.",
         &labels,
     )
     .await?;

@@ -25,11 +25,15 @@ use eval::command::{handle_eval_command, EvalCommand};
 /// key; the cache path itself is `paths.models_cache`.
 const MODEL_CACHE_TTL_HOURS: i64 = 24;
 
+/// What `luna --version` reports: the package version plus the commit the binary was built from,
+/// stamped by `build.rs`. It is what the launch-time update check compares against.
+const VERSION: &str = env!("LUNA_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(
     name = "luna",
     author = "Luna AI",
-    version = "0.1.4",
+    version = VERSION,
     about = "Autonomous AI Agent Harness in Rust"
 )]
 struct Cli {

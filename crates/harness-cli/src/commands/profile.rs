@@ -433,8 +433,8 @@ pub fn create_profile_interactive(
         "  providers: {}",
         if copy_providers { "same" } else { "fresh" }
     );
-    println!("  notes:     {}", notes.len());
-    println!("  memories:  {}", memories.len());
+    println!("  notes:     {}", count_or_fresh(notes.len()));
+    println!("  memories:  {}", count_or_fresh(memories.len()));
 
     if std::io::stdin().is_terminal() {
         let proceed = Confirm::new()
@@ -614,13 +614,33 @@ pub(crate) fn memories_for_copy(source: &Config) -> Vec<(String, String)> {
         .collect()
 }
 
+/// How the review line describes a copied set: a count, or `fresh` when the user chose to start
+/// with nothing. Shared with the chat wizard.
+pub(crate) fn count_or_fresh(count: usize) -> String {
+    if count == 0 {
+        "fresh".to_string()
+    } else {
+        count.to_string()
+    }
+}
+
 fn pick_notes(source: &Config) -> Result<Vec<PathBuf>, HarnessError> {
     if !std::io::stdin().is_terminal() {
         return Ok(Vec::new());
     }
     let choices = list_notes(&source.paths.notes_dir);
     if choices.is_empty() {
-        println!("{}", "No notes to copy.".dimmed());
+        println!("{}", "No notes to copy; starting fresh.".dimmed());
+        return Ok(Vec::new());
+    }
+    // The copy is opt-in: a new profile starts with an empty notebook unless the user says which
+    // notes to bring along.
+    let copy = Confirm::new()
+        .with_prompt("Copy notes into the new profile? (No = start fresh)")
+        .default(false)
+        .interact()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !copy {
         return Ok(Vec::new());
     }
     let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
@@ -681,7 +701,15 @@ fn pick_memories(source: &Config) -> Result<Vec<String>, HarnessError> {
     }
     let choices = list_memories(&source.paths.memory_db);
     if choices.is_empty() {
-        println!("{}", "No memories to copy.".dimmed());
+        println!("{}", "No memories to copy; starting fresh.".dimmed());
+        return Ok(Vec::new());
+    }
+    let copy = Confirm::new()
+        .with_prompt("Copy memories into the new profile? (No = start fresh)")
+        .default(false)
+        .interact()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !copy {
         return Ok(Vec::new());
     }
     let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
