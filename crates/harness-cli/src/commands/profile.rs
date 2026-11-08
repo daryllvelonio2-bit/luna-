@@ -5,8 +5,8 @@
 //! alone works. There is no persistent "active profile" config key.
 //!
 //! Creation is a wizard rather than a flag dump: name and summary, editable prompts, provider
-//! credentials (same or fresh), and checkbox pickers for the sessions, notes, and memories that
-//! should follow the new profile. Everything else starts fresh. The data is assembled in a staging
+//! credentials (same or fresh), and checkbox pickers for the notes and memories that should
+//! follow the new profile. Sessions always start fresh. The data is assembled in a staging
 //! directory and renamed into place, so a crashed create never appears in `profile list`.
 
 use std::collections::HashSet;
@@ -394,7 +394,6 @@ pub fn create_profile_interactive(
         false
     };
 
-    let sessions = pick_sessions(source)?;
     let notes = pick_notes(source)?;
     let memories = pick_memories(source)?;
 
@@ -406,7 +405,6 @@ pub fn create_profile_interactive(
         "  providers: {}",
         if copy_providers { "same" } else { "fresh" }
     );
-    println!("  sessions:  {}", sessions.len());
     println!("  notes:     {}", notes.len());
     println!("  memories:  {}", memories.len());
 
@@ -460,13 +458,9 @@ pub fn create_profile_interactive(
     if copy_providers {
         copy_credentials(&source.paths.credentials, &paths.credentials)?;
     }
-    copy_sessions(
-        &source.paths.sessions_db,
-        &paths.sessions_db,
-        &sessions,
-        &source.paths.todos_dir,
-        &paths.todos_dir,
-    )?;
+    // Create the destination schema now so the profile opens without a first-write delay.
+    // Sessions are never carried into a new profile.
+    harness_core::session::SqliteSessionStore::new(Some(paths.sessions_db.clone()))?;
     copy_notes(&notes, &paths.notes_dir)?;
     copy_memories(&source.paths.memory_db, &paths.memory_db, &memories)?;
 
@@ -530,78 +524,6 @@ fn edit_prompts(name: &str, text: &ProfileText) -> Result<ProfileText, HarnessEr
     };
     let _ = std::fs::remove_file(&file);
     parsed
-}
-
-struct SessionChoice {
-    id: String,
-    label: String,
-}
-
-fn pick_sessions(source: &Config) -> Result<Vec<String>, HarnessError> {
-    if !std::io::stdin().is_terminal() {
-        return Ok(Vec::new());
-    }
-    let choices = list_sessions(&source.paths.sessions_db);
-    if choices.is_empty() {
-        println!("{}", "No sessions to copy.".dimmed());
-        return Ok(Vec::new());
-    }
-    let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
-    let picked = MultiSelect::new()
-        .with_prompt(
-            "Sessions to fork into the new profile (space toggles, ↑/↓ moves, Enter saves)",
-        )
-        .items(&labels)
-        .interact()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    Ok(picked
-        .into_iter()
-        .map(|index| choices[index].id.clone())
-        .collect())
-}
-
-fn list_sessions(db: &Path) -> Vec<SessionChoice> {
-    if !db.exists() {
-        return Vec::new();
-    }
-    let conn = match Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(conn) => conn,
-        Err(error) => {
-            tracing::warn!("could not read sessions from {}: {}", db.display(), error);
-            return Vec::new();
-        }
-    };
-    let mut statement = match conn.prepare(
-        "SELECT id, COALESCE(NULLIF(name, ''), NULLIF(title, ''), id), updated_at,
-                (SELECT COUNT(*) FROM messages WHERE session_id = sessions.id)
-         FROM sessions ORDER BY updated_at DESC",
-    ) {
-        Ok(statement) => statement,
-        Err(error) => {
-            tracing::warn!("could not list sessions: {}", error);
-            return Vec::new();
-        }
-    };
-    let rows = statement.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let title: String = row.get(1)?;
-        let updated: String = row.get(2)?;
-        let count: i64 = row.get(3)?;
-        Ok((id, title, updated, count))
-    });
-    let Ok(rows) = rows else {
-        return Vec::new();
-    };
-    rows.flatten()
-        .map(|(id, title, updated, count)| {
-            let short = id.chars().take(8).collect::<String>();
-            let date = updated.get(0..10).unwrap_or(&updated).to_string();
-            SessionChoice {
-                label: format!("{}  ·  {}  ·  {} msgs  ·  {}", title, short, count, date),
-                id,
-            }
-        })
-        .collect()
 }
 
 struct NoteChoice {
@@ -754,109 +676,6 @@ fn set_private(path: &Path) {
 
 #[cfg(not(unix))]
 fn set_private(_path: &Path) {}
-
-fn copy_sessions(
-    source_db: &Path,
-    dest_db: &Path,
-    selected: &[String],
-    source_todos: &Path,
-    dest_todos: &Path,
-) -> Result<(), HarnessError> {
-    if selected.is_empty() || !source_db.exists() {
-        // Still create the destination schema so the profile opens without a first-write delay.
-        harness_core::session::SqliteSessionStore::new(Some(dest_db.to_path_buf()))?;
-        return Ok(());
-    }
-    harness_core::session::SqliteSessionStore::new(Some(dest_db.to_path_buf()))?;
-
-    let source = Connection::open_with_flags(source_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| HarnessError::SessionError(format!("open sessions: {}", error)))?;
-    let dest = Connection::open(dest_db)
-        .map_err(|error| HarnessError::SessionError(format!("open new sessions: {}", error)))?;
-
-    for old_id in selected {
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let row = source
-            .query_row(
-                "SELECT created_at, updated_at, title, name, model, compact_model
-                 FROM sessions WHERE id = ?1",
-                rusqlite::params![old_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .ok();
-        let Some((created, updated, title, name, model, compact_model)) = row else {
-            continue;
-        };
-        dest.execute(
-            "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![&new_id, created, updated, title, name, model, compact_model],
-        )
-        .map_err(|error| HarnessError::SessionError(format!("copy session: {}", error)))?;
-
-        let mut messages = source
-            .prepare(
-                "SELECT seq, role, content, reasoning, tool_calls_json, tool_result_json,
-                        usage_json, is_summary, compacted_at, created_at
-                 FROM messages WHERE session_id = ?1 ORDER BY seq",
-            )
-            .map_err(|error| HarnessError::SessionError(format!("prepare messages: {}", error)))?;
-        let rows = messages
-            .query_map(rusqlite::params![old_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })
-            .map_err(|error| HarnessError::SessionError(format!("read messages: {}", error)))?;
-        for message in rows.flatten() {
-            dest.execute(
-                "INSERT INTO messages (session_id, seq, role, content, reasoning, tool_calls_json,
-                                       tool_result_json, usage_json, is_summary, compacted_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                rusqlite::params![
-                    &new_id,
-                    message.0,
-                    message.1,
-                    message.2,
-                    message.3,
-                    message.4,
-                    message.5,
-                    message.6,
-                    message.7,
-                    message.8,
-                    message.9,
-                ],
-            )
-            .map_err(|error| HarnessError::SessionError(format!("copy message: {}", error)))?;
-        }
-
-        let old_todo = source_todos.join(format!("{}.json", old_id));
-        let new_todo = dest_todos.join(format!("{}.json", new_id));
-        if old_todo.is_file() {
-            std::fs::create_dir_all(dest_todos).ok();
-            let _ = std::fs::copy(&old_todo, &new_todo);
-        }
-    }
-    Ok(())
-}
 
 fn copy_notes(selected: &[PathBuf], dest_dir: &Path) -> Result<(), HarnessError> {
     std::fs::create_dir_all(dest_dir).map_err(|error| {
@@ -1145,59 +964,5 @@ mod tests {
         let invocation = parse_invocation(args(&["luna", "default"]), tmp.path()).expect("parses");
         assert_eq!(invocation.name(), DEFAULT_PROFILE);
         assert_eq!(invocation.args, args(&["luna"]));
-    }
-
-    #[test]
-    fn copying_a_session_forks_it_under_a_new_id() {
-        let tmp = dir();
-        let source = tmp.path().join("source.db");
-        let dest = tmp.path().join("dest.db");
-        harness_core::session::SqliteSessionStore::new(Some(source.clone())).unwrap();
-        harness_core::session::SqliteSessionStore::new(Some(dest.clone())).unwrap();
-
-        let conn = Connection::open(&source).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, created_at, updated_at, title) VALUES ('old', '2026-01-01', '2026-01-01', 'Work')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (session_id, seq, role, content, created_at)
-             VALUES ('old', 1, 'user', 'hello', '2026-01-01')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let todo_dir = tmp.path().join("todos");
-        std::fs::create_dir_all(&todo_dir).unwrap();
-        std::fs::write(todo_dir.join("old.json"), "{\"items\":[]}").unwrap();
-
-        copy_sessions(
-            &source,
-            &dest,
-            &["old".to_string()],
-            &todo_dir,
-            &tmp.path().join("new-todos"),
-        )
-        .unwrap();
-
-        let conn = Connection::open(&dest).unwrap();
-        let (id, title, count): (String, String, i64) = conn
-            .query_row(
-                "SELECT s.id, s.title, (SELECT COUNT(*) FROM messages WHERE session_id = s.id)
-                 FROM sessions s",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_ne!(id, "old", "the fork gets a new id");
-        assert_eq!(title, "Work");
-        assert_eq!(count, 1);
-        assert!(tmp
-            .path()
-            .join("new-todos")
-            .join(format!("{}.json", id))
-            .is_file());
     }
 }
