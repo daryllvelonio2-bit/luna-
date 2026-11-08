@@ -277,7 +277,7 @@ pub async fn retrieve_antigravity_quota(
             client
                 .post(endpoint)
                 .header(AUTHORIZATION, format!("Bearer {}", token))
-                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(USER_AGENT, user_agent())
                 .header(CONTENT_TYPE, "application/json")
                 .json(&json!({}))
                 .send()

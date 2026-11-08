@@ -28,7 +28,7 @@ const MODEL_CACHE_TTL_HOURS: i64 = 24;
 #[command(
     name = "luna",
     author = "Luna AI",
-    version = "0.1.2",
+    version = "0.1.3",
     about = "Autonomous AI Agent Harness in Rust"
 )]
 struct Cli {

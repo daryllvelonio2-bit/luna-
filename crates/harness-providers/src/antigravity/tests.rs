@@ -1015,3 +1015,34 @@ fn a_numeric_enum_is_dropped_before_code_assist_rejects_the_request() {
         "a string enum is the shape Code Assist accepts and must survive"
     );
 }
+
+/// Code Assist gates on the client identity, not just the version: `antigravity/1.x` is answered
+/// with "This version of Antigravity is no longer supported" even though `agy 1.5.3` works, because
+/// the CLI identifies as `antigravity-cli/1.5.3`. The header must keep that product prefix.
+#[test]
+fn the_client_identifies_as_the_cli_not_the_retired_desktop_app() {
+    let agent = user_agent();
+    let version = agent
+        .strip_prefix("antigravity-cli/")
+        .unwrap_or_else(|| panic!("the client must identify as the CLI: {agent}"));
+    assert!(
+        is_version_like(version),
+        "the version is digits and dots: {agent}"
+    );
+    assert!(
+        !agent.starts_with("antigravity/"),
+        "the retired desktop product is refused by the backend: {agent}"
+    );
+}
+
+/// A wrapper script that prints a sentence instead of a version must not leak into the header,
+/// and a version with surrounding whitespace is still usable after trimming.
+#[test]
+fn only_a_version_reaches_the_user_agent() {
+    assert!(is_version_like("1.5.3"));
+    assert!(is_version_like("2"));
+    assert!(!is_version_like(""));
+    assert!(!is_version_like("antigravity 1.5.3"));
+    assert!(!is_version_like("1.5.3\n"));
+    assert!(!is_version_like("1.5.3-beta"));
+}

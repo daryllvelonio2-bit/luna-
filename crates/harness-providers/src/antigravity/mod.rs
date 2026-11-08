@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use harness_core::{
     CompletionOptions, HarnessError, Message, ReasoningEffort, Role, StreamEvent, TokenUsage,
@@ -59,7 +60,51 @@ pub fn agy_client_secret() -> String {
     }
     AGY_CLIENT_SECRET.to_string()
 }
-pub const DEFAULT_USER_AGENT: &str = "antigravity/1.2.7";
+/// The product half of the `User-Agent`.
+///
+/// Code Assist gates on the client identity, not just a version number: `antigravity/1.x` is the
+/// retired desktop app and is answered with "This version of Antigravity is no longer supported",
+/// even at 1.5.3, while `antigravity-cli/1.x` — what the `agy` CLI sends — is served normally.
+/// (Probed against the live endpoint: `antigravity/1.2.7` and `antigravity/1.5.3` are refused,
+/// `antigravity-cli/1.5.3` and `antigravity/2.0.0` are answered.)
+const USER_AGENT_PRODUCT: &str = "antigravity-cli";
+
+/// The version to claim when no local `agy` can be asked.
+pub const FALLBACK_CLIENT_VERSION: &str = "1.5.3";
+
+/// The `User-Agent` this route sends, e.g. `antigravity-cli/1.5.3`.
+///
+/// The version is read from the installed `agy` so the header follows the client's own updates
+/// instead of freezing at a number the server later retires (the old `antigravity/1.2.7` is
+/// exactly that). Probing happens once per process: `Command` is not cheap, and the version cannot
+/// change mid-session.
+pub fn user_agent() -> &'static str {
+    static USER_AGENT: OnceLock<String> = OnceLock::new();
+    USER_AGENT.get_or_init(|| {
+        let version =
+            installed_client_version().unwrap_or_else(|| FALLBACK_CLIENT_VERSION.to_string());
+        format!("{USER_AGENT_PRODUCT}/{version}")
+    })
+}
+
+/// The version `agy --version` prints, or `None` when the binary is absent or unusable.
+fn installed_client_version() -> Option<String> {
+    let output = Command::new("agy").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    // A version is digits and dots. Refusing anything else keeps a wrapper script's chatter (or a
+    // newline-laden error) out of an HTTP header.
+    is_version_like(version).then(|| version.to_string())
+}
+
+fn is_version_like(value: &str) -> bool {
+    !value.is_empty()
+        && value.starts_with(|c: char| c.is_ascii_digit())
+        && value.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
 
 mod credentials;
 mod payload;
@@ -89,7 +134,7 @@ async fn post_antigravity_with_transport_retry(
             let res = http_client
                 .post(*ep)
                 .header(AUTHORIZATION, format!("Bearer {}", token))
-                .header(USER_AGENT, DEFAULT_USER_AGENT)
+                .header(USER_AGENT, user_agent())
                 .header(CONTENT_TYPE, "application/json")
                 .json(payload)
                 .send()
