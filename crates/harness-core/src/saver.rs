@@ -21,15 +21,108 @@ use crate::error::HarnessError;
 use crate::traits::ModelProvider;
 use crate::types::{Message, Role};
 
+/// What a pass did to one stored item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveStatus {
+    /// The store had no active record for this key.
+    Saved,
+    /// An active record for the same key was replaced or extended.
+    Updated,
+    /// The item was archived (notes) or deactivated (memories).
+    Deleted,
+    /// Two or more items were folded into one.
+    Merged,
+    /// The operation was refused before it reached the store.
+    Skipped,
+}
+
+impl SaveStatus {
+    /// The word a notification shows: `saved`, `updated`, `deleted`, `merged`, `skipped`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Saved => "saved",
+            Self::Updated => "updated",
+            Self::Deleted => "deleted",
+            Self::Merged => "merged",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// Backwards-compatible name for the status a memory write reports.
+pub type MemorySaveStatus = SaveStatus;
+
+/// Which store an outcome belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveStorage {
+    /// A SQLite memory record.
+    Memory,
+    /// A markdown note.
+    Note,
+}
+
+impl SaveStorage {
+    /// The word a notification shows: `memory` or `note`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Note => "note",
+        }
+    }
+}
+
+/// One memory a pass wrote, as a UI should announce it.
+///
+/// The saver is the only place that knows *which* records a detached pass produced; the turn is
+/// already over by the time they land. This is the smallest thing that lets the CLI say
+/// `memory Astra saved` without inventing a second event per write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedMemory {
+    /// Friendly name when the model gave one, otherwise the record's `subject.predicate` id.
+    pub name: String,
+    /// Created, replaced, deactivated, or merged.
+    pub status: MemorySaveStatus,
+}
+
+/// One note a pass wrote, as a UI should announce it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedNote {
+    /// The note's title (the human name), never its slug.
+    pub name: String,
+    /// Created, updated, deleted, or merged.
+    pub status: SaveStatus,
+}
+
+/// One audited outcome: what the pass did, to what, and why.
+///
+/// Unlike [`SavedMemory`] this also carries refusals, so a pass can explain itself without a log
+/// line per operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveOutcome {
+    pub storage: SaveStorage,
+    pub name: String,
+    pub status: SaveStatus,
+    /// Present when `status` is `Skipped`: what rule refused it.
+    pub reason: Option<String>,
+}
+
 /// What one distillation pass produced.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SaveReport {
-    /// Memory records written or revised.
+    /// Memory records written, revised, deactivated, or merged.
     pub memories: usize,
-    /// Notes written.
+    /// Notes written, updated, archived, or merged.
     pub notes: usize,
-    /// Items the saver declined to write (too short, duplicated, malformed).
+    /// Items the saver refused (too short, duplicated, unsupported evidence, capped, secret).
     pub skipped: usize,
+    /// Operations the model explicitly declined with `noop`.
+    pub declined: usize,
+    /// Each memory write, in write order, so a UI can report it by name.
+    pub saved: Vec<SavedMemory>,
+    /// Each note write, in write order, so a UI can report it by title.
+    pub saved_notes: Vec<SavedNote>,
+    /// Every operation's outcome, including refusals and reasons.
+    pub outcomes: Vec<SaveOutcome>,
 }
 
 impl SaveReport {
@@ -38,9 +131,46 @@ impl SaveReport {
         self.memories == 0 && self.notes == 0
     }
 
+    /// Record one applied memory write and its notification.
+    pub fn memory_written(&mut self, name: impl Into<String>, status: SaveStatus) {
+        let name = name.into();
+        self.memories += 1;
+        self.outcomes.push(SaveOutcome {
+            storage: SaveStorage::Memory,
+            name: name.clone(),
+            status,
+            reason: None,
+        });
+        self.saved.push(SavedMemory { name, status });
+    }
+
+    /// Record one applied note write and its notification.
+    pub fn note_written(&mut self, name: impl Into<String>, status: SaveStatus) {
+        let name = name.into();
+        self.notes += 1;
+        self.outcomes.push(SaveOutcome {
+            storage: SaveStorage::Note,
+            name: name.clone(),
+            status,
+            reason: None,
+        });
+        self.saved_notes.push(SavedNote { name, status });
+    }
+
+    /// Record one refused operation and why.
+    pub fn skip(&mut self, storage: SaveStorage, name: impl Into<String>, reason: impl Into<String>) {
+        self.skipped += 1;
+        self.outcomes.push(SaveOutcome {
+            storage,
+            name: name.into(),
+            status: SaveStatus::Skipped,
+            reason: Some(reason.into()),
+        });
+    }
+
     /// One line for the log: what the pass changed, and what it threw away.
     pub fn summary(&self) -> String {
-        if self.is_empty() && self.skipped == 0 {
+        if self.is_empty() && self.skipped == 0 && self.declined == 0 {
             return "nothing worth keeping".to_string();
         }
         let mut parts = vec![
@@ -49,6 +179,9 @@ impl SaveReport {
         ];
         if self.skipped > 0 {
             parts.push(format!("{} skipped", self.skipped));
+        }
+        if self.declined > 0 {
+            parts.push(format!("{} declined", self.declined));
         }
         parts.join(", ")
     }
@@ -68,6 +201,18 @@ pub trait BackgroundSaver: Send + Sync {
 
     /// The model this pass bills to, for the log line.
     fn model(&self) -> &str;
+
+    /// Enable or disable note writes at runtime, without touching memory writes.
+    ///
+    /// The default is a no-op so savers that only write memory need not implement it. A saver
+    /// that writes both honours the session's `/notes off`.
+    fn set_notes_enabled(&self, _enabled: bool) {}
+
+    /// Enable or disable memory-record writes at runtime, without touching note writes.
+    ///
+    /// The default is a no-op so savers that only write notes need not implement it. A saver
+    /// that writes both honours the session's `/memory off`.
+    fn set_memory_enabled(&self, _enabled: bool) {}
 }
 
 /// The trailing messages a saver should read, oldest first.
@@ -168,6 +313,7 @@ mod tests {
             memories: 2,
             notes: 1,
             skipped: 3,
+            ..SaveReport::default()
         };
         assert_eq!(report.summary(), "2 memories, 1 notes, 3 skipped");
         assert!(!report.is_empty());

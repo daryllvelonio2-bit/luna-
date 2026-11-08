@@ -45,24 +45,81 @@ mod tests;
 use commands::{
     command_entries, execute_slash_command, handle_auto_compact_command, handle_compact_command,
     handle_compact_model_switch, handle_default_model_switch, handle_delete_command,
-    handle_diff_command, handle_fork_command, handle_model_switch, handle_name_command,
-    handle_new_command, handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
-    handle_summarize_and_new_command, handle_thinking_switch, handle_usage_command,
-    looks_like_path, select_slash_command, SlashOutcome,
+    handle_diff_command, handle_feature_toggle, handle_fork_command, handle_model_switch,
+    handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
+    handle_sessions_switch, handle_summarize_and_new_command, handle_thinking_switch,
+    handle_usage_command, looks_like_path, select_slash_command, Feature, FeatureToggles,
+    SlashOutcome,
 };
 use keys::AppKey;
 use render::{
-    clean_user_query_for_transcript, compaction_report, extract_patch_diff,
-    format_approval_verdict, format_delegate_duration, format_delegate_notification,
-    format_delegate_title, format_tool_call, format_tool_result, has_verdict, is_non_tool_event,
-    parse_turns_from_history, render_transcript, reply_for_display, right_aligned_user_message,
-    OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    background_job_resume_prompt, bounded_tool_output, clean_user_query_for_transcript,
+    compaction_report, extract_patch_diff, format_approval_verdict, format_delegate_duration,
+    format_delegate_notification, format_delegate_title, format_elapsed_secs,
+    format_job_notification, format_job_system_message, format_tool_call, format_tool_result,
+    has_verdict, is_non_tool_event, parse_turns_from_history, render_transcript, reply_for_display,
+    right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL, LANDING_FRAME_INTERVAL};
 use viewer::show_background_task_viewer;
 
 pub(crate) type ChatAgent =
     Agent<GenericProviderClient, SqliteMemoryEngine, FileNotesEngine, DefaultToolRegistry>;
+
+/// The idle memory-pass timer.
+///
+/// The background saver counts completed turns, so a short session can end before the interval
+/// ever fires. This notices a finished conversation that has gone quiet and asks for one pass.
+/// It is a tiny state machine rather than three locals in the event loop so the reset rules —
+/// a pass per transcript, no pass while busy, no pass before anything was said — are testable.
+struct IdleMemoryPass {
+    idle_since: std::time::Instant,
+    last_pass_turns: usize,
+    was_active: bool,
+}
+
+impl IdleMemoryPass {
+    fn new(turns: usize) -> Self {
+        Self {
+            idle_since: std::time::Instant::now(),
+            last_pass_turns: turns,
+            was_active: false,
+        }
+    }
+
+    /// Advance one tick. `busy` means a turn, a compaction, or a queued message is in progress.
+    /// Returns `true` at most once per new transcript, after it has been quiet for `idle_secs`.
+    fn tick(&mut self, turns: usize, busy: bool, idle_secs: u64, now: std::time::Instant) -> bool {
+        if busy {
+            self.was_active = true;
+            self.idle_since = now;
+            return false;
+        }
+        if self.was_active {
+            // The turn that was in flight has landed, so the quiet clock starts now rather than
+            // at the last keystroke.
+            self.was_active = false;
+            self.idle_since = now;
+            return false;
+        }
+        if turns < self.last_pass_turns {
+            // A cleared or compacted transcript must not strand the timer: without this the
+            // `>` test below could never be true again.
+            self.last_pass_turns = turns;
+            self.idle_since = now;
+            return false;
+        }
+        if turns > self.last_pass_turns
+            && idle_secs > 0
+            && now.duration_since(self.idle_since) >= std::time::Duration::from_secs(idle_secs)
+        {
+            self.last_pass_turns = turns;
+            self.idle_since = now;
+            return true;
+        }
+        false
+    }
+}
 
 /// Draw the transcript.
 ///
@@ -113,7 +170,10 @@ use history::{append_prompt_history, load_prompt_history, KittyKeyboardGuard};
 use prompts::{prompt_approval_choice, prompt_sudo_password_dialog, ChatSudoPrompter};
 pub(crate) use status::{refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed};
 use turn::handle_composer_command;
-use turn::{cancel_running_turn, drain_queue, launch_turn, submission, turn_records, Submission};
+use turn::{
+    can_auto_resume, cancel_running_turn, drain_queue, launch_internal_turn, launch_turn,
+    submission, turn_records, Submission,
+};
 
 /// Register MCP servers from configuration and add their tools to the registry.
 async fn register_mcp_servers(
@@ -418,18 +478,9 @@ pub async fn run_interactive_chat(
     // The skills the harness ships with, including the desktop skill.
     all_skills.extend(crate::commands::desktop::builtin_skills());
 
-    let skills_summary = if all_skills.is_empty() {
-        None
-    } else {
-        let lines: Vec<String> = all_skills
-            .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect();
-        Some(lines.join("\n"))
-    };
-    // The model's index above keeps the full descriptions — choosing between skills is done from
-    // them. `/skills` prints this readout instead: a paragraph per skill is a wall of text on a
-    // terminal, and the procedure itself is `skill_view`'s job.
+    // `/skills` prints a name-only readout: a paragraph per skill is a wall of text on a terminal,
+    // and the procedure itself is `skill_view`'s job. Skills are not listed in the system prompt;
+    // the model discovers them through `skills_list` and loads one only when it invokes it.
     let skills_readout = crate::commands::skills::readout(&all_skills);
 
     // Skills are shared with the `skill_view` / `skills_list` tools and borrowed as a slice for
@@ -508,6 +559,17 @@ pub async fn run_interactive_chat(
 
     let in_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
     let is_attended = Term::stdout().features().is_attended() || in_kitty;
+
+    // Background shell jobs announce themselves on this channel. Only the interactive loop
+    // consumes it; in piped mode the queue stays poll-only, so a channel nobody reads cannot
+    // grow with every job the script starts.
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<harness_core::tasks::JobCompletion>();
+    if is_attended {
+        bg_queue.set_completion_notifier(Arc::new(move |completion| {
+            let _ = job_tx.send(completion);
+        }));
+    }
+
     let ui = Arc::new(ChatUi::new(is_attended));
     let ui_obs = ui.clone();
 
@@ -520,6 +582,10 @@ pub async fn run_interactive_chat(
         config.tools.approval == harness_core::ApprovalMode::Allow,
     ));
     let plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Runtime feature switches (`/memory off`, `/notes off`, `/skills off`, `/mcp off`). The agent
+    // holds the authoritative flags; these atomics let the menu and the piped loop read them
+    // without taking the agent lock.
+    let feature_toggles = FeatureToggles::default();
 
     let approver: Arc<dyn harness_core::Approver> =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
@@ -553,7 +619,6 @@ pub async fn run_interactive_chat(
     });
 
     let mut agent_config = config.agent.clone();
-    agent_config.skills_summary = skills_summary.clone();
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
     agent_config.memory_mode = config.memory.mode;
 
@@ -616,6 +681,14 @@ pub async fn run_interactive_chat(
                     ui_obs.update_context_used(tokens_used);
                 }
             }
+            harness_core::AgentEvent::MemorySaved { name, status } => {
+                // The detached saver lands after the turn; show what it wrote above the
+                // composer until the next turn clears it.
+                ui_obs.push_memory_notice(&name, status.as_str());
+            }
+            harness_core::AgentEvent::NoteSaved { name, status } => {
+                ui_obs.push_note_notice(&name, status.as_str());
+            }
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
                 ui_obs.finish_reasoning();
                 // A todo call reads as the task it acts on, not as the arguments it was sent.
@@ -642,6 +715,8 @@ pub async fn run_interactive_chat(
                             call_formatted: call_fmt,
                             result_formatted: String::new(),
                             diff_lines,
+                            output: String::new(),
+                            output_dropped: 0,
                         });
                 }
             }
@@ -673,7 +748,7 @@ pub async fn run_interactive_chat(
                 } else {
                     " (success)".green().to_string()
                 };
-                let (line, diff_to_show) = {
+                let (line, diff_to_show, result_line) = {
                     let mut tools = in_flight_tools_obs
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
@@ -686,7 +761,10 @@ pub async fn run_interactive_chat(
                     });
                     if let Some(item) = target {
                         item.call_formatted.push_str(&status);
-                        item.result_formatted.clear();
+                        item.result_formatted = format_tool_result(is_error, &output);
+                        let (bounded, dropped) = bounded_tool_output(&output);
+                        item.output = bounded;
+                        item.output_dropped = dropped;
                         let diff = if !is_error
                             && (name == "patch" || name == "edit" || name == "apply_patch")
                         {
@@ -694,12 +772,21 @@ pub async fn run_interactive_chat(
                         } else {
                             Vec::new()
                         };
-                        (item.call_formatted.clone(), diff)
+                        (
+                            item.call_formatted.clone(),
+                            diff,
+                            Some(item.result_formatted.clone()),
+                        )
                     } else {
-                        (format_tool_result(is_error, &output), Vec::new())
+                        (format_tool_result(is_error, &output), Vec::new(), None)
                     }
                 };
                 ui_obs.emit_above(&line);
+                // The retained result under the call: a failing build's first error, a short
+                // payload, or an MCP tool's answer. Ctrl+O shows the bounded body behind it.
+                if let Some(result_line) = result_line {
+                    ui_obs.emit_above(&result_line);
+                }
                 if !diff_to_show.is_empty() {
                     ui_obs.emit_above(&diff_to_show.join("\n"));
                 }
@@ -752,6 +839,8 @@ pub async fn run_interactive_chat(
                         call_formatted: line.clone(),
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
+                        output: String::new(),
+                        output_dropped: 0,
                     });
                 ui_obs.emit_above(&line);
             }
@@ -811,28 +900,37 @@ pub async fn run_interactive_chat(
                 // event stacked one copy of the same notification per event — a long child buried
                 // the conversation under its own progress. `update_delegate_task` repaints the
                 // single running row in place instead, which is what the row is for.
-                {
-                    let mut trackers = trackers_events.lock().unwrap_or_else(|e| e.into_inner());
-                    let entry = trackers
-                        .entry(id.clone())
-                        .or_insert_with(|| (std::time::Instant::now(), "starting".to_string()));
-                    entry.1 = match &activity {
-                        SubagentActivity::ToolStarted { name } => name.clone(),
-                        SubagentActivity::ToolFinished { name, is_error } if *is_error => {
-                            format!("{} (failed)", name)
-                        }
-                        SubagentActivity::ToolFinished { name, .. } => name.clone(),
-                        SubagentActivity::ModelStreaming => "streaming".to_string(),
-                    };
-                }
-
                 let label = match &activity {
                     SubagentActivity::ModelStreaming => "streaming".to_string(),
                     SubagentActivity::ToolStarted { name } => format!("{} running", name),
                     SubagentActivity::ToolFinished { name, is_error } => {
                         format!("{} {}", name, if *is_error { "failed" } else { "done" })
                     }
+                    // The child's newest output line, so a running build is visible in the parent
+                    // without opening the viewer. The chunk may end mid-line; the next one wins.
+                    SubagentActivity::ToolOutput { name, chunk } => {
+                        let newest = chunk
+                            .lines()
+                            .rev()
+                            .find(|line| !line.trim().is_empty())
+                            .map(str::trim);
+                        match newest {
+                            Some(line) if !line.is_empty() => {
+                                let short: String = line.chars().take(60).collect();
+                                format!("{} · {}", name, short)
+                            }
+                            _ => format!("{} running", name),
+                        }
+                    }
                 };
+                {
+                    let mut trackers = trackers_events.lock().unwrap_or_else(|e| e.into_inner());
+                    let entry = trackers
+                        .entry(id.clone())
+                        .or_insert_with(|| (std::time::Instant::now(), "starting".to_string()));
+                    entry.1 = label.clone();
+                }
+
                 ui_delegate_events.update_delegate_task(&id, &label);
             }
             SubagentTaskEvent::Finished { record } => {
@@ -1047,22 +1145,62 @@ pub async fn run_interactive_chat(
                 continue;
             }
             if query == "/" || query.eq_ignore_ascii_case("/help") {
-                for cmd in command_entries(&config, skills) {
+                for cmd in
+                    command_entries(&config, skills, feature_toggles.enabled(Feature::Skills))
+                {
                     println!("  {:<12} {}", cmd.name.cyan(), cmd.details.dimmed());
                 }
                 continue;
             }
             if query == "/skills" || query.starts_with("/skills ") {
-                if let Some(ref readout) = skills_readout {
+                let arg = query.strip_prefix("/skills").unwrap_or("").trim();
+                if !arg.is_empty() {
+                    handle_feature_toggle(
+                        &ui,
+                        &feature_toggles,
+                        &agent,
+                        Feature::Skills,
+                        Some(arg),
+                    )
+                    .await;
+                } else if !feature_toggles.enabled(Feature::Skills) {
+                    println!(
+                        "\n{}\n",
+                        "Skills are OFF for this session. Use /skills on to enable them.".dimmed()
+                    );
+                } else if let Some(ref readout) = skills_readout {
                     println!("\n{}\n{}\n", "Available skills:".bold(), readout);
                 } else {
                     println!("\n{}\n", "No specialized skills installed.".dimmed());
                 }
                 continue;
             }
+            if query == "/memory" || query.starts_with("/memory ") {
+                let arg = query.strip_prefix("/memory").unwrap_or("").trim();
+                let arg = if arg.is_empty() { None } else { Some(arg) };
+                handle_feature_toggle(&ui, &feature_toggles, &agent, Feature::Memory, arg).await;
+                continue;
+            }
+            if query == "/notes" || query.starts_with("/notes ") {
+                let arg = query.strip_prefix("/notes").unwrap_or("").trim();
+                let arg = if arg.is_empty() { None } else { Some(arg) };
+                handle_feature_toggle(&ui, &feature_toggles, &agent, Feature::Notes, arg).await;
+                continue;
+            }
             if query == "/mcp" || query.starts_with("/mcp ") {
                 let sub = query.strip_prefix("/mcp").unwrap_or("").trim();
-                if sub == "list" {
+                if matches!(
+                    sub,
+                    "on" | "off" | "enable" | "disable" | "enabled" | "disabled" | "true" | "false"
+                ) {
+                    handle_feature_toggle(&ui, &feature_toggles, &agent, Feature::Mcp, Some(sub))
+                        .await;
+                } else if !feature_toggles.enabled(Feature::Mcp) {
+                    println!(
+                        "\n{}\n",
+                        "MCP is OFF for this session. Use /mcp on to enable it.".dimmed()
+                    );
+                } else if sub == "list" {
                     println!("{}", crate::commands::mcp::format_mcp_servers(&config));
                 } else if sub == "tools" {
                     println!("{}", crate::commands::mcp::format_mcp_tools(&config).await);
@@ -1314,8 +1452,13 @@ pub async fn run_interactive_chat(
                 continue;
             }
             // A skill invocation is a prompt, not a command: expand it here and let the normal
-            // turn path below run it, exactly as if the user had typed the instructions.
-            let skill_prompt = crate::commands::skills::invocation_prompt(query, skills);
+            // turn path below run it, exactly as if the user had typed the instructions. With
+            // `/skills off` skill names are no longer commands.
+            let skill_prompt = if feature_toggles.enabled(Feature::Skills) {
+                crate::commands::skills::invocation_prompt(query, skills)
+            } else {
+                None
+            };
             let query = skill_prompt.as_deref().unwrap_or(query);
             // An absolute path is input, not a command: `/home/me/notes.txt` goes to the agent.
             if query.starts_with('/') && !looks_like_path(query) {
@@ -1536,6 +1679,17 @@ pub async fn run_interactive_chat(
     // minute of the countdown passes, and the numbers themselves are refetched on this TTL.
     let mut quota_refreshed_at = std::time::Instant::now();
 
+    // The idle memory pass: a short session may end before `background_every_turns` fires, so the
+    // tick notices a quiet, finished conversation and runs one pass over it.
+    let mut idle_pass = IdleMemoryPass::new(turns.len());
+
+    // A background job that finished while the composer was busy. The tick starts the reacting
+    // turn as soon as the composer is genuinely idle; a turn that started after this instant
+    // already replayed the stored completion, so it clears the flag instead. The session id is
+    // part of the key: the completion was stored in *that* session, and resuming after a switch
+    // would start a turn with no job context.
+    let mut pending_job_turn: Option<(String, std::time::Instant)> = None;
+
     loop {
         tokio::select! {
             _ = async {
@@ -1611,6 +1765,71 @@ pub async fn run_interactive_chat(
                         &mut active_turn,
                     );
                 }
+
+                // A completion that arrived while the composer was busy waits for this tick.
+                // A turn that started after the notification already replayed the stored
+                // system message, so it covers the job and the flag is cleared rather than
+                // starting a second, redundant turn.
+                if let Some((pending_session, at)) = pending_job_turn.take() {
+                    if pending_session != session_id {
+                        // The completion lives in the session it arrived in; a switch means this
+                        // loop's next turn would not replay it.
+                    } else if active_turn.is_some() && turn_start > at {
+                        // A turn that started after the notification already replayed it.
+                    } else {
+                        let draft = ui
+                            .input_buf
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        let images = pending_images
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .len();
+                        if can_auto_resume(
+                            active_turn.is_some(),
+                            compacting.load(std::sync::atomic::Ordering::SeqCst),
+                            queue.len(),
+                            &draft,
+                            images,
+                            ui.modal_active(),
+                            plan_mode.load(std::sync::atomic::Ordering::SeqCst),
+                        ) {
+                            launch_internal_turn(
+                                &background_job_resume_prompt(),
+                                &ui,
+                                &agent,
+                                &in_flight_tools,
+                                &mut current_cancel,
+                                &mut current_query,
+                                &mut turn_start,
+                                &mut active_turn,
+                            );
+                        } else {
+                            // Still busy: put it back unchanged so the next tick asks again.
+                            pending_job_turn = Some((pending_session, at));
+                        }
+                    }
+                }
+
+                // The idle memory pass. A short session can end before the every-N-turns interval
+                // fires, so once the conversation has been quiet for a while the tick runs one
+                // pass over what is already there.
+                let busy = active_turn.is_some()
+                    || compacting.load(std::sync::atomic::Ordering::SeqCst)
+                    || !queue.is_empty();
+                if idle_pass.tick(
+                    turns.len(),
+                    busy,
+                    config.memory.background_idle_secs,
+                    std::time::Instant::now(),
+                ) {
+                    let agent = agent.clone();
+                    tokio::spawn(async move {
+                        let agent = agent.lock().await;
+                        agent.spawn_memory_pass_now().await;
+                    });
+                }
             }
 
             _ = landing_animation.tick() => {
@@ -1647,6 +1866,8 @@ pub async fn run_interactive_chat(
                         call_formatted: verdict_str,
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
+                        output: String::new(),
+                        output_dropped: 0,
                     });
                 }
                 if is_run {
@@ -1682,6 +1903,82 @@ pub async fn run_interactive_chat(
                 let _ = response_tx.send(response);
             }
 
+            maybe_job = job_rx.recv() => {
+                let Some(completion) = maybe_job else {
+                    continue;
+                };
+
+                let is_ok = completion.status.starts_with("completed");
+                let glyph = if is_ok {
+                    "✔".green().bold().to_string()
+                } else {
+                    "✖".red().bold().to_string()
+                };
+                let notice = format_job_notification(
+                    &glyph,
+                    &completion.id,
+                    &completion.command,
+                    &completion.status,
+                    &format_elapsed_secs(completion.elapsed_secs),
+                );
+                ui.emit_above(&notice);
+
+                // Store the full result before any turn can replay it. A turn already running
+                // loaded its history before this row existed, which is what the deferred
+                // auto-resume below is for; the next turn will see it either way.
+                let message =
+                    harness_core::Message::system(format_job_system_message(&completion));
+                let stored = match store.append(&session_id, &message, false).await {
+                    Ok(_) => true,
+                    Err(error) => {
+                        tracing::warn!("failed to store background job completion: {}", error);
+                        false
+                    }
+                };
+
+                // Only a stored completion can drive a turn: the model reads it from the replay,
+                // and a turn started without that row would have nothing to react to. If the
+                // write failed, the notice above is still there and the job remains pollable.
+                if stored {
+                    let draft = ui
+                        .input_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let images = pending_images
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .len();
+                    if can_auto_resume(
+                        active_turn.is_some(),
+                        compacting.load(std::sync::atomic::Ordering::SeqCst),
+                        queue.len(),
+                        &draft,
+                        images,
+                        ui.modal_active(),
+                        plan_mode.load(std::sync::atomic::Ordering::SeqCst),
+                    ) {
+                        launch_internal_turn(
+                            &background_job_resume_prompt(),
+                            &ui,
+                            &agent,
+                            &in_flight_tools,
+                            &mut current_cancel,
+                            &mut current_query,
+                            &mut turn_start,
+                            &mut active_turn,
+                        );
+                    } else {
+                        // Busy now: remember the moment and the session so the tick can act once
+                        // the composer is quiet, unless a turn started after it and replayed the
+                        // message.
+                        pending_job_turn.get_or_insert_with(|| {
+                            (session_id.clone(), std::time::Instant::now())
+                        });
+                    }
+                }
+            }
+
             maybe_key = key_rx.recv() => {
                 let key = match maybe_key {
                     Some(k) => k,
@@ -1702,6 +1999,13 @@ pub async fn run_interactive_chat(
 
                 match key {
                     AppKey::Ctrl('o') => {
+                        // While a tool is running, Ctrl+O is about that call: expand its live tail
+                        // so a long build's earlier output is visible. Idle Ctrl+O keeps folding
+                        // the transcript's process blocks.
+                        if ui.has_live_activity() {
+                            ui.toggle_live_expanded();
+                            continue;
+                        }
                         // Ctrl+O: toggle process expansion if transcript turns exist.
                         // In standard terminals where Ctrl+Shift+O arrives as 0x0F (Ctrl+O),
                         // fall back to toggling the todo panel when no process turns exist.
@@ -1799,7 +2103,7 @@ pub async fn run_interactive_chat(
                         ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).push('/');
                         ui.redraw_input_line();
                         if let Some(cmd) =
-                            select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills), &pending_images).await
+                            select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills, feature_toggles.enabled(Feature::Skills)), &pending_images).await
                         {
                             ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
                             ui.redraw_input_line();
@@ -1864,6 +2168,7 @@ pub async fn run_interactive_chat(
                                 &todo_scope,
                                 skills_readout.as_deref(),
                                 skills,
+                                &feature_toggles,
                                 &plan_mode,
                                 Some(bg_queue.as_ref()),
                                 Some(delegate_tool.as_ref()),
@@ -1968,7 +2273,7 @@ pub async fn run_interactive_chat(
 
                         if command_query == "/" || command_query.eq_ignore_ascii_case("/help") {
                             if let Some(cmd) =
-                                select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills), &pending_images)
+                                select_slash_command(&mut key_rx, &ui, &command_entries(&config, skills, feature_toggles.enabled(Feature::Skills)), &pending_images)
                                     .await
                             {
                                 ui.input_buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -2031,6 +2336,7 @@ pub async fn run_interactive_chat(
                                     &todo_scope,
                                     skills_readout.as_deref(),
                                     skills,
+                                    &feature_toggles,
                                     &plan_mode,
                                     Some(bg_queue.as_ref()),
                                     Some(delegate_tool.as_ref()),
@@ -2133,6 +2439,7 @@ pub async fn run_interactive_chat(
                                 &todo_scope,
                                 skills_readout.as_deref(),
                                 skills,
+                                &feature_toggles,
                                 &plan_mode,
                                 Some(bg_queue.as_ref()),
                                 Some(delegate_tool.as_ref()),
@@ -2350,6 +2657,13 @@ pub async fn run_interactive_chat(
                 }
             } => {
                 active_turn = None;
+                // If the turn that just ended started after a deferred completion, it replayed
+                // that completion's stored message; the deferred auto-turn is no longer needed.
+                if pending_job_turn.as_ref().is_some_and(|(pending_session, at)| {
+                    pending_session == &session_id && turn_start > *at
+                }) {
+                    pending_job_turn = None;
+                }
                 // Nothing is in flight any more, whatever the turn did: the hint goes back to
                 // the idle line before the transcript below is redrawn.
                 ui.set_turn_active(false);

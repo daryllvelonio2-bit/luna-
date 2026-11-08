@@ -12,6 +12,31 @@ use crate::session::{estimate_tokens, sendable_messages, StoredMessage};
 use crate::traits::*;
 use crate::types::Message;
 
+/// Tell the CLI what a finished pass wrote.
+///
+/// The pass can run on the agent's task (`/remember`) or on a detached one (the interval, the
+/// idle timer), and the observer has to be told either way — otherwise a write lands silently.
+fn announce_save_report(
+    report: &crate::saver::SaveReport,
+    observer: &Option<super::AgentObserver>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    for saved in &report.saved {
+        observer(super::AgentEvent::MemorySaved {
+            name: saved.name.clone(),
+            status: saved.status,
+        });
+    }
+    for saved in &report.saved_notes {
+        observer(super::AgentEvent::NoteSaved {
+            name: saved.name.clone(),
+            status: saved.status,
+        });
+    }
+}
+
 impl<P, M, N, R> Agent<P, M, N, R>
 where
     P: ModelProvider + 'static,
@@ -68,6 +93,12 @@ where
     /// hold the terminal. A failure is logged, never returned — a saver that cannot reach its
     /// provider must not turn a completed turn into a failed one.
     pub(super) fn spawn_background_saver(&self, messages: &[Message]) {
+        // `/memory off` and `/notes off` stop the saver when both halves are off. With one half
+        // still on the pass runs and the saver skips the disabled kind, so turning memory off
+        // does not also silently stop note writes (and the other way round).
+        if !self.config.memory_enabled && !self.config.notes_enabled {
+            return;
+        }
         let Some(hook) = self.saver.as_ref() else {
             return;
         };
@@ -80,6 +111,9 @@ where
             return;
         }
         let saver = hook.saver.clone();
+        // The pass runs on a detached task, so the observer has to travel with it: the turn that
+        // triggered the write has already returned, and the CLI still needs to say what landed.
+        let observer = self.observer.clone();
         debug!(
             "dispatching background memory saver after turn {} ({} messages, model {})",
             completed,
@@ -88,8 +122,75 @@ where
         );
         tokio::spawn(async move {
             match saver.distil(&tail).await {
-                Ok(report) => info!("background memory saver: {}", report.summary()),
+                Ok(report) => {
+                    info!("background memory saver: {}", report.summary());
+                    announce_save_report(&report, &observer);
+                }
                 Err(error) => warn!("background memory saver failed: {}", error),
+            }
+        });
+    }
+
+    /// Run one background-saver pass over the current session right now (`/remember`).
+    ///
+    /// The detached pass runs on an interval; this is the explicit escape hatch for "save this
+    /// now". It uses the same tail, the same policy and the same observer events, so a manual
+    /// pass and an automatic one are indistinguishable to the store and to the CLI.
+    pub async fn run_memory_pass_now(&self) -> Result<crate::saver::SaveReport, HarnessError> {
+        let Some(hook) = self.saver.as_ref() else {
+            return Err(HarnessError::SessionError(
+                "no background saver is attached (set memory.mode: background)".to_string(),
+            ));
+        };
+        if !self.config.memory_enabled && !self.config.notes_enabled {
+            return Ok(crate::saver::SaveReport::default());
+        }
+        let (history, _) = self.load_history().await?;
+        let messages = self.replay_messages(&history);
+        let tail = transcript_tail(&messages, hook.saver.tail_limit());
+        if tail.is_empty() {
+            return Ok(crate::saver::SaveReport::default());
+        }
+        let report = hook.saver.distil(&tail).await?;
+        announce_save_report(&report, &self.observer);
+        Ok(report)
+    }
+
+    /// Run a pass now, detached, for a session that has gone quiet.
+    ///
+    /// [`run_memory_pass_now`](Self::run_memory_pass_now) awaits the report because `/remember`
+    /// has a user waiting on it. An idle pass has nobody waiting, and the provider call can take
+    /// seconds: taking the tail under the lock and distilling on a separate task keeps the
+    /// composer responsive while the write happens.
+    pub async fn spawn_memory_pass_now(&self) {
+        if !self.config.memory_enabled && !self.config.notes_enabled {
+            return;
+        }
+        let Some(hook) = self.saver.as_ref() else {
+            return;
+        };
+        let Ok((history, _)) = self.load_history().await else {
+            return;
+        };
+        let messages = self.replay_messages(&history);
+        let tail = transcript_tail(&messages, hook.saver.tail_limit());
+        if tail.is_empty() {
+            return;
+        }
+        let saver = hook.saver.clone();
+        let observer = self.observer.clone();
+        debug!(
+            "dispatching idle memory saver ({} messages, model {})",
+            tail.len(),
+            saver.model()
+        );
+        tokio::spawn(async move {
+            match saver.distil(&tail).await {
+                Ok(report) => {
+                    info!("idle memory saver: {}", report.summary());
+                    announce_save_report(&report, &observer);
+                }
+                Err(error) => warn!("idle memory saver failed: {}", error),
             }
         });
     }

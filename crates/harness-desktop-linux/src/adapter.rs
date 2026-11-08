@@ -1,6 +1,7 @@
 //! The AT-SPI adapter: the whole platform surface of the desktop tools.
 
 use harness_desktop::adapter::action::{ActionOps, ActionOutcome, ActionRequest};
+use harness_desktop::adapter::input::{InputOps, ScreenshotInfo, WindowRef};
 use harness_desktop::adapter::observation::ObservationOps;
 use harness_desktop::adapter::system::{DesktopStatus, SystemOps};
 use harness_desktop::adapter::types::{AppInfo, ObservedTree, WindowInfo};
@@ -268,6 +269,84 @@ impl ActionOps for LinuxDesktopAdapter {
                 Ok(outcome)
             }
         }
+    }
+}
+
+impl InputOps for LinuxDesktopAdapter {
+    fn focus(&self, app: &str, _deadline: Deadline) -> Result<WindowRef, DesktopError> {
+        crate::input::focus(app)
+    }
+
+    fn active_window(&self, _deadline: Deadline) -> Result<Option<WindowRef>, DesktopError> {
+        crate::input::active_window()
+    }
+
+    fn keys(&self, keys: &str, _deadline: Deadline) -> Result<(), DesktopError> {
+        crate::input::keys(keys)
+    }
+
+    fn paste(&self, text: &str, _deadline: Deadline) -> Result<(), DesktopError> {
+        crate::input::paste(text)
+    }
+
+    fn click_element(
+        &self,
+        app: &str,
+        identity: &ElementIdentity,
+        button: u8,
+        _deadline: Deadline,
+    ) -> Result<(), DesktopError> {
+        let connection = self.bus()?;
+        let (_, tree) = self.app_tree(&connection, app)?;
+        let node = self.resolve_identity(&tree, identity)?;
+        let bounds = match node.presentation.bounds {
+            Some(bounds) if bounds.has_area() => bounds,
+            _ => {
+                // A compact snapshot does not read extents; read them now.
+                let element = Self::element_of(node)?;
+                crate::tree::node::read_extents(&connection, &element)?.ok_or_else(|| {
+                    DesktopError::new(
+                        ErrorCode::ActionNotSupported,
+                        "The element has no on-screen rectangle to click",
+                    )
+                    .with_suggestion(
+                        "Take a snapshot with compact: false, or click explicit coordinates with desktop_click_at",
+                    )
+                    .not_delivered()
+                })?
+            }
+        };
+        if !bounds.has_area() {
+            return Err(DesktopError::new(
+                ErrorCode::ActionFailed,
+                "The element's on-screen rectangle is empty",
+            )
+            .not_delivered());
+        }
+        crate::input::click_at(
+            bounds.x + bounds.width / 2,
+            bounds.y + bounds.height / 2,
+            button,
+        )
+    }
+
+    fn click_at(
+        &self,
+        x: i32,
+        y: i32,
+        button: u8,
+        _deadline: Deadline,
+    ) -> Result<(), DesktopError> {
+        crate::input::click_at(x, y, button)
+    }
+
+    fn screenshot(
+        &self,
+        app: Option<&str>,
+        path: &str,
+        _deadline: Deadline,
+    ) -> Result<ScreenshotInfo, DesktopError> {
+        crate::input::screenshot(app, path)
     }
 }
 

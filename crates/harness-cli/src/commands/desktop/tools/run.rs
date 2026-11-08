@@ -19,6 +19,11 @@ pub enum DesktopCommand {
     Type,
     SetValue,
     Toggle,
+    Focus,
+    Key,
+    Paste,
+    ClickAt,
+    Screenshot,
 }
 
 impl DesktopCommand {
@@ -36,6 +41,11 @@ impl DesktopCommand {
             Self::Type,
             Self::SetValue,
             Self::Toggle,
+            Self::Focus,
+            Self::Key,
+            Self::Paste,
+            Self::ClickAt,
+            Self::Screenshot,
         ]
     }
 
@@ -53,6 +63,11 @@ impl DesktopCommand {
             Self::Type => "desktop_type",
             Self::SetValue => "desktop_set_value",
             Self::Toggle => "desktop_toggle",
+            Self::Focus => "desktop_focus",
+            Self::Key => "desktop_key",
+            Self::Paste => "desktop_paste",
+            Self::ClickAt => "desktop_click_at",
+            Self::Screenshot => "desktop_screenshot",
         }
     }
 
@@ -84,7 +99,7 @@ impl DesktopCommand {
                 "Activate the element a ref names. The action is semantic: it does not move the pointer or take focus."
             }
             Self::Type => {
-                "Replace the contents of the text field a ref names. This overwrites whatever the field holds."
+                "Replace the contents of the text field a ref names. Mode 'value' writes through the accessibility interface, 'paste' clicks the field and pastes through the clipboard (use it for rich web editors), and 'auto' tries value then falls back to paste."
             }
             Self::SetValue => {
                 "Set the value of the control a ref names. A number goes to a slider or a spinner; anything else goes to a text field."
@@ -92,14 +107,36 @@ impl DesktopCommand {
             Self::Toggle => {
                 "Flip the check box or radio button a ref names, or set it to a given state."
             }
+            Self::Focus => {
+                "Focus an application's window so that key chords and pastes land in it. Omit app to report the window that holds focus now."
+            }
+            Self::Key => {
+                "Send key chords to the focused window: 'ctrl+v', 'enter', 'tab', 'ctrl+a ctrl+v'. Keys are sent at the OS level and do not use the accessibility tree."
+            }
+            Self::Paste => {
+                "Put text on the clipboard and paste it into the focused window. This is the reliable path into a rich web editor that ignores desktop_type."
+            }
+            Self::ClickAt => {
+                "Click with a real pointer at the on-screen center of a ref, or at explicit x and y coordinates. Use it when a semantic desktop_click does nothing."
+            }
+            Self::Screenshot => {
+                "Capture the screen, or one application's window, to a PNG file. The answer carries the absolute path and the pixel size."
+            }
         }
     }
 
-    /// Whether the command changes the screen.
+    /// Whether the command changes the screen or takes over input.
     pub fn is_mutating(&self) -> bool {
         matches!(
             self,
-            Self::Click | Self::Type | Self::SetValue | Self::Toggle
+            Self::Click
+                | Self::Type
+                | Self::SetValue
+                | Self::Toggle
+                | Self::Focus
+                | Self::Key
+                | Self::Paste
+                | Self::ClickAt
         )
     }
 
@@ -108,24 +145,57 @@ impl DesktopCommand {
         if !self.is_mutating() {
             return None;
         }
-        let reference = arguments.get("ref").and_then(Value::as_str)?;
-        let detail = match self {
-            Self::Type => arguments
-                .get("text")
-                .or_else(|| arguments.get("value"))
-                .and_then(Value::as_str),
-            Self::SetValue => arguments
-                .get("value")
-                .or_else(|| arguments.get("text"))
-                .and_then(Value::as_str),
-            Self::Toggle => Some("toggle"),
-            _ => None,
-        };
-        Some(match detail {
-            Some(detail) => format!("{reference} <- {detail}"),
-            None => reference.to_string(),
-        })
+        match self {
+            Self::Focus => Some(match arguments.get("app").and_then(Value::as_str) {
+                Some(app) if !app.is_empty() => format!("focus {app}"),
+                _ => "report the focused window".to_string(),
+            }),
+            Self::Key => Some(format!(
+                "send {}",
+                arguments.get("keys").and_then(Value::as_str).unwrap_or("?")
+            )),
+            Self::Paste => Some(format!(
+                "paste {}",
+                excerpt(arguments.get("text").and_then(Value::as_str).unwrap_or("?"))
+            )),
+            Self::ClickAt => Some(match arguments.get("ref").and_then(Value::as_str) {
+                Some(reference) => format!("pointer click {reference}"),
+                None => format!(
+                    "pointer click {},{}",
+                    arguments.get("x").and_then(Value::as_i64).unwrap_or(0),
+                    arguments.get("y").and_then(Value::as_i64).unwrap_or(0)
+                ),
+            }),
+            _ => {
+                let reference = arguments.get("ref").and_then(Value::as_str)?;
+                let detail = match self {
+                    Self::Type => arguments
+                        .get("text")
+                        .or_else(|| arguments.get("value"))
+                        .and_then(Value::as_str),
+                    Self::SetValue => arguments
+                        .get("value")
+                        .or_else(|| arguments.get("text"))
+                        .and_then(Value::as_str),
+                    Self::Toggle => Some("toggle"),
+                    _ => None,
+                };
+                Some(match detail {
+                    Some(detail) => format!("{reference} <- {detail}"),
+                    None => reference.to_string(),
+                })
+            }
+        }
     }
+}
+
+/// A short, single-line preview of a long payload.
+fn excerpt(text: &str) -> String {
+    let mut excerpt: String = text.chars().take(60).collect();
+    if text.chars().count() > 60 {
+        excerpt.push('…');
+    }
+    excerpt.replace('\n', " ")
 }
 
 /// Run a command and answer with the envelope.
@@ -149,6 +219,10 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
             engine,
             &reference(arguments),
             &value_or_text(arguments, "text", "value"),
+            arguments
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("auto"),
         ),
         DesktopCommand::SetValue => commands::set_value(
             engine,
@@ -158,9 +232,41 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
         DesktopCommand::Toggle => commands::toggle(
             engine,
             &reference(arguments),
-            arguments.get("checked").and_then(Value::as_bool),
+            optional_flag(arguments, "checked"),
+        ),
+        DesktopCommand::Focus => {
+            commands::focus(engine, optional_str(arguments, "app").as_deref())
+        }
+        DesktopCommand::Key => commands::key(engine, &required_str(arguments, "keys")),
+        DesktopCommand::Paste => commands::paste(engine, &required_str(arguments, "text")),
+        DesktopCommand::ClickAt => commands::click_at(
+            engine,
+            optional_str(arguments, "ref").as_deref(),
+            optional_i32(arguments, "x"),
+            optional_i32(arguments, "y"),
+            arguments.get("button").and_then(Value::as_u64).unwrap_or(0) as u8,
+        ),
+        DesktopCommand::Screenshot => commands::screenshot(
+            engine,
+            optional_str(arguments, "app").as_deref(),
+            &screenshot_path(arguments),
         ),
     }
+}
+
+/// The path a screenshot is written to, defaulting to the temp directory.
+fn screenshot_path(arguments: &Value) -> String {
+    if let Some(path) = optional_str(arguments, "path") {
+        return path;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    std::env::temp_dir()
+        .join(format!("luna-screenshot-{stamp}.png"))
+        .display()
+        .to_string()
 }
 
 fn value_or_text(arguments: &Value, primary: &str, secondary: &str) -> String {
@@ -198,21 +304,37 @@ fn optional_str(arguments: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn optional_i32(arguments: &Value, key: &str) -> Option<i32> {
+    arguments
+        .get(key)
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+}
+
+/// A boolean argument, tolerant of the string form a model sometimes sends.
+fn flag(arguments: &Value, key: &str, default: bool) -> bool {
+    optional_flag(arguments, key).unwrap_or(default)
+}
+
+fn optional_flag(arguments: &Value, key: &str) -> Option<bool> {
+    match arguments.get(key)? {
+        Value::Bool(value) => Some(*value),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        Value::Number(number) => number.as_i64().map(|value| value != 0),
+        _ => None,
+    }
+}
+
 /// The tree options a snapshot asks for.
 fn snapshot_options(arguments: &Value) -> harness_desktop::tree::options::TreeOptions {
     let mut options = harness_desktop::tree::options::TreeOptions {
-        interactive_only: arguments
-            .get("interactive")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        skeleton: arguments
-            .get("skeleton")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        compact: arguments
-            .get("compact")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
+        interactive_only: flag(arguments, "interactive", true),
+        skeleton: flag(arguments, "skeleton", false),
+        compact: flag(arguments, "compact", true),
         ..Default::default()
     };
     if let Some(depth) = arguments.get("max_depth").and_then(Value::as_u64) {
@@ -227,9 +349,41 @@ fn find_query(arguments: &Value) -> FindQuery {
     FindQuery {
         role: optional_str(arguments, "role"),
         name: optional_str(arguments, "name"),
-        exact: arguments
-            .get("exact")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        exact: flag(arguments, "exact", false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_boolean_argument_is_read_from_a_bool_or_a_string() {
+        assert_eq!(flag(&json!({ "exact": true }), "exact", false), true);
+        assert_eq!(flag(&json!({ "exact": "true" }), "exact", false), true);
+        assert_eq!(flag(&json!({ "exact": "false" }), "exact", true), false);
+        assert_eq!(flag(&json!({ "exact": 0 }), "exact", true), false);
+        assert_eq!(flag(&json!({}), "exact", true), true);
+    }
+
+    #[test]
+    fn a_missing_checked_argument_stays_unset() {
+        assert_eq!(optional_flag(&json!({}), "checked"), None);
+        assert_eq!(optional_flag(&json!({ "checked": "yes" }), "checked"), Some(true));
+    }
+
+    #[test]
+    fn a_snapshot_flag_survives_the_string_form_a_model_sends() {
+        // The transcript of the Flow session sent `"compact": "true"`.
+        let options = snapshot_options(&json!({
+            "app": "Firefox",
+            "compact": "true",
+            "interactive": "false",
+            "skeleton": "false",
+        }));
+        assert!(options.compact);
+        assert!(!options.interactive_only);
+        assert!(!options.skeleton);
     }
 }

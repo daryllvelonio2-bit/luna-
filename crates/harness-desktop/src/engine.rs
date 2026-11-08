@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::adapter::{ActionOutcome, ActionRequest, DesktopAdapter, DesktopStatus};
+use crate::adapter::{
+    ActionOutcome, ActionRequest, DesktopAdapter, DesktopStatus, ScreenshotInfo, WindowRef,
+};
 use crate::deadline::Deadline;
 use crate::error::{DesktopError, ErrorCode};
 use crate::refs::entry::RefEntry;
@@ -127,6 +129,54 @@ impl DesktopEngine {
         self.adapter
             .execute(&entry.app, &entry.identity, &request, self.deadline())
     }
+
+    /// The element's current value, read again from the live tree.
+    pub fn read_value(&self, ref_id: &str) -> Result<Option<String>, DesktopError> {
+        let entry = self.resolve(ref_id)?;
+        self.adapter
+            .read_value(&entry.app, &entry.identity, self.deadline())
+    }
+
+    /// Focus the window of an application, and report what is active now.
+    pub fn focus(&self, app: &str) -> Result<WindowRef, DesktopError> {
+        self.adapter.focus(app, self.deadline())
+    }
+
+    /// The window that holds keyboard focus right now.
+    pub fn active_window(&self) -> Result<Option<WindowRef>, DesktopError> {
+        self.adapter.active_window(self.deadline())
+    }
+
+    /// Send key chords to the focused window.
+    pub fn keys(&self, keys: &str) -> Result<(), DesktopError> {
+        self.adapter.keys(keys, self.deadline())
+    }
+
+    /// Paste text into the focused window through the clipboard.
+    pub fn paste(&self, text: &str) -> Result<(), DesktopError> {
+        self.adapter.paste(text, self.deadline())
+    }
+
+    /// Click the on-screen center of the element a ref names.
+    pub fn click_element(&self, ref_id: &str, button: u8) -> Result<(), DesktopError> {
+        let entry = self.resolve(ref_id)?;
+        self.adapter
+            .click_element(&entry.app, &entry.identity, button, self.deadline())
+    }
+
+    /// Click a screen coordinate.
+    pub fn click_at(&self, x: i32, y: i32, button: u8) -> Result<(), DesktopError> {
+        self.adapter.click_at(x, y, button, self.deadline())
+    }
+
+    /// Capture the screen, or one application's window, to a PNG file.
+    pub fn screenshot(
+        &self,
+        app: Option<&str>,
+        path: &str,
+    ) -> Result<ScreenshotInfo, DesktopError> {
+        self.adapter.screenshot(app, path, self.deadline())
+    }
 }
 
 /// Give every actionable node in the tree a ref, and remember what it stands for.
@@ -240,6 +290,8 @@ mod tests {
             Ok(ActionOutcome::verified(vec![request.name().to_string()]))
         }
     }
+
+    impl crate::adapter::input::InputOps for Fake {}
 
     impl SystemOps for Fake {
         fn platform(&self) -> &'static str {

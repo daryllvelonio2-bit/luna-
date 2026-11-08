@@ -67,6 +67,7 @@ mod tests {
         struct NoReads;
         impl crate::adapter::observation::ObservationOps for NoReads {}
         impl crate::adapter::action::ActionOps for NoReads {}
+        impl crate::adapter::input::InputOps for NoReads {}
         impl crate::adapter::system::SystemOps for NoReads {}
 
         let engine = DesktopEngine::new(std::sync::Arc::new(NoReads));

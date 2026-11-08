@@ -524,6 +524,73 @@ fn errors_report_the_first_line() {
 }
 
 #[test]
+fn bounded_output_keeps_the_newest_lines_and_counts_the_dropped_ones() {
+    let output = (0..100)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (kept, dropped) = bounded_tool_output(&output);
+
+    assert_eq!(dropped, 100 - MAX_RETAINED_OUTPUT_LINES);
+    assert!(kept.starts_with(&format!("line {dropped}")), "{kept}");
+    assert!(kept.ends_with("line 99"), "{kept}");
+    assert!(!kept.contains("line 0\n"), "{kept}");
+}
+
+#[test]
+fn expanded_transcript_keeps_a_finished_tools_output() {
+    use harness_core::{Message, ToolResult};
+
+    let output = (0..100)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("build it"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "c1".to_string(),
+                    name: "terminal".to_string(),
+                    arguments: json!({ "command": "cargo test" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message::tool(ToolResult::success("c1", &output)),
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    let collapsed = plain_rows(&render_turn_lines(&turns, false, 100)).join("\n");
+    let expanded = plain_rows(&render_turn_lines(&turns, true, 100)).join("\n");
+
+    assert!(
+        !collapsed.contains("line 99"),
+        "the collapsed transcript stays compact: {collapsed}"
+    );
+    assert!(expanded.contains("line 99"), "{expanded}");
+    assert!(expanded.contains("earlier lines"), "{expanded}");
+}
+
+#[test]
 fn activity_line_animates_the_frame_and_reports_elapsed_time() {
     let first = activity_line(0, "", None, Duration::from_millis(1400), 80);
     let second = activity_line(1, "", None, Duration::from_millis(1500), 80);
@@ -1333,7 +1400,10 @@ fn the_transcript_rows_are_the_cli_ui_and_hold_one_line_each() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("audit the delegate viewer"), "{text}");
-    assert!(text.contains("read") && text.contains("viewer.rs"), "{text}");
+    assert!(
+        text.contains("read") && text.contains("viewer.rs"),
+        "{text}"
+    );
     assert!(text.contains("I should read the viewer first."), "{text}");
     assert!(text.contains(LUNA_LABEL), "{text}");
     assert!(
@@ -1558,6 +1628,115 @@ async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     assert_eq!(turns[0].reply, "first answer");
     assert_eq!(turns[1].user_query, "second question");
     assert_eq!(turns[1].reply, "second answer");
+}
+
+#[test]
+fn a_finished_job_reads_as_a_notice_and_a_model_message() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000001".to_string(),
+        command: "cargo build --release\nsecond line".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 316,
+        log_path: "/tmp/job_000001.log".to_string(),
+        output_tail: "line one\nline two\n".to_string(),
+    };
+
+    let notice = format_job_notification(
+        "✔",
+        &completion.id,
+        &completion.command,
+        &completion.status,
+        &format_elapsed_secs(completion.elapsed_secs),
+    );
+    assert_eq!(
+        notice,
+        "✔ job_000001: cargo build --release — completed (exit 0), 5m 16s"
+    );
+    assert!(
+        !notice.contains("second line"),
+        "the notice is one line: {notice}"
+    );
+
+    let message = format_job_system_message(&completion);
+    assert!(
+        message.starts_with(BACKGROUND_JOB_RESUME_PREFIX),
+        "{message}"
+    );
+    for expected in [
+        "job_000001",
+        "cargo build --release",
+        "completed (exit 0)",
+        "5m 16s",
+        "/tmp/job_000001.log",
+        "line one",
+        "line two",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_job_with_no_output_says_so_instead_of_leaving_a_blank() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000002".to_string(),
+        command: "true".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 0,
+        log_path: "/tmp/job_000002.log".to_string(),
+        output_tail: "   \n".to_string(),
+    };
+    let message = format_job_system_message(&completion);
+    assert!(message.contains("(no output)"), "{message}");
+}
+
+#[test]
+fn a_huge_tail_is_trimmed_to_its_newest_characters() {
+    use harness_core::tasks::JobCompletion;
+
+    let completion = JobCompletion {
+        id: "job_000003".to_string(),
+        command: "generate-report".to_string(),
+        status: "completed (exit 0)".to_string(),
+        elapsed_secs: 1,
+        log_path: "/tmp/job_000003.log".to_string(),
+        output_tail: format!("{}THE-END", "x".repeat(10_000)),
+    };
+    let message = format_job_system_message(&completion);
+    assert!(message.contains("earlier characters trimmed"), "{message}");
+    assert!(message.ends_with("THE-END"), "the newest output is kept");
+    assert!(
+        message.chars().count() < 5_000,
+        "the stored message is bounded: {} chars",
+        message.chars().count()
+    );
+}
+
+#[test]
+fn a_harness_owned_turn_is_hidden_from_replay() {
+    let prompt = background_job_resume_prompt();
+    assert!(prompt.starts_with(BACKGROUND_JOB_RESUME_PREFIX), "{prompt}");
+    assert_eq!(clean_user_query_for_transcript(&prompt), "");
+
+    // Ordinary prose that happens to contain the words is still a user message.
+    assert_eq!(
+        clean_user_query_for_transcript("the background job finished"),
+        "the background job finished"
+    );
+}
+
+#[test]
+fn a_long_job_command_is_bounded_in_the_notice() {
+    let long = "x".repeat(200);
+    let short = format_job_command(&long);
+    assert!(short.chars().count() <= 60, "{short}");
+    assert!(short.ends_with('…'), "{short}");
 }
 
 #[test]

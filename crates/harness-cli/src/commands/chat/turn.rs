@@ -159,6 +159,10 @@ pub(super) fn launch_turn(
         format!("{}\n\n{}", q, images.join("\n\n"))
     };
 
+    // The background-saver notices are a glance between turns, not transcript: the next turn
+    // hides them before the screen is cleared and redrawn.
+    ui.clear_memory_notices();
+
     // Luna is thinking from here: the composer's hint says so until the turn ends, and it is set
     // before the box is drawn so the busy line is what the user sees while it runs.
     ui.set_turn_active(true);
@@ -196,6 +200,68 @@ pub(super) fn launch_turn(
         let ag = ag_ref.lock().await;
         ag.run_turn(&q_with_images, cancel_child).await
     }));
+}
+
+/// Start a turn the harness asked for itself, with no user line and no prompt history.
+///
+/// Used when a background job finishes: the completion is already stored as a system message and
+/// the prompt starts with [`BACKGROUND_JOB_RESUME_PREFIX`], so replay hides both. `current_query`
+/// is deliberately empty — the live view has nothing the user typed to show.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn launch_internal_turn(
+    prompt: &str,
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
+    current_cancel: &mut CancellationToken,
+    current_query: &mut String,
+    turn_start: &mut std::time::Instant,
+    active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+) {
+    // The notices belong to the turn that was about to start; the completion itself is already
+    // above the composer and in the transcript.
+    ui.clear_memory_notices();
+    ui.set_turn_active(true);
+
+    *current_cancel = CancellationToken::new();
+    let cancel_child = current_cancel.child_token();
+    let ag_ref = agent.clone();
+    *current_query = String::new();
+    *turn_start = std::time::Instant::now();
+    in_flight_tools
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    let prompt = prompt.to_string();
+    *active_turn = Some(tokio::spawn(async move {
+        let ag = ag_ref.lock().await;
+        ag.run_turn(&prompt, cancel_child).await
+    }));
+}
+
+/// Whether the composer is quiet enough for the harness to start a turn nobody typed.
+///
+/// Every input is a reason *not* to steal the turn: a running turn (the completion will be in the
+/// next replay), a fold (the transcript is being rewritten), a queued message (the user already
+/// has something to send), a draft or attached image (the user is mid-thought), a modal (the
+/// screen is owned by a dialog), or plan mode (the agent must not act before a plan is approved).
+/// A false answer only defers: the tick asks again when it is idle.
+pub(super) fn can_auto_resume(
+    turn_active: bool,
+    compacting: bool,
+    queued: usize,
+    draft: &str,
+    pending_images: usize,
+    modal_active: bool,
+    plan_mode: bool,
+) -> bool {
+    !turn_active
+        && !compacting
+        && queued == 0
+        && draft.trim().is_empty()
+        && pending_images == 0
+        && !modal_active
+        && !plan_mode
 }
 
 /// Stop the turn in flight and record it as cancelled: the body Ctrl+C, Escape and an interrupting
@@ -418,6 +484,8 @@ pub(super) async fn handle_composer_command(
                         call_formatted: line.clone(),
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
+                        output: String::new(),
+                        output_dropped: 0,
                     });
                 ui.emit_above(&line);
             } else {

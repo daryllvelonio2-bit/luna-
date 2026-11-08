@@ -23,12 +23,16 @@ fn a_running_command_keeps_only_its_newest_lines() {
     }
 
     let live = ui.live.lock().unwrap();
-    let rows = live.tool_output.rows(80);
+    let rows = live.tool_output.rows(80, TOOL_TAIL_LINES);
     assert_eq!(rows.len(), TOOL_TAIL_LINES, "the tail is bounded: {rows:?}");
     assert!(rows.last().unwrap().contains("line 19"));
     assert!(
         !rows.iter().any(|row| row.contains("line 11")),
         "the oldest lines fall off the tail: {rows:?}"
+    );
+    assert!(
+        rows[0].contains("earlier line"),
+        "the tail says how much it is hiding: {rows:?}"
     );
 }
 
@@ -42,7 +46,7 @@ fn the_tool_tail_drops_ansi_and_keeps_the_newest_progress_update() {
     let live = ui.live.lock().unwrap();
     let plain: Vec<String> = live
         .tool_output
-        .rows(80)
+        .rows(80, TOOL_TAIL_LINES)
         .iter()
         .map(|row| dialoguer::console::strip_ansi_codes(row).to_string())
         .collect();
@@ -52,8 +56,41 @@ fn the_tool_tail_drops_ansi_and_keeps_the_newest_progress_update() {
         "a `\\r` redraw leaves a line the tail can show: {plain:?}"
     );
     assert!(
-        !plain.iter().any(|row| row.contains("[31m") || row.contains("[0m")),
+        !plain.iter().any(|row| row.contains("10%")),
+        "a `\\r` redraw overwrites the previous update: {plain:?}"
+    );
+    assert!(
+        !plain
+            .iter()
+            .any(|row| row.contains("[31m") || row.contains("[0m")),
         "escape sequences are not text: {plain:?}"
+    );
+}
+
+#[test]
+fn expanding_the_tail_reveals_the_buffered_lines_until_the_call_ends() {
+    let ui = ChatUi::new(true);
+    ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));
+    for i in 0..20 {
+        ui.push_tool_output(&format!("line {i}\n"));
+    }
+
+    assert!(ui.toggle_live_expanded());
+    {
+        let live = ui.live.lock().unwrap();
+        let rows = live.tool_output.rows(80, tool_tail_limit(&live));
+        assert_eq!(
+            rows.len(),
+            20,
+            "expanded tail shows the whole buffer: {rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("line 0")));
+    }
+
+    ui.stop_activity();
+    assert!(
+        !ui.live.lock().unwrap().tool_output_expanded,
+        "the next call starts collapsed"
     );
 }
 
@@ -65,7 +102,12 @@ fn a_new_tool_call_starts_with_an_empty_tail() {
 
     ui.start_activity("$ two", "terminal", &serde_json::json!({}));
     assert!(
-        ui.live.lock().unwrap().tool_output.rows(80).is_empty(),
+        ui.live
+            .lock()
+            .unwrap()
+            .tool_output
+            .rows(80, TOOL_TAIL_LINES)
+            .is_empty(),
         "the previous call's output does not leak into the next one"
     );
 }
@@ -399,6 +441,7 @@ fn demo_the_in_place_repaint() {
             live_rows_lens: vec![visible_width("⠋ reading")],
             panel_rows_lens: Vec::new(),
             delegate_rows_lens: Vec::new(),
+            memory_notice_rows_lens: Vec::new(),
             block_rows: vec!["⠋ reading".to_string(), status.clone(), divider.clone()],
             prompt_drawn: prompt.clone(),
         });
@@ -452,6 +495,7 @@ fn the_live_region_refreshes_in_place_instead_of_blanking_the_screen() {
             live_rows_lens: Vec::new(),
             panel_rows_lens: Vec::new(),
             delegate_rows_lens: Vec::new(),
+            memory_notice_rows_lens: Vec::new(),
             block_rows: vec![status.clone(), divider.clone()],
             prompt_drawn: ui.prompt_row_drawn("").0,
         });
@@ -521,6 +565,7 @@ fn multiple_changed_rows_keep_cursor_in_place_and_walk_down_cleanly() {
             ],
             panel_rows_lens: Vec::new(),
             delegate_rows_lens: Vec::new(),
+            memory_notice_rows_lens: Vec::new(),
             block_rows: vec![
                 "thinking row 1".to_string(),
                 "thinking row 2".to_string(),
@@ -1050,6 +1095,65 @@ fn paints_are_counted_while_they_run() {
         0,
         "each paint is given up when it ends"
     );
+}
+
+/// The background saver's report is a glance, not transcript: one row per memory, named and with
+/// the status the saver chose.
+#[test]
+fn a_memory_notice_names_the_memory_and_its_status() {
+    let ui = ChatUi::new(true);
+    ui.push_memory_notice("Astra", "saved");
+
+    let rows = ui.memory_notice_rows(80);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("memory"), "{}", rows[0]);
+    assert!(rows[0].contains("Astra"), "{}", rows[0]);
+    assert!(rows[0].contains("saved"), "{}", rows[0]);
+}
+
+/// A note write is announced with its own prefix, so a saved note is never mistaken for a memory.
+#[test]
+fn a_note_notice_names_the_note_and_its_status() {
+    let ui = ChatUi::new(true);
+    ui.push_note_notice("Memory Saver Plan", "updated");
+
+    let rows = ui.memory_notice_rows(80);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("note"), "{}", rows[0]);
+    assert!(rows[0].contains("Memory Saver Plan"), "{}", rows[0]);
+    assert!(rows[0].contains("updated"), "{}", rows[0]);
+}
+
+/// A generated name can be a paragraph; the CLI keeps the status on screen by trimming the name
+/// to the row, with an ellipsis so the cut is visible.
+#[test]
+fn a_long_memory_name_is_trimmed_to_fit_the_notice() {
+    let ui = ChatUi::new(true);
+    ui.push_memory_notice(&"long memory name ".repeat(20), "updated");
+
+    let rows = ui.memory_notice_rows(48);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        visible_width(&rows[0]) <= 48,
+        "row is wider than the terminal: {} cells, {rows:?}",
+        visible_width(&rows[0])
+    );
+    assert!(rows[0].contains('…'), "{}", rows[0]);
+    assert!(rows[0].contains("updated"), "{}", rows[0]);
+}
+
+/// The notice is temporary: the next turn drops it, and a later pass for the same memory replaces
+/// the status instead of stacking a stale row.
+#[test]
+fn memory_notices_are_temporary_and_keep_one_row_per_memory() {
+    let ui = ChatUi::new(true);
+    ui.push_memory_notice("Astra", "saved");
+    ui.push_memory_notice("Astra", "updated");
+    assert_eq!(ui.memory_notice_rows(80).len(), 1);
+    assert!(ui.memory_notice_rows(80)[0].contains("updated"));
+
+    ui.clear_memory_notices();
+    assert!(ui.memory_notice_rows(80).is_empty());
 }
 
 #[test]

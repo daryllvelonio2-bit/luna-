@@ -14,6 +14,7 @@ pub mod actions;
 pub mod adapter;
 pub mod bus;
 pub mod element;
+pub mod input;
 pub mod system;
 pub mod tree;
 

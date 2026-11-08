@@ -1,5 +1,5 @@
-//! System-prompt assembly: the `prompts.md` template with memories, skills and the runtime
-//! environment substituted in.
+//! System-prompt assembly: the `prompts.md` template with memories and the runtime environment
+//! substituted in.
 
 use super::Agent;
 use crate::error::HarnessError;
@@ -12,7 +12,7 @@ where
     N: NotesEngine + 'static,
     R: ToolRegistry + 'static,
 {
-    /// Build the full system prompt for a turn, with memories, skills, and memory mode instructions substituted.
+    /// Build the full system prompt for a turn, with memories and memory mode instructions substituted.
     pub async fn build_system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
         self.system_prompt(user_input).await
     }
@@ -27,21 +27,52 @@ where
             return Ok(custom_prompt.clone());
         }
 
-        let relevant_memories = self.memory.retrieve(user_input, 10).await?;
-        let memory_prompt = self.memory.format_as_system_prompt(&relevant_memories);
-        let skills_prompt = self
-            .config
-            .skills_summary
-            .as_deref()
-            .unwrap_or("(no specialized skills installed)");
-        let mcp_prompt = self.mcp_tools_prompt().await?;
+        let memory_prompt = if self.config.memory_enabled {
+            let relevant_memories = self.memory.retrieve(user_input, 10).await?;
+            self.memory.format_as_system_prompt(&relevant_memories)
+        } else {
+            String::new()
+        };
+        // A pointer, not an index: the list is discovered on demand with `skills_list`, and the
+        // procedure only enters the context when `skill_view` loads it. The instruction is what
+        // makes that discovery reliable — without it the model has no reason to look.
+        let skills_protocol = if self.config.skills_enabled {
+            "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions."
+        } else {
+            ""
+        };
+        let mcp_protocol = if self.config.mcp_enabled {
+            let mcp_prompt = self.mcp_tools_prompt().await?;
+            format!(
+                "- Configured MCP Tools: {mcp_prompt}\n  Invoke MCP tools via mcp__<server>__<tool>."
+            )
+        } else {
+            String::new()
+        };
+        let active_memories_block = if self.config.memory_enabled {
+            format!("Active Memories:\n{memory_prompt}")
+        } else {
+            String::new()
+        };
 
         let memory_instruction = match self.config.memory_mode {
             crate::config::MemoryMode::Session => {
-                format!(
-                    "{}\n\n",
-                    crate::prompts::section(crate::prompts::MEMORY_SESSION_PROMPT)?
-                )
+                let mut sections = Vec::new();
+                if self.config.memory_enabled {
+                    sections.push(crate::prompts::section(
+                        crate::prompts::MEMORY_SESSION_PROMPT,
+                    )?);
+                }
+                if self.config.notes_enabled {
+                    sections.push(crate::prompts::section(
+                        crate::prompts::NOTES_SESSION_PROMPT,
+                    )?);
+                }
+                if sections.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n\n", sections.join("\n\n"))
+                }
             }
             crate::config::MemoryMode::Background => String::new(),
         };
@@ -51,9 +82,9 @@ where
                 "{{SYSTEM_PROMPT_PREFIX}}",
                 self.config.system_prompt_prefix.as_deref().unwrap_or(""),
             )
-            .replace("{{ACTIVE_MEMORIES}}", &memory_prompt)
-            .replace("{{AVAILABLE_SKILLS}}", skills_prompt)
-            .replace("{{MCP_TOOLS}}", &mcp_prompt)
+            .replace("{{ACTIVE_MEMORIES_BLOCK}}", &active_memories_block)
+            .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
+            .replace("{{MCP_PROTOCOL}}", &mcp_protocol)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", &memory_instruction)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction);
 

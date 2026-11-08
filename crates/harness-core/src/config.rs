@@ -577,7 +577,9 @@ pub struct MemorySettings {
     pub mode: MemoryMode,
     /// Also let the background saver write notes, not just memory records.
     pub background_notes: bool,
-    /// Distil after every Nth completed turn. `1` means every turn; `0` disables the saver.
+    /// Distil after every Nth completed turn. `3` is the default: overlapping tails re-derive the
+    /// same facts, and `/remember` is there when the user wants a write immediately. `0` disables
+    /// the saver.
     pub background_every_turns: usize,
     /// How many trailing messages the saver reads. A saver that sees the whole session would
     /// re-derive the same facts on every turn and pay for the tokens twice.
@@ -586,6 +588,22 @@ pub struct MemorySettings {
     pub background_model: Option<String>,
     /// Provider used by the saver; `None` means the session's provider.
     pub background_provider: Option<String>,
+    /// Split the pass into extract + reconcile once the store holds more than ~20 items.
+    ///
+    /// One call is cheaper; two calls make better decisions because the curator sees only real
+    /// candidates and a full inventory instead of doing both jobs in one prompt.
+    pub background_two_pass: bool,
+    /// Refuse an operation whose confidence is below this.
+    pub background_min_confidence: f32,
+    /// Per-pass cap on memory writes (adds, updates, merges).
+    pub background_max_memory_writes: usize,
+    /// Per-pass cap on note writes (creates, updates, merges).
+    pub background_max_note_writes: usize,
+    /// Per-pass cap on every operation, including deletes.
+    pub background_max_operations: usize,
+    /// Run one extra pass when the session has been idle this many seconds, so a short session
+    /// still saves before the every-N-turns interval fires. `0` disables idle passes.
+    pub background_idle_secs: u64,
 }
 
 impl Default for MemorySettings {
@@ -593,10 +611,16 @@ impl Default for MemorySettings {
         Self {
             mode: MemoryMode::Session,
             background_notes: true,
-            background_every_turns: 1,
+            background_every_turns: 3,
             background_tail_messages: 24,
             background_model: None,
             background_provider: None,
+            background_two_pass: true,
+            background_min_confidence: 0.65,
+            background_max_memory_writes: 3,
+            background_max_note_writes: 2,
+            background_max_operations: 6,
+            background_idle_secs: 90,
         }
     }
 }

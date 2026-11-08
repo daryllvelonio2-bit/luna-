@@ -419,6 +419,19 @@ pub(crate) fn kill_process_group(leader: Option<u32>) {
 #[cfg(not(any(unix, windows)))]
 fn kill_process_group(_leader: Option<u32>) {}
 
+/// How long coalesced progress may sit before it is handed to the observer.
+///
+/// The observer takes the UI lock; a verbose build can produce thousands of small reads a second.
+/// Batching them keeps the tail looking live without turning every read into a repaint.
+const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Hard bound on coalesced progress, so a reader that never yields cannot grow the batch without
+/// limit before the interval elapses.
+const PROGRESS_FLUSH_BYTES: usize = 32 * 1024;
+
+/// How long a silent pipe waits before the reader checks whether it has anything to flush.
+const PROGRESS_IDLE_POLL: Duration = Duration::from_millis(250);
+
 /// Read one of a child's pipes to the end, keeping the first `cap` bytes for the result while
 /// forwarding everything as it arrives.
 ///
@@ -438,11 +451,28 @@ where
     // A chunk can end in the middle of a multi-byte character. Hold the incomplete tail back
     // instead of decoding it as replacement characters on both sides of the split.
     let mut pending = Vec::new();
+    // Decoded text waiting for the next flush. Coalescing here is what keeps a chatty command from
+    // taking the UI lock on every 8 KB read.
+    let mut coalesced = String::new();
+    let mut last_flush = tokio::time::Instant::now();
     let mut buf = [0u8; 8192];
     loop {
-        match pipe.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
+        // The timeout is what lets a line printed before a long `sleep` reach the tail promptly:
+        // without it, the flush would wait for the next read, which may be a minute away.
+        let idle = if coalesced.is_empty() {
+            PROGRESS_IDLE_POLL
+        } else {
+            PROGRESS_FLUSH_INTERVAL
+        };
+        let read = tokio::time::timeout(idle, pipe.read(&mut buf)).await;
+        match read {
+            Err(_elapsed) => {
+                if let Some(progress) = &progress {
+                    flush_progress(progress, &mut coalesced, &mut last_flush, false);
+                }
+            }
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
                 let chunk = &buf[..n];
                 if collected.len() < cap {
                     let room = cap - collected.len();
@@ -450,35 +480,57 @@ where
                 }
                 if let Some(progress) = &progress {
                     pending.extend_from_slice(chunk);
-                    match std::str::from_utf8(&pending) {
-                        Ok(text) => {
-                            if !text.is_empty() {
-                                progress(text);
+                    if let Ok(text) = std::str::from_utf8(&pending) {
+                        coalesced.push_str(text);
+                        pending.clear();
+                    } else {
+                        // `valid_up_to` is always a UTF-8 boundary; only the incomplete tail stays.
+                        let valid = std::str::from_utf8(&pending)
+                            .err()
+                            .map(|error| error.valid_up_to())
+                            .unwrap_or(0);
+                        if valid > 0 {
+                            // SAFETY: `valid` is a boundary reported by the UTF-8 validator.
+                            if let Ok(text) = std::str::from_utf8(&pending[..valid]) {
+                                coalesced.push_str(text);
                             }
-                            pending.clear();
-                        }
-                        Err(error) => {
-                            let valid = error.valid_up_to();
-                            if valid > 0 {
-                                // SAFETY: `valid_up_to` is always a UTF-8 boundary.
-                                if let Ok(text) = std::str::from_utf8(&pending[..valid]) {
-                                    progress(text);
-                                }
-                                pending.drain(..valid);
-                            }
+                            pending.drain(..valid);
                         }
                     }
+                    flush_progress(progress, &mut coalesced, &mut last_flush, false);
                 }
             }
-            Err(_) => break,
+            Ok(Err(_)) => break,
         }
     }
     if let Some(progress) = &progress {
         if !pending.is_empty() {
-            progress(&String::from_utf8_lossy(&pending));
+            coalesced.push_str(&String::from_utf8_lossy(&pending));
         }
+        flush_progress(progress, &mut coalesced, &mut last_flush, true);
     }
     collected
+}
+
+/// Hand coalesced output to the observer once the interval or size bound is reached, or
+/// unconditionally at EOF.
+fn flush_progress(
+    progress: &ToolProgress,
+    coalesced: &mut String,
+    last_flush: &mut tokio::time::Instant,
+    force: bool,
+) {
+    if coalesced.is_empty() {
+        return;
+    }
+    if force
+        || coalesced.len() >= PROGRESS_FLUSH_BYTES
+        || last_flush.elapsed() >= PROGRESS_FLUSH_INTERVAL
+    {
+        progress(coalesced);
+        coalesced.clear();
+        *last_flush = tokio::time::Instant::now();
+    }
 }
 
 #[async_trait]

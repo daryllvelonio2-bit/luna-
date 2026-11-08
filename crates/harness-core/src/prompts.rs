@@ -13,6 +13,7 @@ const PROMPTS_FILE: &str = include_str!("../prompts.md");
 pub const SYSTEM_PROMPT: &str = "SYSTEM_PROMPT";
 pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
 pub const MEMORY_SESSION_PROMPT: &str = "MEMORY_SESSION_PROMPT";
+pub const NOTES_SESSION_PROMPT: &str = "NOTES_SESSION_PROMPT";
 pub const MEMORY_BACKGROUND_PROMPT: &str = "MEMORY_BACKGROUND_PROMPT";
 
 /// The body of the `name` section, with surrounding blank lines trimmed.
@@ -49,6 +50,7 @@ mod tests {
             SYSTEM_PROMPT,
             COMPACTION_INSTRUCTION,
             MEMORY_SESSION_PROMPT,
+            NOTES_SESSION_PROMPT,
             MEMORY_BACKGROUND_PROMPT,
         ] {
             let body = section(name).expect("declared section is present");
@@ -64,14 +66,17 @@ mod tests {
             "prefix marker missing"
         );
         assert!(
-            body.contains("{{ACTIVE_MEMORIES}}"),
-            "memory marker missing"
+            body.contains("{{ACTIVE_MEMORIES_BLOCK}}"),
+            "memory block marker missing"
         );
         assert!(
-            body.contains("{{AVAILABLE_SKILLS}}"),
-            "skills marker missing"
+            body.contains("{{SKILLS_PROTOCOL}}"),
+            "skills protocol marker missing"
         );
-        assert!(body.contains("{{MCP_TOOLS}}"), "mcp tools marker missing");
+        assert!(
+            body.contains("{{MCP_PROTOCOL}}"),
+            "mcp protocol marker missing"
+        );
         assert!(
             body.contains("{{MEMORY_AND_NOTE_PROTOCOL}}"),
             "memory and note protocol marker missing"
@@ -122,18 +127,27 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_protocol_describes_index_cards_and_project_notes() {
-        let body = section(MEMORY_SESSION_PROMPT).expect("memory prompt loads");
-        assert!(body.contains("Single-line index cards"), "{body}");
+    fn the_memory_and_note_protocols_are_separate_sections() {
+        let memory = section(MEMORY_SESSION_PROMPT).expect("memory prompt loads");
+        assert!(memory.contains("save_memory"), "{memory}");
+        assert!(memory.contains("single-line index cards"), "{memory}");
         assert!(
-            body.contains("single authoritative record per primary domain"),
-            "{body}"
+            memory.contains("single authoritative record per primary domain"),
+            "{memory}"
         );
-        assert!(body.contains("forget_memory"), "{body}");
-        assert!(body.contains("Project Notes"), "{body}");
-        assert!(body.contains("markdown notes"), "{body}");
-        assert!(body.contains("For repository audits"), "{body}");
+        assert!(memory.contains("forget_memory"), "{memory}");
+        assert!(
+            !memory.contains("Project Notes"),
+            "notes moved to their own section: {memory}"
+        );
+
+        let notes = section(NOTES_SESSION_PROMPT).expect("notes prompt loads");
+        assert!(notes.contains("Project Notes"), "{notes}");
+        assert!(notes.contains("save_note"), "{notes}");
+        assert!(notes.contains("markdown notes"), "{notes}");
+        assert!(notes.contains("For repository audits"), "{notes}");
+
         // The old contract — a rich record per entity — is gone.
-        assert!(!body.contains("consolidated memory record"), "{body}");
+        assert!(!memory.contains("consolidated memory record"), "{memory}");
     }
 }

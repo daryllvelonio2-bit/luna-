@@ -348,6 +348,50 @@ async fn terminal_forwards_output_while_the_command_runs() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn terminal_flushes_a_line_before_a_slow_command_finishes() {
+    let dir = tempdir().unwrap();
+    let term = TerminalTool::new(dir.path().to_path_buf(), 10, 50_000);
+    let cancel = CancellationToken::new();
+
+    let started = std::time::Instant::now();
+    let first_at = Arc::new(std::sync::Mutex::new(None));
+    let sink = first_at.clone();
+    let progress: harness_core::ToolProgress = Arc::new(move |chunk: &str| {
+        if chunk.contains("early") {
+            let mut slot = sink.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(std::time::Instant::now());
+            }
+        }
+    });
+
+    // The first line lands immediately, then the command stays quiet for longer than the flush
+    // interval. A coalescing reader that only flushed on the next read would hide "early" until
+    // the sleep ended, which is exactly the regression this guards.
+    let res = term
+        .execute_with_progress(
+            "call_flush",
+            &json!({ "command": "printf 'early\\n'; sleep 1.2; printf 'late\\n'" }),
+            &cancel,
+            Some(&progress),
+        )
+        .await
+        .unwrap();
+
+    assert!(!res.is_error, "{}", res.content);
+    let first = first_at
+        .lock()
+        .unwrap()
+        .expect("the early line reached the observer");
+    assert!(
+        first.duration_since(started) < std::time::Duration::from_millis(900),
+        "the early line waited for the command to finish: {:?}",
+        first.duration_since(started)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_timed_out_command_leaves_no_children_behind() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();

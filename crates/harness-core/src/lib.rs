@@ -44,7 +44,10 @@ pub use hooks::{
 };
 pub use permission::{PermissionEngine, PermissionRule, RuleAction, RuleVerdict};
 pub use registry::DefaultToolRegistry;
-pub use saver::{transcript_tail, BackgroundSaver, SaveReport, SaverHook};
+pub use saver::{
+    transcript_tail, BackgroundSaver, MemorySaveStatus, SaveOutcome, SaveReport, SaveStatus,
+    SaveStorage, SavedMemory, SavedNote, SaverHook,
+};
 pub use session::{
     compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
     heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,

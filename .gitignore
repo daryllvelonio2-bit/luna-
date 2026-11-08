@@ -4,3 +4,6 @@
 *.db
 eval-report.json
 .luna-todo.json
+
+__pycache__/
+*.pyc

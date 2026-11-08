@@ -311,7 +311,7 @@ impl Tool for SkillViewTool {
     }
 
     fn description(&self) -> &str {
-        "View the full instructions and guidelines for an available skill on demand."
+        "Load the full instructions for an available skill. Call this after skills_list names a skill that matches the task, then follow those instructions."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -338,11 +338,7 @@ impl Tool for SkillViewTool {
             .and_then(|n| n.as_str())
             .unwrap_or_default()
             .trim();
-        if let Some(skill) = self
-            .skills
-            .iter()
-            .find(|s| names_match(&s.name, name))
-        {
+        if let Some(skill) = self.skills.iter().find(|s| names_match(&s.name, name)) {
             let mut output = format!(
                 "# Skill: {}\n{}\n\n## Instructions\n{}",
                 skill.name, skill.description, skill.instructions
@@ -386,7 +382,7 @@ impl Tool for SkillsListTool {
     }
 
     fn description(&self) -> &str {
-        "List all available skills with their short descriptions."
+        "List all available skills with their short descriptions. Call this before starting a task that could match a skill, then load the match with skill_view."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -469,6 +465,25 @@ Test instructions
             let adapter = SkillToolAdapter::new(skill);
             assert_eq!(adapter.name(), "browser");
         }
+    }
+
+    /// The tools carry the discovery loop themselves: a model that only reads tool definitions
+    /// (no prompt index) still learns to list first, then load the match.
+    #[test]
+    fn the_skill_tools_document_the_discover_then_load_loop() {
+        let skills = Arc::new(Vec::new());
+        let list = SkillsListTool::new(skills.clone());
+        let view = SkillViewTool::new(skills);
+        assert!(
+            list.description().contains("skill_view"),
+            "{}",
+            list.description()
+        );
+        assert!(
+            view.description().contains("skills_list"),
+            "{}",
+            view.description()
+        );
     }
 
     #[tokio::test]

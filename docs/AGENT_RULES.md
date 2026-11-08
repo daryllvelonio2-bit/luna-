@@ -4,7 +4,7 @@ Read this before touching anything. It overrides habit.
 
 ## 1. What this is
 
-`luna` is a Rust autonomous-agent harness: a 10-crate workspace under `crates/`. It is a real
+`luna` is a Rust autonomous-agent harness: a 12-crate workspace under `crates/`. It is a real
 binary, not a mock — `cargo run --bin luna -- --help`. It talks to live model providers, keeps
 SQLite memory records and markdown-file notes under `paths.notes_dir`, speaks MCP, and runs
 sandboxed wasm plugins.
@@ -34,15 +34,29 @@ assigned by the dispatcher; you never pick your own lane.
   ~500 MB each) pushed the box into swap and made the dispatcher refuse to spawn anyone. Do not raise
   it, and do not run a build in the background while another one is running in your own card — one
   build at a time per worker.
-- Build: `cargo build --release` from the repo root → binary at `target/release/luna` (per-tree). If
-  your shell still exports `CARGO_TARGET_DIR` (an old worker session, for instance), the binary lands
-  at `$CARGO_TARGET_DIR/release/luna` instead — a path other trees write to as well, so it is never
-  proof of your branch: rebuild before testing it. Measured cold-build cost (card t_eb80814a): one
-  uninterrupted release build of this workspace (~800 dependency crates, bundled sqlite/audio/tls)
-  was still compiling when `timeout 900` killed it at 55 minutes, and the tree finished at 65 minutes
-  of wall clock including two restarts — the first build in a fresh worktree is not a quick step.
-- Inner loop: `cargo build -p harness-providers` (or whichever crate the card touches).
-- Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets -- -D warnings`.
+- **Inner loop is targeted.** `cargo check -p <crate> --all-targets` is the fast feedback loop
+  (measured ~1.2 s warm on this box). Then `scripts/test-changed.sh` (or `cargo test -p <crate>
+  --bin luna` / `--test <name>`), and `cargo clippy -p <crate> --all-targets -- -D warnings`. A
+  workspace-wide `cargo test` / `cargo clippy` is for changes that really span the workspace, not
+  the default.
+- **Release build:** `cargo build --release -p harness-cli --bin luna` → `target/release/luna`
+  (per-tree; measured ~1.2 s warm). If your shell still exports `CARGO_TARGET_DIR` (an old worker
+  session, for instance), the binary lands at `$CARGO_TARGET_DIR/release/luna` instead — a path other
+  trees write to as well, so it is never proof of your branch: rebuild before testing it. Measured
+  cold-build cost (card t_eb80814a): one uninterrupted release build of this workspace (~800
+  dependency crates, bundled sqlite/audio/tls) was still compiling when `timeout 900` killed it at
+  55 minutes, and the tree finished at 65 minutes of wall clock including two restarts — the first
+  build in a fresh worktree is not a quick step.
+- **Rebuild scope.** Cargo reuses fingerprints: editing `harness-cli` rebuilds only the CLI; editing
+  `harness-core` rebuilds nearly every crate that depends on it; a new crate rebuilds itself plus its
+  dependents. Changing `[profile.*]`, `RUSTFLAGS`, the linker, or the edition forces a full rebuild —
+  do not touch those for a feature change.
+- **Install reuses release artifacts.** `cargo install --path crates/harness-cli --force` and the
+  same command with `--root ~/.local` share `target/release`; build once, then install. Do not run
+  `cargo clean` before installing.
+- **Keep disk headroom.** `target/` exceeds 30 GB. Keep at least 5 GB free (`df -h .`). When it is
+  full, delete `target/debug/incremental` and `target/debug/examples` first — they are regenerable
+  and much cheaper than a cold `cargo clean`. A full disk makes builds and installs fail or crawl.
 - Credentials: the harness reads `~/.luna/credentials.json`. The NVIDIA NIM key comes from the
   Shiina CLI config, never from a file in this repo:
 
@@ -74,6 +88,35 @@ assigned by the dispatcher; you never pick your own lane.
 - "Should work" is not verification. Verification is a command and its output.
 - Anything that spends NIM quota (chat round-trips, model discovery) runs once per card, not in a
   loop. One real round-trip beats ten speculative ones.
+
+### Targeted test runner
+
+`scripts/test-changed.sh` is the default test command. It diffs the working tree against `HEAD`
+(staged, unstaged, and untracked files) and runs only what those files affect:
+
+| Changed path | Runs |
+|---|---|
+| `crates/<crate>/tests/<stem>.rs` | `cargo test -p <crate> --test <stem>` |
+| `crates/<crate>/src/<module>.rs` | `cargo test -p <crate> --lib <module::path>` (`--bins` for `harness-cli`) |
+| `crates/<crate>/src/lib.rs`, `src/main.rs` | `cargo test -p <crate>` |
+| `crates/<crate>/src/bin/<name>.rs` | `cargo test -p <crate> --bin <name>` |
+| `crates/<crate>/Cargo.toml`, `build.rs`, `tests/fixtures/` | `cargo test -p <crate>` |
+| root `Cargo.toml` / `Cargo.lock` / `.cargo/` | `cargo test --workspace` |
+| `docs/`, `scripts/`, `*.md` | nothing |
+
+A source module also pulls in an integration test whose filename contains that module name as a
+word (`tools/shell.rs` → `tests/fs_shell_tools_test.rs`). When any library crate changes, the runner
+first does `cargo check -p harness-cli --bin luna`; the CLI depends on nearly every crate, so this is
+the cheapest way to catch a dependent that no longer compiles.
+
+Options: `--dry-run` prints the plan; `--full` (or `--workspace`) runs the old
+`cargo test --workspace`; `--no-check` skips the compile gate; `--base <rev>` diffs against another
+revision; `--keep-going` runs every command after a failure; and explicit file/directory arguments
+plan from those paths instead of the diff.
+
+Use the targeted runner while iterating. Run `scripts/test-changed.sh --full` before pushing when the
+change spans crates or touches a public API; the targeted run intentionally does not compile every
+other crate's test binaries.
 
 ## 4. Boundaries
 

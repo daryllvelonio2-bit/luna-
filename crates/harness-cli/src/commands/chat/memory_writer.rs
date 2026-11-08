@@ -81,6 +81,11 @@ pub fn build_saver(
     policy.every_turns = config.memory.background_every_turns;
     policy.tail_messages = config.memory.background_tail_messages;
     policy.notes = config.memory.background_notes;
+    policy.two_pass = config.memory.background_two_pass;
+    policy.min_confidence = config.memory.background_min_confidence;
+    policy.max_memory_writes = config.memory.background_max_memory_writes;
+    policy.max_note_writes = config.memory.background_max_note_writes;
+    policy.max_operations = config.memory.background_max_operations;
     Some(Arc::new(MemorySaver::new(
         Arc::new(client),
         memory.clone(),
@@ -186,7 +191,7 @@ mod tests {
         let saver = build(&config).expect("background mode builds a saver");
 
         assert_eq!(saver.model(), "session-model");
-        assert_eq!(saver.every_turns(), 1);
+        assert_eq!(saver.every_turns(), 3);
         assert_eq!(saver.tail_limit(), 24);
         assert!(saver.every_turns() > 0, "a zero interval would disable it");
     }

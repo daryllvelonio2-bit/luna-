@@ -90,6 +90,22 @@ where
                 tool_call.name, tool_call.id
             );
 
+            // A tool hidden from the request can still arrive if the model saw it earlier in the
+            // conversation or a provider replays a stale call. Reject it here rather than letting
+            // the registry run something the user just turned off.
+            if !self.config.tool_enabled(&tool_call.name) {
+                let result = ToolResult::error(
+                    &tool_call.id,
+                    format!(
+                        "tool '{}' is disabled for this session; turn it back on with a slash command",
+                        tool_call.name
+                    ),
+                );
+                self.finish_call(&tool_call, &tool_call.arguments, result, true, state)
+                    .await?;
+                continue;
+            }
+
             // Hooks run before the human gate and can only narrow the call: a denial replaces its
             // result, an argument rewrite is what the gate and the tool then see. A hook can never
             // approve what the gate would refuse, so the two cannot disagree.
@@ -200,10 +216,11 @@ where
         let results: Vec<Result<ToolResult, HarnessError>> = if batch.len() == 1 {
             let (call, _) = &batch[0];
             let progress = self.progress_sink(&call.name);
-            vec![self
-                .registry
-                .execute_with_progress(call, &cancel, progress.as_ref())
-                .await]
+            vec![
+                self.registry
+                    .execute_with_progress(call, &cancel, progress.as_ref())
+                    .await,
+            ]
         } else {
             debug!(
                 calls = batch.len(),

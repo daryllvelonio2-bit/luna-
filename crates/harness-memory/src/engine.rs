@@ -482,7 +482,9 @@ impl MemoryEngine for SqliteMemoryEngine {
 
         // Auto-supersede conflicting active memories:
         // For note pointers: match on subject & predicate.
-        // For entity memories: strictly ONE active record per subject (case-insensitive)!
+        // For entity memories: strictly ONE active record per (subject, predicate), case-insensitive.
+        // Keying on the predicate too is what lets `project.luna.build` and `project.luna.test`
+        // coexist; keying on the subject alone silently deactivated the older attribute.
         let old_ids: Vec<String> = if record.category == MemoryCategory::NotePointer {
             let mut check_stmt = tx
                 .prepare("SELECT id FROM memories WHERE subject = ?1 AND predicate = ?2 AND is_active = 1")
@@ -500,11 +502,11 @@ impl MemoryEngine for SqliteMemoryEngine {
             ids
         } else {
             let mut check_stmt = tx
-                .prepare("SELECT id FROM memories WHERE LOWER(subject) = LOWER(?1) AND category != 'note_pointer' AND is_active = 1")
+                .prepare("SELECT id FROM memories WHERE LOWER(subject) = LOWER(?1) AND LOWER(predicate) = LOWER(?2) AND category != 'note_pointer' AND is_active = 1")
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
             let rows = check_stmt
-                .query_map(params![record.subject], |row| row.get(0))
+                .query_map(params![record.subject, record.predicate], |row| row.get(0))
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
             let mut ids = Vec::new();
             for r in rows.flatten() {
@@ -588,12 +590,19 @@ impl MemoryEngine for SqliteMemoryEngine {
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         }
 
-        // Deactivate any other active duplicate topic records if this is not a note pointer
+        // Deactivate any other active duplicate (subject, predicate) records if this is not a note
+        // pointer. A different predicate is a different attribute and must survive.
         if updated.category != MemoryCategory::NotePointer {
             tx.execute(
                 "UPDATE memories SET is_active = 0, superseded_by = ?1, updated_at = ?2
-                 WHERE LOWER(subject) = LOWER(?3) AND id != ?1 AND is_active = 1 AND category != 'note_pointer'",
-                params![updated.id, Utc::now().to_rfc3339(), updated.subject],
+                 WHERE LOWER(subject) = LOWER(?3) AND LOWER(predicate) = LOWER(?4)
+                   AND id != ?1 AND is_active = 1 AND category != 'note_pointer'",
+                params![
+                    updated.id,
+                    Utc::now().to_rfc3339(),
+                    updated.subject,
+                    updated.predicate
+                ],
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         }

@@ -3,8 +3,9 @@
 //! A procedure is read with `skill_view`; `/skills` is what a user scans to remember what exists, so
 //! each entry is a name and nothing else. A skill's description is written for the model — scope,
 //! exclusions, alternatives, frequently a paragraph — and printing it turns a scannable index into a
-//! wall of prose that has to be read to find a name. The descriptions still reach the model through
-//! `agent.skills_summary`; this module only shapes what the terminal prints.
+//! wall of prose that has to be read to find a name. The model sees a description only when it calls
+//! `skills_list`, and the instructions only when it calls `skill_view`; this module shapes what the
+//! terminal prints.
 
 use harness_plugins::Skill;
 

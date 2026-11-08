@@ -84,6 +84,11 @@ mod tests {
             "desktop_type",
             "desktop_set_value",
             "desktop_toggle",
+            "desktop_focus",
+            "desktop_key",
+            "desktop_paste",
+            "desktop_click_at",
+            "desktop_screenshot",
         ] {
             assert!(names.contains(&expected), "{expected} is not registered");
         }
@@ -100,6 +105,10 @@ mod tests {
             "desktop_type",
             "desktop_set_value",
             "desktop_toggle",
+            "desktop_focus",
+            "desktop_key",
+            "desktop_paste",
+            "desktop_click_at",
         ] {
             assert!(
                 registry.is_mutating(gated).await.expect("a verdict"),
@@ -114,6 +123,7 @@ mod tests {
             "desktop_find",
             "desktop_get",
             "desktop_is",
+            "desktop_screenshot",
         ] {
             assert!(
                 !registry.is_mutating(read_only).await.expect("a verdict"),

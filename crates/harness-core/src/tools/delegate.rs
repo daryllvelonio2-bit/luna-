@@ -61,6 +61,12 @@ pub enum SubagentActivity {
     ModelStreaming,
     /// The child started a tool call.
     ToolStarted { name: String },
+    /// A chunk of the child's running tool output.
+    ///
+    /// Only tools that stream (currently the terminal) produce this. The parent renders the last
+    /// non-empty line on the delegate row, so a child build's progress is visible without opening
+    /// its viewer.
+    ToolOutput { name: String, chunk: String },
     /// The child's tool call finished.
     ToolFinished { name: String, is_error: bool },
 }
@@ -850,6 +856,11 @@ async fn run_single_subagent(
                 let args_str = serde_json::to_string(&arguments).unwrap_or_default();
                 log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
                 observer_tracker.record(SubagentActivity::ToolStarted { name });
+            }
+            AgentEvent::ToolOutput { name, chunk } => {
+                // The parent's delegate row is one line: forward the chunk and let it pick the
+                // newest line. The child's full log keeps every byte.
+                observer_tracker.record(SubagentActivity::ToolOutput { name, chunk });
             }
             AgentEvent::ToolExecuted {
                 name,

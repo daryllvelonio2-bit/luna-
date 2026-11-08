@@ -27,6 +27,38 @@ async fn test_notes_fts_and_pointer_distillation() {
     assert_eq!(search_results[0].id, note.id);
 }
 
+/// Archiving is a soft delete: the note leaves the active set but the file stays on disk.
+#[tokio::test]
+async fn test_archive_note_hides_it_without_destroying_the_file() {
+    let engine = FileNotesEngine::in_memory().unwrap();
+
+    let note = engine
+        .save_note(
+            "Obsolete Deployment Runbook",
+            "Old procedure that has been replaced.",
+            &[],
+        )
+        .await
+        .unwrap();
+    let path = engine.dir().join(format!("{}.md", note.id));
+    assert!(path.exists());
+
+    assert!(engine.archive_note(&note.id).await.unwrap());
+
+    assert!(engine.list_notes(10, 0).await.unwrap().is_empty());
+    assert!(engine.read_note(&note.id).await.is_err());
+    assert!(!path.exists(), "the active copy must be gone");
+    let archived = engine.dir().join(".archive").join(format!("{}.md", note.id));
+    assert!(
+        archived.exists(),
+        "the archived copy must still exist at {}",
+        archived.display()
+    );
+    assert!(std::fs::read_to_string(&archived)
+        .unwrap()
+        .contains("Old procedure"));
+}
+
 #[tokio::test]
 async fn test_delete_note_removes_row_and_fts_entry() {
     let engine = FileNotesEngine::in_memory().unwrap();

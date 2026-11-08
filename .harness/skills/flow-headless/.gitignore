@@ -1,0 +1,8 @@
+# The profile copy holds live Google/YouTube cookies. Never commit it.
+profile/
+.venv/
+downloads/
+__pycache__/
+*.pyc
+*.png
+*.log

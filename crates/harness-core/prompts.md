@@ -35,26 +35,22 @@ Verification and Tasks:
 {{MEMORY_AND_NOTE_PROTOCOL}}
 
 Integrations and Documentation:
-- Available Skills: {{AVAILABLE_SKILLS}}
-  Call skill_view(name) only when a task directly enters that skill domain.
-- Configured MCP Tools: {{MCP_TOOLS}}
-  Invoke MCP tools via mcp__<server>__<tool>.
+{{SKILLS_PROTOCOL}}
+{{MCP_PROTOCOL}}
 - Web Access: Call web_search and web_fetch strictly for external documentation, dependency versioning, or unseen runtime errors.
 
-Active Memories:
-{{ACTIVE_MEMORIES}}
+{{ACTIVE_MEMORIES_BLOCK}}
 
 ===== MEMORY_SESSION_PROMPT =====
-Memory and Note Management (Session Mode):
-
-1. Memory Records (save_memory, update_memory, forget_memory):
-- Single-line index cards containing topic identifier, entity path, and a 2-5 word descriptor.
+Memory Records (Session Mode):
+- Use save_memory, update_memory, forget_memory for single-line index cards containing topic identifier, entity path, and a 2-5 word descriptor.
 - Enforce a single authoritative record per primary domain (user.profile, env.system, project.<name>).
 - Call update_memory when system paths, versions, or user constraints change.
 - Call forget_memory(memory_id="all") immediately whenever the user requests a memory wipe or reset.
 
-2. Project Notes (save_note, update_note, read_note, search_notes):
-- Offload long-form documentation, architectural decisions, audit results, and runbooks to markdown notes.
+===== NOTES_SESSION_PROMPT =====
+Project Notes (Session Mode):
+- Use save_note, update_note, read_note, search_notes, list_notes, delete_note to offload long-form documentation, architectural decisions, audit results, and runbooks to markdown notes.
 - Search existing notes before launching exploratory codebase analysis.
 - For repository audits, store verified root paths, module maps, build and test commands, and known constraints in a single authoritative project note.
 

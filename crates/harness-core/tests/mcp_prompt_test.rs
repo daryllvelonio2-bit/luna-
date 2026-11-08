@@ -1,6 +1,6 @@
 //! The system prompt's MCP block: the marker is substituted in place of the template, the
 //! configured tools show up by their namespaced name, and a config with no servers says so
-//! instead of leaving a `{{MCP_TOOLS}}` stub for the model to puzzle over.
+//! instead of leaving a `{{MCP_PROTOCOL}}` stub for the model to puzzle over.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -116,12 +116,19 @@ impl Tool for NamedTool {
 fn agent_with(
     registry: DefaultToolRegistry,
 ) -> Agent<MockProvider, MockMemory, MockNotes, DefaultToolRegistry> {
+    agent_with_config(registry, AgentConfig::default())
+}
+
+fn agent_with_config(
+    registry: DefaultToolRegistry,
+    config: AgentConfig,
+) -> Agent<MockProvider, MockMemory, MockNotes, DefaultToolRegistry> {
     Agent::new(
         Arc::new(MockProvider),
         Arc::new(MockMemory),
         Arc::new(MockNotes),
         Arc::new(registry),
-        AgentConfig::default(),
+        config,
     )
 }
 
@@ -140,7 +147,7 @@ async fn registered_mcp_tool_appears_in_the_prompt() {
         .expect("prompt builds");
 
     assert!(
-        !prompt.contains("{{MCP_TOOLS}}"),
+        !prompt.contains("{{MCP_PROTOCOL}}"),
         "the marker must be substituted, not shipped to the model"
     );
     assert!(prompt.contains("mcp__filesystem__read_file"), "{prompt}");
@@ -154,6 +161,81 @@ async fn absent_mcp_tools_yield_the_fallback_and_no_stub() {
         .await
         .expect("prompt builds");
 
-    assert!(!prompt.contains("{{MCP_TOOLS}}"), "{prompt}");
+    assert!(!prompt.contains("{{MCP_PROTOCOL}}"), "{prompt}");
     assert!(prompt.contains("no MCP tools registered"), "{prompt}");
+}
+
+/// The runtime toggles own their prompt blocks: a disabled feature leaves neither its marker nor
+/// its instructions behind, and the other families stay intact.
+#[tokio::test]
+async fn feature_toggles_remove_only_their_own_prompt_blocks() {
+    let config = AgentConfig {
+        memory_enabled: false,
+        ..Default::default()
+    };
+    let prompt = agent_with_config(DefaultToolRegistry::new(), config)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(
+        !prompt.contains("Memory Records (Session Mode)"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Active Memories:"), "{prompt}");
+    assert!(prompt.contains("Project Notes (Session Mode)"), "{prompt}");
+
+    let config = AgentConfig {
+        notes_enabled: false,
+        ..Default::default()
+    };
+    let prompt = agent_with_config(DefaultToolRegistry::new(), config)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(!prompt.contains("Project Notes (Session Mode)"), "{prompt}");
+    assert!(prompt.contains("Memory Records (Session Mode)"), "{prompt}");
+
+    // Skills are discovered through `skills_list` / `skill_view`, never pasted into the prompt:
+    // an always-present index is dead weight on every turn, even when skills are enabled. The
+    // pointer is what keeps discovery reliable.
+    let prompt = agent_with_config(DefaultToolRegistry::new(), AgentConfig::default())
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(prompt.contains("skills_list"), "{prompt}");
+    assert!(prompt.contains("skill_view(name)"), "{prompt}");
+    assert!(!prompt.contains("Available Skills"), "{prompt}");
+    assert!(!prompt.contains("specialized skills"), "{prompt}");
+
+    let config = AgentConfig {
+        skills_enabled: false,
+        ..Default::default()
+    };
+    let prompt = agent_with_config(DefaultToolRegistry::new(), config)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(!prompt.contains("skills_list"), "{prompt}");
+    assert!(prompt.contains("Memory Records (Session Mode)"), "{prompt}");
+
+    let config = AgentConfig {
+        mcp_enabled: false,
+        ..Default::default()
+    };
+    let registry = DefaultToolRegistry::new();
+    registry
+        .register(Arc::new(NamedTool("mcp__filesystem__read_file")))
+        .await
+        .expect("register");
+    let prompt = agent_with_config(registry, config)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(!prompt.contains("Configured MCP Tools"), "{prompt}");
+    assert!(!prompt.contains("mcp__filesystem__read_file"), "{prompt}");
+    // The native tool index is not the MCP block and must survive.
+    assert!(
+        prompt.contains("read_file(path, offset, limit)"),
+        "{prompt}"
+    );
 }

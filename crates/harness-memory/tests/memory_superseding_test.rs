@@ -373,6 +373,42 @@ async fn test_forget_multiple_semicolon_delimited() {
     assert_eq!(engine.retrieve("antigravity", 5).await.unwrap().len(), 0);
 }
 
+/// Uniqueness is `(subject, predicate)`, not `subject`: two different attributes of the same
+/// entity are different facts and must both stay active.
+#[tokio::test]
+async fn test_different_predicates_of_one_subject_coexist() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    engine
+        .save(&record(
+            "project.luna.build_command",
+            "project.luna",
+            "build_command",
+            "cargo build -p harness-cli --bin luna",
+        ))
+        .await
+        .unwrap();
+    engine
+        .save(&record(
+            "project.luna.test_command",
+            "project.luna",
+            "test_command",
+            "cargo test -p harness-core",
+        ))
+        .await
+        .unwrap();
+
+    let res = engine.retrieve("project.luna", 10).await.unwrap();
+    assert_eq!(
+        res.len(),
+        2,
+        "a new predicate must not deactivate the older attribute: {res:?}"
+    );
+    let objects: Vec<&str> = res.iter().map(|m| m.object.as_str()).collect();
+    assert!(objects.contains(&"cargo build -p harness-cli --bin luna"));
+    assert!(objects.contains(&"cargo test -p harness-core"));
+}
+
 #[tokio::test]
 async fn test_update_memory_tool_partial_fields_preserves_existing() {
     use std::sync::Arc;

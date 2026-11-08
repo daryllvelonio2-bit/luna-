@@ -258,16 +258,6 @@ async fn apply_workspace_change(
     }
     // The skills the harness ships with, including the desktop skill.
     all_skills.extend(crate::commands::desktop::builtin_skills());
-    let summary = if all_skills.is_empty() {
-        None
-    } else {
-        let lines: Vec<String> = all_skills
-            .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect();
-        Some(lines.join("\n"))
-    };
-    agent_guard.set_skills_summary(summary);
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
         agent_guard

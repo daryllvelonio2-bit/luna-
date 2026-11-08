@@ -21,6 +21,7 @@ mod tests {
         struct NoStatus;
         impl crate::adapter::observation::ObservationOps for NoStatus {}
         impl crate::adapter::action::ActionOps for NoStatus {}
+        impl crate::adapter::input::InputOps for NoStatus {}
         impl crate::adapter::system::SystemOps for NoStatus {}
 
         let engine = DesktopEngine::new(std::sync::Arc::new(NoStatus));

@@ -5,6 +5,7 @@
 //! live in submodules grouped by what they act on: `session`, `model`, `context`, `value_prompt`.
 
 use colored::Colorize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -71,6 +72,143 @@ pub struct SlashCommand {
     pub details: &'static str,
 }
 
+/// A feature the user can switch off at runtime with a slash command.
+///
+/// The atomics are the CLI's own copy: the menu and the non-interactive loop read them without
+/// taking the agent lock, while the agent's [`harness_core::AgentConfig`] holds the authoritative
+/// flags the turn loop and dispatcher check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Feature {
+    Memory,
+    Notes,
+    Skills,
+    Mcp,
+}
+
+impl Feature {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Feature::Memory => "memory",
+            Feature::Notes => "notes",
+            Feature::Skills => "skills",
+            Feature::Mcp => "mcp",
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Feature::Memory => "Saved memory",
+            Feature::Notes => "Notes",
+            Feature::Skills => "Skills",
+            Feature::Mcp => "MCP",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FeatureToggles {
+    memory: AtomicBool,
+    notes: AtomicBool,
+    skills: AtomicBool,
+    mcp: AtomicBool,
+}
+
+impl Default for FeatureToggles {
+    fn default() -> Self {
+        Self {
+            memory: AtomicBool::new(true),
+            notes: AtomicBool::new(true),
+            skills: AtomicBool::new(true),
+            mcp: AtomicBool::new(true),
+        }
+    }
+}
+
+impl FeatureToggles {
+    pub(crate) fn enabled(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::Memory => self.memory.load(Ordering::Relaxed),
+            Feature::Notes => self.notes.load(Ordering::Relaxed),
+            Feature::Skills => self.skills.load(Ordering::Relaxed),
+            Feature::Mcp => self.mcp.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn set(&self, feature: Feature, enabled: bool) {
+        let slot = match feature {
+            Feature::Memory => &self.memory,
+            Feature::Notes => &self.notes,
+            Feature::Skills => &self.skills,
+            Feature::Mcp => &self.mcp,
+        };
+        slot.store(enabled, Ordering::Relaxed);
+    }
+}
+
+/// Parse the argument of `/memory`, `/notes`, `/skills`, or `/mcp`.
+///
+/// `Ok(None)` is a status query (no argument), `Err(())` is an argument the command does not
+/// understand, and the message for it belongs to the caller so the usage line can name the
+/// command the user actually typed.
+fn parse_feature_arg(arg: Option<&str>) -> Result<Option<bool>, ()> {
+    match arg
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("status") => Ok(None),
+        Some("on") | Some("enable") | Some("enabled") | Some("true") => Ok(Some(true)),
+        Some("off") | Some("disable") | Some("disabled") | Some("false") => Ok(Some(false)),
+        Some(_) => Err(()),
+    }
+}
+
+/// Apply a runtime feature toggle to both the CLI's copy and the live agent.
+///
+/// The agent holds the flags the turn loop filters on, so a command that only changed the CLI's
+/// atomics would show "OFF" while the model kept its tools.
+pub(crate) async fn handle_feature_toggle(
+    ui: &ChatUi,
+    toggles: &FeatureToggles,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    feature: Feature,
+    arg: Option<&str>,
+) {
+    let desired = match parse_feature_arg(arg) {
+        Ok(value) => value,
+        Err(()) => {
+            ui.emit_above(&format!("{} Usage: /{} on|off", "•".cyan(), feature.name()));
+            return;
+        }
+    };
+
+    let enabled = match desired {
+        Some(enabled) => {
+            toggles.set(feature, enabled);
+            let mut agent = agent.lock().await;
+            match feature {
+                Feature::Memory => agent.set_memory_enabled(enabled),
+                Feature::Notes => agent.set_notes_enabled(enabled),
+                Feature::Skills => agent.set_skills_enabled(enabled),
+                Feature::Mcp => agent.set_mcp_enabled(enabled),
+            }
+            enabled
+        }
+        None => toggles.enabled(feature),
+    };
+
+    let state = if enabled {
+        "ON".green().bold().to_string()
+    } else {
+        "OFF".dimmed().to_string()
+    };
+    ui.emit_above(&format!(
+        "{} {} is {} for this session",
+        "•".cyan(),
+        feature.title(),
+        state
+    ));
+}
+
 /// One row in the slash menu: a built-in command or a configured worker.
 ///
 /// Built-ins are `&'static str`, workers are owned, so the menu works on owned rows uniformly.
@@ -84,7 +222,11 @@ pub struct CommandEntry {
 ///
 /// A worker whose name collides with a built-in never appears: the dispatcher gives built-ins
 /// priority, so listing it as a worker would be a lie.
-pub fn command_entries(config: &Config, skills: &[harness_plugins::Skill]) -> Vec<CommandEntry> {
+pub fn command_entries(
+    config: &Config,
+    skills: &[harness_plugins::Skill],
+    skills_enabled: bool,
+) -> Vec<CommandEntry> {
     let mut entries: Vec<CommandEntry> = SLASH_COMMANDS
         .iter()
         .map(|command| CommandEntry {
@@ -109,22 +251,26 @@ pub fn command_entries(config: &Config, skills: &[harness_plugins::Skill]) -> Ve
     }
 
     // Installed skills are invokable too: `/<skill-name> [input]` runs the skill's instructions as
-    // the next turn. Built-ins and workers keep their names; a skill cannot shadow them.
-    for skill in skills {
-        let command = format!("/{}", skill.name);
-        if skill.name.is_empty()
-            || skill.name.contains(char::is_whitespace)
-            || skill.name.contains('/')
-            || entries
-                .iter()
-                .any(|entry| entry.name.eq_ignore_ascii_case(&command))
-        {
-            continue;
+    // the next turn. Built-ins and workers keep their names; a skill cannot shadow them. With
+    // `/skills off` the skill commands disappear from the menu and from `/help`, but the built-in
+    // `/skills` command stays so the feature can be turned back on.
+    if skills_enabled {
+        for skill in skills {
+            let command = format!("/{}", skill.name);
+            if skill.name.is_empty()
+                || skill.name.contains(char::is_whitespace)
+                || skill.name.contains('/')
+                || entries
+                    .iter()
+                    .any(|entry| entry.name.eq_ignore_ascii_case(&command))
+            {
+                continue;
+            }
+            entries.push(CommandEntry {
+                name: command,
+                details: skill_command_details(&skill.description),
+            });
         }
-        entries.push(CommandEntry {
-            name: command,
-            details: skill_command_details(&skill.description),
-        });
     }
 
     entries
@@ -242,11 +388,23 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/skills",
-        details: "List available specialized skills",
+        details: "List available skills, or turn skills on/off (/skills on|off)",
     },
     SlashCommand {
         name: "/mcp",
-        details: "List configured MCP servers and tools (/mcp, /mcp tools)",
+        details: "List MCP servers and tools, or turn MCP on/off (/mcp on|off)",
+    },
+    SlashCommand {
+        name: "/memory",
+        details: "Turn saved memory on/off for this session (/memory on|off)",
+    },
+    SlashCommand {
+        name: "/notes",
+        details: "Turn notes on/off for this session (/notes on|off)",
+    },
+    SlashCommand {
+        name: "/remember",
+        details: "Run a memory pass over this session now instead of waiting for the interval",
     },
     SlashCommand {
         name: "/plan",
@@ -359,6 +517,8 @@ pub(crate) async fn execute_slash_command(
     skills_readout: Option<&str>,
     // Installed skills, so `/<skill-name>` can appear in help and dispatch as a turn.
     skills: &[harness_plugins::Skill],
+    // Runtime on/off state for memory, notes, skills, and MCP.
+    toggles: &FeatureToggles,
     plan_mode: &Arc<std::sync::atomic::AtomicBool>,
     bg_queue: Option<&harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
@@ -724,6 +884,18 @@ pub(crate) async fn execute_slash_command(
         // agent lock, which the running turn holds for its whole duration: the guidance would land
         // only once the turn it was meant to steer had already ended.
         "/skills" => {
+            // `/skills on|off` is a toggle; a bare `/skills` keeps its original job of listing.
+            if arg.is_some() {
+                handle_feature_toggle(ui, toggles, agent, Feature::Skills, arg).await;
+                return Ok(SlashOutcome::Continue);
+            }
+            if !toggles.enabled(Feature::Skills) {
+                ui.emit_above(&format!(
+                    "{} Skills are OFF for this session. Use /skills on to enable them.",
+                    "•".cyan()
+                ));
+                return Ok(SlashOutcome::Continue);
+            }
             // Every exit path answers something: a silent command reads as a dead key. Both of them
             // answer through `emit_above`, which restores the composer itself — drawing it again
             // here would print a second box below the first.
@@ -741,8 +913,51 @@ pub(crate) async fn execute_slash_command(
             }
             Ok(SlashOutcome::Continue)
         }
+        "/memory" => {
+            handle_feature_toggle(ui, toggles, agent, Feature::Memory, arg).await;
+            Ok(SlashOutcome::Continue)
+        }
+        "/notes" => {
+            handle_feature_toggle(ui, toggles, agent, Feature::Notes, arg).await;
+            Ok(SlashOutcome::Continue)
+        }
+        "/remember" => {
+            let report = {
+                let agent = agent.lock().await;
+                agent.run_memory_pass_now().await
+            };
+            match report {
+                Ok(report) => {
+                    if report.is_empty() && report.skipped == 0 && report.declined == 0 {
+                        ui.emit_above(&format!("{} Nothing new worth remembering.", "•".cyan()));
+                    } else {
+                        ui.emit_above(&format!("{} Memory pass: {}", "•".cyan(), report.summary()));
+                    }
+                }
+                Err(error) => ui.emit_above(&format!(
+                    "{} Memory pass failed: {}",
+                    "✖".red().bold(),
+                    error
+                )),
+            }
+            Ok(SlashOutcome::Continue)
+        }
         "/mcp" => {
             let sub = arg.unwrap_or("").trim();
+            if matches!(
+                sub,
+                "on" | "off" | "enable" | "disable" | "enabled" | "disabled" | "true" | "false"
+            ) {
+                handle_feature_toggle(ui, toggles, agent, Feature::Mcp, Some(sub)).await;
+                return Ok(SlashOutcome::Continue);
+            }
+            if !toggles.enabled(Feature::Mcp) {
+                ui.emit_above(&format!(
+                    "{} MCP is OFF for this session. Use /mcp on to enable it.",
+                    "•".cyan()
+                ));
+                return Ok(SlashOutcome::Continue);
+            }
             if sub == "list" {
                 let readout = crate::commands::mcp::format_mcp_servers(config);
                 ui.emit_above(&format!("\n{}", readout.trim_end()));
@@ -849,7 +1064,7 @@ pub(crate) async fn execute_slash_command(
         }
         "/help" | "/commands" | "/?" => {
             let mut help_text = String::from("\nAvailable commands:\n");
-            for cmd in command_entries(config, skills) {
+            for cmd in command_entries(config, skills, toggles.enabled(Feature::Skills)) {
                 help_text.push_str(&format!(
                     "  {:<16} {}\n",
                     cmd.name.cyan(),
@@ -920,12 +1135,16 @@ pub(crate) async fn execute_slash_command(
                 }
             }
             // An installed skill is a command too. The caller turns this prompt into a normal
-            // turn, so the skill runs with the session's tools, history, and approvals.
-            if let Some(prompt) = crate::commands::skills::invocation_prompt(cmd, skills) {
-                return Ok(SlashOutcome::Turn {
-                    prompt,
-                    display: cmd.trim().to_string(),
-                });
+            // turn, so the skill runs with the session's tools, history, and approvals. With
+            // `/skills off` the names are not commands, so a typed one falls through to the
+            // unrecognized-command message instead of running.
+            if toggles.enabled(Feature::Skills) {
+                if let Some(prompt) = crate::commands::skills::invocation_prompt(cmd, skills) {
+                    return Ok(SlashOutcome::Turn {
+                        prompt,
+                        display: cmd.trim().to_string(),
+                    });
+                }
             }
             if name.starts_with('/') {
                 ui.emit_above(&format!(
@@ -3061,5 +3280,78 @@ mod path_tests {
     fn an_existing_single_component_is_a_path() {
         assert!(looks_like_path("/tmp"));
         assert!(looks_like_path("/etc"));
+    }
+}
+
+#[cfg(test)]
+mod feature_toggle_tests {
+    use super::*;
+
+    /// `/memory off` and its siblings accept the words people actually type; a bare command is a
+    /// status query, and anything else is a usage error rather than a silent no-op.
+    #[test]
+    fn feature_arguments_are_on_off_or_a_status_query() {
+        assert_eq!(parse_feature_arg(None), Ok(None));
+        assert_eq!(parse_feature_arg(Some("")), Ok(None));
+        assert_eq!(parse_feature_arg(Some("status")), Ok(None));
+        for on in ["on", "enable", "enabled", "true", "ON"] {
+            assert_eq!(parse_feature_arg(Some(on)), Ok(Some(true)), "{on}");
+        }
+        for off in ["off", "disable", "disabled", "false", "OFF"] {
+            assert_eq!(parse_feature_arg(Some(off)), Ok(Some(false)), "{off}");
+        }
+        assert_eq!(parse_feature_arg(Some("maybe")), Err(()));
+    }
+
+    /// Each toggle is independent: turning one off must not silently take the others with it.
+    #[test]
+    fn toggles_default_on_and_flip_independently() {
+        let toggles = FeatureToggles::default();
+        let all = [
+            Feature::Memory,
+            Feature::Notes,
+            Feature::Skills,
+            Feature::Mcp,
+        ];
+        for feature in all {
+            assert!(toggles.enabled(feature), "{feature:?} starts on");
+        }
+
+        toggles.set(Feature::Memory, false);
+        assert!(!toggles.enabled(Feature::Memory));
+        assert!(toggles.enabled(Feature::Notes));
+        assert!(toggles.enabled(Feature::Skills));
+        assert!(toggles.enabled(Feature::Mcp));
+
+        toggles.set(Feature::Memory, true);
+        assert!(toggles.enabled(Feature::Memory));
+    }
+
+    /// The skill commands are the one part of the menu that belongs to a toggle: with skills off
+    /// they disappear, while the built-in `/skills` command stays so they can be turned back on.
+    #[test]
+    fn disabled_skills_disappear_from_the_command_menu() {
+        use harness_plugins::Skill;
+
+        let skill = Skill {
+            name: "review".to_string(),
+            description: "Review a diff carefully.".to_string(),
+            instructions: "Do the thing.".to_string(),
+            file_path: std::path::PathBuf::from("review/SKILL.md"),
+            command: None,
+            timeout_secs: None,
+            parameters: None,
+        };
+        let config = Config::default();
+
+        let on = command_entries(&config, std::slice::from_ref(&skill), true);
+        assert!(on.iter().any(|entry| entry.name == "/review"));
+        assert!(on.iter().any(|entry| entry.name == "/skills"));
+
+        let off = command_entries(&config, std::slice::from_ref(&skill), false);
+        assert!(!off.iter().any(|entry| entry.name == "/review"));
+        assert!(off.iter().any(|entry| entry.name == "/skills"));
+        assert!(off.iter().any(|entry| entry.name == "/memory"));
+        assert!(off.iter().any(|entry| entry.name == "/notes"));
     }
 }

@@ -32,6 +32,7 @@ mod tests {
             }
         }
         impl crate::adapter::action::ActionOps for OneApp {}
+        impl crate::adapter::input::InputOps for OneApp {}
         impl crate::adapter::system::SystemOps for OneApp {}
 
         let engine = DesktopEngine::new(std::sync::Arc::new(OneApp));

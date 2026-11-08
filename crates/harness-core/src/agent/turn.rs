@@ -207,6 +207,9 @@ where
         // the model the loop is about to ask.
         let capabilities = self.provider.capabilities();
         let mut tools = self.registry.list_tools().await?;
+        // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) remove
+        // the owned tools from the request entirely: the model cannot ask for what it cannot see.
+        tools.retain(|tool| self.config.tool_enabled(&tool.name));
         if !capabilities.tool_use {
             if !tools.is_empty() {
                 warn!(

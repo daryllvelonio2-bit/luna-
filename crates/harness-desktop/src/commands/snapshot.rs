@@ -19,6 +19,7 @@ mod tests {
         struct NoApps;
         impl crate::adapter::observation::ObservationOps for NoApps {}
         impl crate::adapter::action::ActionOps for NoApps {}
+        impl crate::adapter::input::InputOps for NoApps {}
         impl crate::adapter::system::SystemOps for NoApps {}
 
         let engine = DesktopEngine::new(std::sync::Arc::new(NoApps));

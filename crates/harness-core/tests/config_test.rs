@@ -213,10 +213,16 @@ fn memory_settings_default_to_the_session_writer() {
     assert_eq!(settings.mode, MemoryMode::Session);
     assert_eq!(settings.mode.to_string(), "session");
     assert!(settings.background_notes);
-    assert_eq!(settings.background_every_turns, 1);
+    assert_eq!(settings.background_every_turns, 3);
     assert_eq!(settings.background_tail_messages, 24);
     assert!(settings.background_model.is_none());
     assert!(settings.background_provider.is_none());
+    assert!(settings.background_two_pass);
+    assert!((settings.background_min_confidence - 0.65).abs() < f32::EPSILON);
+    assert_eq!(settings.background_max_memory_writes, 3);
+    assert_eq!(settings.background_max_note_writes, 2);
+    assert_eq!(settings.background_max_operations, 6);
+    assert_eq!(settings.background_idle_secs, 90);
     assert!(!settings.mode.is_background());
     // A config file written before these keys existed keeps the old behaviour.
     let dir = TempDir::new().unwrap();

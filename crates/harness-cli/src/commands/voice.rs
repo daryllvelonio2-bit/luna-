@@ -170,16 +170,6 @@ pub async fn run_voice_loop(
     // The skills the harness ships with, including the desktop skill.
     all_skills.extend(crate::commands::desktop::builtin_skills());
 
-    let skills_summary = if all_skills.is_empty() {
-        None
-    } else {
-        let lines: Vec<String> = all_skills
-            .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect();
-        Some(lines.join("\n"))
-    };
-
     if !all_skills.is_empty() {
         let skills_arc = Arc::new(all_skills);
         registry
@@ -195,7 +185,6 @@ pub async fn run_voice_loop(
     crate::commands::desktop::tools::register(registry.as_ref()).await?;
 
     let mut agent_cfg = config.agent.clone();
-    agent_cfg.skills_summary = skills_summary;
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     agent_cfg.memory_mode = config.memory.mode;
     agent_cfg.context_window = Some(super::context_window::context_window_for(

@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use harness_core::saver::{BackgroundSaver, SaveReport};
+use harness_core::saver::{
+    BackgroundSaver, MemorySaveStatus, SaveReport, SaveStatus, SavedMemory, SavedNote,
+};
 use harness_core::*;
 
 /// A provider that answers the first call with a tool-less reply, so one turn is one model call.
@@ -104,6 +106,7 @@ struct RecordingSaver {
     every_turns: usize,
     tail: usize,
     explode: bool,
+    report: SaveReport,
 }
 
 impl RecordingSaver {
@@ -114,6 +117,10 @@ impl RecordingSaver {
             every_turns,
             tail,
             explode: false,
+            report: SaveReport {
+                memories: 1,
+                ..SaveReport::default()
+            },
         })
     }
 }
@@ -129,11 +136,7 @@ impl BackgroundSaver for RecordingSaver {
             });
         }
         self.passes.lock().unwrap().push(tail.to_vec());
-        Ok(SaveReport {
-            memories: 1,
-            notes: 0,
-            skipped: 0,
-        })
+        Ok(self.report.clone())
     }
 
     fn tail_limit(&self) -> usize {
@@ -201,6 +204,88 @@ async fn a_completed_turn_hands_the_transcript_to_the_saver() {
         "{tail:?}"
     );
     assert!(tail.iter().all(|message| message.role != Role::System));
+}
+
+/// The pass is detached, so the report has to be forwarded as events: the CLI has no other way to
+/// know which memories landed after the turn it already answered.
+#[tokio::test]
+async fn a_saved_memory_is_announced_to_the_observer() {
+    let passes = Arc::new(Mutex::new(Vec::new()));
+    let mut saver = RecordingSaver::new(passes, 1, 24);
+    Arc::get_mut(&mut saver).expect("sole owner").report = SaveReport {
+        memories: 2,
+        saved: vec![
+            SavedMemory {
+                name: "Astra".to_string(),
+                status: MemorySaveStatus::Updated,
+            },
+            SavedMemory {
+                name: "Luna".to_string(),
+                status: MemorySaveStatus::Saved,
+            },
+        ],
+        ..SaveReport::default()
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_obs = seen.clone();
+    let agent = agent(saver).with_observer(Arc::new(move |event| {
+        if let AgentEvent::MemorySaved { name, status } = event {
+            seen_obs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((name, status));
+        }
+    }));
+
+    agent
+        .run_turn("remember this", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+
+    assert_eq!(
+        *seen.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![
+            ("Astra".to_string(), MemorySaveStatus::Updated),
+            ("Luna".to_string(), MemorySaveStatus::Saved),
+        ]
+    );
+}
+
+/// Notes are announced too, with their title, so a saved document is not silent.
+#[tokio::test]
+async fn a_saved_note_is_announced_to_the_observer() {
+    let passes = Arc::new(Mutex::new(Vec::new()));
+    let mut saver = RecordingSaver::new(passes, 1, 24);
+    Arc::get_mut(&mut saver).expect("sole owner").report = SaveReport {
+        notes: 1,
+        saved_notes: vec![SavedNote {
+            name: "Memory Saver Plan".to_string(),
+            status: SaveStatus::Updated,
+        }],
+        ..SaveReport::default()
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_obs = seen.clone();
+    let agent = agent(saver).with_observer(Arc::new(move |event| {
+        if let AgentEvent::NoteSaved { name, status } = event {
+            seen_obs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((name, status));
+        }
+    }));
+
+    agent
+        .run_turn("remember this", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+
+    assert_eq!(
+        *seen.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![("Memory Saver Plan".to_string(), SaveStatus::Updated)]
+    );
 }
 
 #[tokio::test]
@@ -288,6 +373,26 @@ async fn a_zero_interval_disables_the_saver_entirely() {
     assert!(passes.lock().unwrap().is_empty());
 }
 
+/// `/memory off` is a promise about the store, not just about the model's tool list: with both
+/// halves disabled the detached pass must not run at all.
+#[tokio::test]
+async fn memory_and_notes_off_stop_the_background_saver() {
+    let passes = Arc::new(Mutex::new(Vec::new()));
+    let saver = RecordingSaver::new(passes.clone(), 1, 24);
+    let mut agent = agent(saver.clone());
+    agent.set_memory_enabled(false);
+    agent.set_notes_enabled(false);
+
+    agent
+        .run_turn("do not remember this", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+
+    assert_eq!(saver.calls.load(Ordering::SeqCst), 0);
+    assert!(passes.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn memory_mode_switches_system_prompt_instructions_dynamically() {
     let config = AgentConfig {
@@ -305,7 +410,8 @@ async fn memory_mode_switches_system_prompt_instructions_dynamically() {
 
     // 1. In session mode: prompt instructs to call save_memory / save_note
     let session_prompt = agent.build_system_prompt("hello").await.unwrap();
-    assert!(session_prompt.contains("Memory and Note Management (Session Mode)"));
+    assert!(session_prompt.contains("Memory Records (Session Mode)"));
+    assert!(session_prompt.contains("Project Notes (Session Mode)"));
     assert!(session_prompt.contains("save_memory"));
     assert!(!session_prompt.contains("Memory Protocol (Background Saver Mode)"));
 
@@ -313,7 +419,8 @@ async fn memory_mode_switches_system_prompt_instructions_dynamically() {
     let mut bg_agent = agent;
     bg_agent.set_memory_mode(harness_core::MemoryMode::Background);
     let bg_prompt = bg_agent.build_system_prompt("hello").await.unwrap();
-    assert!(!bg_prompt.contains("Memory and Note Management (Session Mode)"));
+    assert!(!bg_prompt.contains("Memory Records (Session Mode)"));
+    assert!(!bg_prompt.contains("Project Notes (Session Mode)"));
     assert!(!bg_prompt.contains("SESSION WRITER MODE"));
     assert!(!bg_prompt.contains("save_memory"));
     assert!(!bg_prompt.contains("save_note"));

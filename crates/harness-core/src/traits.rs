@@ -157,6 +157,15 @@ pub trait NotesEngine: Send + Sync {
     /// Permanently delete a note. Returns `true` if a note with `id` existed and was removed,
     /// `false` if no such note was found (which is not an error).
     async fn delete_note(&self, id: &str) -> Result<bool, HarnessError>;
+
+    /// Move a note out of the active set without destroying it.
+    ///
+    /// Returns `true` when the note was archived, `false` when the engine has no archive concept
+    /// or the note did not exist. The background saver soft-deletes: it calls this first and only
+    /// falls back to [`NotesEngine::delete_note`] when the engine cannot archive.
+    async fn archive_note(&self, _id: &str) -> Result<bool, HarnessError> {
+        Ok(false)
+    }
 }
 
 /// Receives a tool's output while it is still running, so a UI can show progress instead of

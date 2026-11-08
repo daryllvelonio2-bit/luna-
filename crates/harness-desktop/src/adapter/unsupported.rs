@@ -6,6 +6,7 @@
 //! claim and a wrong one.
 
 use crate::adapter::action::{ActionOps, ActionOutcome, ActionRequest};
+use crate::adapter::input::{InputOps, ScreenshotInfo, WindowRef};
 use crate::adapter::observation::ObservationOps;
 use crate::adapter::system::{DesktopStatus, SystemOps};
 use crate::adapter::types::{AppInfo, ObservedTree, WindowInfo};
@@ -98,6 +99,53 @@ impl ActionOps for UnsupportedAdapter {
         _deadline: Deadline,
     ) -> Result<ActionOutcome, DesktopError> {
         Err(self.refuse("execute"))
+    }
+}
+
+impl InputOps for UnsupportedAdapter {
+    fn focus(&self, _app: &str, _deadline: Deadline) -> Result<WindowRef, DesktopError> {
+        Err(self.refuse("focus"))
+    }
+
+    fn active_window(&self, _deadline: Deadline) -> Result<Option<WindowRef>, DesktopError> {
+        Err(self.refuse("active_window"))
+    }
+
+    fn keys(&self, _keys: &str, _deadline: Deadline) -> Result<(), DesktopError> {
+        Err(self.refuse("keys"))
+    }
+
+    fn paste(&self, _text: &str, _deadline: Deadline) -> Result<(), DesktopError> {
+        Err(self.refuse("paste"))
+    }
+
+    fn click_element(
+        &self,
+        _app: &str,
+        _identity: &ElementIdentity,
+        _button: u8,
+        _deadline: Deadline,
+    ) -> Result<(), DesktopError> {
+        Err(self.refuse("click_element"))
+    }
+
+    fn click_at(
+        &self,
+        _x: i32,
+        _y: i32,
+        _button: u8,
+        _deadline: Deadline,
+    ) -> Result<(), DesktopError> {
+        Err(self.refuse("click_at"))
+    }
+
+    fn screenshot(
+        &self,
+        _app: Option<&str>,
+        _path: &str,
+        _deadline: Deadline,
+    ) -> Result<ScreenshotInfo, DesktopError> {
+        Err(self.refuse("screenshot"))
     }
 }
 

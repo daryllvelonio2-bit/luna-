@@ -461,7 +461,45 @@ impl NotesEngine for FileNotesEngine {
             ))),
         }
     }
+
+    async fn archive_note(&self, id: &str) -> Result<bool, HarnessError> {
+        let Ok(note) = self.find(id) else {
+            return Ok(false);
+        };
+
+        let path = self.note_path(&note.id)?;
+        let archive_dir = self.dir.join(ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_dir).map_err(|e| {
+            HarnessError::NotesError(format!(
+                "Failed to create the notes archive '{}': {}",
+                archive_dir.display(),
+                e
+            ))
+        })?;
+        let target = archive_dir.join(format!("{}.md", note.id));
+        harness_core::fsutil::replace_file(&path, &target).map_err(|e| {
+            HarnessError::NotesError(format!(
+                "Failed to archive note '{}' to '{}': {}",
+                path.display(),
+                target.display(),
+                e
+            ))
+        })?;
+        if let Ok(mut cache) = self.cache.write() {
+            cache.remove(&path);
+        }
+        info!(
+            "Archived note '{}' to '{}'",
+            note.id,
+            target.display()
+        );
+        Ok(true)
+    }
 }
+
+/// Subdirectory that holds soft-deleted notes. It is a dot directory so `load_all` (which only
+/// reads top-level `.md` files) never lists it as a note.
+const ARCHIVE_DIR: &str = ".archive";
 
 /// Writes a note to `<dir>/<id>.md`, optionally skipping an existing file (import path).
 fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, HarnessError> {

@@ -23,6 +23,7 @@ mod tests {
         struct NoWindows;
         impl crate::adapter::observation::ObservationOps for NoWindows {}
         impl crate::adapter::action::ActionOps for NoWindows {}
+        impl crate::adapter::input::InputOps for NoWindows {}
         impl crate::adapter::system::SystemOps for NoWindows {}
 
         let engine = DesktopEngine::new(std::sync::Arc::new(NoWindows));

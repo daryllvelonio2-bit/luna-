@@ -1,5 +1,7 @@
 use super::commands::SlashCommand;
-use super::turn::{composer_command, submission, turn_records, ComposerCommand, InterruptNotice};
+use super::turn::{
+    can_auto_resume, composer_command, submission, turn_records, ComposerCommand, InterruptNotice,
+};
 use std::time::{Duration, Instant};
 
 /// The commands the composer owns are recognised by their whole name, and their argument is
@@ -184,7 +186,7 @@ fn command_entries_lists_configured_workers_as_invokable_commands() {
         },
     );
 
-    let entries = command_entries(&config, &[]);
+    let entries = command_entries(&config, &[], true);
     let carbon = entries
         .iter()
         .find(|entry| entry.name == "/carbon")
@@ -217,7 +219,7 @@ fn command_entries_lists_installed_skills_as_invokable_commands() {
         skill("two words", "Unreachable."),
     ];
 
-    let entries = command_entries(&config, &skills);
+    let entries = command_entries(&config, &skills, true);
     let review = entries
         .iter()
         .find(|entry| entry.name == "/review")
@@ -250,7 +252,7 @@ fn built_in_commands_shadow_a_worker_with_the_same_name() {
         },
     );
 
-    let entries = command_entries(&config, &[]);
+    let entries = command_entries(&config, &[], true);
     assert!(
         entries
             .iter()
@@ -268,7 +270,7 @@ fn built_in_commands_shadow_a_worker_with_the_same_name() {
             reasoning_effort: None,
         },
     );
-    let entries = command_entries(&config, &[]);
+    let entries = command_entries(&config, &[], true);
     assert!(
         !entries.iter().any(|entry| entry.name == "/provider"),
         "an alias of a built-in command must not be listed as a worker"
@@ -301,6 +303,15 @@ fn slash_commands_includes_mcp() {
     assert!(
         SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/mcp"),
         "/mcp command must be registered in SLASH_COMMANDS"
+    );
+}
+
+#[test]
+fn slash_commands_includes_remember() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/remember"),
+        "/remember must be registered so the user can force a pass"
     );
 }
 
@@ -544,7 +555,7 @@ async fn handle_thinking_switch_sets_effort() {
 
 #[tokio::test]
 async fn execute_slash_command_plan_toggle_and_unrecognized() {
-    use super::commands::{execute_slash_command, SlashOutcome};
+    use super::commands::{execute_slash_command, Feature, FeatureToggles, SlashOutcome};
     use super::ui::ChatUi;
     use harness_core::{
         tools::TodoScope, Agent, AgentConfig, Config, DefaultToolRegistry, SqliteSessionStore,
@@ -592,6 +603,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     let mut process_expanded = false;
     let todo_scope = TodoScope::new(tmp.path().join("todos"), &session_id);
     let plan_mode = Arc::new(AtomicBool::new(false));
+    let feature_toggles = FeatureToggles::default();
     let (_tx, mut rx) = mpsc::unbounded_channel();
 
     // 1. /plan toggles plan mode
@@ -615,6 +627,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &todo_scope,
         None,
         &[],
+        &feature_toggles,
         &plan_mode,
         None,
         None,
@@ -645,6 +658,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &todo_scope,
         None,
         &[],
+        &feature_toggles,
         &plan_mode,
         None,
         None,
@@ -674,6 +688,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &todo_scope,
         None,
         &[],
+        &feature_toggles,
         &plan_mode,
         None,
         None,
@@ -703,6 +718,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &todo_scope,
         None,
         &[],
+        &feature_toggles,
         &plan_mode,
         None,
         None,
@@ -711,6 +727,70 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     .await
     .unwrap();
     assert!(matches!(unrec_res, SlashOutcome::Continue));
+
+    // 4. A feature command reaches both the CLI's menu state and the live agent's config.
+    assert!(feature_toggles.enabled(Feature::Memory));
+    let memory_res = execute_slash_command(
+        "/memory off",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &[],
+        &feature_toggles,
+        &plan_mode,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(memory_res, SlashOutcome::Continue));
+    assert!(!feature_toggles.enabled(Feature::Memory));
+    assert!(!agent.lock().await.config().memory_enabled);
+
+    // And the same command turns it back on.
+    let _ = execute_slash_command(
+        "/memory on",
+        &mut rx,
+        &ui,
+        &mut config,
+        &cred_manager,
+        &discovery,
+        &agent,
+        &store,
+        &mut session_id,
+        &mut current_provider,
+        &mut current_model,
+        &mut compact_provider,
+        &mut compact_model,
+        &mut turns,
+        &mut process_expanded,
+        &todo_scope,
+        None,
+        &[],
+        &feature_toggles,
+        &plan_mode,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(feature_toggles.enabled(Feature::Memory));
+    assert!(agent.lock().await.config().memory_enabled);
 }
 
 #[test]
@@ -751,6 +831,81 @@ fn typing_keeps_the_landing_shower_running() {
         assert!(
             !super::key_keeps_landing(&key, false),
             "{key:?} can move the mark"
+        );
+    }
+}
+
+/// The idle pass exists for sessions too short to reach the every-N-turns interval. It must fire
+/// once per transcript, only after the conversation has actually gone quiet, and never while a
+/// turn is still running.
+#[test]
+fn the_idle_memory_pass_fires_once_per_transcript_after_the_quiet_window() {
+    let start = Instant::now();
+    let mut pass = super::IdleMemoryPass::new(0);
+
+    // Nothing has been said, so there is nothing to save.
+    assert!(!pass.tick(0, false, 90, start + Duration::from_secs(600)));
+
+    // A turn in flight keeps the clock at zero.
+    assert!(!pass.tick(1, true, 90, start));
+    assert!(!pass.tick(1, true, 90, start + Duration::from_secs(600)));
+
+    // The turn lands; the quiet clock starts then, not at the keystroke.
+    assert!(!pass.tick(1, false, 90, start + Duration::from_secs(601)));
+    assert!(!pass.tick(1, false, 90, start + Duration::from_secs(690)));
+    assert!(pass.tick(1, false, 90, start + Duration::from_secs(691)));
+
+    // The same transcript never gets a second pass.
+    assert!(!pass.tick(1, false, 90, start + Duration::from_secs(9_999)));
+
+    // A new turn re-arms it, from its own landing time.
+    assert!(!pass.tick(2, true, 90, start + Duration::from_secs(10_000)));
+    assert!(!pass.tick(2, false, 90, start + Duration::from_secs(10_001)));
+    assert!(pass.tick(2, false, 90, start + Duration::from_secs(10_091)));
+}
+
+/// Zero disables the idle pass, and a transcript that shrank (cleared, compacted) must not leave
+/// the marker ahead of it forever: the next turn still re-arms the pass.
+#[test]
+fn the_idle_memory_pass_is_off_at_zero_and_recovers_from_a_shrunk_transcript() {
+    let start = Instant::now();
+    let mut pass = super::IdleMemoryPass::new(3);
+
+    assert!(!pass.tick(3, false, 0, start + Duration::from_secs(600)));
+
+    // The transcript shrank; the remaining turns were already covered, so no pass is owed for
+    // them, but the marker must follow the transcript down.
+    assert!(!pass.tick(1, false, 90, start + Duration::from_secs(700)));
+    assert!(!pass.tick(1, false, 90, start + Duration::from_secs(790)));
+
+    // A new turn after the shrink still fires, from its own landing time.
+    assert!(!pass.tick(2, true, 90, start + Duration::from_secs(800)));
+    assert!(!pass.tick(2, false, 90, start + Duration::from_secs(801)));
+    assert!(pass.tick(2, false, 90, start + Duration::from_secs(891)));
+}
+
+/// A completion may only start a turn nobody typed when the composer is genuinely quiet. Every
+/// other input is a reason to wait: stealing a draft or a queued message is worse than a job
+/// notification arriving one turn later.
+#[test]
+fn an_unasked_turn_waits_for_a_quiet_composer() {
+    assert!(can_auto_resume(false, false, 0, "", 0, false, false));
+    assert!(can_auto_resume(false, false, 0, "   ", 0, false, false));
+
+    let busy = [
+        (true, false, 0, "", 0, false, false),
+        (false, true, 0, "", 0, false, false),
+        (false, false, 1, "", 0, false, false),
+        (false, false, 0, "half a thought", 0, false, false),
+        (false, false, 0, "", 1, false, false),
+        (false, false, 0, "", 0, true, false),
+        (false, false, 0, "", 0, false, true),
+    ];
+    for (turn_active, compacting, queued, draft, images, modal, plan) in busy {
+        assert!(
+            !can_auto_resume(turn_active, compacting, queued, draft, images, modal, plan),
+            "must not resume: turn={turn_active} compacting={compacting} queued={queued} \
+             draft={draft:?} images={images} modal={modal} plan={plan}"
         );
     }
 }

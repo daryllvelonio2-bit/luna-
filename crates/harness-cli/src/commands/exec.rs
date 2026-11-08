@@ -211,9 +211,6 @@ pub async fn run_exec(
     // before the provider rejects the request, not after.
     agent_cfg.context_window =
         Some(super::context_window::context_window_for(&config, &provider_id, &model_id) as usize);
-    if let Some(skills_summary) = skills_summary(&config) {
-        agent_cfg.skills_summary = Some(skills_summary);
-    }
 
     // Hooks are part of the agent, not part of the REPL: `luna exec` is the path CI and scripts
     // take, and a guardrail that only arms in an interactive session is a guardrail that is off
@@ -416,27 +413,4 @@ fn read_prompt(prompt: Option<String>) -> Result<String, HarnessError> {
         }
         Some(text) => Ok(text.to_string()),
     }
-}
-
-fn skills_summary(config: &Config) -> Option<String> {
-    let mut all = Vec::new();
-    if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
-    {
-        all.extend(skills);
-    }
-    let workspace_skills = config.paths.workspace_root.join(".harness/skills");
-    if workspace_skills.exists() {
-        if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&workspace_skills) {
-            all.extend(skills);
-        }
-    }
-    if all.is_empty() {
-        return None;
-    }
-    Some(
-        all.iter()
-            .map(|skill| format!("- {}: {}", skill.name, skill.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
 }

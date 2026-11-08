@@ -129,11 +129,14 @@ struct Activity {
     frame: usize,
 }
 
-/// How many lines of a running command's output the live region keeps.
+/// How many lines of a running command's output the live region shows by default.
 ///
 /// A tail, not a log: the composer has to stay usable while a build prints thousands of lines. The
 /// full output still reaches the model with the result; this is only the live view.
 const TOOL_TAIL_LINES: usize = 8;
+
+/// How many lines the tail keeps in memory, so Ctrl+O can expand it without re-reading the child.
+const TOOL_TAIL_BUFFER_LINES: usize = 200;
 
 /// Longest single line the tail keeps before forcing a break. A progress bar that never emits a
 /// newline must not grow the buffer for the length of the command.
@@ -141,13 +144,19 @@ const TOOL_TAIL_LINE_CHARS: usize = 2048;
 
 /// The newest lines of a running command's output.
 ///
-/// Chunks arrive at arbitrary boundaries, so the last line is held back until a newline (or the
-/// line cap) completes it. Carriage returns count as line breaks: progress bars redraw with `\r`,
-/// and showing the last update is the point of a tail.
+/// Chunks arrive at arbitrary boundaries, so the line being written is held separately until a
+/// newline completes it. A lone `\r` returns the cursor to column 0 without clearing the line:
+/// the next printable character overwrites it, which is what makes a progress bar one row instead
+/// of one row per update.
 #[derive(Default)]
 struct ToolTail {
     lines: std::collections::VecDeque<String>,
-    partial: String,
+    /// The line currently being written.
+    current: String,
+    /// A `\r` was seen and the next printable character should overwrite [`Self::current`].
+    pending_cr: bool,
+    /// Lines evicted from the front of the bounded buffer, for the "earlier lines" row.
+    dropped: usize,
     escape: Escape,
 }
 
@@ -174,14 +183,24 @@ impl ToolTail {
                     '\x1b' => self.escape = Escape::Esc,
                     '\n' => self.break_line(),
                     '\r' => {
-                        // CRLF is one break, not two; a lone `\r` is a progress-bar redraw.
-                        if chars.peek() != Some(&'\n') {
+                        // CRLF is one break, not two. A lone `\r` leaves the line on screen until
+                        // the next printable character overwrites it, matching the terminal.
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
                             self.break_line();
+                        } else {
+                            self.pending_cr = true;
                         }
                     }
-                    '\t' => self.partial.push_str("    "),
+                    '\t' => {
+                        self.overwrite_if_pending();
+                        self.current.push_str("    ");
+                    }
                     c if c.is_control() => {}
-                    c => self.partial.push(c),
+                    c => {
+                        self.overwrite_if_pending();
+                        self.current.push(c);
+                    }
                 },
                 Escape::Esc => {
                     self.escape = match ch {
@@ -202,56 +221,85 @@ impl ToolTail {
                     _ => {}
                 },
                 Escape::OscEsc => {
-                    self.escape = if ch == '\\' { Escape::None } else { Escape::Osc };
+                    self.escape = if ch == '\\' {
+                        Escape::None
+                    } else {
+                        Escape::Osc
+                    };
                 }
             }
-            if self.partial.len() >= TOOL_TAIL_LINE_CHARS {
+            if self.current.len() >= TOOL_TAIL_LINE_CHARS {
                 self.break_line();
             }
         }
     }
 
+    fn overwrite_if_pending(&mut self) {
+        if self.pending_cr {
+            self.current.clear();
+            self.pending_cr = false;
+        }
+    }
+
     fn break_line(&mut self) {
-        let line = std::mem::take(&mut self.partial);
+        self.pending_cr = false;
+        let line = std::mem::take(&mut self.current);
         let line = line.trim_end().to_string();
         // A run of blank lines (a CRLF split across chunks, a banner) costs rows and says nothing.
         if line.is_empty() && self.lines.back().is_none_or(|last| last.is_empty()) {
             return;
         }
         self.lines.push_back(line);
-        while self.lines.len() > TOOL_TAIL_LINES {
+        while self.lines.len() > TOOL_TAIL_BUFFER_LINES {
             self.lines.pop_front();
+            self.dropped += 1;
         }
     }
 
     fn clear(&mut self) {
         self.lines.clear();
-        self.partial.clear();
+        self.current.clear();
+        self.pending_cr = false;
+        self.dropped = 0;
         self.escape = Escape::None;
     }
 
-    /// The tail as composer rows, newest last, each one physical row wide.
-    fn rows(&self, width: usize) -> Vec<String> {
+    /// The tail as composer rows, newest last, at most `limit` physical rows wide.
+    ///
+    /// When more lines exist than the limit allows, the oldest visible row is replaced by a count
+    /// of what is hidden, so the tail never claims to be the whole story.
+    fn rows(&self, width: usize, limit: usize) -> Vec<String> {
         let budget = width.saturating_sub(4).max(8);
-        let mut rows: Vec<String> = self
+        let mut all: Vec<String> = self
             .lines
             .iter()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                format!(
-                    "  {} {}",
-                    "│".dimmed(),
-                    truncate_to_cells(line, budget).dimmed()
-                )
-            })
+            .map(|line| truncate_to_cells(line, budget))
             .collect();
-        let partial = self.partial.trim_end();
-        if !partial.is_empty() {
+        let current = self.current.trim_end();
+        if !current.is_empty() {
+            all.push(truncate_to_cells(current, budget));
+        }
+
+        let limit = limit.max(1);
+        let content_limit = if all.len() > limit { limit - 1 } else { limit };
+        let start = all.len().saturating_sub(content_limit);
+        let hidden = self.dropped + start;
+
+        let mut rows = Vec::with_capacity(all.len().saturating_sub(start) + 1);
+        if hidden > 0 {
             rows.push(format!(
                 "  {} {}",
-                "│".dimmed(),
-                truncate_to_cells(partial, budget).dimmed()
+                "…".dimmed(),
+                format!(
+                    "{hidden} earlier line{}",
+                    if hidden == 1 { "" } else { "s" }
+                )
+                .dimmed()
             ));
+        }
+        for line in &all[start..] {
+            rows.push(format!("  {} {}", "│".dimmed(), line.dimmed()));
         }
         rows
     }
@@ -283,6 +331,49 @@ fn format_delegate_task_row(task: &DelegateTaskView, more: usize, width: usize) 
     )
 }
 
+/// A memory the background saver just wrote, as the composer announces it.
+///
+/// The notice is chrome, not transcript: the pass runs after the reply, and a permanent line per
+/// record would grow the scrollback with bookkeeping. The next turn clears it, so it reads as a
+/// glance at what was remembered rather than as history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemoryNotice {
+    /// `memory` or `note`: what kind of thing the row is about.
+    storage: String,
+    name: String,
+    status: String,
+}
+
+/// Longest friendly name a notice shows before the CLI trims it. Even on a wide terminal a long
+/// generated title should not push the status off the row.
+const MAX_MEMORY_NOTICE_NAME_CELLS: usize = 40;
+
+/// How many notices stack above the composer. A pass can write many records; the newest are the
+/// ones still worth a glance.
+const MAX_MEMORY_NOTICES: usize = 5;
+
+/// One composer row for a write: `memory <name> <saved|updated>` or `note <title> <saved>`.
+fn format_save_notice(storage: &str, name: &str, status: &str, width: usize) -> String {
+    let status = status.trim();
+    let fixed = visible_width(storage) + 1 + 1 + visible_width(status);
+    let budget = width
+        .saturating_sub(fixed)
+        .min(MAX_MEMORY_NOTICE_NAME_CELLS);
+    let name = truncate_to_cells(name, budget);
+    let status = match status {
+        "saved" => status.green(),
+        "updated" => status.yellow(),
+        "deleted" => status.red(),
+        "merged" => status.cyan(),
+        other => other.normal(),
+    };
+    let storage = match storage {
+        "note" => storage.magenta(),
+        _ => storage.dimmed(),
+    };
+    format!("{} {} {}", storage, name.cyan(), status)
+}
+
 /// A fold of the oldest turns, as far as the animation is concerned.
 ///
 /// Carried in the live region rather than printed once, because the summary call takes seconds and
@@ -305,6 +396,8 @@ struct LiveRegion {
     activity: Option<Activity>,
     /// The newest lines of the running tool's output, drawn under its activity row.
     tool_output: ToolTail,
+    /// Whether Ctrl+O asked for the whole buffered tail instead of the default eight rows.
+    tool_output_expanded: bool,
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     compaction: Option<Compaction>,
@@ -348,6 +441,8 @@ struct BoxDrawnMetrics {
     panel_rows_lens: Vec<usize>,
     /// Rows of running delegated tasks drawn above the composer.
     delegate_rows_lens: Vec<usize>,
+    /// Rows of background-saver notifications drawn above the status line.
+    memory_notice_rows_lens: Vec<usize>,
     /// The rows drawn between the transcript and the prompt, top to bottom.
     ///
     /// The repaint compares them with the next frame and rewrites only the rows whose text
@@ -380,6 +475,15 @@ pub fn visible_width(s: &str) -> usize {
 /// the block cannot fit, the rows kept are the *newest* — the interesting end of a stream is its
 /// end. `chrome` counts the rows drawn below the region, so a tall block pushes the transcript up
 /// instead of pushing the prompt off the screen.
+/// The rows the live tool tail may occupy: the default tail, or the whole buffer once expanded.
+fn tool_tail_limit(live: &LiveRegion) -> usize {
+    if live.tool_output_expanded {
+        TOOL_TAIL_BUFFER_LINES
+    } else {
+        TOOL_TAIL_LINES
+    }
+}
+
 fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<String> {
     let all = if live.reasoning.is_empty() {
         Vec::new()
@@ -389,7 +493,7 @@ fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -> Vec<Strin
     let height = get_terminal_height();
     let reserved = usize::from(live.activity.is_some())
         + usize::from(live.compaction.is_some())
-        + live.tool_output.rows(width).len();
+        + live.tool_output.rows(width, tool_tail_limit(live)).len();
     let budget = height
         .saturating_sub(chrome + reserved + 1)
         .max(MIN_LIVE_REASONING_ROWS);
@@ -438,6 +542,8 @@ pub struct ChatUi {
     /// Delegated children that are still running. These stay visible above the composer after
     /// the main turn ends, so a background task never disappears without a trace.
     delegate_tasks: Arc<Mutex<Vec<DelegateTaskView>>>,
+    /// Memories the detached saver just wrote, shown above the status line until the next turn.
+    memory_notices: Arc<Mutex<Vec<MemoryNotice>>>,
     /// Whether a turn is in flight. Only the composer's hint reads it: the empty line says
     /// something different depending on whether Luna is idle or working.
     turn_active: Arc<AtomicBool>,
@@ -524,6 +630,7 @@ impl ChatUi {
             todo_collapsed: Arc::new(AtomicBool::new(false)),
             queue_depth: Arc::new(AtomicUsize::new(0)),
             delegate_tasks: Arc::new(Mutex::new(Vec::new())),
+            memory_notices: Arc::new(Mutex::new(Vec::new())),
             turn_active: Arc::new(AtomicBool::new(false)),
             box_drawn: Arc::new(AtomicBool::new(false)),
             landing: Arc::new(Mutex::new(None)),
@@ -751,10 +858,104 @@ impl ChatUi {
         }
     }
 
+    /// Announce one memory the background saver wrote.
+    ///
+    /// The saver's pass is detached and can finish long after the reply, so this arrives from the
+    /// agent's observer. The name is normalised and trimmed at paint time; the status is kept
+    /// whole because it is the part that answers "did it replace something?".
+    pub fn push_memory_notice(&self, name: &str, status: &str) {
+        self.push_save_notice("memory", name, status);
+    }
+
+    /// Announce a note the background saver wrote, updated, archived, or merged.
+    pub fn push_note_notice(&self, name: &str, status: &str) {
+        self.push_save_notice("note", name, status);
+    }
+
+    /// The shared notice path: one temporary row per stored item, whatever store it lives in.
+    fn push_save_notice(&self, storage: &str, name: &str, status: &str) {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty() {
+            return;
+        }
+        let status = status.trim().to_string();
+        let changed = {
+            let mut notices = self
+                .memory_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // One row per item: a later pass that updates the same record replaces the old
+            // status instead of stacking a stale `saved` beside a fresh `updated`.
+            if let Some(existing) = notices
+                .iter_mut()
+                .find(|notice| notice.storage == storage && notice.name == name)
+            {
+                if existing.status == status {
+                    false
+                } else {
+                    existing.status = status.clone();
+                    true
+                }
+            } else {
+                notices.push(MemoryNotice {
+                    storage: storage.to_string(),
+                    name: name.clone(),
+                    status: status.clone(),
+                });
+                if notices.len() > MAX_MEMORY_NOTICES {
+                    let excess = notices.len() - MAX_MEMORY_NOTICES;
+                    notices.drain(..excess);
+                }
+                true
+            }
+        };
+        if !changed {
+            return;
+        }
+        if self.is_attended {
+            self.redraw_box();
+        } else {
+            // No composer to hold a temporary row, so the run log gets the line instead.
+            self.emit_above(&format_save_notice(
+                storage,
+                &name,
+                &status,
+                get_terminal_width(),
+            ));
+        }
+    }
+
+    /// Drop the background-saver notices, as the start of a new turn does.
+    pub fn clear_memory_notices(&self) {
+        let had = {
+            let mut notices = self
+                .memory_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let had = !notices.is_empty();
+            notices.clear();
+            had
+        };
+        if had {
+            self.redraw_box();
+        }
+    }
+
+    /// The rows that report what the background saver just wrote.
+    pub fn memory_notice_rows(&self, width: usize) -> Vec<String> {
+        self.memory_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|notice| format_save_notice(&notice.storage, &notice.name, &notice.status, width))
+            .collect()
+    }
+
     pub fn box_row_count(&self) -> usize {
         4 + if self.queue_depth() > 0 { 1 } else { 0 }
             + self.todo_panel_rows(get_terminal_width()).len()
             + self.delegate_task_rows(get_terminal_width()).len()
+            + self.memory_notice_rows(get_terminal_width()).len()
     }
 
     pub fn begin_block(&self, kind: OutputBlockKind) {
@@ -791,6 +992,7 @@ impl ChatUi {
     pub fn start_activity(&self, call: &str, name: &str, arguments: &serde_json::Value) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.tool_output.clear();
+        live.tool_output_expanded = false;
         live.activity = Some(Activity {
             call: call.to_string(),
             detail: tool_activity_detail(name, arguments),
@@ -803,6 +1005,32 @@ impl ChatUi {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.activity = None;
         live.tool_output.clear();
+        live.tool_output_expanded = false;
+    }
+
+    /// Whether a tool is running and therefore whether Ctrl+O should expand the live tail rather
+    /// than the transcript.
+    pub fn has_live_activity(&self) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .is_some()
+    }
+
+    /// Toggle the live tail between its default height and the whole buffered output.
+    ///
+    /// Returns whether the tail is now expanded. Only meaningful while a tool is running; the
+    /// caller checks [`Self::has_live_activity`] first so the same key still folds the transcript
+    /// when Luna is idle.
+    pub fn toggle_live_expanded(&self) -> bool {
+        let expanded = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.tool_output_expanded = !live.tool_output_expanded;
+            live.tool_output_expanded
+        };
+        self.animate_tick();
+        expanded
     }
 
     /// Add a chunk of a running tool's output to the tail under its activity row.
@@ -872,6 +1100,7 @@ impl ChatUi {
         live.rows.clear();
         live.activity = None;
         live.tool_output.clear();
+        live.tool_output_expanded = false;
         live.compaction = None;
     }
 
@@ -1253,6 +1482,11 @@ impl ChatUi {
                 .iter()
                 .map(|&len| physical_line_count(len, current_width))
                 .sum();
+            let memory_notice_rows: usize = m
+                .memory_notice_rows_lens
+                .iter()
+                .map(|&len| physical_line_count(len, current_width))
+                .sum();
 
             let below = bottom_rows;
             let above = prompt_rows.saturating_sub(1)
@@ -1261,7 +1495,8 @@ impl ChatUi {
                 + queued_rows
                 + live_rows
                 + panel_rows
-                + delegate_rows;
+                + delegate_rows
+                + memory_notice_rows;
             (below, above)
         } else {
             let total = previous_live_rows + self.box_row_count();
@@ -1391,6 +1626,7 @@ impl ChatUi {
             .clone();
         let panel_rows = self.todo_panel_rows(width);
         let delegate_rows = self.delegate_task_rows(width);
+        let memory_notice_rows = self.memory_notice_rows(width);
         let queued_line = self.format_queue_line(width);
         let status_line = self.format_status_line(width);
 
@@ -1405,6 +1641,7 @@ impl ChatUi {
         block.extend(live_rows.iter().cloned());
         block.extend(panel_rows.iter().cloned());
         block.extend(delegate_rows.iter().cloned());
+        block.extend(memory_notice_rows.iter().cloned());
         if let Some(line) = &queued_line {
             block.push(line.clone());
         }
@@ -1478,6 +1715,10 @@ impl ChatUi {
                 m.live_rows_lens = live_rows.iter().map(|r| visible_width(r)).collect();
                 m.panel_rows_lens = panel_rows.iter().map(|r| visible_width(r)).collect();
                 m.delegate_rows_lens = delegate_rows.iter().map(|r| visible_width(r)).collect();
+                m.memory_notice_rows_lens = memory_notice_rows
+                    .iter()
+                    .map(|r| visible_width(r))
+                    .collect();
                 m.queued_line_len = queued_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.status_line_len = status_line.as_ref().map(|s| visible_width(s)).unwrap_or(0);
                 m.prompt_len = visible_width(&prompt);
@@ -1511,7 +1752,7 @@ impl ChatUi {
                     width,
                 ));
                 // The newest lines of what the call is printing, under the call itself.
-                rows.extend(live.tool_output.rows(width));
+                rows.extend(live.tool_output.rows(width, tool_tail_limit(&live)));
             }
 
             if let Some(compaction) = &mut live.compaction {
@@ -1556,6 +1797,9 @@ impl ChatUi {
         // A running child is also chrome: its row stays above the composer after the main turn
         // ends, so the user can still see which delegated task is running.
         rows.extend(self.delegate_task_rows(width));
+        // What the detached saver just wrote: visible until the next turn, not part of the
+        // transcript.
+        rows.extend(self.memory_notice_rows(width));
         if let Some(queued) = self.format_queue_line(width) {
             rows.push(queued);
         }
@@ -1606,6 +1850,7 @@ impl ChatUi {
 
         let panel = self.todo_panel_rows(width);
         let delegate_rows = self.delegate_task_rows(width);
+        let memory_notice_rows = self.memory_notice_rows(width);
         let queue_line = self.format_queue_line(width);
         let status_str = self.format_status_line(width);
 
@@ -1627,6 +1872,10 @@ impl ChatUi {
             live_rows_lens,
             panel_rows_lens: panel.iter().map(|r| visible_width(r)).collect(),
             delegate_rows_lens: delegate_rows.iter().map(|r| visible_width(r)).collect(),
+            memory_notice_rows_lens: memory_notice_rows
+                .iter()
+                .map(|r| visible_width(r))
+                .collect(),
             block_rows,
             prompt_drawn: prompt_str.clone(),
         });

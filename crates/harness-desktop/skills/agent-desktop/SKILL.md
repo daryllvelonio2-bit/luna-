@@ -1,6 +1,6 @@
 ---
 name: agent-desktop
-description: Operate desktop applications through native accessibility trees: read the UI, click, type, fill fields, toggle controls and verify the result. Use for any desktop GUI task. Not for web pages: use the browser skill.
+description: Operate desktop applications through native accessibility trees: read the UI, click, type, fill fields, toggle controls and verify the result. Includes OS-level window focus, real pointer clicks, key chords, clipboard paste and screenshots for controls the accessibility tree cannot drive. Use for any desktop GUI task, including a web page already open in a logged-in browser.
 ---
 
 # agent-desktop
@@ -23,10 +23,15 @@ you.
 | `desktop_find` | look for elements by role or name; returns them with refs | no |
 | `desktop_get` | read one property of a ref: `value`, `state` or `actions` | no |
 | `desktop_is` | ask whether a ref has a state: `enabled`, `focused`, `selected`, `checked` | no |
-| `desktop_click` | activate the element a ref names | yes |
+| `desktop_click` | activate the element a ref names, semantically | yes |
 | `desktop_type` | replace the contents of the text field a ref names | yes |
 | `desktop_set_value` | set the value of the control a ref names | yes |
 | `desktop_toggle` | flip a checkable control, or set it to a given state | yes |
+| `desktop_focus` | focus an app's window, or report the focused window | yes |
+| `desktop_key` | send key chords to the focused window | yes |
+| `desktop_paste` | put text on the clipboard and paste it into the focused window | yes |
+| `desktop_click_at` | click a ref's on-screen center, or x/y, with a real pointer | yes |
+| `desktop_screenshot` | capture the screen or one window to a PNG file | no |
 
 The mutating tools go through the harness's approval gate. Expect a prompt
 before the first one.
@@ -74,10 +79,51 @@ Retry only when the answer says the retry is safe. Otherwise read the live state
 first — `desktop_get` or a fresh `desktop_snapshot` — and decide from that. A
 repeated click clicks twice.
 
+## When the accessibility tree is not enough
+
+Some controls cannot be driven semantically. A rich web editor (ProseMirror,
+Lexical, Draft.js, a bare `contenteditable`) often exposes an `entry` whose
+`EditableText.SetTextContents` is accepted but ignored, so `desktop_get value`
+keeps returning `￼` and the field stays empty. Other elements expose no action
+at all. Use the fallback ladder in this order:
+
+1. **Focus the window.** `desktop_focus --app "Firefox"` raises the window and
+   tells you whether it is active. Key chords and pastes go to the *focused*
+   window, not to the app you last snapshot.
+2. **Paste instead of write.** `desktop_type --ref @… --text "…" --mode paste`
+   clicks the field with a real pointer, selects its contents and pastes through
+   the clipboard. This is a real editing event and works where a property write
+   does not. `--mode auto` (the default) tries the accessibility write, reads the
+   field back, and falls back to paste when the text did not land.
+3. **Click with a pointer.** `desktop_click_at --ref @…` clicks the element's
+   on-screen center; `desktop_click_at --x 640 --y 480` clicks a coordinate.
+   Use it when a semantic `desktop_click` reports `delivered_unverified` and the
+   screen does not change.
+4. **Send keys.** `desktop_key --keys "ctrl+a ctrl+v"` for shortcuts and
+   `desktop_key --keys "tab tab enter"` for keyboard navigation. A chord joins
+   keys with `+`; chords are separated by spaces.
+5. **Look at the pixels.** `desktop_screenshot --app "Firefox" --path /tmp/x.png`
+   writes a PNG and returns its absolute path and pixel size. Tool results are
+   text, so the harness cannot show you the image inline; use OCR (`tesseract`)
+   or open the file to read it.
+
+A window that is not focused is the most common reason a `desktop_key` or
+`desktop_paste` appears to do nothing. Check `desktop_focus` with no `--app`
+first, then read the screen again.
+
+## Web pages
+
+A web page already open in the user's logged-in browser is a desktop window:
+use these tools on the browser app. The separate `browser` skill launches its
+own headless Chromium and cannot see that session or its cookies. Use it for
+public pages, not for the user's authenticated work.
+
 ## Notes
 
 - Observation and semantic actions do not move the pointer and do not take
-  focus, so the user can keep working while you act.
+  focus, so the user can keep working while you act. The fallback tools
+  (`desktop_focus`, `desktop_key`, `desktop_paste`, `desktop_click_at`) do take
+  over input; say so before you use them.
 - `desktop_type` replaces the whole contents of a field. Read the field first
   if you mean to append.
 - A field that shows `checked` is a check box or a radio button; use

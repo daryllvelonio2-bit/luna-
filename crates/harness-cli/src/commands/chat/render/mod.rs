@@ -7,7 +7,18 @@
 use std::time::Duration;
 
 use colored::Colorize;
+use harness_core::tasks::JobCompletion;
 use harness_core::{ApprovalRequest, Role, StoredMessage, TurnToolCall};
+
+/// The first line of the prompt the harness sends itself when a background job finishes.
+///
+/// It is a sentinel, not prose: [`clean_user_query_for_transcript`] drops a stored prompt that
+/// starts with it, so replaying a session does not show a user message nobody typed.
+pub const BACKGROUND_JOB_RESUME_PREFIX: &str = "[background job finished]";
+
+/// How much of a finished job's output the stored system message carries. The log keeps the
+/// rest; this is enough to see what happened without pinning a huge line in every replay.
+const MAX_JOB_TAIL_CHARS: usize = 4_000;
 
 /// Formatted tool execution lines for a single tool call within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +26,45 @@ pub struct TurnProcessItem {
     pub call_formatted: String,
     pub result_formatted: String,
     pub diff_lines: Vec<String>,
+    /// A bounded copy of what the call printed, kept so Ctrl+O can show it after the live tail
+    /// is gone. Bounded because a transcript lives for the whole session.
+    pub output: String,
+    /// Lines dropped from the front of `output` when it was bounded.
+    pub output_dropped: usize,
+}
+
+/// How many lines of a finished tool's output the transcript retains for Ctrl+O.
+const MAX_RETAINED_OUTPUT_LINES: usize = 40;
+
+/// Hard cap on retained output characters, so a single-line payload cannot pin megabytes.
+const MAX_RETAINED_OUTPUT_CHARS: usize = 8 * 1024;
+
+/// Keep the newest lines of a tool result, plus a count of what was dropped.
+///
+/// The end of a build or test run is where the verdict is; the beginning is already represented by
+/// [`format_tool_result`]'s first-line summary.
+pub fn bounded_tool_output(output: &str) -> (String, usize) {
+    let trimmed = output.trim_end();
+    if trimmed.is_empty() {
+        return (String::new(), 0);
+    }
+
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let start = lines.len().saturating_sub(MAX_RETAINED_OUTPUT_LINES);
+    let mut kept = lines[start..].join("\n");
+    let mut dropped = start;
+
+    if kept.len() > MAX_RETAINED_OUTPUT_CHARS {
+        // Trim from the front on a character boundary: the tail is what matters.
+        let mut cut = kept.len() - MAX_RETAINED_OUTPUT_CHARS;
+        while cut < kept.len() && !kept.is_char_boundary(cut) {
+            cut += 1;
+        }
+        dropped += kept[..cut].matches('\n').count();
+        kept = kept[cut..].to_string();
+    }
+
+    (kept, dropped)
 }
 
 /// A completed turn in the chat session, holding its query, intermediate reasoning, tool calls, and final reply.
@@ -62,6 +112,12 @@ fn extract_out_of_band_steer(content: &str) -> Option<String> {
 pub fn clean_user_query_for_transcript(raw: &str) -> String {
     if raw.trim().is_empty() {
         return raw.to_string();
+    }
+
+    // A turn the harness started for itself is not something the user said. The prompt exists
+    // only to carry the completion to the model; the transcript already has the notification.
+    if raw.trim_start().starts_with(BACKGROUND_JOB_RESUME_PREFIX) {
+        return String::new();
     }
 
     // 1. Strip plan mode instruction prefix if present
@@ -193,6 +249,8 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                             ),
                             result_formatted: String::new(),
                             diff_lines: Vec::new(),
+                            output: String::new(),
+                            output_dropped: 0,
                         });
                         continue;
                     }
@@ -231,6 +289,8 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         call_formatted: format_tool_call(&call.name, &call.arguments),
                         result_formatted: String::new(),
                         diff_lines,
+                        output: String::new(),
+                        output_dropped: 0,
                     });
                 }
                 if let Some(ref content) = msg.content {
@@ -255,7 +315,8 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                         !is_non_tool_event(&it.call_formatted) && !has_verdict(&it.call_formatted)
                     }) {
                         target.call_formatted.push_str(&status);
-                        target.result_formatted.clear();
+                        target.result_formatted = format_tool_result(res.is_error, &res.content);
+                        (target.output, target.output_dropped) = bounded_tool_output(&res.content);
                     }
                 }
             }
@@ -384,6 +445,33 @@ pub fn render_turn_lines(turns: &[TurnRecord], expanded: bool, width: usize) -> 
                         push_rows(&mut lines, &call);
                         for diff_line in &item.diff_lines {
                             push_rows(&mut lines, diff_line);
+                        }
+                        // The retained result: a one-line verdict/summary always, then the bounded
+                        // body when there is more to it. This is what keeps a failing build's last
+                        // lines — and an MCP tool's output — available after the live tail clears.
+                        if !item.result_formatted.is_empty() {
+                            push_rows(&mut lines, &item.result_formatted);
+                        }
+                        if !item.output.is_empty() && item.output.lines().count() > 1 {
+                            if item.output_dropped > 0 {
+                                lines.push(format!(
+                                    "  {} {}",
+                                    "…".dimmed(),
+                                    format!(
+                                        "{} earlier line{}",
+                                        item.output_dropped,
+                                        if item.output_dropped == 1 { "" } else { "s" }
+                                    )
+                                    .dimmed()
+                                ));
+                            }
+                            for row in item.output.lines() {
+                                lines.push(format!(
+                                    "  {} {}",
+                                    "│".dimmed(),
+                                    truncate_to_cells(row, width.saturating_sub(4).max(8)).dimmed()
+                                ));
+                            }
                         }
                     }
                 }
@@ -1212,7 +1300,11 @@ pub fn format_delegate_title(goal: &str) -> String {
 
 /// Format duration into compact human-readable string (e.g. "4s", "1m 12s").
 pub fn format_delegate_duration(dur: std::time::Duration) -> String {
-    let secs = dur.as_secs();
+    format_elapsed_secs(dur.as_secs())
+}
+
+/// The same compact duration, from whole seconds.
+pub fn format_elapsed_secs(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
     } else if secs < 3600 {
@@ -1220,6 +1312,86 @@ pub fn format_delegate_duration(dur: std::time::Duration) -> String {
     } else {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
+}
+
+/// One line of a shell command, bounded, for a job notice.
+pub fn format_job_command(command: &str) -> String {
+    let first = command
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(command)
+        .trim();
+    if first.chars().count() > 60 {
+        format!("{}…", first.chars().take(59).collect::<String>())
+    } else {
+        first.to_string()
+    }
+}
+
+/// Render the line that appears above the composer when a background job stops.
+pub fn format_job_notification(
+    glyph: &str,
+    id: &str,
+    command: &str,
+    status: &str,
+    elapsed: &str,
+) -> String {
+    format!(
+        "{glyph} {id}: {} — {status}, {elapsed}",
+        format_job_command(command)
+    )
+}
+
+/// The stored system message a finished job leaves for the model.
+///
+/// It carries everything the model needs to decide what to do next without another `process
+/// poll`: what ran, how it ended, how long it took, where the full log is, and the end of the
+/// output. The first line is the resume sentinel so replay can recognise the turn it started.
+pub fn format_job_system_message(completion: &JobCompletion) -> String {
+    let tail = completion.output_tail.trim_end();
+    let tail = if tail.is_empty() {
+        "(no output)".to_string()
+    } else {
+        let chars: Vec<char> = tail.chars().collect();
+        if chars.len() > MAX_JOB_TAIL_CHARS {
+            let kept: String = chars[chars.len() - MAX_JOB_TAIL_CHARS..].iter().collect();
+            format!(
+                "… ({} earlier characters trimmed; see the log)\n{}",
+                chars.len() - MAX_JOB_TAIL_CHARS,
+                kept
+            )
+        } else {
+            tail.to_string()
+        }
+    };
+    format!(
+        "{BACKGROUND_JOB_RESUME_PREFIX}\n\
+         Background job {} stopped: {}\n\
+         Command: {}\n\
+         Duration: {}\n\
+         Log: {}\n\
+         \n\
+         Output tail:\n{}",
+        completion.id,
+        completion.status,
+        completion.command,
+        format_elapsed_secs(completion.elapsed_secs),
+        completion.log_path,
+        tail,
+    )
+}
+
+/// The prompt that starts the harness-owned turn reacting to a completion.
+///
+/// The system message carries the data; this only tells the model what to do with it. It is
+/// hidden from replay by the sentinel prefix.
+pub fn background_job_resume_prompt() -> String {
+    format!(
+        "{BACKGROUND_JOB_RESUME_PREFIX}\n\
+         A background shell job you started has just stopped. Read its result above, then continue \
+         the task: report what happened, or take the next step the result calls for. Do not repeat \
+         work that already finished."
+    )
 }
 
 /// Render a delegated task notification line:

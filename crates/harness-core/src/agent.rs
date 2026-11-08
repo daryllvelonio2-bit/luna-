@@ -22,7 +22,7 @@ use crate::checkpoint::CheckpointController;
 use crate::error::HarnessError;
 use crate::hooks::HookRunner;
 use crate::permission::PermissionEngine;
-use crate::saver::{BackgroundSaver, SaverHook};
+use crate::saver::{BackgroundSaver, MemorySaveStatus, SaveStatus, SaverHook};
 use crate::session::{CompactionOutcome, SessionStore};
 use crate::traits::*;
 use crate::types::*;
@@ -115,9 +115,18 @@ pub struct AgentConfig {
     pub engineer_model: Option<String>,
     /// Provider used by the background engineer agent; `None` means the session's provider.
     pub engineer_provider: Option<String>,
-    /// Compact one-line summary index of available skills (e.g. "- name: description")
-    #[serde(default)]
-    pub skills_summary: Option<String>,
+    /// Whether saved-memory tools, retrieval, and the background saver are active this session.
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
+    /// Whether note tools and the note protocol are active this session.
+    #[serde(default = "default_true")]
+    pub notes_enabled: bool,
+    /// Whether skill tools and skill commands are active this session.
+    #[serde(default = "default_true")]
+    pub skills_enabled: bool,
+    /// Whether `mcp__*` tools and the MCP prompt block are active this session.
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
     /// Root directory of the workspace. Injected into system prompt so the model knows its working directory.
     #[serde(default)]
     pub workspace_root: Option<PathBuf>,
@@ -157,6 +166,10 @@ fn default_auto_compact_percent() -> Option<usize> {
 }
 
 fn default_auto_compact_enabled() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -208,7 +221,10 @@ impl Default for AgentConfig {
             compaction_provider: None,
             engineer_model: None,
             engineer_provider: None,
-            skills_summary: None,
+            memory_enabled: true,
+            notes_enabled: true,
+            skills_enabled: true,
+            mcp_enabled: true,
             workspace_root: None,
             memory_mode: crate::config::MemoryMode::Session,
             auto_compact_enabled: true,
@@ -216,6 +232,26 @@ impl Default for AgentConfig {
             auto_compact_percent: None,
             auto_compact_turns: 20,
             context_window: None,
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Whether a tool may run under the session's runtime feature toggles.
+    ///
+    /// This is the single place that maps a tool name to the feature that owns it, so the turn
+    /// loop's tool list and the dispatcher's rejection check can never disagree about what
+    /// `/memory off`, `/notes off`, `/skills off`, or `/mcp off` actually disabled.
+    pub fn tool_enabled(&self, name: &str) -> bool {
+        if name.starts_with("mcp__") {
+            return self.mcp_enabled;
+        }
+        match name {
+            "save_memory" | "update_memory" | "forget_memory" => self.memory_enabled,
+            "save_note" | "update_note" | "read_note" | "search_notes" | "list_notes"
+            | "delete_note" => self.notes_enabled,
+            "skill_view" | "skills_list" => self.skills_enabled,
+            _ => true,
         }
     }
 }
@@ -306,10 +342,7 @@ pub enum AgentEvent {
     /// Only tools that override [`crate::traits::Tool::execute_with_progress`] produce this; the
     /// chunk boundaries are the reader's, not the tool's, so a consumer should buffer text rather
     /// than assume lines. The complete output still arrives with `ToolExecuted`.
-    ToolOutput {
-        name: String,
-        chunk: String,
-    },
+    ToolOutput { name: String, chunk: String },
     ToolExecuted {
         name: String,
         output: String,
@@ -349,6 +382,20 @@ pub enum AgentEvent {
     /// a measurement. A UI that holds a high-water mark must still take a `reset` value even when
     /// it is lower.
     ContextTokensUpdated { tokens_used: u32, reset: bool },
+    /// The background saver wrote one memory record.
+    ///
+    /// The pass runs detached after the reply, so this arrives while the session is idle. `name`
+    /// is the model's friendly name when it gave one, otherwise the record's `subject.predicate`
+    /// id; `status` says whether the write created a record or replaced an active one.
+    MemorySaved {
+        name: String,
+        status: MemorySaveStatus,
+    },
+    /// The background saver wrote, updated, archived, or merged one note.
+    ///
+    /// Like [`AgentEvent::MemorySaved`] this arrives after the reply, while the session is idle.
+    /// `name` is the note's title (the human name), not its slug.
+    NoteSaved { name: String, status: SaveStatus },
 }
 
 pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -747,9 +794,35 @@ where
         self.config.workspace_root = Some(root);
     }
 
-    /// Set or update the skills summary for the agent's prompt context.
-    pub fn set_skills_summary(&mut self, summary: Option<String>) {
-        self.config.skills_summary = summary;
+    /// Enable or disable saved memory for this session.
+    ///
+    /// Disabling it also stops the background saver: a feature that is off must not keep writing
+    /// records behind the turn.
+    pub fn set_memory_enabled(&mut self, enabled: bool) {
+        self.config.memory_enabled = enabled;
+        if let Some(hook) = self.saver.as_ref() {
+            hook.saver.set_memory_enabled(enabled);
+        }
+    }
+
+    /// Enable or disable note tools and the note protocol for this session.
+    ///
+    /// In background mode the saver writes notes too, so the runtime gate is forwarded to it.
+    pub fn set_notes_enabled(&mut self, enabled: bool) {
+        self.config.notes_enabled = enabled;
+        if let Some(hook) = self.saver.as_ref() {
+            hook.saver.set_notes_enabled(enabled);
+        }
+    }
+
+    /// Enable or disable skill tools and skill commands for this session.
+    pub fn set_skills_enabled(&mut self, enabled: bool) {
+        self.config.skills_enabled = enabled;
+    }
+
+    /// Enable or disable MCP tools and the MCP prompt block for this session.
+    pub fn set_mcp_enabled(&mut self, enabled: bool) {
+        self.config.mcp_enabled = enabled;
     }
 
     /// Read-only access to current agent configuration.
@@ -781,6 +854,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each toggle owns exactly its own tools; the mapping is what `/memory off` and friends
+    /// rely on, so a new tool in one family must be added here rather than silently bypassing it.
+    #[test]
+    fn runtime_toggles_own_their_tools() {
+        let mut config = AgentConfig::default();
+        for name in [
+            "save_memory",
+            "update_memory",
+            "forget_memory",
+            "save_note",
+            "update_note",
+            "read_note",
+            "search_notes",
+            "list_notes",
+            "delete_note",
+            "skill_view",
+            "skills_list",
+            "mcp__server__tool",
+            "read_file",
+        ] {
+            assert!(config.tool_enabled(name), "{name} starts enabled");
+        }
+
+        config.memory_enabled = false;
+        assert!(!config.tool_enabled("save_memory"));
+        assert!(!config.tool_enabled("update_memory"));
+        assert!(!config.tool_enabled("forget_memory"));
+        assert!(config.tool_enabled("save_note"));
+        assert!(config.tool_enabled("read_file"));
+
+        config.notes_enabled = false;
+        assert!(!config.tool_enabled("save_note"));
+        assert!(!config.tool_enabled("delete_note"));
+        assert!(config.tool_enabled("skill_view"));
+
+        config.skills_enabled = false;
+        assert!(!config.tool_enabled("skill_view"));
+        assert!(!config.tool_enabled("skills_list"));
+        assert!(config.tool_enabled("mcp__server__tool"));
+
+        config.mcp_enabled = false;
+        assert!(!config.tool_enabled("mcp__server__tool"));
+        assert!(config.tool_enabled("read_file"));
+    }
 
     /// A configured bar above the model window is clamped below it; a bar that already fits, or a
     /// host that does not know the window, is left exactly as configured.

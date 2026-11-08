@@ -1,9 +1,20 @@
 //! Finding and holding the accessibility bus.
 
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use harness_desktop::error::{DesktopError, ErrorCode};
 use zbus::blocking::{Connection, Proxy};
+
+/// How long one call on the accessibility bus may wait for a reply.
+///
+/// The bus is a shared resource and an application can stop answering while it
+/// is busy (a modal dialog, a long re-render). Without a bound, a single stuck
+/// call hangs the tool — and the turn — forever. Five seconds is longer than
+/// any healthy call and short enough that the agent can fall back to a pointer
+/// click instead of waiting.
+const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
+
 
 const A11Y_BUS_SERVICE: &str = "org.a11y.Bus";
 const A11Y_BUS_PATH: &str = "/org/a11y/bus";
@@ -43,6 +54,7 @@ fn connect() -> Result<Connection, DesktopError> {
     let address = discover_address()?;
     zbus::blocking::connection::Builder::address(address.as_str())
         .map_err(|error| bus_unavailable(&error))?
+        .method_timeout(METHOD_TIMEOUT)
         .build()
         .map_err(|error| bus_unavailable(&error))
 }
@@ -89,6 +101,22 @@ fn bus_unavailable(error: &zbus::Error) -> DesktopError {
 /// element simply does not offer that capability, and the caller should read
 /// on without it.
 pub fn classify(error: &zbus::Error) -> DesktopError {
+    // The connection's method timeout: the application stopped answering. This
+    // is the failure that used to hang a tool forever, so it gets its own code
+    // and a pointer fallback rather than a generic bus error.
+    if let zbus::Error::InputOutput(io) = error {
+        if io.kind() == std::io::ErrorKind::TimedOut {
+            return DesktopError::new(
+                ErrorCode::Timeout,
+                "The application did not answer the accessibility bus in time",
+            )
+            .with_suggestion(
+                "The window may be busy or showing a modal dialog; take a screenshot, then use \
+                 desktop_click_at or desktop_key instead of a semantic action",
+            )
+            .not_delivered();
+        }
+    }
     let text = error.to_string();
     if text.contains("UnknownMethod") || text.contains("UnknownInterface") {
         return DesktopError::new(
@@ -133,5 +161,15 @@ mod tests {
     fn a_gone_service_is_reported_as_a_missing_application() {
         let error = classify(&zbus::Error::Failure("ServiceUnknown".to_string()));
         assert_eq!(error.code, ErrorCode::AppNotFound);
+    }
+
+    #[test]
+    fn a_call_that_times_out_is_a_timeout_with_a_pointer_fallback() {
+        let error = classify(&zbus::Error::InputOutput(std::sync::Arc::new(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+        )));
+        assert_eq!(error.code, ErrorCode::Timeout);
+        let suggestion = error.suggestion.expect("a suggestion");
+        assert!(suggestion.contains("desktop_click_at"), "{suggestion}");
     }
 }

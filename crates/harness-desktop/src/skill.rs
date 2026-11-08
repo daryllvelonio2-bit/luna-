@@ -12,7 +12,7 @@ pub const SKILL_MARKDOWN: &str = include_str!("../skills/agent-desktop/SKILL.md"
 pub const SKILL_NAME: &str = "agent-desktop";
 
 /// The one-line summary the harness shows in its skill index.
-pub const SKILL_DESCRIPTION: &str = "Operate desktop applications through native accessibility trees: read the UI, click, type, fill fields, toggle controls and verify the result. Use for any desktop GUI task. Not for web pages: use the browser skill.";
+pub const SKILL_DESCRIPTION: &str = "Operate desktop applications through native accessibility trees: read the UI, click, type, fill fields, toggle controls and verify the result. Includes OS-level window focus, real pointer clicks, key chords, clipboard paste and screenshots for controls the accessibility tree cannot drive. Use for any desktop GUI task, including a web page already open in a logged-in browser.";
 
 /// The skill's name.
 pub fn skill_name() -> &'static str {
@@ -84,6 +84,11 @@ mod tests {
             "desktop_type",
             "desktop_set_value",
             "desktop_toggle",
+            "desktop_focus",
+            "desktop_key",
+            "desktop_paste",
+            "desktop_click_at",
+            "desktop_screenshot",
         ] {
             assert!(instructions.contains(tool), "{tool} is not documented");
         }
