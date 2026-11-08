@@ -406,29 +406,22 @@ async fn main() -> Result<(), HarnessError> {
     // check itself is silent unless a newer build was actually found.
     if is_interactive_chat {
         if let Some(status) = commands::update::check_at_launch(&config).await {
-            match commands::update::prompt(&status) {
-                commands::update::LaunchAction::Update => {
-                    match commands::update::install(&status, &config).await {
-                        Ok(path) => {
-                            println!(
-                                "{} Installed {} → {} at {}. Restart luna to use it.",
-                                "✔".green().bold(),
-                                commands::update::short(&status.current),
-                                commands::update::short(&status.latest),
-                                path.display()
-                            );
-                            return Ok(());
-                        }
-                        Err(error) => {
-                            eprintln!("{} Update failed: {}", "✖".red().bold(), error);
-                            eprintln!(
-                                "  Run `python3 scripts/auto_build_install.py` to update manually."
-                            );
-                        }
-                    }
+            match commands::update::ask_and_install(&status, &config).await {
+                commands::update::LaunchOutcome::Installed(path) => {
+                    println!(
+                        "{} Installed {} → {} at {}. Restart luna to use it.",
+                        "✔".green().bold(),
+                        commands::update::short(&status.current),
+                        commands::update::short(&status.latest),
+                        path.display()
+                    );
+                    return Ok(());
                 }
-                commands::update::LaunchAction::Remind => commands::update::remind(&status),
-                commands::update::LaunchAction::Later => {}
+                // The modal already showed the reason. Launching the old build is the safe
+                // fallback, and running the same update question again now would only repeat it.
+                commands::update::LaunchOutcome::Failed(_) => {}
+                commands::update::LaunchOutcome::Remind => {}
+                commands::update::LaunchOutcome::Later => {}
             }
         }
     }

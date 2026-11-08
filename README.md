@@ -383,7 +383,26 @@ successful `release-build` run and, when the commits differ, asks with a centred
 
 - **Update now** downloads the artifact that build already produced and swaps it in beside the
   running binary. The next launch starts the new build (the running one is untouched). It needs a
-  GitHub token in `GITHUB_TOKEN`/`GH_TOKEN` or an authenticated `gh` CLI.
+  GitHub token in `GITHUB_TOKEN`/`GH_TOKEN` or an authenticated `gh` CLI. The modal stays up for the
+  whole install, showing a spinner, the current step, and a byte-accurate progress bar:
+
+  ```
+  ╭─ Updating Luna ───────────────────────────────────────╮
+  │  f6faaf8 → 3c1d9e2f                                   │
+  │  ┌─ Download ────────────────────────────────────────┐ │
+  │  │ ████████████████░░░░░░░░░░  47%  4.6 MB / 9.8 MB │ │
+  │  └───────────────────────────────────────────────────┘ │
+  │  ✔ Checking credentials                               │
+  │  ✔ Finding the release build                          │
+  │  ⠸ Downloading the build                              │
+  │  · Extracting the binary                              │
+  │  · Installing beside the running copy                 │
+  ╰───────────────────────────────────────────────────────╯
+  ```
+
+  When it finishes, a result box says where the build was installed and waits for a key press;
+  a failure shows the reason and the same "nothing was changed" reassurance before launching the
+  old build.
 - **Remind me on the next update** skips this build; an even newer one asks again.
 - **Later** asks again on the next launch.
 
