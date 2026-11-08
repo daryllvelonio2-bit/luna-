@@ -69,9 +69,11 @@ pub struct Config {
     pub usage: UsageSettings,
     /// Who writes durable memory, and with what budget. See [`MemorySettings`].
     pub memory: MemorySettings,
-    /// Which personality core the first-run onboarding selected. Written by
-    /// `harness-onboarding`; the prompt text itself lives in `prompts.md`.
-    pub persona: PersonaSettings,
+    /// Deprecated: the persona the old onboarding flow used to select. Accepted so a config
+    /// written before profiles still loads, then ignored and dropped on the next write. Profile
+    /// selection is invocation-based now, so nothing reads this.
+    #[serde(default, skip_serializing)]
+    pub persona: serde_yaml::Value,
     /// `false` once the first-run onboarding has completed.
     ///
     /// Defaults to `true`, so an install with no config file — and a config file that predates the
@@ -144,7 +146,7 @@ impl Default for Config {
             telemetry: TelemetrySettings::default(),
             usage: UsageSettings::default(),
             memory: MemorySettings::default(),
-            persona: PersonaSettings::default(),
+            persona: serde_yaml::Value::Null,
             first_run: true,
             auto_compact_enabled: true,
             auto_compact_threshold: AUTO_COMPACT_DEFAULT_THRESHOLD,
@@ -300,20 +302,6 @@ impl McpSettings {
         }
         Ok(())
     }
-}
-
-/// The persona recorded by the first-run onboarding flow (`harness-onboarding`).
-///
-/// Only the *choice* is persisted here: the prompt block of persona `id` is read from
-/// `crates/harness-core/prompts.md` at load time, so prompt text has exactly one home and editing a
-/// persona's voice does not require rewriting every user's config file.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PersonaSettings {
-    /// Persona id `1..=10`; `0` means "not chosen yet".
-    pub id: u8,
-    /// The persona's display name, stored next to the id so the file reads as intent, not a code.
-    pub name: String,
 }
 
 /// Messaging platform gateway settings (Telegram, Discord, WhatsApp).

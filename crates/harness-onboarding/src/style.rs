@@ -24,7 +24,7 @@ pub const ACCENT_COLOR: Color = Color::Rgb {
     g: 150,
     b: 255,
 };
-/// Primary text: persona names, headlines. Near-white, never pure white (it glares on dark themes).
+/// Primary text: profile names, headlines. Near-white, never pure white (it glares on dark themes).
 pub const NAME_COLOR: Color = Color::Rgb {
     r: 244,
     g: 242,

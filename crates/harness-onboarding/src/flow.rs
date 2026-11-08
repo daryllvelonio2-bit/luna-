@@ -246,7 +246,7 @@ pub fn confirmation_lines(
     for (offset, wrapped) in screen::wrap(&hint, limit).into_iter().enumerate() {
         lines.insert(hint_start + offset, Line::of(Span::muted(wrapped)));
     }
-    // Same shape as the persona block above: label, then the value — on one line when it fits and
+    // Same shape as the profile block above: label, then the value — on one line when it fits and
     // wrapped under the label when the terminal is too narrow for both.
     let label = "Memory writer";
     let summary = crate::memory_step::summary(memory);

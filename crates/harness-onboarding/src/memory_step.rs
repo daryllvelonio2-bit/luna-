@@ -11,8 +11,8 @@
 //!   asked to spend tool calls on bookkeeping.
 //!
 //! The step reuses the menu's panel, entry line and wrappers ([`crate::menu`]) so it lands in the
-//! same visual language as the persona menu; only the layout is simpler, because two options with
-//! explanations are a list, not a grid.
+//! same visual language as the other settings screens; only the layout is simpler, because two
+//! options with explanations are a list, not a grid.
 
 use std::io::{BufRead, Write};
 
