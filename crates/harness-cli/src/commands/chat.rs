@@ -13,7 +13,10 @@ use harness_core::{
     ModelProvider, SessionBinding, SessionStore, ToolRegistry, TurnOutcome,
 };
 use harness_mcp::{McpStdioClient, McpToolAdapter};
-use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
+use harness_memory::{
+    build_memory_engine, ForgetMemoryTool, MemoryEngineKind, MemorySearchTool, SaveMemoryTool,
+    UpdateMemoryTool,
+};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
@@ -64,7 +67,7 @@ use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL, LANDING_FR
 use viewer::show_background_task_viewer;
 
 pub(crate) type ChatAgent =
-    Agent<GenericProviderClient, SqliteMemoryEngine, FileNotesEngine, DefaultToolRegistry>;
+    Agent<GenericProviderClient, MemoryEngineKind, FileNotesEngine, DefaultToolRegistry>;
 
 /// The idle memory-pass timer.
 ///
@@ -395,9 +398,7 @@ pub async fn run_interactive_chat(
         }
     };
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(
-        config.paths.memory_db.clone(),
-    ))?);
+    let memory = build_memory_engine(&config)?;
     let notes = Arc::new(FileNotesEngine::new(
         config.paths.notes_dir.clone(),
         Some(config.paths.notes_db.clone()),
@@ -408,9 +409,10 @@ pub async fn run_interactive_chat(
     // independent saver that reads each finished turn and writes the same records through the same
     // tool, so the write tools are withheld from the session to keep exactly one writer.
     let background_mode = config.memory.mode.is_background();
+    let memory_dyn: Arc<dyn harness_core::MemoryEngine> = memory.clone();
     let memory_saver = memory_writer::build_saver(
         &config,
-        &memory,
+        &memory_dyn,
         notes.clone(),
         &current_provider,
         &current_model,
@@ -453,6 +455,10 @@ pub async fn run_interactive_chat(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
+        .await?;
+    // Recall is read-only and available in both writer modes.
+    registry
+        .register(Arc::new(MemorySearchTool::new(memory.clone())))
         .await?;
 
     // One line of notice, because a mode that changes *where* records come from is worth stating.

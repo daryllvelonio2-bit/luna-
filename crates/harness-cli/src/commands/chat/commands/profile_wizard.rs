@@ -715,13 +715,13 @@ fn render_picker_box(
         0
     };
     let end = (start + PICKER_PAGE).min(items.len());
-    for index in start..end {
+    for (index, item) in items.iter().enumerate().take(end).skip(start) {
         let mark = if checked.get(index).copied().unwrap_or(false) {
             "[x]".green().bold().to_string()
         } else {
             "[ ]".dimmed().to_string()
         };
-        let label = cut(&items[index], total.saturating_sub(10));
+        let label = cut(item, total.saturating_sub(10));
         if index == selected {
             body.push(row(
                 &format!(" {} {} {}", "❯".cyan().bold(), mark, label.bold()),

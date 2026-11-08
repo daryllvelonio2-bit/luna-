@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod heartbeat;
 pub mod hooks;
 pub mod mcp;
+pub mod memory;
 pub mod models;
 pub mod profile;
 pub mod prompt_images;

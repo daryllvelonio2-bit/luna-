@@ -13,6 +13,7 @@ use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
+use commands::memory::{handle_memory_command, MemoryCommand};
 use commands::models::{handle_models_command, ModelsCommand};
 use commands::profile::{handle_profile_command, parse_invocation, ProfileCommand};
 use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
@@ -240,6 +241,11 @@ enum Commands {
     Heartbeat {
         /// Optional target (e.g. "ping")
         target: Option<String>,
+    },
+    /// Inspect and maintain the Markdown memory store
+    Memory {
+        #[command(subcommand)]
+        subcommand: MemoryCommand,
     },
     /// Inspect configured Model Context Protocol (MCP) servers and the tools they expose
     Mcp {
@@ -646,6 +652,9 @@ async fn main() -> Result<(), HarnessError> {
                 &discovery,
             )
             .await?;
+        }
+        Some(Commands::Memory { subcommand }) => {
+            handle_memory_command(subcommand, &config)?;
         }
         Some(Commands::Mcp { subcommand }) => {
             // Bare `luna mcp` reads the config, the cheap and safe default.

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
-use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
+use harness_memory::{build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
@@ -105,9 +105,7 @@ pub async fn run_voice_loop(
         config.providers.get(&provider_id),
     )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(
-        config.paths.memory_db.clone(),
-    ))?);
+    let memory = build_memory_engine(&config)?;
     let notes = Arc::new(FileNotesEngine::new(
         config.paths.notes_dir.clone(),
         Some(config.paths.notes_db.clone()),
@@ -143,6 +141,9 @@ pub async fn run_voice_loop(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(MemorySearchTool::new(memory.clone())))
         .await?;
 
     // Register core filesystem and shell tools (§2.2)

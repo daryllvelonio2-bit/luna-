@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use harness_core::config::Config;
-use harness_core::NotesEngine;
-use harness_memory::{MemorySaver, SaverPolicy, SqliteMemoryEngine};
+use harness_core::{MemoryEngine, NotesEngine};
+use harness_memory::{MemorySaver, SaverPolicy};
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
 /// Build the independent memory writer, or `None` when the config keeps the session as the writer.
@@ -38,7 +38,7 @@ use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery
 #[allow(clippy::too_many_arguments)]
 pub fn build_saver(
     config: &Config,
-    memory: &Arc<SqliteMemoryEngine>,
+    memory: &Arc<dyn MemoryEngine>,
     notes: Arc<dyn NotesEngine>,
     session_provider: &str,
     session_model: &str,
@@ -117,9 +117,10 @@ pub fn notice(config: &Config) -> Option<String> {
 mod tests {
     use super::*;
     use harness_core::BackgroundSaver;
+    use harness_memory::SqliteMemoryEngine;
     use harness_notes::FileNotesEngine;
 
-    fn temp_engines() -> (Arc<SqliteMemoryEngine>, Arc<dyn NotesEngine>) {
+    fn temp_engines() -> (Arc<dyn MemoryEngine>, Arc<dyn NotesEngine>) {
         (
             Arc::new(SqliteMemoryEngine::in_memory().expect("memory db")),
             Arc::new(FileNotesEngine::in_memory().expect("notes db")),

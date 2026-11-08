@@ -538,3 +538,93 @@ impl Tool for ForgetMemoryTool {
         ))
     }
 }
+
+pub struct MemorySearchTool {
+    engine: Arc<dyn MemoryEngine>,
+}
+
+impl MemorySearchTool {
+    pub fn new(engine: Arc<dyn MemoryEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl Tool for MemorySearchTool {
+    fn name(&self) -> &str {
+        "memory_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search persistent memory before answering about people, projects, prior decisions, past work, preferences, or anything that may already be stored. Returns verbatim record text. Quote it; never paraphrase stored facts. Do not use for pure greenfield coding with no memory relevance."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Short keywords or a question; not a pasted conversation or system prompt"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum records to return (default 5, max 20)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let query = args
+            .get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim();
+        if query.is_empty() {
+            return Ok(ToolResult::error(call_id, "Missing search query."));
+        }
+        let limit = args
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(5)
+            .clamp(1, 20) as usize;
+        let records = self.engine.retrieve(query, limit).await?;
+        let results: Vec<serde_json::Value> = records
+            .iter()
+            .map(|record| {
+                json!({
+                    "id": record.id,
+                    "category": record.category.to_string(),
+                    "subject": record.subject,
+                    "predicate": record.predicate,
+                    "object": record.object,
+                    "name": record.name,
+                    "path": record.path,
+                    "text": record.raw_content,
+                    "confidence": record.confidence,
+                    "updated_at": record.updated_at,
+                })
+            })
+            .collect();
+        Ok(ToolResult::success(
+            call_id,
+            json!({
+                "query": query,
+                "results": results,
+                "count": results_len(&records),
+            })
+            .to_string(),
+        ))
+    }
+}
+
+fn results_len(records: &[MemoryRecord]) -> usize {
+    records.len()
+}

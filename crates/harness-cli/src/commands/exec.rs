@@ -23,7 +23,7 @@ use harness_core::{
     approval, Agent, AgentConfig, AgentEvent, Config, DefaultToolRegistry, HarnessError,
     PermissionEngine, ReplayNotice, SessionBinding, SessionStore, ToolRegistry,
 };
-use harness_memory::{ForgetMemoryTool, SaveMemoryTool, SqliteMemoryEngine, UpdateMemoryTool};
+use harness_memory::{build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,
@@ -95,9 +95,7 @@ pub async fn run_exec(
         config.providers.get(&provider_id),
     )?);
 
-    let memory = Arc::new(SqliteMemoryEngine::new(Some(
-        config.paths.memory_db.clone(),
-    ))?);
+    let memory = build_memory_engine(&config)?;
     let notes = Arc::new(FileNotesEngine::new(
         config.paths.notes_dir.clone(),
         Some(config.paths.notes_db.clone()),
@@ -135,6 +133,9 @@ pub async fn run_exec(
         .await?;
     registry
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(MemorySearchTool::new(memory.clone())))
         .await?;
 
     let mut all_skills = Vec::new();

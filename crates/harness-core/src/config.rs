@@ -596,6 +596,10 @@ pub struct MemorySettings {
     /// Run one extra pass when the session has been idle this many seconds, so a short session
     /// still saves before the every-N-turns interval fires. `0` disables idle passes.
     pub background_idle_secs: u64,
+    /// Markdown store settings. When `store.enabled` is true, memory records are written to
+    /// `paths.memory_dir` instead of `paths.memory_db`; SQLite stays available as a migration
+    /// source and a rollback path.
+    pub store: MemoryStoreSettings,
 }
 
 impl Default for MemorySettings {
@@ -613,6 +617,62 @@ impl Default for MemorySettings {
             background_max_note_writes: 2,
             background_max_operations: 6,
             background_idle_secs: 90,
+            store: MemoryStoreSettings::default(),
+        }
+    }
+}
+
+/// Markdown memory store settings. See `docs/MEMORY_STORE.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryStoreSettings {
+    /// Use the Markdown store as the memory engine. `false` keeps the legacy SQLite engine.
+    pub enabled: bool,
+    /// `hash` (default, no model download) | `minilm` | `embeddinggemma` | `none`.
+    pub embedder: String,
+    /// Target characters per record chunk when mining.
+    pub chunk_chars: usize,
+    /// Pointer lines written to a content index.
+    pub index_chars: usize,
+    /// Source bytes scanned when extracting content-index entities.
+    pub index_scan_chars: usize,
+    /// Hybrid weight for the vector component.
+    pub hybrid_vector_weight: f32,
+    /// Hybrid weight for the BM25 component.
+    pub hybrid_bm25_weight: f32,
+    /// Score bonus for records named by a matching content index.
+    pub index_boost: f32,
+    /// `off` (default) | `local` | `provider`.
+    pub rerank: String,
+    /// Mine the workspace automatically on session start. Off by default: mining is explicit.
+    pub auto_mine: bool,
+    /// Let lifecycle hooks write memory automatically.
+    pub hooks_auto_save: bool,
+    /// Save every N human messages when hooks are enabled.
+    pub hooks_save_interval: usize,
+    /// `direct` (default) | `prefer` | `require`.
+    pub write_routing: String,
+    /// Shard a topic's records by id prefix after this many files.
+    pub shard_after: usize,
+}
+
+impl Default for MemoryStoreSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            embedder: "hash".to_string(),
+            chunk_chars: 800,
+            index_chars: 1_500,
+            index_scan_chars: 5_000,
+            hybrid_vector_weight: 0.6,
+            hybrid_bm25_weight: 0.4,
+            index_boost: 0.1,
+            rerank: "off".to_string(),
+            auto_mine: false,
+            hooks_auto_save: true,
+            hooks_save_interval: 10,
+            write_routing: "direct".to_string(),
+            shard_after: 5_000,
         }
     }
 }
@@ -623,6 +683,9 @@ impl Default for MemorySettings {
 #[serde(default, deny_unknown_fields)]
 pub struct PathsSettings {
     pub memory_db: PathBuf,
+    /// Canonical Markdown memory store (`~/.luna/memory`). SQLite in `memory_db` is the legacy
+    /// store and a migration source, not the source of truth when `memory.store.enabled` is true.
+    pub memory_dir: PathBuf,
     /// Legacy note store. Notes are files now; this database is only read once, to import the
     /// notes an older install left behind.
     pub notes_db: PathBuf,
@@ -659,6 +722,7 @@ impl Default for PathsSettings {
         let luna = home_dir().join(".luna");
         Self {
             memory_db: luna.join("memory.db"),
+            memory_dir: luna.join("memory"),
             notes_db: luna.join("notes.db"),
             notes_dir: luna.join("notes"),
             sessions_db: luna.join("sessions.db"),
@@ -1613,6 +1677,7 @@ fn scalar_to_string(value: &Value) -> String {
 fn expand_paths(paths: &mut PathsSettings) {
     let fields = [
         &mut paths.memory_db,
+        &mut paths.memory_dir,
         &mut paths.notes_db,
         &mut paths.notes_dir,
         &mut paths.sessions_db,
