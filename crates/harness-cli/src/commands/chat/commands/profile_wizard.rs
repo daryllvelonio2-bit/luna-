@@ -700,9 +700,12 @@ fn render_picker_box(
             body.push(row(&format!("   {} {}", mark, label.dimmed()), total));
         }
     }
-    // Pad the page so the box does not shrink when the last page has fewer rows.
-    for _ in (end - start)..PICKER_PAGE {
-        body.push(row("", total));
+    // A list longer than one page keeps the frame height fixed so paging never makes it jump.
+    // A shorter list stays compact: empty rows under the last item are just noise.
+    if items.len() > PICKER_PAGE {
+        for _ in (end - start)..PICKER_PAGE {
+            body.push(row("", total));
+        }
     }
 
     body.push(row(
