@@ -24,6 +24,4 @@ mod engine;
 mod skill;
 
 pub use engine::DesktopEngine;
-pub use skill::{
-    skill_description, skill_instructions, skill_name, SKILL_MARKDOWN, SKILL_NAME,
-};
+pub use skill::{skill_description, skill_instructions, skill_name, SKILL_MARKDOWN, SKILL_NAME};

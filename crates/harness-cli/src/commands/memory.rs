@@ -103,9 +103,7 @@ pub fn handle_memory_command(command: MemoryCommand, config: &Config) -> Result<
                             serde_json::Value::Object(
                                 topics
                                     .iter()
-                                    .map(|(topic, count)| {
-                                        (topic.clone(), serde_json::json!(count))
-                                    })
+                                    .map(|(topic, count)| (topic.clone(), serde_json::json!(count)))
                                     .collect(),
                             ),
                         )
@@ -135,12 +133,7 @@ pub fn handle_memory_command(command: MemoryCommand, config: &Config) -> Result<
             }
         }
         MemoryCommand::Mine { dir, domain } => {
-            let dir = dir.unwrap_or_else(|| {
-                config
-                    .paths
-                    .workspace_root
-                    .clone()
-            });
+            let dir = dir.unwrap_or_else(|| config.paths.workspace_root.clone());
             let report = store.mine(&dir, domain.as_deref())?;
             println!(
                 "mined {} file(s): {} record(s), {} removed, {} skipped",
@@ -155,10 +148,7 @@ pub fn handle_memory_command(command: MemoryCommand, config: &Config) -> Result<
             since,
             json,
         } => {
-            let since = since
-                .as_deref()
-                .map(parse_time)
-                .transpose()?;
+            let since = since.as_deref().map(parse_time).transpose()?;
             let filter = SearchFilter {
                 domain,
                 topic,
@@ -199,10 +189,7 @@ pub fn handle_memory_command(command: MemoryCommand, config: &Config) -> Result<
             } else {
                 for (rank, result) in results.iter().enumerate() {
                     let span = if result.record.line_start > 0 {
-                        format!(
-                            "L{}-L{}",
-                            result.record.line_start, result.record.line_end
-                        )
+                        format!("L{}-L{}", result.record.line_start, result.record.line_end)
                     } else {
                         "—".to_string()
                     };
@@ -342,7 +329,9 @@ pub fn handle_memory_command(command: MemoryCommand, config: &Config) -> Result<
 fn parse_time(text: &str) -> Result<chrono::DateTime<chrono::Utc>, HarnessError> {
     chrono::DateTime::parse_from_rfc3339(text)
         .map(|time| time.with_timezone(&chrono::Utc))
-        .map_err(|error| HarnessError::ConfigurationError(format!("invalid timestamp '{text}': {error}")))
+        .map_err(|error| {
+            HarnessError::ConfigurationError(format!("invalid timestamp '{text}': {error}"))
+        })
 }
 
 fn print_issues(label: &str, issues: &[String]) {

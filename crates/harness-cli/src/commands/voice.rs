@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{Agent, Config, DefaultToolRegistry, HarnessError, ToolRegistry};
-use harness_memory::{build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
+use harness_memory::{
+    build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool,
+};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,

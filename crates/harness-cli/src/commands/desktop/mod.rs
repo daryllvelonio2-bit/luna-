@@ -152,7 +152,8 @@ mod tests {
             .await
             .expect("the tool answers");
         assert!(
-            result.content.contains("platform") || result.content.contains("PLATFORM_NOT_SUPPORTED"),
+            result.content.contains("platform")
+                || result.content.contains("PLATFORM_NOT_SUPPORTED"),
             "the answer must say what the desktop can do: {}",
             result.content
         );

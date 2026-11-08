@@ -60,7 +60,9 @@ mod tests {
 
     #[test]
     fn a_root_and_a_depth_can_be_set() {
-        let options = TreeOptions::interactive().with_root("@s1:e3").with_max_depth(4);
+        let options = TreeOptions::interactive()
+            .with_root("@s1:e3")
+            .with_max_depth(4);
         assert_eq!(options.root.as_deref(), Some("@s1:e3"));
         assert_eq!(options.max_depth, Some(4));
     }

@@ -34,10 +34,10 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "rs", "md", "markdown", "toml", "yaml", "yml", "json", "jsonl", "ts", "tsx", "js", "jsx",
-    "py", "go", "java", "c", "h", "cc", "cpp", "hpp", "sh", "bash", "zsh", "sql", "css",
-    "scss", "html", "htm", "txt", "lua", "rb", "swift", "kt", "kts", "php", "ex", "exs", "erl",
-    "hs", "ml", "clj", "zig", "nim", "cs", "fs", "vue", "svelte",
+    "rs", "md", "markdown", "toml", "yaml", "yml", "json", "jsonl", "ts", "tsx", "js", "jsx", "py",
+    "go", "java", "c", "h", "cc", "cpp", "hpp", "sh", "bash", "zsh", "sql", "css", "scss", "html",
+    "htm", "txt", "lua", "rb", "swift", "kt", "kts", "php", "ex", "exs", "erl", "hs", "ml", "clj",
+    "zig", "nim", "cs", "fs", "vue", "svelte",
 ];
 
 #[derive(Debug, Default)]
@@ -61,7 +61,11 @@ pub fn mine(
         .map_err(|error| HarnessError::MemoryError(format!("{}: {error}", dir.display())))?;
     let domain = domain_override
         .map(ids::slugify)
-        .or_else(|| dir.file_name().and_then(|name| name.to_str()).map(ids::slugify))
+        .or_else(|| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .map(ids::slugify)
+        })
         .unwrap_or_else(|| "projects".to_string());
 
     let mut report = MineReport::default();
@@ -186,7 +190,10 @@ fn topic_for(relative: &Path) -> String {
         .collect();
     if components.len() >= 2 {
         let first = components[0].to_ascii_lowercase();
-        if matches!(first.as_str(), "crates" | "packages" | "libs" | "apps" | "src") {
+        if matches!(
+            first.as_str(),
+            "crates" | "packages" | "libs" | "apps" | "src"
+        ) {
             return ids::slugify(&components[1]);
         }
         return ids::slugify(&components[0]);
@@ -284,7 +291,12 @@ fn write_content_index(
             continue;
         };
         let entities = extract_entities(text);
-        let entity_cell = entities.iter().take(6).cloned().collect::<Vec<_>>().join(";");
+        let entity_cell = entities
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(";");
         let label = first_line(text, source_file);
         lines.push(format!(
             "{} | {} | {}:L{}-L{} | →{}",
@@ -335,9 +347,8 @@ fn write_content_index(
         body.push_str(&line);
         body.push('\n');
     }
-    atomic::write_str(&path, &super::frontmatter::render(&yaml, &body)).map_err(|error| {
-        HarnessError::MemoryError(format!("{}: {error}", path.display()))
-    })
+    atomic::write_str(&path, &super::frontmatter::render(&yaml, &body))
+        .map_err(|error| HarnessError::MemoryError(format!("{}: {error}", path.display())))
 }
 
 fn write_summary(
@@ -364,10 +375,7 @@ fn write_summary(
             .take(6)
             .collect::<Vec<_>>()
             .join(";");
-        let quote: String = first_line(chunk_text, "")
-            .chars()
-            .take(160)
-            .collect();
+        let quote: String = first_line(chunk_text, "").chars().take(160).collect();
         body.push_str(&format!(
             "S{}:{}|{}|\"{}\"|CORE|TECHNICAL\n",
             index + 1,
@@ -395,9 +403,8 @@ fn write_summary(
         .join(ids::slugify(topic))
         .join("summaries")
         .join(format!("{stem}.summary.md"));
-    atomic::write_str(&path, &super::frontmatter::render(&yaml, &body)).map_err(|error| {
-        HarnessError::MemoryError(format!("{}: {error}", path.display()))
-    })
+    atomic::write_str(&path, &super::frontmatter::render(&yaml, &body))
+        .map_err(|error| HarnessError::MemoryError(format!("{}: {error}", path.display())))
 }
 
 fn escape(value: &str) -> String {
@@ -443,7 +450,9 @@ mod tests {
         assert_eq!(report.files, 1);
         assert!(report.records >= 1);
         let records = store.active_records().unwrap();
-        assert!(records.iter().any(|record| record.body.contains("MemoryStore")));
+        assert!(records
+            .iter()
+            .any(|record| record.body.contains("MemoryStore")));
         let _ = fs::remove_dir_all(&dir);
     }
 }

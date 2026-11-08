@@ -23,7 +23,9 @@ use harness_core::{
     approval, Agent, AgentConfig, AgentEvent, Config, DefaultToolRegistry, HarnessError,
     PermissionEngine, ReplayNotice, SessionBinding, SessionStore, ToolRegistry,
 };
-use harness_memory::{build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
+use harness_memory::{
+    build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool,
+};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,

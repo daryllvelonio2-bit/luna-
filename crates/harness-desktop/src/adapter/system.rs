@@ -48,10 +48,7 @@ mod tests {
     #[test]
     fn an_unimplemented_status_refuses() {
         let error = Noop.status(Deadline::none()).expect_err("no status");
-        assert_eq!(
-            error.code,
-            crate::error::ErrorCode::PlatformNotSupported
-        );
+        assert_eq!(error.code, crate::error::ErrorCode::PlatformNotSupported);
     }
 
     #[test]

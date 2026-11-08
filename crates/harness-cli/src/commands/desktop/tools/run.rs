@@ -206,14 +206,20 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
         DesktopCommand::ListWindows => {
             commands::list_windows(engine, optional_str(arguments, "app").as_deref())
         }
-        DesktopCommand::Snapshot => commands::snapshot(engine, &app(arguments), &snapshot_options(arguments)),
+        DesktopCommand::Snapshot => {
+            commands::snapshot(engine, &app(arguments), &snapshot_options(arguments))
+        }
         DesktopCommand::Find => commands::find(engine, &app(arguments), &find_query(arguments)),
-        DesktopCommand::Get => {
-            commands::get(engine, &reference(arguments), &required_str(arguments, "property"))
-        }
-        DesktopCommand::Is => {
-            commands::is(engine, &reference(arguments), &required_str(arguments, "predicate"))
-        }
+        DesktopCommand::Get => commands::get(
+            engine,
+            &reference(arguments),
+            &required_str(arguments, "property"),
+        ),
+        DesktopCommand::Is => commands::is(
+            engine,
+            &reference(arguments),
+            &required_str(arguments, "predicate"),
+        ),
         DesktopCommand::Click => commands::click(engine, &reference(arguments)),
         DesktopCommand::Type => commands::type_text(
             engine,
@@ -234,9 +240,7 @@ pub fn execute(engine: &DesktopEngine, command: &DesktopCommand, arguments: &Val
             &reference(arguments),
             optional_flag(arguments, "checked"),
         ),
-        DesktopCommand::Focus => {
-            commands::focus(engine, optional_str(arguments, "app").as_deref())
-        }
+        DesktopCommand::Focus => commands::focus(engine, optional_str(arguments, "app").as_deref()),
         DesktopCommand::Key => commands::key(engine, &required_str(arguments, "keys")),
         DesktopCommand::Paste => commands::paste(engine, &required_str(arguments, "text")),
         DesktopCommand::ClickAt => commands::click_at(
@@ -370,7 +374,10 @@ mod tests {
     #[test]
     fn a_missing_checked_argument_stays_unset() {
         assert_eq!(optional_flag(&json!({}), "checked"), None);
-        assert_eq!(optional_flag(&json!({ "checked": "yes" }), "checked"), Some(true));
+        assert_eq!(
+            optional_flag(&json!({ "checked": "yes" }), "checked"),
+            Some(true)
+        );
     }
 
     #[test]

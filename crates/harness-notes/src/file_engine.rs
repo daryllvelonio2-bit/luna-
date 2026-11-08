@@ -488,11 +488,7 @@ impl NotesEngine for FileNotesEngine {
         if let Ok(mut cache) = self.cache.write() {
             cache.remove(&path);
         }
-        info!(
-            "Archived note '{}' to '{}'",
-            note.id,
-            target.display()
-        );
+        info!("Archived note '{}' to '{}'", note.id, target.display());
         Ok(true)
     }
 }

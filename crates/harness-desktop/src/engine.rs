@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::adapter::{
     ActionOutcome, ActionRequest, DesktopAdapter, DesktopStatus, ScreenshotInfo, WindowRef,
@@ -305,23 +305,34 @@ mod tests {
 
     #[test]
     fn a_snapshot_mints_a_ref_for_the_actionable_node_only() {
-        let snapshot = engine().observe("Calculator", &TreeOptions::default()).expect("data");
+        let snapshot = engine()
+            .observe("Calculator", &TreeOptions::default())
+            .expect("data");
         assert_eq!(snapshot["ref_count"], 1);
-        let ref_id = snapshot["tree"]["children"][0]["ref_id"].as_str().expect("a ref");
-        assert!(ref_id.starts_with('@') && ref_id.contains(":e1"), "{ref_id}");
+        let ref_id = snapshot["tree"]["children"][0]["ref_id"]
+            .as_str()
+            .expect("a ref");
+        assert!(
+            ref_id.starts_with('@') && ref_id.contains(":e1"),
+            "{ref_id}"
+        );
     }
 
     #[test]
     fn the_snapshot_id_is_short_and_readable() {
         let id = new_snapshot_id();
         assert!(id.len() <= 8, "{id}");
-        assert!(id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 
     #[test]
     fn a_minted_ref_resolves_to_its_element() {
         let engine = engine();
-        let snapshot = engine.observe("Calculator", &TreeOptions::default()).expect("data");
+        let snapshot = engine
+            .observe("Calculator", &TreeOptions::default())
+            .expect("data");
         let ref_id = snapshot["tree"]["children"][0]["ref_id"]
             .as_str()
             .expect("a ref")
@@ -333,7 +344,9 @@ mod tests {
 
     #[test]
     fn an_unknown_snapshot_is_reported_as_not_found() {
-        let error = engine().resolve("@nosuch:e1").expect_err("no such snapshot");
+        let error = engine()
+            .resolve("@nosuch:e1")
+            .expect_err("no such snapshot");
         assert_eq!(error.code, ErrorCode::SnapshotNotFound);
     }
 

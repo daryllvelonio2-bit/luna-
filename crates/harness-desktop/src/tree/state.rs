@@ -49,7 +49,11 @@ mod tests {
     #[test]
     fn the_common_predicates_read_the_state_list() {
         let state = ElementState {
-            states: vec!["enabled".to_string(), "focused".to_string(), "checked".to_string()],
+            states: vec![
+                "enabled".to_string(),
+                "focused".to_string(),
+                "checked".to_string(),
+            ],
         };
         assert!(state.is_enabled());
         assert!(state.is_focused());

@@ -112,7 +112,9 @@ pub fn store_config(config: &harness_core::config::Config) -> StoreConfig {
     // backend is configured before it is implemented, the manifest must still
     // record what actually produced the vectors.
     store.embedder = store::embed::identity().to_string();
-    if !settings.embedder.eq_ignore_ascii_case("hash") && !settings.embedder.eq_ignore_ascii_case("none") {
+    if !settings.embedder.eq_ignore_ascii_case("hash")
+        && !settings.embedder.eq_ignore_ascii_case("none")
+    {
         tracing::warn!(
             "memory.store.embedder = '{}' is not available in this build; using '{}'",
             settings.embedder,
@@ -132,7 +134,7 @@ pub fn build_memory_engine(
             Some(config.paths.memory_db.clone()),
         )?)));
     }
-    Ok(Arc::new(MemoryEngineKind::Markdown(MarkdownMemoryEngine::new(
-        store_config(config),
-    )?)))
+    Ok(Arc::new(MemoryEngineKind::Markdown(
+        MarkdownMemoryEngine::new(store_config(config))?,
+    )))
 }

@@ -204,7 +204,8 @@ impl Record {
     }
 
     fn from_document(text: &str) -> Result<Self, String> {
-        let (yaml, body) = frontmatter::split(text).ok_or_else(|| "missing front matter".to_string())?;
+        let (yaml, body) =
+            frontmatter::split(text).ok_or_else(|| "missing front matter".to_string())?;
         let value = frontmatter::parse(yaml).map_err(|e| e.to_string())?;
         let id = frontmatter::string(&value, "id").ok_or_else(|| "missing id".to_string())?;
         let category = match frontmatter::string(&value, "category").as_deref() {
@@ -216,8 +217,10 @@ impl Record {
         };
         let domain = frontmatter::string(&value, "domain").unwrap_or_else(|| "memory".to_string());
         let topic = frontmatter::string(&value, "topic").unwrap_or_else(|| "general".to_string());
-        let created_at = parse_time(frontmatter::string(&value, "created_at")).unwrap_or_else(Utc::now);
-        let updated_at = parse_time(frontmatter::string(&value, "updated_at")).unwrap_or(created_at);
+        let created_at =
+            parse_time(frontmatter::string(&value, "created_at")).unwrap_or_else(Utc::now);
+        let updated_at =
+            parse_time(frontmatter::string(&value, "updated_at")).unwrap_or(created_at);
         let filed_at = parse_time(frontmatter::string(&value, "filed_at")).unwrap_or(created_at);
         let raw_content = body.to_string();
         Ok(Self {
@@ -268,7 +271,10 @@ fn placement(record: &MemoryRecord) -> (String, String) {
             return (ids::slugify(domain), ids::slugify(rest));
         }
     }
-    ("memory".to_string(), ids::slugify(&record.category.to_string()))
+    (
+        "memory".to_string(),
+        ids::slugify(&record.category.to_string()),
+    )
 }
 
 /// Optional filters for a search.
@@ -386,7 +392,11 @@ impl MemoryStore {
         let domain_md = domain_dir.join("domain.md");
         if !domain_md.exists() {
             let text = frontmatter::render(
-                &format!("domain: {}\ncreated_at: {}", ids::slugify(domain), Utc::now().to_rfc3339()),
+                &format!(
+                    "domain: {}\ncreated_at: {}",
+                    ids::slugify(domain),
+                    Utc::now().to_rfc3339()
+                ),
                 "",
             );
             atomic::write_str(&domain_md, &text).map_err(io_err)?;
@@ -431,7 +441,9 @@ impl MemoryStore {
             record,
             vector,
         });
-        cache.docs.sort_by_key(|a| std::cmp::Reverse(a.record.updated_at));
+        cache
+            .docs
+            .sort_by_key(|a| std::cmp::Reverse(a.record.updated_at));
         self.write_manifest(cache.docs.len());
         Ok(())
     }
@@ -508,7 +520,11 @@ impl MemoryStore {
             }
         }
         for (path, error) in invalid {
-            tracing::warn!("memory store: skipping unreadable record {}: {}", path.display(), error);
+            tracing::warn!(
+                "memory store: skipping unreadable record {}: {}",
+                path.display(),
+                error
+            );
         }
         docs.sort_by_key(|a| std::cmp::Reverse(a.record.updated_at));
         Ok(docs)
@@ -593,15 +609,33 @@ impl MemoryStore {
                     .map(|topic| ids::slugify(topic) == ids::slugify(&doc.record.topic))
                     .unwrap_or(true)
             })
-            .filter(|doc| filter.since.map(|since| doc.record.updated_at >= since).unwrap_or(true))
-            .filter(|doc| filter.before.map(|before| doc.record.updated_at < before).unwrap_or(true))
+            .filter(|doc| {
+                filter
+                    .since
+                    .map(|since| doc.record.updated_at >= since)
+                    .unwrap_or(true)
+            })
+            .filter(|doc| {
+                filter
+                    .before
+                    .map(|before| doc.record.updated_at < before)
+                    .unwrap_or(true)
+            })
             .collect();
 
         let documents: Vec<(String, String, Vec<f32>)> = filtered
             .iter()
-            .map(|doc| (doc.record.id.clone(), search_text(&doc.record), doc.vector.clone()))
+            .map(|doc| {
+                (
+                    doc.record.id.clone(),
+                    search_text(&doc.record),
+                    doc.vector.clone(),
+                )
+            })
             .collect();
-        let overfetch = limit.saturating_mul(self.config.overfetch.max(1)).max(limit);
+        let overfetch = limit
+            .saturating_mul(self.config.overfetch.max(1))
+            .max(limit);
         let hits = search::hybrid(
             &documents,
             query,
@@ -753,13 +787,19 @@ impl MemoryStore {
         let paths = self.all_record_paths()?;
         let stems: HashSet<String> = paths
             .iter()
-            .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()).map(str::to_string))
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+            })
             .collect();
         for path in paths {
             let text = match fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) => {
-                    report.unreadable.push(format!("{}: {error}", path.display()));
+                    report
+                        .unreadable
+                        .push(format!("{}: {error}", path.display()));
                     continue;
                 }
             };
@@ -788,7 +828,9 @@ impl MemoryStore {
                     record.predicate.trim().to_ascii_lowercase(),
                 );
                 if let Some(previous) = seen.insert(key, record.id.clone()) {
-                    report.duplicate_active.push(format!("{previous} / {}", record.id));
+                    report
+                        .duplicate_active
+                        .push(format!("{previous} / {}", record.id));
                 }
             }
         }
@@ -815,7 +857,10 @@ impl MemoryStore {
         });
         let path = self.config.root.join("search_index").join("manifest.json");
         let _ = fs::create_dir_all(path.parent().unwrap_or(&self.config.root));
-        let _ = atomic::write_str(&path, &serde_json::to_string_pretty(&manifest).unwrap_or_default());
+        let _ = atomic::write_str(
+            &path,
+            &serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+        );
     }
 
     /// Mine a directory tree into records. Returns a report of what changed.
@@ -1072,15 +1117,24 @@ mod tests {
     fn search_returns_the_matching_record() {
         let store = temp_store();
         store
-            .write_record(Record::from_memory(&memory("user.profile", "Rust engineer building Luna")))
+            .write_record(Record::from_memory(&memory(
+                "user.profile",
+                "Rust engineer building Luna",
+            )))
             .unwrap();
         store
-            .write_record(Record::from_memory(&memory("env.database", "Postgres on port 5432")))
+            .write_record(Record::from_memory(&memory(
+                "env.database",
+                "Postgres on port 5432",
+            )))
             .unwrap();
         let results = store
             .search("Rust engineer", &SearchFilter::default(), 5)
             .unwrap();
-        assert_eq!(results.first().map(|r| r.record.id.as_str()), Some("user.profile"));
+        assert_eq!(
+            results.first().map(|r| r.record.id.as_str()),
+            Some("user.profile")
+        );
         let _ = fs::remove_dir_all(store.root());
     }
 

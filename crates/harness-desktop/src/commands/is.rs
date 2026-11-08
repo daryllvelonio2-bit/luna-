@@ -34,7 +34,8 @@ pub fn is(engine: &DesktopEngine, ref_id: &str, predicate: &str) -> Response {
                             "Unknown predicate '{other}'. Use enabled, focused, selected or checked."
                         )),
                     );
-                }            };
+                }
+            };
             Response::ok(
                 "is",
                 json!({

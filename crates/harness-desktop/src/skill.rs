@@ -29,7 +29,9 @@ pub fn skill_description() -> &'static str {
 /// The frontmatter is harness metadata; the body is what an agent reads, so it
 /// is what `skill_view` hands over.
 pub fn skill_instructions() -> &'static str {
-    let body = SKILL_MARKDOWN.strip_prefix("---\n").unwrap_or(SKILL_MARKDOWN);
+    let body = SKILL_MARKDOWN
+        .strip_prefix("---\n")
+        .unwrap_or(SKILL_MARKDOWN);
     match body.split_once("\n---\n") {
         Some((_, rest)) => rest.trim(),
         None => body.trim(),

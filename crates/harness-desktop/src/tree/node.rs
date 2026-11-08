@@ -98,8 +98,10 @@ impl AccessibilityNode {
 /// Whether a role names a field the agent can type into.
 pub fn is_editable_role(role: &str) -> bool {
     let role = role.to_ascii_lowercase();
-    matches!(role.as_str(), "text" | "entry" | "password text" | "passwordtext")
-        || (role.contains("text") && (role.contains("entry") || role.contains("field")))
+    matches!(
+        role.as_str(),
+        "text" | "entry" | "password text" | "passwordtext"
+    ) || (role.contains("text") && (role.contains("entry") || role.contains("field")))
 }
 
 #[cfg(test)]

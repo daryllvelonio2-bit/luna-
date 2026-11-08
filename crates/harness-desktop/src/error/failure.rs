@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::code::ErrorCode;
 use super::disposition::DeliverySemantics;

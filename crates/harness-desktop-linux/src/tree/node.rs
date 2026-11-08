@@ -56,7 +56,13 @@ pub fn read_node(connection: &Connection, element: &AtspiElement) -> Result<RawN
 
 /// The role of an element, as the platform names it.
 pub fn read_role(connection: &Connection, element: &AtspiElement) -> Result<String, DesktopError> {
-    match call::<String>(connection, element, ACCESSIBLE_INTERFACE, "GetRoleName", &()) {
+    match call::<String>(
+        connection,
+        element,
+        ACCESSIBLE_INTERFACE,
+        "GetRoleName",
+        &(),
+    ) {
         Ok(name) if !name.trim().is_empty() => Ok(name),
         _ => {
             let role: u32 = call(connection, element, ACCESSIBLE_INTERFACE, "GetRole", &())?;
@@ -66,7 +72,10 @@ pub fn read_role(connection: &Connection, element: &AtspiElement) -> Result<Stri
 }
 
 /// The states of an element, as names.
-pub fn read_states(connection: &Connection, element: &AtspiElement) -> Result<Vec<String>, DesktopError> {
+pub fn read_states(
+    connection: &Connection,
+    element: &AtspiElement,
+) -> Result<Vec<String>, DesktopError> {
     let bits: Vec<u32> = call(connection, element, ACCESSIBLE_INTERFACE, "GetState", &())?;
     Ok(super::state::state_names(&bits))
 }
@@ -76,13 +85,16 @@ pub fn read_children(
     connection: &Connection,
     element: &AtspiElement,
 ) -> Result<Vec<AtspiElement>, DesktopError> {
-    let children: Vec<(String, OwnedObjectPath)> =
-        call(connection, element, ACCESSIBLE_INTERFACE, "GetChildren", &())?;
+    let children: Vec<(String, OwnedObjectPath)> = call(
+        connection,
+        element,
+        ACCESSIBLE_INTERFACE,
+        "GetChildren",
+        &(),
+    )?;
     Ok(children
         .into_iter()
-        .filter(|(bus_name, path)| {
-            !bus_name.is_empty() && path.as_str() != "/org/a11y/atspi/null"
-        })
+        .filter(|(bus_name, path)| !bus_name.is_empty() && path.as_str() != "/org/a11y/atspi/null")
         .map(|(bus_name, path)| AtspiElement::new(bus_name, path.as_str()))
         .collect())
 }
@@ -92,7 +104,13 @@ pub fn read_interfaces(
     connection: &Connection,
     element: &AtspiElement,
 ) -> Result<Vec<String>, DesktopError> {
-    call::<Vec<String>>(connection, element, ACCESSIBLE_INTERFACE, "GetInterfaces", &())
+    call::<Vec<String>>(
+        connection,
+        element,
+        ACCESSIBLE_INTERFACE,
+        "GetInterfaces",
+        &(),
+    )
 }
 
 /// One string property of the accessible interface.
@@ -124,7 +142,9 @@ pub fn read_extents(
         &(SCREEN_COORDINATES,),
     ) {
         Ok((x, y, width, height)) => Ok(Some(Rect::new(x, y, width, height))),
-        Err(error) if error.code == harness_desktop::error::ErrorCode::ActionNotSupported => Ok(None),
+        Err(error) if error.code == harness_desktop::error::ErrorCode::ActionNotSupported => {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }

@@ -81,8 +81,7 @@ impl Tool for DesktopTool {
         let arguments = arguments.clone();
         // The bus calls block, and a blocking call on the runtime's own thread
         // would stall every other task in the session.
-        let task =
-            tokio::task::spawn_blocking(move || run::execute(&engine, &command, &arguments));
+        let task = tokio::task::spawn_blocking(move || run::execute(&engine, &command, &arguments));
         let response = match tokio::time::timeout(TOOL_DEADLINE, task).await {
             Ok(joined) => joined.map_err(|error| HarnessError::ToolExecutionFailed {
                 tool: command.tool_name().to_string(),

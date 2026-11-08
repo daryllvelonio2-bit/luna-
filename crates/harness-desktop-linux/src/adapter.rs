@@ -13,8 +13,8 @@ use harness_desktop::tree::options::TreeOptions;
 use harness_desktop::tree::state::ElementState;
 use zbus::blocking::Connection;
 
-use crate::actions::editable_text::{read_text, read_value, set_text_contents, set_value};
 use crate::actions::do_action::{action_index_any, do_action, element_actions};
+use crate::actions::editable_text::{read_text, read_value, set_text_contents, set_value};
 use crate::bus;
 use crate::element::AtspiElement;
 use crate::system::apps::{find_app, list_apps};
@@ -27,8 +27,20 @@ use crate::tree::walk::walk;
 /// A toolkit calls the same thing "click", "press" or "activate" depending on
 /// the widget, so the adapter asks for all three rather than insisting on one.
 const CLICK_VERBS: &[&str] = &[
-    "click", "press", "activate", "jump", "open", "openlink", "open link", "select",
-    "switch", "toggle", "expand", "collapse", "check", "uncheck",
+    "click",
+    "press",
+    "activate",
+    "jump",
+    "open",
+    "openlink",
+    "open link",
+    "select",
+    "switch",
+    "toggle",
+    "expand",
+    "collapse",
+    "check",
+    "uncheck",
 ];
 const TOGGLE_VERBS: &[&str] = &["toggle", "click", "press", "activate", "check", "uncheck"];
 
@@ -182,7 +194,9 @@ impl ActionOps for LinuxDesktopAdapter {
                     .with_suggestion("Read the element's state before trying again")
                     .not_delivered());
                 }
-                Ok(ActionOutcome::unverified(vec!["Action.DoAction".to_string()]))
+                Ok(ActionOutcome::unverified(vec![
+                    "Action.DoAction".to_string()
+                ]))
             }
             ActionRequest::Type { text } => {
                 let done = set_text_contents(&connection, &element, text)?;
@@ -365,8 +379,10 @@ impl SystemOps for LinuxDesktopAdapter {
             Ok(connection) => {
                 // The registry answers even when no application is registered,
                 // so it is the cheapest proof that the bus is alive.
-                match crate::tree::node::read_children(&connection, &crate::system::apps::desktop_root())
-                {
+                match crate::tree::node::read_children(
+                    &connection,
+                    &crate::system::apps::desktop_root(),
+                ) {
                     Ok(_) => true,
                     Err(error) => {
                         notes.push(error.message.clone());

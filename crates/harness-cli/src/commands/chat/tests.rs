@@ -467,7 +467,9 @@ async fn handle_thinking_switch_sets_effort() {
     use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MemoryEngineKind::Sqlite(SqliteMemoryEngine::in_memory().unwrap()));
+    let memory = Arc::new(MemoryEngineKind::Sqlite(
+        SqliteMemoryEngine::in_memory().unwrap(),
+    ));
     let notes = Arc::new(FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
     let registry = Arc::new(DefaultToolRegistry::new());
     let creds = CredentialManager::new(None).unwrap();
@@ -568,7 +570,9 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     use tokio::sync::mpsc;
 
     let tmp = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MemoryEngineKind::Sqlite(SqliteMemoryEngine::in_memory().unwrap()));
+    let memory = Arc::new(MemoryEngineKind::Sqlite(
+        SqliteMemoryEngine::in_memory().unwrap(),
+    ));
     let notes = Arc::new(FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
     let registry = Arc::new(DefaultToolRegistry::new());
     let creds = CredentialManager::new(None).unwrap();

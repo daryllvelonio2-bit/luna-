@@ -48,7 +48,10 @@ async fn test_archive_note_hides_it_without_destroying_the_file() {
     assert!(engine.list_notes(10, 0).await.unwrap().is_empty());
     assert!(engine.read_note(&note.id).await.is_err());
     assert!(!path.exists(), "the active copy must be gone");
-    let archived = engine.dir().join(".archive").join(format!("{}.md", note.id));
+    let archived = engine
+        .dir()
+        .join(".archive")
+        .join(format!("{}.md", note.id));
     assert!(
         archived.exists(),
         "the archived copy must still exist at {}",

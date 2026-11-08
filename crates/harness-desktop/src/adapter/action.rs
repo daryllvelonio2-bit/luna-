@@ -115,10 +115,7 @@ mod tests {
             .name(),
             "set-value"
         );
-        assert_eq!(
-            ActionRequest::Toggle { checked: None }.name(),
-            "toggle"
-        );
+        assert_eq!(ActionRequest::Toggle { checked: None }.name(), "toggle");
     }
 
     #[test]

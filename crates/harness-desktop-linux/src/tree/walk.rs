@@ -63,10 +63,7 @@ fn walk_at(
             name: raw.name.clone().filter(|s| !s.trim().is_empty()),
             value: None,
             description: raw.description.clone().filter(|s| !s.trim().is_empty()),
-            native_id: raw
-                .accessible_id
-                .clone()
-                .filter(|id| !id.trim().is_empty()),
+            native_id: raw.accessible_id.clone().filter(|id| !id.trim().is_empty()),
         },
         presentation: NodePresentation {
             states: raw.states.clone(),
@@ -81,9 +78,7 @@ fn walk_at(
         children: Vec::new(),
     };
 
-    let cut_by_depth = options
-        .max_depth
-        .is_some_and(|limit| depth >= limit);
+    let cut_by_depth = options.max_depth.is_some_and(|limit| depth >= limit);
     let cut_by_skeleton = options.skeleton && depth >= 1;
     // In compact mode, do not recurse into nested submenus (menus inside menus)
     // as their popup contents are not visible on screen until opened.

@@ -17,7 +17,9 @@ use harness_core::{
     approval, Agent, AgentConfig, Config, DefaultToolRegistry, HarnessError, PermissionEngine,
     SessionBinding, ToolRegistry,
 };
-use harness_memory::{build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
+use harness_memory::{
+    build_memory_engine, ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool,
+};
 use harness_notes::{
     DeleteNoteTool, FileNotesEngine, ListNotesTool, ReadNoteTool, SaveNoteTool, SearchNotesTool,
     UpdateNoteTool,

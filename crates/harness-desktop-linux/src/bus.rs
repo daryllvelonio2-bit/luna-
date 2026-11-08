@@ -15,7 +15,6 @@ use zbus::blocking::{Connection, Proxy};
 /// click instead of waiting.
 const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 
-
 const A11Y_BUS_SERVICE: &str = "org.a11y.Bus";
 const A11Y_BUS_PATH: &str = "/org/a11y/bus";
 const A11Y_BUS_INTERFACE: &str = "org.a11y.Bus";
@@ -134,9 +133,12 @@ pub fn classify(error: &zbus::Error) -> DesktopError {
         .with_suggestion("Run desktop_list_apps and use an application that is still running")
         .not_delivered();
     }
-    DesktopError::new(ErrorCode::Internal, "The accessibility bus returned an error")
-        .with_suggestion("Retry the command; report the platform detail if it persists")
-        .with_platform_detail(text)
+    DesktopError::new(
+        ErrorCode::Internal,
+        "The accessibility bus returned an error",
+    )
+    .with_suggestion("Retry the command; report the platform detail if it persists")
+    .with_platform_detail(text)
 }
 
 #[cfg(test)]

@@ -75,27 +75,22 @@ impl HyprClient {
 
 /// Run a program and return its standard output.
 pub(crate) fn run(program: &str, args: &[&str]) -> Result<String, DesktopError> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| {
-            DesktopError::new(
-                ErrorCode::PlatformNotSupported,
-                format!("'{program}' could not be run: {error}"),
-            )
-            .with_suggestion(format!("Install '{program}' and try again"))
-            .not_delivered()
-        })?;
+    let output = Command::new(program).args(args).output().map_err(|error| {
+        DesktopError::new(
+            ErrorCode::PlatformNotSupported,
+            format!("'{program}' could not be run: {error}"),
+        )
+        .with_suggestion(format!("Install '{program}' and try again"))
+        .not_delivered()
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(
-            DesktopError::new(
-                ErrorCode::ActionFailed,
-                format!("'{program}' failed: {stderr}"),
-            )
-            .with_platform_detail(stderr)
-            .not_delivered(),
-        );
+        return Err(DesktopError::new(
+            ErrorCode::ActionFailed,
+            format!("'{program}' failed: {stderr}"),
+        )
+        .with_platform_detail(stderr)
+        .not_delivered());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -447,15 +442,9 @@ fn measure_move(request: i32) -> Option<(i32, i32)> {
 
 /// One raw absolute move, in ydotool's own coordinate space.
 fn move_absolute_raw(x: i32, y: i32) -> Option<()> {
-    ydotool(&[
-        "mousemove",
-        "-a",
-        "--",
-        &x.to_string(),
-        &y.to_string(),
-    ])
-    .ok()
-    .map(|_| ())
+    ydotool(&["mousemove", "-a", "--", &x.to_string(), &y.to_string()])
+        .ok()
+        .map(|_| ())
 }
 
 /// The ydotool daemon socket, if the session has one.
@@ -512,9 +501,9 @@ fn parse_keys(input: &str) -> Result<Vec<Vec<u16>>, DesktopError> {
             let code = keycode(name).ok_or_else(|| {
                 DesktopError::invalid_args(format!("'{part}' is not a key this adapter knows"))
                     .with_suggestion(
-                        "Use ctrl, shift, alt, super, enter, tab, escape, space, backspace, delete, \
+                    "Use ctrl, shift, alt, super, enter, tab, escape, space, backspace, delete, \
                          home, end, pageup, pagedown, left, right, up, down, f1-f12, a-z or 0-9",
-                    )
+                )
             })?;
             codes.push(code);
         }

@@ -21,7 +21,11 @@ pub(crate) fn run(
     }
 }
 
-fn outcome_json(ref_id: &str, request: &ActionRequest, outcome: &ActionOutcome) -> serde_json::Value {
+fn outcome_json(
+    ref_id: &str,
+    request: &ActionRequest,
+    outcome: &ActionOutcome,
+) -> serde_json::Value {
     json!({
         "ref_id": ref_id,
         "action": request.name(),

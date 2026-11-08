@@ -31,9 +31,7 @@ pub fn click_at(
         _ => {
             return Response::err(
                 "click-at",
-                &crate::error::DesktopError::invalid_args(
-                    "Give either a ref, or both x and y",
-                ),
+                &crate::error::DesktopError::invalid_args("Give either a ref, or both x and y"),
             )
         }
     };

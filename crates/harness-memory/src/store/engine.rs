@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use harness_core::{HarnessError, MemoryCategory, MemoryEngine, MemoryRecord};
 
-use super::{Record, SearchFilter, SearchResult, StoreConfig, MemoryStore};
+use super::{MemoryStore, Record, SearchFilter, SearchResult, StoreConfig};
 
 pub struct MarkdownMemoryEngine {
     store: MemoryStore,
@@ -73,8 +73,7 @@ impl MemoryEngine for MarkdownMemoryEngine {
                 if incoming.category == MemoryCategory::NotePointer
                     || existing.category == MemoryCategory::NotePointer
                 {
-                    existing.subject == incoming.subject
-                        && existing.predicate == incoming.predicate
+                    existing.subject == incoming.subject && existing.predicate == incoming.predicate
                 } else {
                     existing.subject.eq_ignore_ascii_case(&incoming.subject)
                         && existing.predicate.eq_ignore_ascii_case(&incoming.predicate)
@@ -271,7 +270,10 @@ mod tests {
     #[tokio::test]
     async fn save_then_retrieve_round_trips() {
         let engine = temp_engine();
-        engine.save(&memory("user.profile", "Rust engineer")).await.unwrap();
+        engine
+            .save(&memory("user.profile", "Rust engineer"))
+            .await
+            .unwrap();
         let records = engine.retrieve("Rust engineer", 5).await.unwrap();
         assert!(records.iter().any(|record| record.id == "user.profile"));
         let _ = std::fs::remove_dir_all(engine.store().root());
@@ -280,8 +282,14 @@ mod tests {
     #[tokio::test]
     async fn save_supersedes_the_previous_active_record() {
         let engine = temp_engine();
-        engine.save(&memory("env.database", "Postgres")).await.unwrap();
-        engine.save(&memory("env.database", "SQLite")).await.unwrap();
+        engine
+            .save(&memory("env.database", "Postgres"))
+            .await
+            .unwrap();
+        engine
+            .save(&memory("env.database", "SQLite"))
+            .await
+            .unwrap();
         let record = engine.get_record("env.database").await.unwrap().unwrap();
         assert_eq!(record.object, "SQLite");
         let active = engine
@@ -298,7 +306,10 @@ mod tests {
     #[tokio::test]
     async fn update_changes_in_place() {
         let engine = temp_engine();
-        engine.save(&memory("user.profile", "Rust engineer")).await.unwrap();
+        engine
+            .save(&memory("user.profile", "Rust engineer"))
+            .await
+            .unwrap();
         let mut updated = memory("user.profile", "Rust engineer and writer");
         updated.updated_at = Utc::now();
         engine.update("user.profile", &updated).await.unwrap();

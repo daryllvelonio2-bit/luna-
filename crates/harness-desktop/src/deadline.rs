@@ -35,7 +35,10 @@ impl Deadline {
 
     /// The error a caller reports when the budget ran out.
     pub fn timeout_error(&self) -> crate::error::DesktopError {
-        crate::error::DesktopError::new(crate::error::ErrorCode::Timeout, "The desktop operation ran out of time")
+        crate::error::DesktopError::new(
+            crate::error::ErrorCode::Timeout,
+            "The desktop operation ran out of time",
+        )
         .with_suggestion("Retry with a larger timeout, or take a fresh snapshot")
         .not_delivered()
     }

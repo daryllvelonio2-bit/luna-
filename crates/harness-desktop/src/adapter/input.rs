@@ -125,7 +125,9 @@ mod tests {
 
     #[test]
     fn an_unimplemented_capability_refuses_instead_of_doing_nothing() {
-        let error = Noop.focus("Firefox", Deadline::none()).expect_err("no focus");
+        let error = Noop
+            .focus("Firefox", Deadline::none())
+            .expect_err("no focus");
         assert_eq!(error.code, ErrorCode::PlatformNotSupported);
         assert!(error.suggestion.is_some());
     }
@@ -135,6 +137,8 @@ mod tests {
         assert!(Noop.keys("ctrl+v", Deadline::none()).is_err());
         assert!(Noop.paste("hi", Deadline::none()).is_err());
         assert!(Noop.click_at(1, 2, 0, Deadline::none()).is_err());
-        assert!(Noop.screenshot(None, "/tmp/x.png", Deadline::none()).is_err());
+        assert!(Noop
+            .screenshot(None, "/tmp/x.png", Deadline::none())
+            .is_err());
     }
 }

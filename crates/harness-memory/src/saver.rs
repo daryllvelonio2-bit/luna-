@@ -379,14 +379,36 @@ impl Inventory {
 
 /// One validated operation, ready to apply.
 enum Planned {
-    AddMemory { item: Item },
-    UpdateMemory { target: String, item: Item },
-    DeleteMemory { target: String, reason: String },
-    MergeMemories { targets: Vec<String>, item: Item },
-    CreateNote { note: NoteItem },
-    UpdateNote { target: String, note: NoteItem },
-    MergeNotes { targets: Vec<String>, note: NoteItem },
-    DeleteNote { target: String, reason: String },
+    AddMemory {
+        item: Item,
+    },
+    UpdateMemory {
+        target: String,
+        item: Item,
+    },
+    DeleteMemory {
+        target: String,
+        reason: String,
+    },
+    MergeMemories {
+        targets: Vec<String>,
+        item: Item,
+    },
+    CreateNote {
+        note: NoteItem,
+    },
+    UpdateNote {
+        target: String,
+        note: NoteItem,
+    },
+    MergeNotes {
+        targets: Vec<String>,
+        note: NoteItem,
+    },
+    DeleteNote {
+        target: String,
+        reason: String,
+    },
 }
 
 impl Planned {
@@ -576,7 +598,12 @@ impl MemorySaver {
     }
 
     /// One model call, returning the text to parse.
-    async fn call(&self, system: &str, user: String, max_tokens: u32) -> Result<String, HarnessError> {
+    async fn call(
+        &self,
+        system: &str,
+        user: String,
+        max_tokens: u32,
+    ) -> Result<String, HarnessError> {
         let messages = vec![Message::system(system), Message::user(user)];
         let options = CompletionOptions {
             model: Some(self.policy.model.clone()),
@@ -586,13 +613,19 @@ impl MemorySaver {
         };
         let response = self.provider.complete(&messages, &[], &options).await?;
         let text = response.content.as_deref().unwrap_or_default();
-        Ok(if (text.is_empty() || text == harness_core::types::NO_TEXT_RESPONSE)
-            && response.reasoning.is_some()
-        {
-            response.reasoning.as_deref().unwrap_or_default().to_string()
-        } else {
-            text.to_string()
-        })
+        Ok(
+            if (text.is_empty() || text == harness_core::types::NO_TEXT_RESPONSE)
+                && response.reasoning.is_some()
+            {
+                response
+                    .reasoning
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                text.to_string()
+            },
+        )
     }
 
     async fn curate(
@@ -708,7 +741,11 @@ impl MemorySaver {
                 | Planned::UpdateNote { .. }
                 | Planned::MergeNotes { .. } => {
                     if note_writes >= self.policy.max_note_writes {
-                        report.skip(SaveStorage::Note, planned_name(&op), "note write cap reached");
+                        report.skip(
+                            SaveStorage::Note,
+                            planned_name(&op),
+                            "note write cap reached",
+                        );
                         continue;
                     }
                     note_writes += 1;
@@ -799,7 +836,11 @@ impl MemorySaver {
                     || item.predicate.trim().is_empty()
                     || item.object.trim().is_empty()
                 {
-                    report.skip(SaveStorage::Memory, display, "empty subject, predicate, or object");
+                    report.skip(
+                        SaveStorage::Memory,
+                        display,
+                        "empty subject, predicate, or object",
+                    );
                     return None;
                 }
                 if already_known(
@@ -820,7 +861,11 @@ impl MemorySaver {
                 }
                 let target = operation.target_id.as_deref().unwrap_or("").trim();
                 let Some(record) = inventory.memory(target) else {
-                    report.skip(SaveStorage::Memory, display, "target not found in inventory");
+                    report.skip(
+                        SaveStorage::Memory,
+                        display,
+                        "target not found in inventory",
+                    );
                     return None;
                 };
                 let item = operation.memory?;
@@ -840,7 +885,11 @@ impl MemorySaver {
                 }
                 let target = operation.target_id.as_deref().unwrap_or("").trim();
                 let Some(record) = inventory.memory(target) else {
-                    report.skip(SaveStorage::Memory, display, "target not found in inventory");
+                    report.skip(
+                        SaveStorage::Memory,
+                        display,
+                        "target not found in inventory",
+                    );
                     return None;
                 };
                 if record.category == MemoryCategory::NotePointer {
@@ -868,7 +917,11 @@ impl MemorySaver {
                 }
                 let targets = self.resolve_memories(inventory, &operation.target_ids);
                 if targets.len() < 2 {
-                    report.skip(SaveStorage::Memory, display, "merge needs two valid targets");
+                    report.skip(
+                        SaveStorage::Memory,
+                        display,
+                        "merge needs two valid targets",
+                    );
                     return None;
                 }
                 let item = operation.memory?;
@@ -1008,7 +1061,10 @@ impl MemorySaver {
 
                 let tool = SaveMemoryTool::new(self.memory.clone());
                 let call_id = format!("saver_mem_{}", report.memories + 1);
-                match tool.execute(&call_id, &args, &CancellationToken::new()).await {
+                match tool
+                    .execute(&call_id, &args, &CancellationToken::new())
+                    .await
+                {
                     Ok(result) if !result.is_error => {
                         written_keys.insert(key);
                         report.memory_written(
@@ -1020,7 +1076,9 @@ impl MemorySaver {
                             },
                         );
                     }
-                    Ok(_) => report.skip(SaveStorage::Memory, memory_display(item), "store refused"),
+                    Ok(_) => {
+                        report.skip(SaveStorage::Memory, memory_display(item), "store refused")
+                    }
                     Err(error) => {
                         tracing::warn!("background saver could not write a memory: {}", error);
                         report.skip(SaveStorage::Memory, memory_display(item), "store error");
@@ -1037,12 +1095,17 @@ impl MemorySaver {
                 if self.update_memory(first, item, report).await {
                     for target in targets.iter().skip(1) {
                         if let Err(error) = self.memory.forget(target).await {
-                            tracing::warn!("could not deactivate merged memory '{}': {}", target, error);
+                            tracing::warn!(
+                                "could not deactivate merged memory '{}': {}",
+                                target,
+                                error
+                            );
                         }
                     }
                     // The update reported `updated`; the merge is the more accurate word.
                     if let Some(last) = report.outcomes.last_mut() {
-                        if last.storage == SaveStorage::Memory && last.status == SaveStatus::Updated {
+                        if last.storage == SaveStorage::Memory && last.status == SaveStatus::Updated
+                        {
                             last.status = SaveStatus::Merged;
                         }
                     }
@@ -1104,20 +1167,27 @@ impl MemorySaver {
                     }
                 }
             }
-            Planned::DeleteMemory { target, reason } => {
-                match self.memory.forget(target).await {
-                    Ok(()) => report.memory_written(target.clone(), SaveStatus::Deleted),
-                    Err(error) => {
-                        tracing::warn!("could not delete memory '{}' ({}): {}", target, reason, error);
-                        report.skip(SaveStorage::Memory, target, "store error");
-                    }
+            Planned::DeleteMemory { target, reason } => match self.memory.forget(target).await {
+                Ok(()) => report.memory_written(target.clone(), SaveStatus::Deleted),
+                Err(error) => {
+                    tracing::warn!(
+                        "could not delete memory '{}' ({}): {}",
+                        target,
+                        reason,
+                        error
+                    );
+                    report.skip(SaveStorage::Memory, target, "store error");
                 }
-            }
+            },
             Planned::DeleteNote { target, reason } => {
                 if self.remove_note(target).await {
                     report.note_written(target.clone(), SaveStatus::Deleted);
                 } else {
-                    report.skip(SaveStorage::Note, target, format!("could not archive: {reason}"));
+                    report.skip(
+                        SaveStorage::Note,
+                        target,
+                        format!("could not archive: {reason}"),
+                    );
                 }
             }
         }
@@ -1147,13 +1217,20 @@ impl MemorySaver {
 
         let tool = UpdateMemoryTool::new(self.memory.clone());
         let call_id = format!("saver_mem_{}", report.memories + 1);
-        match tool.execute(&call_id, &args, &CancellationToken::new()).await {
+        match tool
+            .execute(&call_id, &args, &CancellationToken::new())
+            .await
+        {
             Ok(result) if !result.is_error => {
                 report.memory_written(memory_display(item), SaveStatus::Updated);
                 true
             }
             Ok(_) => {
-                report.skip(SaveStorage::Memory, memory_display(item), "store refused update");
+                report.skip(
+                    SaveStorage::Memory,
+                    memory_display(item),
+                    "store refused update",
+                );
                 false
             }
             Err(error) => {
@@ -1333,13 +1410,7 @@ fn memory_display(item: &Item) -> String {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}.{}",
-                item.subject.trim(),
-                item.predicate.trim()
-            )
-        })
+        .unwrap_or_else(|| format!("{}.{}", item.subject.trim(), item.predicate.trim()))
 }
 
 /// Whether the store already states this triple.
@@ -1417,7 +1488,9 @@ fn contains_secret(text: &str) -> bool {
     if MARKERS.iter().any(|marker| lower.contains(marker)) {
         return true;
     }
-    const PREFIXES: &[&str] = &["sk-", "ghp_", "gho_", "ghs_", "xoxb-", "xoxp-", "akia", "aiza", "glpat-"];
+    const PREFIXES: &[&str] = &[
+        "sk-", "ghp_", "gho_", "ghs_", "xoxb-", "xoxp-", "akia", "aiza", "glpat-",
+    ];
     if PREFIXES.iter().any(|prefix| lower.contains(prefix)) {
         return true;
     }
@@ -1445,11 +1518,9 @@ fn parse_distilled(text: &str) -> Result<Distilled, HarnessError> {
 
 fn parse_candidates(text: &str) -> Result<CandidateSet, HarnessError> {
     let candidate = json_object(text, "background-saver")?;
-    serde_json::from_str::<CandidateSet>(&candidate).map_err(|error| {
-        HarnessError::ProviderError {
-            provider: "background-saver".to_string(),
-            message: format!("could not parse the scout's JSON: {error}"),
-        }
+    serde_json::from_str::<CandidateSet>(&candidate).map_err(|error| HarnessError::ProviderError {
+        provider: "background-saver".to_string(),
+        message: format!("could not parse the scout's JSON: {error}"),
     })
 }
 
@@ -1734,7 +1805,10 @@ mod tests {
         let report = saver.distil(&conversation()).await.expect("distils");
 
         assert_eq!(report.memories, 1);
-        let stored = memory.retrieve("response_style", 5).await.expect("retrieves");
+        let stored = memory
+            .retrieve("response_style", 5)
+            .await
+            .expect("retrieves");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].object, "concise, no filler");
         assert_eq!(stored[0].category, MemoryCategory::UserProfile);
@@ -1841,7 +1915,10 @@ mod tests {
         assert_eq!(report.memories, 0);
         assert_eq!(report.skipped, 1);
         assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
-        assert_eq!(report.outcomes[0].reason.as_deref(), Some("secret detected"));
+        assert_eq!(
+            report.outcomes[0].reason.as_deref(),
+            Some("secret detected")
+        );
     }
 
     #[tokio::test]
@@ -1864,7 +1941,10 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("LUNA: Noted"), "{prompt}");
-        assert!(!prompt.contains("system prompt"), "the system prompt leaked in");
+        assert!(
+            !prompt.contains("system prompt"),
+            "the system prompt leaked in"
+        );
 
         let system = provider.systems();
         assert!(system.contains("memory curator"), "{system}");
@@ -1878,7 +1958,11 @@ mod tests {
         let provider = CannedProvider::new(r#"{"operations":[]}"#);
         let (saver, memory, notes) = saver(provider.clone());
         let note = notes
-            .save_note("Build Recipe", "cargo build --release", &["build".to_string()])
+            .save_note(
+                "Build Recipe",
+                "cargo build --release",
+                &["build".to_string()],
+            )
             .await
             .expect("saves note");
         memory
@@ -2032,7 +2116,11 @@ mod tests {
         assert_eq!(report.saved_notes[0].status, SaveStatus::Deleted);
         assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
         assert!(
-            memory.retrieve("mem_ptr", 10).await.expect("retrieves").is_empty(),
+            memory
+                .retrieve("mem_ptr", 10)
+                .await
+                .expect("retrieves")
+                .is_empty(),
             "the pointer survived the note deletion"
         );
     }
@@ -2188,7 +2276,10 @@ mod tests {
             "budget blown: {}",
             rendered.chars().count()
         );
-        assert!(rendered.starts_with("(earlier turns omitted)"), "{rendered}");
+        assert!(
+            rendered.starts_with("(earlier turns omitted)"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -2203,7 +2294,10 @@ mod tests {
     fn evidence_matching_ignores_case_and_whitespace_but_not_paraphrase() {
         let transcript = "USER: I always   build with cargo\n";
         assert!(evidence_supported("i always build with cargo", transcript));
-        assert!(!evidence_supported("I usually build with cargo", transcript));
+        assert!(!evidence_supported(
+            "I usually build with cargo",
+            transcript
+        ));
         assert!(!evidence_supported("", transcript));
     }
 }

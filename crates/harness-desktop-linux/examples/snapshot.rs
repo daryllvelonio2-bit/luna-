@@ -10,7 +10,9 @@ use harness_desktop_linux::LinuxDesktopAdapter;
 use std::sync::Arc;
 
 fn main() {
-    let app = std::env::args().nth(1).unwrap_or_else(|| "Firefox".to_string());
+    let app = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "Firefox".to_string());
     let engine = DesktopEngine::new(Arc::new(LinuxDesktopAdapter::new()));
     let options = TreeOptions {
         interactive_only: true,

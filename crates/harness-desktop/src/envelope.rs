@@ -99,8 +99,8 @@ mod tests {
 
     #[test]
     fn every_envelope_carries_its_version() {
-        let value: Value = serde_json::from_str(&Response::ok("x", Value::Null).to_json())
-            .expect("parses");
+        let value: Value =
+            serde_json::from_str(&Response::ok("x", Value::Null).to_json()).expect("parses");
         assert_eq!(value["version"], ENVELOPE_VERSION);
     }
 }

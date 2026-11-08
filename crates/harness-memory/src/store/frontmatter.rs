@@ -12,7 +12,9 @@ use serde_yaml::Value;
 /// block (opening `---` with no closing `---`) is also `None`: callers decide
 /// whether that is a warning or an error.
 pub fn split(text: &str) -> Option<(&str, &str)> {
-    let rest = text.strip_prefix("---\r\n").or_else(|| text.strip_prefix("---\n"))?;
+    let rest = text
+        .strip_prefix("---\r\n")
+        .or_else(|| text.strip_prefix("---\n"))?;
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\r', '\n']);

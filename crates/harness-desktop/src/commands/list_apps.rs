@@ -22,7 +22,8 @@ mod tests {
             fn list_apps(
                 &self,
                 _deadline: crate::deadline::Deadline,
-            ) -> Result<Vec<crate::adapter::types::AppInfo>, crate::error::DesktopError> {
+            ) -> Result<Vec<crate::adapter::types::AppInfo>, crate::error::DesktopError>
+            {
                 Ok(vec![crate::adapter::types::AppInfo {
                     name: "Calculator".to_string(),
                     pid: Some(42),

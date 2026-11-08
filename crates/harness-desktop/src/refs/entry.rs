@@ -18,12 +18,7 @@ pub struct RefEntry {
 }
 
 impl RefEntry {
-    pub fn new(
-        snapshot_id: &str,
-        local_ref: &str,
-        app: &str,
-        identity: ElementIdentity,
-    ) -> Self {
+    pub fn new(snapshot_id: &str, local_ref: &str, app: &str, identity: ElementIdentity) -> Self {
         Self {
             ref_id: crate::refs::token::qualify_ref_id(snapshot_id, local_ref),
             snapshot_id: snapshot_id.to_string(),

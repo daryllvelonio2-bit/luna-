@@ -158,7 +158,12 @@ impl SaveReport {
     }
 
     /// Record one refused operation and why.
-    pub fn skip(&mut self, storage: SaveStorage, name: impl Into<String>, reason: impl Into<String>) {
+    pub fn skip(
+        &mut self,
+        storage: SaveStorage,
+        name: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
         self.skipped += 1;
         self.outcomes.push(SaveOutcome {
             storage,

@@ -86,9 +86,10 @@ pub trait ObservationOps: Send + Sync {
             }
         }
 
-        let mut matches = tree.flatten().into_iter().filter(|node| {
-            node.identity.key(&node.role).matches(identity)
-        });
+        let mut matches = tree
+            .flatten()
+            .into_iter()
+            .filter(|node| node.identity.key(&node.role).matches(identity));
         let Some(first) = matches.next() else {
             return Err(DesktopError::new(
                 crate::error::ErrorCode::StaleRef,
@@ -143,10 +144,7 @@ mod tests {
     #[test]
     fn an_unimplemented_capability_refuses_rather_than_answering_empty() {
         let error = Noop.list_apps(Deadline::none()).expect_err("no apps");
-        assert_eq!(
-            error.code,
-            crate::error::ErrorCode::PlatformNotSupported
-        );
+        assert_eq!(error.code, crate::error::ErrorCode::PlatformNotSupported);
     }
 
     #[test]
@@ -170,7 +168,9 @@ mod tests {
             name: Some("7".to_string()),
             ..Default::default()
         };
-        let error = Noop.resolve_identity(&root, &identity).expect_err("no match");
+        let error = Noop
+            .resolve_identity(&root, &identity)
+            .expect_err("no match");
         assert_eq!(error.code, crate::error::ErrorCode::StaleRef);
     }
 
@@ -184,7 +184,9 @@ mod tests {
             name: Some("7".to_string()),
             ..Default::default()
         };
-        let error = Noop.resolve_identity(&root, &identity).expect_err("two matches");
+        let error = Noop
+            .resolve_identity(&root, &identity)
+            .expect_err("two matches");
         assert_eq!(error.code, crate::error::ErrorCode::AmbiguousTarget);
     }
 
@@ -203,7 +205,9 @@ mod tests {
             handle: Some("app|btn2".to_string()),
             ..Default::default()
         };
-        let found = Noop.resolve_identity(&root, &identity).expect("resolves via handle");
+        let found = Noop
+            .resolve_identity(&root, &identity)
+            .expect("resolves via handle");
         assert_eq!(found.handle.as_ref().unwrap().token, "app|btn2");
     }
 }

@@ -15,7 +15,13 @@ pub fn read_text(
     connection: &Connection,
     element: &AtspiElement,
 ) -> Result<Option<String>, DesktopError> {
-    match call::<String>(connection, element, TEXT_INTERFACE, "GetText", &(0i32, -1i32)) {
+    match call::<String>(
+        connection,
+        element,
+        TEXT_INTERFACE,
+        "GetText",
+        &(0i32, -1i32),
+    ) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.code == harness_desktop::error::ErrorCode::ActionNotSupported => Ok(None),
         Err(err) => Err(err),

@@ -38,7 +38,13 @@ fn a_screenshot_is_a_measurable_png() {
         .expect("the screen can be captured");
     assert!(info.width > 0);
     assert!(info.height > 0);
-    assert_eq!(info.path, std::fs::canonicalize(&path).expect("the file exists").display().to_string());
+    assert_eq!(
+        info.path,
+        std::fs::canonicalize(&path)
+            .expect("the file exists")
+            .display()
+            .to_string()
+    );
     let bytes = std::fs::read(&path).expect("the file is readable");
     assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
     let _ = std::fs::remove_file(path);

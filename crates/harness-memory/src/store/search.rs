@@ -15,9 +15,9 @@ const B: f64 = 0.75;
 
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
-    "her", "his", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "our", "she",
-    "that", "the", "their", "them", "they", "this", "to", "was", "we", "were", "what", "when",
-    "where", "which", "who", "will", "with", "you", "your",
+    "her", "his", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "our", "she", "that",
+    "the", "their", "them", "they", "this", "to", "was", "we", "were", "what", "when", "where",
+    "which", "who", "will", "with", "you", "your",
 ];
 
 /// Lowercase, split on non-alphanumerics and camel-case boundaries, drop
@@ -120,8 +120,9 @@ impl LexicalIndex {
                     let df = *self.document_frequency.get(term).unwrap_or(&0) as f64;
                     let idf = ((total - df + 0.5) / (df + 0.5) + 1.0).ln();
                     let tf = frequency as f64;
-                    let denominator =
-                        tf + K1 * (1.0 - B + B * document.length as f64 / self.average_length.max(1.0));
+                    let denominator = tf
+                        + K1 * (1.0 - B
+                            + B * document.length as f64 / self.average_length.max(1.0));
                     score += idf * (tf * (K1 + 1.0)) / denominator;
                 }
                 if matched {
@@ -169,10 +170,8 @@ pub fn hybrid(
             .iter()
             .map(|(id, text, _)| (id.clone(), text.clone())),
     );
-    let lexical_scores: HashMap<String, f64> = lexical
-        .search(query, documents.len())
-        .into_iter()
-        .collect();
+    let lexical_scores: HashMap<String, f64> =
+        lexical.search(query, documents.len()).into_iter().collect();
 
     let mut candidates: Vec<Candidate> = documents
         .iter()

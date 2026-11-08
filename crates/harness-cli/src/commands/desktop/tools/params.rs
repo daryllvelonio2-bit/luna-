@@ -6,7 +6,7 @@
 //! else is optional. The type matters: a flag declared as a string arrives as
 //! `"true"`, which no boolean reader accepts.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::run::DesktopCommand;
 
