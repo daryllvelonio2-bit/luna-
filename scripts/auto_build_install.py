@@ -153,15 +153,24 @@ def install_binary(zip_bytes):
     """Extract the `luna` binary from the zip and install it to INSTALL_DIR."""
     os.makedirs(INSTALL_DIR, exist_ok=True)
     dest = os.path.join(INSTALL_DIR, "luna")
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        # Find the `luna` file inside the zip (artifact zips preserve path structure).
-        candidates = [n for n in zf.namelist() if n.endswith("/luna") or n == "luna"]
-        if not candidates:
-            raise BuildError(f"`luna` binary not found in artifact: {zf.namelist()}")
-        with zf.open(candidates[0]) as src, open(dest, "wb") as out:
-            out.write(src.read())
-    st = os.stat(dest)
-    os.chmod(dest, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # A running `luna` holds the destination inode open, and writing that path fails with
+    # ETXTBSY. Write beside it and rename: rename swaps the directory entry atomically, the
+    # running process keeps the old inode, and the next launch gets the new binary.
+    staging = dest + ".new"
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            # Find the `luna` file inside the zip (artifact zips preserve path structure).
+            candidates = [n for n in zf.namelist() if n.endswith("/luna") or n == "luna"]
+            if not candidates:
+                raise BuildError(f"`luna` binary not found in artifact: {zf.namelist()}")
+            with zf.open(candidates[0]) as src, open(staging, "wb") as out:
+                out.write(src.read())
+        st = os.stat(staging)
+        os.chmod(staging, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(staging, dest)
+    finally:
+        if os.path.exists(staging):
+            os.remove(staging)
     print(f"Installed `luna` to {dest}")
     print(f"Run: {dest} --help")
 
