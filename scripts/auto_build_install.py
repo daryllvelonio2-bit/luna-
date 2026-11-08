@@ -37,6 +37,25 @@ class BuildError(RuntimeError):
     pass
 
 
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect without carrying the API token to the new host.
+
+    GitHub answers an artifact download with a 302 to a pre-signed Blob URL.
+    urllib forwards request headers on redirect, so the `Authorization` header
+    reaches Azure, which rejects it as malformed and the download fails with
+    HTTP 401 even though the build succeeded. The signed URL needs no token.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+OPENER = urllib.request.build_opener(_StripAuthOnRedirect)
+
+
 def api_request(method, path, data=None, parse=True):
     """Make an authenticated GitHub API request."""
     url = f"{API_BASE}{path}"
@@ -51,7 +70,7 @@ def api_request(method, path, data=None, parse=True):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with OPENER.open(req, timeout=60) as resp:
             raw = resp.read()
             if not parse:
                 return raw
