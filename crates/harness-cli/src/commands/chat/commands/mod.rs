@@ -1122,6 +1122,13 @@ pub(crate) async fn execute_slash_command(
                     return Ok(SlashOutcome::Continue);
                 }
             };
+            // The chat's key reader owns stdin. Anything already queued belongs to the command
+            // line that was just submitted, not to the wizard, so drop it before the pause.
+            while key_rx.try_recv().is_ok() {}
+            // `handle_profile_command` uses `dialoguer`, which reads stdin directly. Without this
+            // pause the reader thread races it for every keystroke, and the first press in the
+            // wizard is stolen — which reads as having to press a key twice.
+            let _pause = super::keys::pause_input();
             // The wizard (name, $EDITOR prompts, checkbox pickers) needs a cooked terminal.
             let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
             if raw {

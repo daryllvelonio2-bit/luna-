@@ -14,7 +14,7 @@
 #![cfg_attr(windows, allow(dead_code))]
 
 use std::io;
-#[cfg(unix)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -25,6 +25,65 @@ use std::os::unix::io::RawFd;
 /// covers the rare case of the bytes arriving in separate reads.
 #[cfg(unix)]
 const ESC_PEEK_TIMEOUT: Duration = Duration::from_millis(30);
+
+/// How long a blocking read waits before re-checking [`input_paused`]. Short enough that a
+/// pause takes effect before a keystroke is lost, long enough to stay idle at rest.
+const READ_SLICE: Duration = Duration::from_millis(50);
+
+/// Non-zero while another part of the process owns stdin (`/profile create` runs `dialoguer`).
+///
+/// The chat reads keys on its own thread. A prompt that reads stdin directly would race that
+/// thread for every keystroke, which shows up as keys that need pressing twice. A command that
+/// needs stdin pauses the reader for the duration instead.
+static INPUT_PAUSED: AtomicUsize = AtomicUsize::new(0);
+/// Readers currently inside a read call, so a pause can wait for the fd to be released.
+static ACTIVE_READERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the chat's key reader is currently paused.
+pub fn input_paused() -> bool {
+    INPUT_PAUSED.load(Ordering::SeqCst) > 0
+}
+
+/// A guard that lends stdin to another reader and gives it back on drop.
+pub struct InputPauseGuard;
+
+impl Drop for InputPauseGuard {
+    fn drop(&mut self) {
+        INPUT_PAUSED.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait for the key reader to leave stdin, then keep it out until the guard drops.
+///
+/// An in-flight read returns within [`READ_SLICE`], so this wait is bounded even while the
+/// terminal is silent.
+pub fn pause_input() -> InputPauseGuard {
+    INPUT_PAUSED.fetch_add(1, Ordering::SeqCst);
+    while ACTIVE_READERS.load(Ordering::SeqCst) > 0 {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    InputPauseGuard
+}
+
+/// Marks a read as active, unless a pause arrived first.
+struct ActiveReader;
+
+impl ActiveReader {
+    fn acquire() -> Option<Self> {
+        ACTIVE_READERS.fetch_add(1, Ordering::SeqCst);
+        if input_paused() {
+            ACTIVE_READERS.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for ActiveReader {
+    fn drop(&mut self) {
+        ACTIVE_READERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// A key press, as the chat understands it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +170,20 @@ pub fn read_key() -> io::Result<AppKey> {
 #[cfg(windows)]
 pub fn read_key() -> io::Result<AppKey> {
     use crossterm::event::{self, Event, KeyEventKind};
+    let _active = match ActiveReader::acquire() {
+        Some(active) => active,
+        None => {
+            std::thread::sleep(Duration::from_millis(10));
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+    };
     loop {
+        if !event::poll(READ_SLICE)? {
+            if input_paused() {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            continue;
+        }
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 return Ok(from_crossterm(key));
@@ -159,11 +231,27 @@ fn from_crossterm(key: crossterm::event::KeyEvent) -> AppKey {
 
 #[cfg(unix)]
 fn read_key_fd(fd: RawFd) -> io::Result<AppKey> {
+    let _active = match ActiveReader::acquire() {
+        Some(active) => active,
+        None => {
+            // A pause owns stdin; report it the way an interrupted syscall is reported so the
+            // caller can wait without inventing a key.
+            std::thread::sleep(Duration::from_millis(10));
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+    };
+
     let mut buf: Vec<u8> = Vec::with_capacity(16);
     loop {
-        let Some(byte) = read_byte(fd, None)? else {
-            // EOF: the terminal is gone.
-            return Ok(AppKey::Unknown);
+        let byte = match read_byte(fd, Some(READ_SLICE))? {
+            ByteRead::Byte(byte) => byte,
+            ByteRead::Eof => return Ok(AppKey::Unknown),
+            ByteRead::Timeout => {
+                if input_paused() {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                continue;
+            }
         };
         buf.push(byte);
 
@@ -171,8 +259,8 @@ fn read_key_fd(fd: RawFd) -> io::Result<AppKey> {
             // The rest of an escape sequence may still be in flight. If nothing follows
             // within the peek window, the Escape key was pressed on its own.
             match read_byte(fd, Some(ESC_PEEK_TIMEOUT))? {
-                Some(next) => buf.push(next),
-                None => return Ok(AppKey::Escape),
+                ByteRead::Byte(next) => buf.push(next),
+                ByteRead::Timeout | ByteRead::Eof => return Ok(AppKey::Escape),
             }
         }
 
@@ -438,10 +526,17 @@ fn utf8_len(first: u8) -> usize {
     }
 }
 
-/// Read one byte, waiting up to `timeout` for it. `None` means the timeout expired or
-/// the terminal reached EOF.
+/// One step of a byte read: a byte, no byte yet, or the terminal is gone.
 #[cfg(unix)]
-fn read_byte(fd: RawFd, timeout: Option<Duration>) -> io::Result<Option<u8>> {
+enum ByteRead {
+    Byte(u8),
+    Timeout,
+    Eof,
+}
+
+/// Read one byte, waiting up to `timeout` for it.
+#[cfg(unix)]
+fn read_byte(fd: RawFd, timeout: Option<Duration>) -> io::Result<ByteRead> {
     let mut poll_fd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -455,22 +550,22 @@ fn read_byte(fd: RawFd, timeout: Option<Duration>) -> io::Result<Option<u8>> {
     if ready < 0 {
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::Interrupted {
-            return Ok(None);
+            return Ok(ByteRead::Timeout);
         }
         return Err(error);
     }
     if ready == 0 {
-        return Ok(None);
+        return Ok(ByteRead::Timeout);
     }
 
     let mut byte = [0u8; 1];
     loop {
         let read = unsafe { libc::read(fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
         if read == 1 {
-            return Ok(Some(byte[0]));
+            return Ok(ByteRead::Byte(byte[0]));
         }
         if read == 0 {
-            return Ok(None);
+            return Ok(ByteRead::Eof);
         }
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::Interrupted {

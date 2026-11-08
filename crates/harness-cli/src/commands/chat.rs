@@ -1634,7 +1634,12 @@ pub async fn run_interactive_chat(
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    // SIGINT or other signal interrupted read syscall - do not terminate reader thread!
+                    // SIGINT or other signal interrupted read syscall - do not terminate reader
+                    // thread. A pause (another prompt owns stdin) also reports Interrupted, so
+                    // back off briefly instead of spinning while it holds the terminal.
+                    if keys::input_paused() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                     continue;
                 }
                 Err(_) => {
