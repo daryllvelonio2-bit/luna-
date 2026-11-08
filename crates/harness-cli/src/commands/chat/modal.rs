@@ -88,10 +88,11 @@ pub(crate) fn centred_frame(
 /// Called once for the first frame and again on every repaint. There is nothing to preserve on this
 /// screen, so each frame is written whole.
 pub(crate) fn paint_centred(rendered: &str) {
-    print!(
-        "{}",
-        centred_frame(rendered, get_terminal_width(), get_terminal_height())
-    );
+    // `\r\n`, not `\n`: the popup that runs before the chat may have asked crossterm for raw
+    // mode, which turns off the terminal's newline-to-carriage-return translation. Without the
+    // explicit CR every row would start where the previous one ended and the box would shear.
+    let frame = centred_frame(rendered, get_terminal_width(), get_terminal_height());
+    print!("{}", frame.replace('\n', "\r\n"));
     let _ = io::stdout().flush();
 }
 
