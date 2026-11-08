@@ -103,6 +103,13 @@ pub struct AgentConfig {
     pub system_prompt_prefix: Option<String>,
     /// When specified, completely replaces the default system prompt template (used for specialized subagents).
     pub system_prompt_override: Option<String>,
+    /// Runtime-only persona text from the active profile. Never read from the config file: the
+    /// profile loader sets it after resolution, so a profile cannot be edited through `config set`.
+    #[serde(skip)]
+    pub profile_persona: Option<String>,
+    /// Runtime-only behavior text from the active profile. See [`Self::profile_persona`].
+    #[serde(skip)]
+    pub profile_behavior: Option<String>,
     /// Estimated transcript size at which the oldest turns are summarised.
     pub compact_at_tokens: usize,
     /// Trailing user turns kept verbatim when compacting.
@@ -215,6 +222,8 @@ impl Default for AgentConfig {
             require_hitl_for_mutation: true,
             system_prompt_prefix: None,
             system_prompt_override: None,
+            profile_persona: None,
+            profile_behavior: None,
             compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,

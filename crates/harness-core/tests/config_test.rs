@@ -18,6 +18,7 @@ fn layers(file: Option<PathBuf>) -> Layers {
     Layers {
         defaults: Config::default(),
         file,
+        profile: None,
         env: BTreeMap::new(),
         flags: BTreeMap::new(),
     }
@@ -353,6 +354,7 @@ fn provider_override_keys_are_known_and_reported() {
     let resolved = resolve(&Layers {
         defaults,
         file: Some(path),
+        profile: None,
         env: BTreeMap::new(),
         flags: BTreeMap::new(),
     })

@@ -145,6 +145,7 @@ fn test_gateway_config_persistence() {
     let layers = Layers {
         defaults: Config::default(),
         file: Some(file.clone()),
+        profile: None,
         env: BTreeMap::new(),
         flags: BTreeMap::new(),
     };

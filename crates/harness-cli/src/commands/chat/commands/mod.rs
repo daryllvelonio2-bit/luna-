@@ -162,6 +162,30 @@ fn parse_feature_arg(arg: Option<&str>) -> Result<Option<bool>, ()> {
     }
 }
 
+/// Parse `/profile ...` into the CLI subcommand it maps to.
+fn parse_profile_command(arg: Option<&str>) -> Option<crate::commands::profile::ProfileCommand> {
+    use crate::commands::profile::ProfileCommand;
+    let mut parts = arg?.split_whitespace();
+    match parts.next()? {
+        "list" | "ls" => Some(ProfileCommand::List),
+        "show" => Some(ProfileCommand::Show {
+            name: parts.next().map(str::to_string),
+            full: parts.any(|part| part == "--full"),
+        }),
+        "path" => Some(ProfileCommand::Path {
+            name: parts.next().map(str::to_string),
+        }),
+        "create" | "new" => Some(ProfileCommand::Create {
+            name: parts.next().map(str::to_string),
+        }),
+        "delete" | "rm" => Some(ProfileCommand::Delete {
+            name: parts.next()?.to_string(),
+            force: false,
+        }),
+        _ => None,
+    }
+}
+
 /// Apply a runtime feature toggle to both the CLI's copy and the live agent.
 ///
 /// The agent holds the flags the turn loop filters on, so a command that only changed the CLI's
@@ -473,6 +497,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/delete",
         details: "Delete current session and start a fresh one",
+    },
+    SlashCommand {
+        name: "/profile",
+        details: "List, create, show, or delete profiles (/profile create [name])",
     },
     SlashCommand {
         name: "/worker",
@@ -1072,6 +1100,60 @@ pub(crate) async fn execute_slash_command(
                 ));
             }
             ui.emit_above(&help_text);
+            Ok(SlashOutcome::Continue)
+        }
+        "/profile" | "/profiles" => {
+            ui.redraw_input_line();
+            let Some(command) = parse_profile_command(arg) else {
+                ui.emit_above(&format!(
+                    "{} Usage: /profile list | show [name] [--full] | path [name] | create [name] | delete <name>",
+                    "•".cyan()
+                ));
+                return Ok(SlashOutcome::Continue);
+            };
+            let global = match crate::commands::profile::global_config() {
+                Ok(config) => config,
+                Err(error) => {
+                    ui.emit_above(&format!(
+                        "{} Could not load the global config: {}",
+                        "✖".red().bold(),
+                        error
+                    ));
+                    return Ok(SlashOutcome::Continue);
+                }
+            };
+            // The wizard (name, $EDITOR prompts, checkbox pickers) needs a cooked terminal.
+            let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+            if raw {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
+            let result = crate::commands::profile::handle_profile_command(command, config, &global);
+            if raw {
+                let _ = crossterm::terminal::enable_raw_mode();
+            }
+            match result {
+                Ok(()) => {
+                    if matches!(arg.map(str::trim), Some(value) if value.starts_with("create") || value.starts_with("new"))
+                    {
+                        let name = arg
+                            .and_then(|value| value.split_whitespace().nth(1))
+                            .unwrap_or("<name>");
+                        ui.emit_above(&format!(
+                            "{} Open the new profile with `luna {}` or `{}`.",
+                            "✔".green().bold(),
+                            name,
+                            name
+                        ));
+                    }
+                }
+                Err(error) => {
+                    ui.emit_above(&format!(
+                        "{} Profile command failed: {}",
+                        "✖".red().bold(),
+                        error
+                    ));
+                }
+            }
             Ok(SlashOutcome::Continue)
         }
         "/worker" => {

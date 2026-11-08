@@ -1,8 +1,8 @@
 //! End-to-end tests of the onboarding flow: a scripted answer against a real temp config file.
 //!
 //! The flow is driven through [`harness_onboarding::run`] with an `InstantPacer` and a fixed column
-//! count, so these tests exercise the production code path — briefing, menu, validation, persistence,
-//! confirmation — without a terminal and without waiting three seconds for the animation.
+//! count, so these tests exercise the production code path — briefing, settings screens, validation,
+//! persistence, confirmation — without a terminal and without waiting for the animation.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -16,6 +16,7 @@ fn layers(file: &Path) -> Layers {
     Layers {
         defaults: Config::default(),
         file: Some(file.to_path_buf()),
+        profile: None,
         env: BTreeMap::new(),
         flags: BTreeMap::new(),
     }
@@ -44,7 +45,7 @@ fn drive_expecting_error(file: &Path, script: &str) -> String {
     let mut out: Vec<u8> = Vec::new();
     let mut pacer = InstantPacer;
     let error = run(&layers, &mut reader, &mut out, &mut pacer, &columns)
-        .expect_err("the script never picks a valid persona");
+        .expect_err("the script does not complete the flow");
     error.to_string()
 }
 
@@ -74,7 +75,7 @@ fn read_config(file: &Path) -> serde_yaml::Value {
 }
 
 #[test]
-fn a_fresh_install_is_onboarded_and_the_choice_is_persisted() {
+fn a_fresh_install_is_onboarded_with_the_default_profile() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
     let layers = layers(&file);
@@ -85,21 +86,23 @@ fn a_fresh_install_is_onboarded_and_the_choice_is_persisted() {
     );
     assert!(!file.exists());
 
-    let (outcome, rendered) = drive(&file, "3\n2\n");
+    // The first answer is the memory writer. There is no persona prompt consuming input.
+    let (outcome, rendered) = drive(&file, "2\n");
 
-    assert_eq!(outcome.persona.id, 3);
-    assert_eq!(outcome.persona.name, "Celestial Oracle");
+    assert_eq!(outcome.profile, harness_core::profiles::DEFAULT_PROFILE);
     assert_eq!(outcome.memory, harness_core::MemoryMode::Background);
     assert_eq!(outcome.config_path, file);
 
     let config = read_config(&file);
-    assert_eq!(config["persona"]["id"].as_u64(), Some(3));
-    assert_eq!(config["persona"]["name"].as_str(), Some("Celestial Oracle"));
     assert_eq!(config["memory"]["mode"].as_str(), Some("background"));
     assert_eq!(config["first_run"].as_bool(), Some(false));
+    assert!(
+        config.get("persona").is_none(),
+        "onboarding no longer writes a persona"
+    );
 
-    assert!(rendered.contains("Persona configured"));
-    assert!(rendered.contains("Celestial Oracle (id 3)"));
+    assert!(rendered.contains("Profile configured"));
+    assert!(rendered.contains("default (built-in)"));
     assert!(rendered.contains("Background saver"));
     assert!(rendered.contains("Config written to"));
 }
@@ -110,7 +113,7 @@ fn the_flow_writes_the_config_and_the_gate_then_stays_closed() {
     let file = tmp.path().join("nested").join("luna").join("config.yaml");
     let layers = layers(&file);
 
-    drive(&file, "6\n1\n");
+    drive(&file, "1\n");
 
     assert!(file.exists(), "the flow creates parent directories");
     assert!(
@@ -118,26 +121,24 @@ fn the_flow_writes_the_config_and_the_gate_then_stays_closed() {
         "an onboarded install must not be asked again"
     );
 
-    // Re-resolving the same file is what the harness does on the next launch: the persona is there.
     let resolved = harness_core::config::resolve(&layers)
         .expect("the written file loads")
         .into_config();
-    assert_eq!(resolved.persona.id, 6);
-    assert_eq!(resolved.persona.name, "Supportive Android Maid");
+    assert_eq!(resolved.memory.mode, harness_core::MemoryMode::Session);
     assert!(!resolved.first_run);
 }
 
 #[test]
-fn a_blank_line_takes_the_default_persona() {
+fn a_blank_line_takes_the_default_memory_writer() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let (outcome, _) = drive(&file, "\n\n");
+    let (outcome, _) = drive(&file, "\n");
 
-    assert_eq!(outcome.persona.id, harness_onboarding::persona::DEFAULT_ID);
+    assert_eq!(outcome.memory, harness_core::MemoryMode::Session);
     assert_eq!(
-        read_config(&file)["persona"]["id"].as_u64(),
-        Some(u64::from(harness_onboarding::persona::DEFAULT_ID))
+        read_config(&file)["memory"]["mode"].as_str(),
+        Some("session")
     );
 }
 
@@ -146,34 +147,16 @@ fn invalid_answers_are_rejected_and_then_recovered_from() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let (outcome, rendered) = drive(&file, "0\nbanana\n11\n7\n2\n");
+    let (outcome, rendered) = drive(&file, "9\nbanana\n2\n");
 
-    assert_eq!(outcome.persona.id, 7, "the fourth answer is honoured");
+    assert_eq!(outcome.memory, harness_core::MemoryMode::Background);
     assert_eq!(
         rendered.matches('✗').count(),
-        3,
+        2,
         "each rejection is reported"
     );
-    assert!(rendered.contains("is outside the catalog"));
-    assert!(rendered.contains("is not a number"));
-    assert_eq!(read_config(&file)["persona"]["id"].as_u64(), Some(7));
-}
-
-#[test]
-fn a_script_that_never_answers_validly_persists_nothing() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let file = tmp.path().join("config.yaml");
-
-    let error = drive_expecting_error(&file, "99\n99\n99\n99\n99\n99\n99\n99\n99\n99\n99\n");
-
-    assert!(
-        error.contains("no personality core was selected"),
-        "{error}"
-    );
-    assert!(
-        !file.exists(),
-        "a rejected flow must not write a half-config"
-    );
+    assert!(rendered.contains("there is no option 9"));
+    assert!(rendered.contains("'banana' is not a number"));
 }
 
 #[test]
@@ -183,7 +166,10 @@ fn a_closed_input_is_an_error_rather_than_a_silent_default() {
 
     let error = drive_expecting_error(&file, "");
 
-    assert!(error.contains("input closed"), "{error}");
+    assert!(
+        error.contains("input closed before a memory mode was chosen"),
+        "{error}"
+    );
     assert!(!file.exists());
 }
 
@@ -206,14 +192,12 @@ fn the_greeting_is_centered_and_the_briefing_keeps_its_shape() {
     );
     assert!(rendered.contains("I inspect, execute, and reflect"));
     assert!(rendered.contains("tune my neural core to your style"));
-    assert!(rendered.contains("NEURAL CORE CALIBRATION"));
-    for persona in harness_onboarding::CATALOG {
-        assert!(
-            rendered.contains(persona.name),
-            "{} is missing from the menu",
-            persona.name
-        );
-    }
+    assert!(rendered.contains("Profile configured"));
+    assert!(
+        !rendered.contains("NEURAL CORE CALIBRATION"),
+        "the persona menu is gone"
+    );
+    assert!(!rendered.contains("Classic Tsundere"));
 }
 
 #[test]
@@ -222,7 +206,7 @@ fn the_memory_screen_offers_both_writers_and_a_blank_keeps_the_session_writer() 
     let file = tmp.path().join("config.yaml");
     let layers = layers(&file);
 
-    let (outcome, rendered) = drive(&file, "5\n\n");
+    let (outcome, rendered) = drive(&file, "\n");
 
     assert_eq!(outcome.memory, harness_core::MemoryMode::Session);
     assert_eq!(
@@ -241,14 +225,12 @@ fn the_memory_screen_offers_both_writers_and_a_blank_keeps_the_session_writer() 
         rendered.contains("luna config set memory.mode background"),
         "the escape hatch is on screen"
     );
-    // Both answers are echoed, so the user saw what they chose before the flow ended.
     assert!(rendered.contains("Session writer — I save memories as we talk"));
 
     let resolved = harness_core::config::resolve(&layers)
         .expect("the written file loads")
         .into_config();
     assert_eq!(resolved.memory.mode, harness_core::MemoryMode::Session);
-    assert_eq!(resolved.persona.id, 5);
 }
 
 #[test]
@@ -265,7 +247,7 @@ fn a_rejected_memory_answer_is_reported_and_the_next_one_is_honoured() {
     );
     assert_eq!(
         rendered.matches('✗').count(),
-        2,
+        3,
         "each rejection is reported"
     );
     assert!(rendered.contains("there is no option 9"));
@@ -277,7 +259,7 @@ fn a_closed_input_before_the_memory_mode_writes_nothing() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let error = drive_expecting_error(&file, "4\n");
+    let error = drive_expecting_error(&file, "");
 
     assert!(
         error.contains("input closed before a memory mode was chosen"),
@@ -285,7 +267,7 @@ fn a_closed_input_before_the_memory_mode_writes_nothing() {
     );
     assert!(
         !file.exists(),
-        "neither answer is written when the second one is missing"
+        "nothing is written when the first answer is missing"
     );
 }
 
@@ -294,19 +276,18 @@ fn re_running_the_flow_overwrites_the_memory_mode() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    drive(&file, "4\n2\n");
+    drive(&file, "2\n");
     assert_eq!(
         read_config(&file)["memory"]["mode"].as_str(),
         Some("background")
     );
 
     // `luna setup` bypasses the first_run gate, so a second run must be able to switch back.
-    drive(&file, "4\n1\n");
+    drive(&file, "1\n");
     assert_eq!(
         read_config(&file)["memory"]["mode"].as_str(),
         Some("session")
     );
-    assert_eq!(read_config(&file)["persona"]["id"].as_u64(), Some(4));
 }
 
 #[test]
@@ -314,7 +295,7 @@ fn the_terminal_is_prepared_and_handed_back_clean() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
     let layers = layers(&file);
-    let mut reader = Cursor::new(b"2\n1\n".to_vec());
+    let mut reader = Cursor::new(b"1\n".to_vec());
     let mut out: Vec<u8> = Vec::new();
     let mut pacer = InstantPacer;
 
@@ -340,8 +321,8 @@ fn onboarding_configures_custom_auto_compact() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona 1, memory 1, enable auto-compact, threshold 250k, turns 15
-    let (outcome, rendered) = drive(&file, "1\n1\n1\n250k\n15\n");
+    // memory 1, enable auto-compact, threshold 250k, percent/turns 15
+    let (outcome, rendered) = drive(&file, "1\n1\n250k\n15\n");
 
     assert!(outcome.auto_compact.enabled);
     assert_eq!(outcome.auto_compact.threshold, 250_000);
@@ -359,10 +340,10 @@ fn onboarding_configures_telegram_gateway() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona 1, memory 1, enable auto-compact, default th, default turns, gateway 2 (Telegram), bot token
+    // memory 1, auto-compact 1, default threshold, default percent, gateway 2, bot token
     let (outcome, rendered) = drive(
         &file,
-        "1\n1\n1\n\n\n2\n123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11\n",
+        "1\n1\n\n\n2\n123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11\n",
     );
 
     assert!(outcome.gateway.enabled);
@@ -388,8 +369,8 @@ fn onboarding_defaults_to_terminal_only_gateway() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona 1, memory 1, enable auto-compact, default th, default turns, gateway 1 (Terminal only)
-    let (outcome, rendered) = drive(&file, "1\n1\n1\n\n\n1\n");
+    // memory 1, auto-compact 1, default threshold, default percent, gateway 1
+    let (outcome, rendered) = drive(&file, "1\n1\n\n\n1\n");
 
     assert!(!outcome.gateway.enabled);
     assert_eq!(outcome.gateway.platform, "none");
@@ -405,8 +386,8 @@ fn onboarding_disables_auto_compact() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona 2, memory 1, disable auto-compact (choice 2)
-    let (outcome, rendered) = drive(&file, "2\n1\n2\n");
+    // memory 1, disable auto-compact (choice 2)
+    let (outcome, rendered) = drive(&file, "1\n2\n");
 
     assert!(!outcome.auto_compact.enabled);
 
@@ -449,8 +430,8 @@ fn onboarding_configures_custom_notes_dir() {
     let file = tmp.path().join("config.yaml");
     let notes_dir = tmp.path().join("custom-notes");
 
-    // persona 1, memory 1, auto-compact default, gateway default, custom notes_dir
-    let (outcome, rendered) = drive(&file, &format!("1\n1\n1\n\n\n1\n{}\n", notes_dir.display()));
+    // memory 1, auto-compact default, gateway default, custom notes_dir
+    let (outcome, rendered) = drive(&file, &format!("1\n1\n\n\n1\n{}\n", notes_dir.display()));
 
     assert_eq!(outcome.notes_dir, notes_dir);
     assert!(notes_dir.is_dir(), "the chosen folder is created");

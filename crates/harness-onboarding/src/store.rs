@@ -1,16 +1,14 @@
 //! Persistence of the onboarding result.
 //!
 //! The flow records its answers in the harness config file (`$LUNA_CONFIG`, else
-//! `~/.luna/config.yaml`): the persona (`persona.id`, `persona.name`), who writes memory
-//! (`memory.mode`), where notes live (`paths.notes_dir`), the auto-compact budget, the messaging
-//! gateway, whether the web tools are registered (`tools.web.enabled`, `tools.web.search_backend`,
-//! `tools.web.search_api_key_env`), and `first_run: false` to close the gate.
+//! `~/.luna/config.yaml`): who writes memory (`memory.mode`), where notes live
+//! (`paths.notes_dir`), the auto-compact budget, the messaging gateway, whether the web tools are
+//! registered (`tools.web.enabled`, `tools.web.search_backend`, `tools.web.search_api_key_env`),
+//! and `first_run: false` to close the gate.
 //!
-//! What is deliberately *not* written is the persona's prompt block. Prompt text has exactly one
-//! home — `crates/harness-core/prompts.md` — so an install stores the *choice* and the block is
-//! resolved from that file at load time ([`crate::persona::Persona::prompt_block`]). Copying the
-//! prose into every user's YAML would freeze it at the version they onboarded with, and editing a
-//! persona's voice would then require migrating config files instead of shipping a rebuild.
+//! The profile is not a config key. Bare `luna` always runs the built-in `default` profile, and a
+//! named profile is selected by invocation (`luna terra`) — so onboarding has nothing to persist
+//! for it and cannot pin a custom profile over the default.
 //!
 //! `memory.mode` is stored the same way: the mode names a behaviour the harness already implements
 //! (`session` or `background`), not a copy of anything.
@@ -25,12 +23,6 @@ use harness_core::config::{self, Layers, SearchBackend};
 use harness_core::error::HarnessError;
 use harness_core::MemoryMode;
 
-use crate::persona::Persona;
-
-/// The config key holding the selected persona id.
-pub const PERSONA_ID_KEY: &str = "persona.id";
-/// The config key holding the selected persona's display name.
-pub const PERSONA_NAME_KEY: &str = "persona.name";
 /// The config key holding who writes durable memory: `session` or `background`.
 pub const MEMORY_MODE_KEY: &str = "memory.mode";
 /// The config key holding whether auto-compaction is enabled.
@@ -134,15 +126,12 @@ impl Default for AutoCompactSelection {
 /// Write the selections, returning the path that was written.
 pub fn persist(
     layers: &Layers,
-    persona: &Persona,
     memory: MemoryMode,
     notes_dir: &std::path::Path,
     auto_compact: &AutoCompactSelection,
     gateway: &GatewaySelection,
     web: &WebSelection,
 ) -> Result<PathBuf, HarnessError> {
-    config::set_in_file(layers, PERSONA_ID_KEY, &persona.id.to_string())?;
-    config::set_in_file(layers, PERSONA_NAME_KEY, persona.name)?;
     config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
     config::set_in_file(layers, NOTES_DIR_KEY, &notes_dir.to_string_lossy())?;
     config::set_in_file(

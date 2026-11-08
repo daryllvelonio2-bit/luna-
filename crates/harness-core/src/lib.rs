@@ -8,6 +8,7 @@ pub mod fsutil;
 pub mod glob;
 pub mod hooks;
 pub mod permission;
+pub mod profiles;
 pub mod prompts;
 pub mod registry;
 pub mod saver;

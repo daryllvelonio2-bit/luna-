@@ -81,6 +81,14 @@ mod tests {
             body.contains("{{MEMORY_AND_NOTE_PROTOCOL}}"),
             "memory and note protocol marker missing"
         );
+        assert!(
+            body.contains("{{PROFILE_PERSONA}}"),
+            "profile persona marker missing"
+        );
+        assert!(
+            body.contains("{{PROFILE_BEHAVIOR}}"),
+            "profile behavior marker missing"
+        );
     }
 
     #[test]

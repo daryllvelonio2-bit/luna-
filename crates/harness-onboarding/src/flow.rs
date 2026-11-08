@@ -1,20 +1,22 @@
-//! The first-run flow: briefing, selection, handshake.
+//! The first-run flow: briefing, settings, handshake.
 //!
 //! [`needs_onboarding`] is the gate the harness calls before its agent loop; [`run`] is the flow
-//! itself, written against `BufRead`/`Write`/`Pacer`/a column-count closure so the whole three-phase
-//! sequence can be driven from a test with a scripted answer and no terminal.
+//! itself, written against `BufRead`/`Write`/`Pacer`/a column-count closure so the whole sequence
+//! can be driven from a test with a scripted answer and no terminal.
 //!
 //! The phases:
 //!
 //! 1. A centered, typed mission briefing (`🌙`, greeting, what Luna is for, the hand-off line).
-//! 2. The persona menu, with `1..=10` accepted, a blank line taking the default, and anything else
-//!    rejected with a reason and re-prompted.
-//! 3. The other settings screens — who writes memory, auto-compaction, the messaging gateway, where
+//! 2. The settings screens — who writes memory, auto-compaction, the messaging gateway, where
 //!    notes live, and whether the agent may search and read the web — each drawn and validated by
 //!    its own module ([`crate::memory_step`], [`crate::compact_step`], [`crate::gateway_step`],
 //!    [`crate::notes_step`], [`crate::web_step`]) against the same panel.
-//! 4. The selections written to the config file, then a centered confirmation naming them and the
+//! 3. The selections written to the config file, then a centered confirmation naming them and the
 //!    file they were written to.
+//!
+//! There is no persona step. The only built-in profile is `default`, and bare `luna` already runs
+//! it. Custom profiles are created later with `/profile create`; onboarding configures the
+//! default install and never picks a voice on the user's behalf.
 //!
 //! The cursor is restored on every path: by the [`CursorGuard`] drop guard, and — because a signal
 //! does not unwind — by the SIGINT/SIGTERM handlers [`run_interactive`] installs.
@@ -24,14 +26,13 @@ use std::path::{Path, PathBuf};
 
 use harness_core::config::{self, Layers};
 use harness_core::error::HarnessError;
+use harness_core::profiles::DEFAULT_PROFILE;
 use harness_core::MemoryMode;
 
-use crate::menu;
-use crate::persona::Persona;
 use crate::screen::{self, Size};
 use crate::signal::CursorGuard;
 use crate::store;
-use crate::style::{Line, Span, CREST_COLOR, ERROR_COLOR, MUTED_COLOR, NAME_COLOR};
+use crate::style::{Line, Span, CREST_COLOR, MUTED_COLOR, NAME_COLOR};
 use crate::typewriter::{Pacer, RealPacer, Typewriter};
 
 /// The celestial crest, rendered with a glow.
@@ -47,15 +48,13 @@ pub const MISSION: [&str; 3] = [
 /// The line that hands the floor to the user.
 pub const TRANSITION: &str = "── Let's tune my neural core to your style ──";
 /// The confirmation headline.
-pub const LINK_TITLE: &str = "🌙  Persona configured.";
-/// How many rejected answers are tolerated before the flow gives up instead of looping forever.
-pub const MAX_ATTEMPTS: usize = 10;
+pub const LINK_TITLE: &str = "🌙  Profile configured.";
 
 /// What the flow produced.
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    /// The chosen personality core.
-    pub persona: &'static Persona,
+    /// The profile the install runs with. Always the built-in `default`.
+    pub profile: &'static str,
     /// Who writes durable memory from now on.
     pub memory: MemoryMode,
     /// Where markdown notes live on disk.
@@ -98,7 +97,6 @@ where
 
     let mut writer = Typewriter::new(out, pacer, size);
     briefing(&mut writer)?;
-    let persona = select_persona(&mut writer, reader)?;
 
     // Phase 2b: who writes memory. A separate screen, same box, same list language.
     let memory = select_memory(&mut writer, reader)?;
@@ -115,20 +113,11 @@ where
     // Phase 2f: whether the agent may search and read the web.
     let web = crate::web_step::select(&mut writer, reader)?;
 
-    let config_path = store::persist(
-        layers,
-        persona,
-        memory,
-        &notes_dir,
-        &auto_compact,
-        &gateway,
-        &web,
-    )?;
+    let config_path = store::persist(layers, memory, &notes_dir, &auto_compact, &gateway, &web)?;
 
     let mut writer = Typewriter::new(out, pacer, size);
     confirmation(
         &mut writer,
-        persona,
         memory,
         &notes_dir,
         &auto_compact,
@@ -138,7 +127,7 @@ where
     )?;
 
     Ok(Outcome {
-        persona,
+        profile: DEFAULT_PROFILE,
         memory,
         notes_dir,
         auto_compact,
@@ -188,56 +177,6 @@ fn briefing<W: Write, P: Pacer>(writer: &mut Typewriter<'_, W, P>) -> Result<(),
     Ok(())
 }
 
-/// Phase 2: the menu, then the answer loop.
-fn select_persona<R: BufRead, W: Write, P: Pacer>(
-    writer: &mut Typewriter<'_, W, P>,
-    reader: &mut R,
-) -> Result<&'static Persona, HarnessError> {
-    writer.clear_screen()?;
-    let size = writer.size();
-    // The header draws itself at boot speed, then the choices land at once: the box gives the eye
-    // somewhere to land before ten names arrive.
-    writer.type_block_quick(&menu::header(size))?;
-    writer.blank()?;
-    writer.write_block(&menu::body(size))?;
-    writer.blank()?;
-    writer.write_block(&menu::hint_lines(size))?;
-    writer.blank()?;
-
-    for attempt in 1..=MAX_ATTEMPTS {
-        let prompt = menu::prompt_lines(size);
-        if let Some((last, leading)) = prompt.split_last() {
-            for line in leading {
-                writer.write_line(line)?;
-            }
-            writer.write_prompt_line(last)?;
-        }
-        let mut answer = String::new();
-        if reader.read_line(&mut answer)? == 0 {
-            // EOF: the input is gone (a piped stdin, a closed terminal). Say so rather than
-            // persisting a persona the user never chose.
-            writer.blank()?;
-            return Err(HarnessError::Io(
-                "input closed before a personality core was chosen".to_string(),
-            ));
-        }
-        match menu::parse_selection(&answer) {
-            Ok(persona) => return Ok(persona),
-            Err(error) => {
-                writer.write_centered(&format!("✗ {}", error), Some(ERROR_COLOR))?;
-                if attempt == MAX_ATTEMPTS {
-                    break;
-                }
-            }
-        }
-    }
-
-    Err(HarnessError::ConfigurationError(format!(
-        "no personality core was selected in {} attempts; run `luna` again when you are ready",
-        MAX_ATTEMPTS
-    )))
-}
-
 /// Phase 2b: the memory-core screen, then its answer loop.
 ///
 /// The step owns its own screen and retry loop ([`crate::memory_step::select`]); the flow only has
@@ -253,7 +192,6 @@ fn select_memory<R: BufRead, W: Write, P: Pacer>(
 #[allow(clippy::too_many_arguments)]
 fn confirmation<W: Write, P: Pacer>(
     writer: &mut Typewriter<'_, W, P>,
-    persona: &Persona,
     memory: MemoryMode,
     notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
@@ -264,7 +202,6 @@ fn confirmation<W: Write, P: Pacer>(
     writer.clear_screen()?;
     writer.show_cursor()?;
     let lines = confirmation_lines(
-        persona,
         memory,
         notes_dir,
         auto_compact,
@@ -278,9 +215,7 @@ fn confirmation<W: Write, P: Pacer>(
 }
 
 /// The centered confirmation block, sized for the terminal it will land in.
-#[allow(clippy::too_many_arguments)]
 pub fn confirmation_lines(
-    persona: &Persona,
     memory: MemoryMode,
     notes_dir: &Path,
     auto_compact: &store::AutoCompactSelection,
@@ -296,13 +231,21 @@ pub fn confirmation_lines(
     let mut lines = vec![
         Line::of(Span::strong(LINK_TITLE, CREST_COLOR)),
         Line::blank(),
-        Line::of(Span::muted("Personality core  "))
-            .with(Span::strong(persona.labelled(), NAME_COLOR)),
+        Line::of(Span::muted("Profile  ")).with(Span::strong(
+            format!("{} (built-in)", DEFAULT_PROFILE),
+            NAME_COLOR,
+        )),
+        Line::of(Span::muted(
+            "Create another with `/profile create`; open it with `luna <name>`.",
+        )),
+        Line::blank(),
     ];
-    for wrapped in screen::wrap(&format!("“{}”", persona.tagline), limit) {
-        lines.push(Line::of(Span::muted(wrapped)));
+    // The hint above is a fixed string; rewrap it for the narrow terminal case so it obeys `limit`.
+    let hint_start = 3usize;
+    let hint = lines.remove(hint_start).text();
+    for (offset, wrapped) in screen::wrap(&hint, limit).into_iter().enumerate() {
+        lines.insert(hint_start + offset, Line::of(Span::muted(wrapped)));
     }
-    lines.push(Line::blank());
     // Same shape as the persona block above: label, then the value — on one line when it fits and
     // wrapped under the label when the terminal is too narrow for both.
     let label = "Memory writer";
@@ -381,7 +324,7 @@ pub fn confirmation_lines(
         lines.push(Line::of(Span::muted(wrapped)));
     }
     for wrapped in screen::wrap(
-        "Verify with `luna config get persona.id` and `luna config get memory.mode`, or change them later with `luna config set`.",
+        "Verify with `luna config get memory.mode`, or change settings later with `luna config set`.",
         limit,
     ) {
         lines.push(Line::of(Span::muted(wrapped)));
@@ -395,19 +338,16 @@ pub fn confirmation_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persona;
     use std::path::PathBuf;
 
     #[test]
-    fn the_confirmation_names_the_persona_and_the_file() {
-        let persona = persona::by_id(3).expect("in the catalog");
+    fn the_confirmation_names_the_default_profile_and_the_file() {
         let path = std::env::temp_dir().join(".luna").join("config.yaml");
         let notes_dir = std::env::temp_dir().join(".luna").join("notes");
         let ac = store::AutoCompactSelection::default();
         let gw = store::GatewaySelection::default();
         let web = store::WebSelection::default();
         let block = confirmation_lines(
-            persona,
             MemoryMode::Background,
             &notes_dir,
             &ac,
@@ -421,10 +361,9 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n");
 
-        assert!(block.contains("Persona configured"));
-        assert!(block.contains(&persona.labelled()));
+        assert!(block.contains("Profile configured"));
+        assert!(block.contains("default (built-in)"));
         assert!(block.contains(&path.display().to_string()));
-        assert!(block.contains(persona.tagline));
         // Both answers are reported, so the screen states the whole outcome.
         assert!(block.contains("Background saver"), "{block}");
         assert!(block.contains("memory.mode"), "{block}");
@@ -435,7 +374,6 @@ mod tests {
 
     #[test]
     fn the_confirmation_fits_a_narrow_terminal() {
-        let persona = persona::by_id(9).expect("in the catalog");
         let notes_dir = PathBuf::from("~/.luna/notes");
         for columns in [40u16, 80, 120] {
             let ac = store::AutoCompactSelection::default();
@@ -446,7 +384,6 @@ mod tests {
                 api_key_env: Some("A_VERY_LONG_ENVIRONMENT_VARIABLE_NAME".to_string()),
             };
             for line in confirmation_lines(
-                persona,
                 MemoryMode::Session,
                 &notes_dir,
                 &ac,

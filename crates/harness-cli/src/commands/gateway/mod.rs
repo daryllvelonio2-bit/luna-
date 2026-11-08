@@ -69,14 +69,11 @@ fn headless_approver(config: &Config, yes: bool) -> Arc<dyn Approver> {
 }
 
 pub async fn run_gateway(
-    mut config: Config,
+    config: Config,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,
     options: GatewayOptions,
 ) -> Result<(), HarnessError> {
-    // Apply persona prompt prefix
-    harness_onboarding::persona::apply_selected(&mut config)?;
-
     let store = Arc::new(open_store(&config)?);
     let provider_id = config.model.provider.clone();
     let model_id = config.model.default.clone();
@@ -380,6 +377,8 @@ pub async fn run_gateway(
                             ..AgentConfig::default()
                         };
                         agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
+                        agent_cfg.profile_persona = config.agent.profile_persona.clone();
+                        agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
                         agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
                         agent_cfg.memory_mode = config.memory.mode;
                         agent_cfg.context_window = Some(

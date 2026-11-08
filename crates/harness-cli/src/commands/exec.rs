@@ -205,6 +205,8 @@ pub async fn run_exec(
         ..AgentConfig::default()
     };
     agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
+    agent_cfg.profile_persona = config.agent.profile_persona.clone();
+    agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     agent_cfg.memory_mode = config.memory.mode;
     // Follow the model's real window rather than the config's fixed bar; a headless run must fold

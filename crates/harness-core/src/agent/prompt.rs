@@ -17,16 +17,30 @@ where
         self.system_prompt(user_input).await
     }
 
-    /// The system prompt: the `prompts.md` template with the configured prefix and the retrieved
-    /// memories substituted in.
+    /// The system prompt: the static `prompts.md` contract with the active profile's persona and
+    /// behavior, the configured prefix, and the retrieved memories substituted in.
     ///
     /// Substitution is a literal `replace`, not `format!`, so the prompt text stays free of format
     /// syntax — a stray brace in the file can never abort a turn.
+    ///
+    /// Order matters. The profile's behavior is substituted *last*, after every static marker has
+    /// been resolved, so text a user wrote in a profile cannot remove or duplicate the locked
+    /// tool/memory blocks. Markers inside profile text stay literal.
     pub(super) async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
-        if let Some(ref custom_prompt) = self.config.system_prompt_override {
-            return Ok(custom_prompt.clone());
-        }
-
+        let default_profile = crate::profiles::default_profile()?;
+        let persona = self
+            .config
+            .profile_persona
+            .as_deref()
+            .unwrap_or(&default_profile.persona);
+        // `system_prompt_override` replaces only the behavior section; the static contract below
+        // it still applies. That is what makes it safe for specialized subagents.
+        let behavior = self
+            .config
+            .system_prompt_override
+            .as_deref()
+            .or(self.config.profile_behavior.as_deref())
+            .unwrap_or(&default_profile.behavior);
         let memory_prompt = if self.config.memory_enabled {
             let relevant_memories = self.memory.retrieve(user_input, 10).await?;
             self.memory.format_as_system_prompt(&relevant_memories)
@@ -78,15 +92,19 @@ where
         };
 
         let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
-            .replace(
-                "{{SYSTEM_PROMPT_PREFIX}}",
-                self.config.system_prompt_prefix.as_deref().unwrap_or(""),
-            )
             .replace("{{ACTIVE_MEMORIES_BLOCK}}", &active_memories_block)
             .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
             .replace("{{MCP_PROTOCOL}}", &mcp_protocol)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", &memory_instruction)
-            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction);
+            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction)
+            .replace(
+                "{{SYSTEM_PROMPT_PREFIX}}",
+                self.config.system_prompt_prefix.as_deref().unwrap_or(""),
+            )
+            .replace("{{PROFILE_PERSONA}}", persona)
+            // Behavior is last: a profile cannot re-open a marker the static contract already
+            // resolved, and a marker it writes stays literal text.
+            .replace("{{PROFILE_BEHAVIOR}}", behavior);
 
         let env_info = if let Some(ref root) = self.config.workspace_root {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());

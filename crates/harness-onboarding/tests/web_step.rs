@@ -18,6 +18,7 @@ fn layers(file: &Path) -> Layers {
     Layers {
         defaults: Config::default(),
         file: Some(file.to_path_buf()),
+        profile: None,
         env: BTreeMap::new(),
         flags: BTreeMap::new(),
     }
@@ -70,8 +71,8 @@ fn a_blank_web_answer_records_the_keyless_search() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona, memory, auto-compact off, gateway, notes (blank), web (blank)
-    let (outcome, rendered) = drive(&file, "1\n1\n2\n1\n\n\n");
+    // memory, auto-compact off, gateway, notes (blank), web (blank)
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n\n");
 
     assert!(outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::DuckDuckGo);
@@ -103,8 +104,8 @@ fn choosing_a_keyed_backend_records_the_variable_that_holds_the_key() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona, memory, auto-compact off, gateway, notes (blank), web (2 = Brave), variable name
-    let (outcome, rendered) = drive(&file, "1\n1\n2\n1\n\n2\nMY_BRAVE_KEY\n");
+    // memory, auto-compact off, gateway, notes (blank), web (2 = Brave), variable name
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n2\nMY_BRAVE_KEY\n");
 
     assert!(outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::Brave);
@@ -141,7 +142,7 @@ fn the_environment_variable_can_be_left_to_the_backend_default() {
     let file = tmp.path().join("config.yaml");
 
     // ... web (3 = Tavily), then a blank variable name.
-    let (outcome, rendered) = drive(&file, "1\n1\n2\n1\n\n3\n\n");
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n3\n\n");
 
     assert_eq!(outcome.web.backend, SearchBackend::Tavily);
     assert_eq!(outcome.web.api_key_env.as_deref(), Some("TAVILY_API_KEY"));
@@ -160,7 +161,7 @@ fn web_access_can_be_turned_off_entirely() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let (outcome, rendered) = drive(&file, "1\n1\n2\n1\n\n4\n");
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n4\n");
 
     assert!(!outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::Disabled);
@@ -179,7 +180,7 @@ fn a_rejected_web_answer_is_reported_and_the_next_one_is_honoured() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    let (outcome, rendered) = drive(&file, "1\n1\n2\n1\n\n7\nbanana\nddg\n");
+    let (outcome, rendered) = drive(&file, "1\n2\n1\n\n7\nbanana\nddg\n");
 
     assert_eq!(outcome.web.backend, SearchBackend::DuckDuckGo);
     assert_eq!(
@@ -202,8 +203,8 @@ fn a_script_that_ends_before_the_web_question_still_leaves_a_usable_default() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let file = tmp.path().join("config.yaml");
 
-    // persona, memory, auto-compact off, gateway, notes (blank) — and nothing more.
-    let (outcome, _) = drive(&file, "1\n1\n2\n1\n\n");
+    // memory, auto-compact off, gateway, notes (blank) — and nothing more.
+    let (outcome, _) = drive(&file, "1\n2\n1\n\n");
 
     assert!(outcome.web.enabled);
     assert_eq!(outcome.web.backend, SearchBackend::DuckDuckGo);

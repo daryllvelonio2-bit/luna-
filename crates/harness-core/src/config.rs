@@ -646,6 +646,8 @@ pub struct PathsSettings {
     pub workspace_root: PathBuf,
     pub jobs_dir: PathBuf,
     pub skills_dir: PathBuf,
+    /// Where custom profiles live: one self-contained directory per profile.
+    pub profiles_dir: PathBuf,
     /// Per-turn file snapshots that `/rewind` restores from.
     pub checkpoints_dir: PathBuf,
     /// One row per turn: tokens, model, duration, cost. See `usage.rs`.
@@ -673,6 +675,7 @@ impl Default for PathsSettings {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             jobs_dir: luna.join("jobs"),
             skills_dir: luna.join("skills"),
+            profiles_dir: luna.join("profiles"),
             checkpoints_dir: luna.join("checkpoints"),
             usage_db: luna.join("usage.db"),
             todos_dir: luna.join("todos"),
@@ -869,6 +872,9 @@ pub struct Layers {
     pub defaults: Config,
     /// Layer 2. `None` means the file layer does not exist at all.
     pub file: Option<PathBuf>,
+    /// Layer 2b. A profile's own `config.yaml`, overlaid after the global file and before the
+    /// environment. `None` for the built-in `default` profile.
+    pub profile: Option<PathBuf>,
     /// Layer 3, already mapped to dotted keys (see [`env_overrides`]).
     pub env: BTreeMap<String, String>,
     /// Layer 4, as dotted keys.
@@ -882,6 +888,7 @@ pub fn process_layers(defaults: Config) -> Result<Layers, HarnessError> {
     Ok(Layers {
         defaults,
         file: Some(config_file_path()),
+        profile: None,
         env,
         flags: BTreeMap::new(),
     })
@@ -934,18 +941,26 @@ pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
         Some(path) => read_file_value(path)?.unwrap_or_else(empty),
         None => empty(),
     };
+    let profile = match layers.profile.as_deref() {
+        Some(path) => read_file_value(path)?.unwrap_or_else(empty),
+        None => empty(),
+    };
     let env = overlay_value(&layers.env, &known)?;
     let flag = overlay_value(&layers.flags, &known)?;
 
     let mut merged = defaults;
     deep_merge(&mut merged, file.clone());
+    deep_merge(&mut merged, profile.clone());
     deep_merge(&mut merged, env.clone());
     deep_merge(&mut merged, flag.clone());
 
     let mut config: Config = from_value(&merged)?;
     expand_paths(&mut config.paths);
 
-    let from_file = flatten(&file);
+    let mut from_file = flatten(&file);
+    for (key, value) in flatten(&profile) {
+        from_file.insert(key, value);
+    }
     let from_env = flatten(&env);
     let from_flag = flatten(&flag);
 

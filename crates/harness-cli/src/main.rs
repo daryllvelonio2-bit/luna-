@@ -14,6 +14,7 @@ use commands::chat::run_interactive_chat;
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
 use commands::models::{handle_models_command, ModelsCommand};
+use commands::profile::{handle_profile_command, parse_invocation, ProfileCommand};
 use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
 use commands::skill::{handle_skill_command, SkillCommand};
 use commands::supervisor::run_supervisor_loop;
@@ -28,7 +29,7 @@ const MODEL_CACHE_TTL_HOURS: i64 = 24;
 #[command(
     name = "luna",
     author = "Luna AI",
-    version = "0.1.3",
+    version = "0.1.4",
     about = "Autonomous AI Agent Harness in Rust"
 )]
 struct Cli {
@@ -205,7 +206,12 @@ enum Commands {
         #[command(subcommand)]
         subcommand: ConfigCommand,
     },
-    /// Run the setup / onboarding flow: choose a personality core and rewrite the config
+    /// List, create, show, delete, or locate profiles
+    Profile {
+        #[command(subcommand)]
+        subcommand: ProfileCommand,
+    },
+    /// Run the setup / onboarding flow and rewrite the config
     #[command(name = "setup", alias = "onboard", alias = "onboarding")]
     Setup,
     /// Connect Luna to external chat platforms (Telegram, Discord, WhatsApp)
@@ -240,12 +246,26 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), HarnessError> {
+    // Profile selection happens before clap, because `luna terra` is not a subcommand and a
+    // launcher named `terra` changes argv[0] rather than argv[1]. The selector is removed from
+    // the argument list, leaving clap an ordinary command line.
+    let invocation = parse_invocation(
+        std::env::args_os().collect(),
+        &harness_core::profiles::profiles_root(),
+    )?;
+    let profile_name = invocation.name().to_string();
+
     // The config resolves *before* clap parses, because the flag help text reports the configured
     // defaults — `luna chat --help` must show the real provider, not a literal.
     let mut layers = config::process_layers(catalog_defaults())?;
+    if profile_name != harness_core::profiles::DEFAULT_PROFILE {
+        let dir =
+            harness_core::profiles::profile_dir(&layers.defaults.paths.profiles_dir, &profile_name);
+        layers.profile = Some(dir.join("config.yaml"));
+    }
     let help_defaults = config::resolve(&layers)?;
 
-    let matches = build_command(&help_defaults).get_matches();
+    let matches = build_command(&help_defaults).get_matches_from(invocation.args);
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => error.exit(),
@@ -317,6 +337,9 @@ async fn main() -> Result<(), HarnessError> {
     }
 
     let mut config: Config = config::resolve(&layers)?.into_config();
+    // The profile's persona/behavior and (for a custom profile) its state paths. Forced after
+    // resolution so a profile's config.yaml cannot point at another profile's data.
+    let _active_profile = commands::profile::activate(&mut config, &profile_name)?;
 
     let is_interactive_chat = match &cli.command {
         None | Some(Commands::Chat { .. }) => {
@@ -329,23 +352,23 @@ async fn main() -> Result<(), HarnessError> {
     // user who has never configured Luna gets the briefing instead of an agent loop that fails on a
     // missing provider. It only ever runs on an attended `luna`/`luna chat`: `exec`, pipes and CI
     // stay headless, and `LUNA_FIRST_RUN=false` or `luna config set first_run false` skips it.
+    // It configures the built-in default; a named profile is opened by invocation, never onboarded.
     let mut ran_first_run_onboarding = false;
-    if is_interactive_chat && harness_onboarding::needs_onboarding(&layers)? {
+    if is_interactive_chat
+        && profile_name == harness_core::profiles::DEFAULT_PROFILE
+        && harness_onboarding::needs_onboarding(&layers)?
+    {
         let outcome = harness_onboarding::run_interactive(&layers)?;
         tracing::info!(
-            persona = outcome.persona.name,
+            profile = outcome.profile,
             config = %outcome.config_path.display(),
             "first-run onboarding complete"
         );
-        // Re-resolve so this same run uses the persona it just wrote.
+        // Re-resolve so this same run uses the settings it just wrote.
         config = config::resolve(&layers)?.into_config();
+        commands::profile::activate(&mut config, &profile_name)?;
         ran_first_run_onboarding = true;
     }
-
-    // The persona's voice is prefixed to the system prompt. An explicit
-    // `agent.system_prompt_prefix` in the config file outranks the menu answer, so this never
-    // replaces a prefix the user wrote by hand.
-    harness_onboarding::persona::apply_selected(&mut config)?;
 
     let log_file_path = if is_interactive_chat {
         let luna_dir = config
@@ -555,14 +578,17 @@ async fn main() -> Result<(), HarnessError> {
         Some(Commands::Config { subcommand }) => {
             handle_config_command(subcommand, &layers)?;
         }
+        Some(Commands::Profile { subcommand }) => {
+            let global = commands::profile::global_config()?;
+            handle_profile_command(subcommand, &config, &global)?;
+        }
         // Explicitly re-runnable: the `first_run` gate is bypassed because asking for the flow is
         // itself the intent. Recalibrating a core later is a config edit, not a memory wipe.
         Some(Commands::Setup) => {
             let outcome = harness_onboarding::run_interactive(&layers)?;
             println!(
-                "persona.id = {} ({}) written to {}",
-                outcome.persona.id,
-                outcome.persona.name,
+                "profile = {} (built-in) written to {}",
+                outcome.profile,
                 outcome.config_path.display()
             );
             handle_interactive_auth(cred_manager).await?;
