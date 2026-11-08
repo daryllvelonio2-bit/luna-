@@ -1,0 +1,24 @@
+{
+  "name": "luna-memory",
+  "version": "0.1.0",
+  "description": "Luna memory store — hybrid search, knowledge graph, lifecycle hooks, and dual-endpoint writer daemon.",
+  "author": {
+    "name": "luna-team"
+  },
+  "license": "MIT",
+  "commands": [],
+  "mcpServers": {
+    "luna-memory": {
+      "command": "luna",
+      "args": ["memory", "mcp"]
+    }
+  },
+  "keywords": [
+    "memory",
+    "ai",
+    "mcp",
+    "knowledge-graph",
+    "search",
+    "daemon"
+  ]
+}

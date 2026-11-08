@@ -44,6 +44,222 @@ impl MarkdownMemoryEngine {
     ) -> Result<Vec<SearchResult>, HarnessError> {
         self.store.search(query, filter, limit)
     }
+
+    pub fn wake_up(&self, domain: Option<&str>) -> Result<String, HarnessError> {
+        self.store.wake_up(domain)
+    }
+
+    pub fn recall(
+        &self,
+        domain: Option<&str>,
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<String, HarnessError> {
+        self.store.recall(domain, topic, limit)
+    }
+
+    pub fn context_stack(&self) -> super::context::MemoryStack {
+        self.store.context_stack()
+    }
+
+    pub fn kg_add_triple(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+        confidence: Option<f32>,
+        source_record: Option<&str>,
+        source_file: Option<&str>,
+        source_drawer_id: Option<&str>,
+        adapter_name: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        self.store.kg_add_triple(
+            subject,
+            predicate,
+            object,
+            valid_from,
+            valid_to,
+            confidence,
+            source_record,
+            source_file,
+            source_drawer_id,
+            adapter_name,
+        )
+    }
+
+    pub fn kg_invalidate(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        ended: Option<&str>,
+    ) -> Result<usize, HarnessError> {
+        self.store.kg_invalidate(subject, predicate, object, ended)
+    }
+
+    pub fn kg_supersede(
+        &self,
+        subject: &str,
+        predicate: &str,
+        old_obj: &str,
+        new_obj: &str,
+        at: Option<&str>,
+        confidence: Option<f32>,
+        source_record: Option<&str>,
+        source_file: Option<&str>,
+        source_drawer_id: Option<&str>,
+        adapter_name: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        self.store.kg_supersede(
+            subject,
+            predicate,
+            old_obj,
+            new_obj,
+            at,
+            confidence,
+            source_record,
+            source_file,
+            source_drawer_id,
+            adapter_name,
+        )
+    }
+
+    pub fn kg_query(
+        &self,
+        entity: &str,
+        as_of: Option<&str>,
+        direction: Option<&str>,
+    ) -> Result<super::kg::EntityQueryResult, HarnessError> {
+        self.store.kg_query(entity, as_of, direction)
+    }
+
+    pub fn kg_query_relationship(
+        &self,
+        predicate: &str,
+        as_of: Option<&str>,
+    ) -> Result<Vec<super::kg::Triple>, HarnessError> {
+        self.store.kg_query_relationship(predicate, as_of)
+    }
+
+    pub fn kg_timeline(
+        &self,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<super::kg::Triple>, HarnessError> {
+        self.store.kg_timeline(entity, limit, offset)
+    }
+
+    pub fn kg_stats(&self) -> Result<super::kg::KnowledgeGraphStats, HarnessError> {
+        self.store.kg_stats()
+    }
+
+    pub fn traverse(
+        &self,
+        start_node: &str,
+        max_hops: usize,
+    ) -> Result<Vec<super::graph::TraversalStep>, HarnessError> {
+        self.store.traverse(start_node, max_hops)
+    }
+
+    pub fn find_tunnels(
+        &self,
+        domain_a: Option<&str>,
+        domain_b: Option<&str>,
+    ) -> Result<Vec<super::graph::TunnelBridge>, HarnessError> {
+        self.store.find_tunnels(domain_a, domain_b)
+    }
+
+    pub fn mine_sessions(
+        &self,
+        sessions_db_path: &std::path::Path,
+        domain: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<super::MineReport, HarnessError> {
+        self.store.mine_sessions(sessions_db_path, domain, topic)
+    }
+
+    pub fn mine_convos(
+        &self,
+        path: &std::path::Path,
+        domain: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<super::MineReport, HarnessError> {
+        self.store.mine_convos(path, domain, topic)
+    }
+
+    pub fn journal_write(
+        &self,
+        agent: &str,
+        content: &str,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<super::JournalEntry, HarnessError> {
+        self.store.journal_write(agent, content, timestamp)
+    }
+
+    pub fn journal_read(
+        &self,
+        agent: &str,
+        date: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<super::JournalEntry>, HarnessError> {
+        self.store.journal_read(agent, date, limit)
+    }
+
+    pub fn event_append(
+        &self,
+        stream: &str,
+        event_type: &str,
+        from: &str,
+        to: Option<&str>,
+        body: &str,
+        correlation_id: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<super::Event, HarnessError> {
+        self.store
+            .event_append(stream, event_type, from, to, body, correlation_id, status)
+    }
+
+    pub fn event_list(
+        &self,
+        stream: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        limit: Option<usize>,
+        unacked_by: Option<&str>,
+    ) -> Result<Vec<super::Event>, HarnessError> {
+        self.store.event_list(stream, since, limit, unacked_by)
+    }
+
+    pub fn event_ack(&self, stream: &str, agent: &str, event_id: &str) -> Result<(), HarnessError> {
+        self.store.event_ack(stream, agent, event_id)
+    }
+
+    pub async fn event_wait(
+        &self,
+        stream: &str,
+        agent: &str,
+        timeout_ms: u64,
+    ) -> Result<Option<super::Event>, HarnessError> {
+        self.store.event_wait(stream, agent, timeout_ms).await
+    }
+
+    pub fn artifact_put(
+        &self,
+        id_opt: Option<&str>,
+        payload: &[u8],
+        extra_meta: std::collections::HashMap<String, String>,
+    ) -> Result<String, HarnessError> {
+        self.store.artifact_put(id_opt, payload, extra_meta)
+    }
+
+    pub fn artifact_get(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Vec<u8>, super::ArtifactMeta)>, HarnessError> {
+        self.store.artifact_get(id)
+    }
 }
 
 #[async_trait]

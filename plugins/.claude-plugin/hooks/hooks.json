@@ -1,0 +1,38 @@
+{
+  "description": "Luna memory auto-save, lifecycle, and pre-compact hooks",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "luna memory hook run stop --harness claude-code",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "luna memory hook run session-end --harness claude-code",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "luna memory hook run precompact --harness claude-code",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}

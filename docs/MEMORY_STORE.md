@@ -602,8 +602,10 @@ Config: `memory.store.write_routing: direct | prefer | require` (default
 `prefer`). Hooks never cold-start the daemon and keep a 500 ms budget.
 
 The daemon (`luna memory daemon start`) is the single long-lived writer. It
-serves MCP and HTTP, owns the Tantivy writer, and serializes index commits.
-Readers open the index directly and never touch the lock.
+provides two endpoints: a native Luna connection (default, IPC/socket with no
+MCP overhead) and an optional MCP/HTTP server for external agents. It owns the
+Tantivy writer and serializes index commits. Readers open the index directly and
+never touch the lock.
 
 ## 10. CLI surface
 
@@ -645,11 +647,18 @@ Backed by `harness-memory`; `harness-cli` gets a `memory` subcommand. Command
 implementations live in `harness-memory/src/store/ops/` so the MCP server and
 CLI share one code path.
 
-## 11. MCP surface
+## 11. Communication endpoints: Native Luna & MCP
 
-Run `luna memory mcp` (stdio) or `luna memory serve` (HTTP, optional TLS and
-bearer token). Tool names use the `memory_` prefix so they never collide with
-Luna's existing `mcp__server__tool` namespace.
+The memory subsystem exposes two distinct endpoints:
+
+1. **Native Luna connection (default)**: Luna connects directly via native IPC
+   (Unix domain socket or direct memory engine bindings) without any MCP wrapping
+   or serialization overhead. This is the zero-overhead default path for Luna's
+   interactive sessions, background savers, and hooks.
+2. **MCP server endpoint (optional)**: For external tools and third-party agents
+   (Claude Code, Codex, Cursor). Run `luna memory mcp` (stdio) or `luna memory serve`
+   (HTTP, optional TLS and bearer token). Tool names use the `memory_` prefix so
+   they never collide with Luna's existing `mcp__server__tool` namespace.
 
 | Group | Tools |
 |---|---|
@@ -849,7 +858,7 @@ Dependencies to add to the workspace:
 | 2 | content indexes, compact summaries, L0–L3 context | context text under 900 tokens, search improves |
 | 3 | KG + temporal + links/cross-links | `kg query --as-of`, `traverse` work |
 | 4 | conversation/session miner, journal, event log | mine `sessions.db`, query it |
-| 5 | MCP server, hooks, daemon, plugins | Claude Code/Codex can read and write the store |
+| 5 | native daemon connection (default) + optional MCP server, hooks, plugins | native Luna connection active; Claude Code/Codex can read and write via MCP |
 | 6 | audit/repair/export/sync/backup, migration, eval | `luna memory migrate` + R@5 harness |
 
 Phase 1 is the load-bearing one: if hybrid retrieval over Markdown is not good,

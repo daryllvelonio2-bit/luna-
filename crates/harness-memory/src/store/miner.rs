@@ -1,17 +1,28 @@
 //! Project miner: walk a tree, chunk text, and file verbatim records with
 //! content indexes and compact summaries.
+//!
+//! Direct port of MemPalace's `miner.py`, `room_detector_local.py`, and `palace/closets.py`:
+//! - Paragraph-aware sliding window chunking (`chunk_text`)
+//! - Folder-to-room mapping (70+ patterns) and topic detection
+//! - Compact pointer lines with action verbs, markdown headers, and quotes
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use harness_core::{HarnessError, MemoryCategory};
+use regex::Regex;
 use walkdir::WalkDir;
 
 use super::atomic;
 use super::ids;
 use super::Record;
+
+pub const DEFAULT_CHUNK_SIZE: usize = 800;
+pub const DEFAULT_CHUNK_OVERLAP: usize = 100;
+pub const DEFAULT_MIN_CHUNK_SIZE: usize = 50;
 
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -40,12 +51,307 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "zig", "nim", "cs", "fs", "vue", "svelte",
 ];
 
+/// 70+ folder-to-room mappings ported verbatim from MemPalace's `room_detector_local.py:FOLDER_ROOM_MAP`.
+const FOLDER_ROOM_MAP: &[(&str, &str)] = &[
+    ("frontend", "frontend"),
+    ("front-end", "frontend"),
+    ("front_end", "frontend"),
+    ("client", "frontend"),
+    ("ui", "frontend"),
+    ("views", "frontend"),
+    ("components", "frontend"),
+    ("pages", "frontend"),
+    ("backend", "backend"),
+    ("back-end", "backend"),
+    ("back_end", "backend"),
+    ("server", "backend"),
+    ("api", "backend"),
+    ("routes", "backend"),
+    ("services", "backend"),
+    ("controllers", "backend"),
+    ("models", "backend"),
+    ("database", "backend"),
+    ("db", "backend"),
+    ("docs", "documentation"),
+    ("doc", "documentation"),
+    ("documentation", "documentation"),
+    ("wiki", "documentation"),
+    ("readme", "documentation"),
+    ("notes", "documentation"),
+    ("design", "design"),
+    ("designs", "design"),
+    ("mockups", "design"),
+    ("wireframes", "design"),
+    ("assets", "design"),
+    ("storyboard", "design"),
+    ("costs", "costs"),
+    ("cost", "costs"),
+    ("budget", "costs"),
+    ("finance", "costs"),
+    ("financial", "costs"),
+    ("pricing", "costs"),
+    ("invoices", "costs"),
+    ("accounting", "costs"),
+    ("meetings", "meetings"),
+    ("meeting", "meetings"),
+    ("calls", "meetings"),
+    ("meeting_notes", "meetings"),
+    ("standup", "meetings"),
+    ("minutes", "meetings"),
+    ("team", "team"),
+    ("staff", "team"),
+    ("hr", "team"),
+    ("hiring", "team"),
+    ("employees", "team"),
+    ("people", "team"),
+    ("research", "research"),
+    ("references", "research"),
+    ("reading", "research"),
+    ("papers", "research"),
+    ("planning", "planning"),
+    ("roadmap", "planning"),
+    ("strategy", "planning"),
+    ("specs", "planning"),
+    ("requirements", "planning"),
+    ("tests", "testing"),
+    ("test", "testing"),
+    ("testing", "testing"),
+    ("qa", "testing"),
+    ("scripts", "scripts"),
+    ("tools", "scripts"),
+    ("utils", "scripts"),
+    ("config", "configuration"),
+    ("configs", "configuration"),
+    ("settings", "configuration"),
+    ("infrastructure", "configuration"),
+    ("infra", "configuration"),
+    ("deploy", "configuration"),
+];
+
 #[derive(Debug, Default)]
 pub struct MineReport {
     pub files: usize,
     pub records: usize,
     pub skipped: usize,
     pub removed: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextChunk {
+    pub content: String,
+    pub chunk_index: usize,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
+/// Split content into drawer-sized chunks.
+/// Direct port of MemPalace's `miner.py:chunk_text`.
+pub fn chunk_text(
+    content: &str,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    min_chunk_size: usize,
+) -> Vec<TextChunk> {
+    assert!(
+        chunk_overlap <= chunk_size / 2,
+        "chunk_overlap ({}) must be at most chunk_size / 2 ({})",
+        chunk_overlap,
+        chunk_size / 2
+    );
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut chunk_index = 0;
+
+    let mut nl_before_start = 0;
+    let mut start_anchor = 0;
+    let mut nl_before_end = 0;
+    let mut end_anchor = 0;
+
+    while start < content.len() {
+        // UTF-8 char boundary guard for start
+        while start < content.len() && !content.is_char_boundary(start) {
+            start += 1;
+        }
+        if start >= content.len() {
+            break;
+        }
+
+        let mut end = (start + chunk_size).min(content.len());
+        while end > start && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        // Try to break at paragraph boundary, then newline boundary
+        if end < content.len() {
+            let slice = &content[start..end];
+            let midpoint = chunk_size / 2;
+            if let Some(pos) = slice.rfind("\n\n") {
+                if pos > midpoint {
+                    end = start + pos;
+                } else if let Some(pos_nl) = slice.rfind('\n') {
+                    if pos_nl > midpoint {
+                        end = start + pos_nl;
+                    }
+                }
+            } else if let Some(pos_nl) = slice.rfind('\n') {
+                if pos_nl > midpoint {
+                    end = start + pos_nl;
+                }
+            }
+        }
+
+        let chunk = content[start..end].trim();
+        if chunk.len() >= min_chunk_size {
+            let line_start = if start >= start_anchor {
+                nl_before_start += content[start_anchor..start]
+                    .chars()
+                    .filter(|&c| c == '\n')
+                    .count();
+                start_anchor = start;
+                nl_before_start + 1
+            } else {
+                content[..start].chars().filter(|&c| c == '\n').count() + 1
+            };
+
+            let line_end = if end >= end_anchor {
+                nl_before_end += content[end_anchor..end]
+                    .chars()
+                    .filter(|&c| c == '\n')
+                    .count();
+                end_anchor = end;
+                nl_before_end + 1
+            } else {
+                content[..end].chars().filter(|&c| c == '\n').count() + 1
+            };
+
+            chunks.push(TextChunk {
+                content: chunk.to_string(),
+                chunk_index,
+                line_start,
+                line_end,
+            });
+            chunk_index += 1;
+        }
+
+        let next_start = if end < content.len() {
+            end.saturating_sub(chunk_overlap)
+        } else {
+            end
+        };
+        // Avoid infinite loop if start does not advance
+        if next_start <= start {
+            start = end;
+        } else {
+            start = next_start;
+        }
+    }
+
+    if chunks.is_empty() && !trimmed.is_empty() {
+        let lines = trimmed.chars().filter(|&c| c == '\n').count() + 1;
+        chunks.push(TextChunk {
+            content: trimmed.to_string(),
+            chunk_index: 0,
+            line_start: 1,
+            line_end: lines,
+        });
+    }
+
+    chunks
+}
+
+/// Tokenize a name into lowercased tokens split by '-', '_', '.', '/'.
+/// Matches MemPalace `miner.py:_tokens`.
+fn name_tokens(val: &str) -> HashSet<String> {
+    val.split(|c: char| c == '-' || c == '_' || c == '.' || c == '/')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Returns true when `a` and `b` match as equal strings or as separator-bounded tokens.
+/// Matches MemPalace `miner.py:_name_matches`.
+fn name_matches(a: &str, b: &str) -> bool {
+    let a_low = a.to_lowercase();
+    let b_low = b.to_lowercase();
+    if a_low == b_low {
+        return true;
+    }
+    let tok_a = name_tokens(a);
+    let tok_b = name_tokens(b);
+    tok_a.contains(&b_low) || tok_b.contains(&a_low)
+}
+
+/// Route a file to the right topic.
+/// Direct port of MemPalace's `detect_room` (miner.py:679).
+fn detect_topic(relative: &Path, content: &str) -> String {
+    let components: Vec<String> = relative
+        .components()
+        .filter_map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect();
+
+    // Priority 1: folder path matches FOLDER_ROOM_MAP
+    if components.len() >= 2 {
+        for part in &components[..components.len() - 1] {
+            let part_lower = part.to_lowercase().replace('-', "_");
+            for &(pattern, room) in FOLDER_ROOM_MAP {
+                if name_matches(&part_lower, pattern) {
+                    return room.to_string();
+                }
+            }
+        }
+        // Sub-container mapping for crates/packages/libs/apps
+        let first = components[0].to_lowercase().replace('-', "_");
+        if matches!(first.as_str(), "crates" | "packages" | "libs" | "apps") {
+            if let Some(next) = components.get(1) {
+                return ids::slugify(next);
+            }
+        }
+    }
+
+    // Priority 2: filename matches known room/topic
+    let stem = relative
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    for &(pattern, room) in FOLDER_ROOM_MAP {
+        if name_matches(&stem, pattern) {
+            return room.to_string();
+        }
+    }
+
+    // Priority 3: keyword scoring from content window
+    let content_window = content
+        .chars()
+        .take(2000)
+        .collect::<String>()
+        .to_lowercase();
+    let mut scores: HashMap<&'static str, usize> = HashMap::new();
+    for &(pattern, room) in FOLDER_ROOM_MAP {
+        let count = content_window.matches(pattern).count();
+        if count > 0 {
+            *scores.entry(room).or_insert(0) += count;
+        }
+    }
+    if let Some((&best_room, &score)) = scores.iter().max_by_key(|&(_, count)| count) {
+        if score > 0 {
+            return best_room.to_string();
+        }
+    }
+
+    // Priority 4: fallback to first component or "general"
+    if let Some(first) = components.first() {
+        if components.len() > 1 {
+            return ids::slugify(first);
+        }
+    }
+    "general".to_string()
 }
 
 /// Mine `dir` into `store`. Existing records for a source are replaced when
@@ -111,46 +417,45 @@ pub fn mine(
         }
         let relative = path.strip_prefix(&dir).unwrap_or(path);
         let source_file = relative.to_string_lossy().to_string();
-        let topic = topic_for(relative);
-        let chunks = chunk(&text, store.config.chunk_chars);
+        let topic = detect_topic(relative, &text);
+        let chunks = chunk_text(
+            &text,
+            store.config.chunk_chars,
+            DEFAULT_CHUNK_OVERLAP,
+            DEFAULT_MIN_CHUNK_SIZE,
+        );
         let mut new_ids = HashSet::new();
 
-        for (index, (start, end, chunk_text)) in chunks.iter().enumerate() {
-            let id = ids::record_id(&domain, &topic, &source_file, index, chunk_text);
+        for chunk in &chunks {
+            let id = ids::record_id_from_chunk(&domain, &topic, &source_file, chunk.chunk_index);
             new_ids.insert(id.clone());
-            if existing.iter().any(|record| record.id == id) {
-                continue;
-            }
-            let entities = extract_entities(chunk_text);
+            let entities = extract_entities(&chunk.content);
+            let first = first_line(&chunk.content, &source_file);
             let record = Record {
                 id,
                 domain: domain.clone(),
                 topic: topic.clone(),
                 source_file: Some(source_file.clone()),
-                chunk_index: index,
-                line_start: *start,
-                line_end: *end,
+                chunk_index: chunk.chunk_index,
+                line_start: chunk.line_start,
+                line_end: chunk.line_end,
                 filed_at: Utc::now(),
                 entities: entities.clone(),
-                tags: vec![Path::new(&source_file)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .unwrap_or("text")
-                    .to_string()],
-                body_hash: ids::body_hash(chunk_text),
-                subject: topic.clone(),
-                predicate: "source".to_string(),
-                object: first_line(chunk_text, &source_file),
-                name: None,
-                path: Some(path.to_string_lossy().to_string()),
-                raw_content: chunk_text.to_string(),
+                tags: vec![topic.clone()],
+                body_hash: ids::body_hash(&chunk.content),
+                subject: format!("file.{}", ids::slugify(&source_file)),
+                predicate: format!("chunk.{}", chunk.chunk_index),
+                object: first,
+                name: Some(source_file.clone()),
+                path: Some(source_file.clone()),
+                raw_content: chunk.content.clone(),
                 category: MemoryCategory::Fact,
                 confidence: 1.0,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 is_active: true,
                 superseded_by: None,
-                body: chunk_text.to_string(),
+                body: chunk.content.clone(),
             };
             store.write_record(record)?;
             report.records += 1;
@@ -183,131 +488,166 @@ fn is_text_file(path: &Path) -> bool {
     TEXT_EXTENSIONS.contains(&extension.as_str())
 }
 
-fn topic_for(relative: &Path) -> String {
-    let components: Vec<String> = relative
-        .components()
-        .filter_map(|component| component.as_os_str().to_str().map(str::to_string))
-        .collect();
-    if components.len() >= 2 {
-        let first = components[0].to_ascii_lowercase();
-        if matches!(
-            first.as_str(),
-            "crates" | "packages" | "libs" | "apps" | "src"
-        ) {
-            return ids::slugify(&components[1]);
-        }
-        return ids::slugify(&components[0]);
-    }
-    relative
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(ids::slugify)
-        .unwrap_or_else(|| "general".to_string())
+static ACTION_RE: OnceLock<Regex> = OnceLock::new();
+static HEADER_RE: OnceLock<Regex> = OnceLock::new();
+static QUOTE_RE: OnceLock<Regex> = OnceLock::new();
+static ENTITY_WORD_RE: OnceLock<Regex> = OnceLock::new();
+
+fn action_regex() -> &'static Regex {
+    ACTION_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:built|fixed|wrote|added|pushed|tested|created|decided|migrated|reviewed|deployed|configured|removed|updated)\s+[\w\s]{3,40}").unwrap()
+    })
 }
 
-/// Split text on line boundaries into chunks of roughly `chunk_chars`.
-/// Returns `(start_line, end_line, text)`, with 1-based inclusive lines.
-fn chunk(text: &str, chunk_chars: usize) -> Vec<(usize, usize, String)> {
-    let chunk_chars = chunk_chars.max(200);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut start_line = 1usize;
-    let mut line_number = 0usize;
+fn header_regex() -> &'static Regex {
+    HEADER_RE.get_or_init(|| Regex::new(r"(?m)^#{1,3}\s+(.{5,60})$").unwrap())
+}
 
-    for line in text.split_inclusive('\n') {
-        line_number += 1;
-        if current.is_empty() {
-            start_line = line_number;
+fn quote_regex() -> &'static Regex {
+    QUOTE_RE.get_or_init(|| Regex::new(r#""([^"]{15,150})""#).unwrap())
+}
+
+fn entity_word_regex() -> &'static Regex {
+    ENTITY_WORD_RE.get_or_init(|| Regex::new(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+|[A-Z]{2,})*\b").unwrap())
+}
+
+/// Extract entity proper nouns (frequency >= 2, top 5).
+/// Direct port of MemPalace's `palace/closets.py:build_closet_lines` entity extractor.
+pub(crate) fn extract_entities(text: &str) -> Vec<String> {
+    let re = entity_word_regex();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let stop_words: HashSet<&'static str> =
+        super::search::MEMPALACE_STOPWORDS.iter().copied().collect();
+
+    for m in re.find_iter(text) {
+        let word = m.as_str();
+        let lower = word.to_lowercase();
+        if stop_words.contains(lower.as_str()) || word.len() < 3 {
+            continue;
         }
-        current.push_str(line);
-        if current.chars().count() >= chunk_chars {
-            let trimmed = current.trim_end().to_string();
-            if !trimmed.is_empty() {
-                chunks.push((start_line, line_number, trimmed));
+        *counts.entry(word.to_string()).or_insert(0) += 1;
+    }
+
+    let mut frequent: Vec<(String, usize)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
+    frequent.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    frequent.into_iter().take(5).map(|(w, _)| w).collect()
+}
+
+/// Build compact closet pointer lines from drawer chunks.
+/// Direct port of MemPalace `palace/closets.py:build_closet_lines`.
+pub(crate) fn build_pointer_lines(
+    domain: &str,
+    topic: &str,
+    source_file: &str,
+    chunks: &[TextChunk],
+    ids: &HashSet<String>,
+) -> Vec<String> {
+    let now = Utc::now().date_naive();
+    let mut ordered: Vec<&String> = ids.iter().collect();
+    ordered.sort();
+    let mut lines = Vec::new();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let Some(record_id) = ordered.get(index) else {
+            continue;
+        };
+        let window = if chunk.content.len() > 5000 {
+            &chunk.content[..5000]
+        } else {
+            &chunk.content
+        };
+
+        let entities = extract_entities(window);
+        let span = format!("{}:L{}-L{}", now, chunk.line_start, chunk.line_end);
+
+        let mut topics = Vec::new();
+
+        // 1. Action verb phrases
+        for m in action_regex().find_iter(window) {
+            topics.push(m.as_str().trim().to_lowercase());
+        }
+
+        // 2. Markdown headers
+        for cap in header_regex().captures_iter(window) {
+            if let Some(h) = cap.get(1) {
+                topics.push(h.as_str().trim().to_lowercase());
             }
-            current.clear();
+        }
+
+        // Dedupe preserving order, take top 8
+        let mut seen = HashSet::new();
+        topics.retain(|t| seen.insert(t.clone()));
+        topics.truncate(8);
+
+        // 3. Quotes (up to 3)
+        let mut quotes = Vec::new();
+        for cap in quote_regex().captures_iter(window) {
+            if let Some(q) = cap.get(1) {
+                quotes.push(format!("\"{}\"", q.as_str().trim()));
+            }
+            if quotes.len() >= 3 {
+                break;
+            }
+        }
+
+        for t in &topics {
+            lines.push(
+                super::pointer_index::PointerLine::new(
+                    t.clone(),
+                    entities.clone(),
+                    Some(span.clone()),
+                    vec![(*record_id).clone()],
+                )
+                .render(),
+            );
+        }
+        for q in &quotes {
+            lines.push(
+                super::pointer_index::PointerLine::new(
+                    q.clone(),
+                    entities.clone(),
+                    Some(span.clone()),
+                    vec![(*record_id).clone()],
+                )
+                .render(),
+            );
+        }
+
+        // Fallback if no actions, headers, or quotes matched
+        if lines.is_empty() {
+            let stem = Path::new(source_file)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("source");
+            lines.push(
+                super::pointer_index::PointerLine::new(
+                    format!("{}/{}/{}", domain, topic, stem),
+                    entities.clone(),
+                    Some(span.clone()),
+                    vec![(*record_id).clone()],
+                )
+                .render(),
+            );
         }
     }
-    if !current.trim().is_empty() {
-        chunks.push((start_line, line_number, current.trim_end().to_string()));
-    }
-    if chunks.is_empty() {
-        chunks.push((1, 1, text.trim().to_string()));
-    }
-    chunks
+
+    lines
 }
 
-fn first_line(body: &str, fallback: &str) -> String {
-    body.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(120).collect())
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-fn extract_entities(text: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut entities = Vec::new();
-    for word in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
-        let word = word.trim_matches(':');
-        if word.len() < 3 || word.len() > 64 {
-            continue;
-        }
-        let looks_named = word
-            .chars()
-            .next()
-            .map(|c| c.is_uppercase())
-            .unwrap_or(false)
-            || word.contains('_')
-            || word.contains("::");
-        if !looks_named {
-            continue;
-        }
-        let key = word.to_ascii_lowercase();
-        if seen.insert(key) {
-            entities.push(word.to_string());
-        }
-        if entities.len() >= 16 {
-            break;
-        }
-    }
-    entities
-}
-
-fn write_content_index(
+pub(crate) fn write_content_index(
     store: &super::MemoryStore,
     domain: &str,
     topic: &str,
     source_file: &str,
-    chunks: &[(usize, usize, String)],
+    chunks: &[TextChunk],
     ids: &HashSet<String>,
 ) -> Result<(), HarnessError> {
     let now = Utc::now();
-    let mut lines = Vec::new();
     let mut ordered: Vec<&String> = ids.iter().collect();
     ordered.sort();
-    for (index, (start, end, text)) in chunks.iter().enumerate() {
-        let Some(id) = ordered.get(index) else {
-            continue;
-        };
-        let entities = extract_entities(text);
-        let entity_cell = entities
-            .iter()
-            .take(6)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(";");
-        let label = first_line(text, source_file);
-        lines.push(format!(
-            "{} | {} | {}:L{}-L{} | →{}",
-            escape(&label),
-            escape(&entity_cell),
-            now.date_naive(),
-            start,
-            end,
-            id
-        ));
-    }
+
+    let lines = build_pointer_lines(domain, topic, source_file, chunks, ids);
+
     let yaml = format!(
         "source_file: {}\nrecords: [{}]\nbuilt_at: {}\nchunk_indexes: [{}]",
         yaml_string(source_file),
@@ -336,6 +676,7 @@ fn write_content_index(
         .join(ids::slugify(topic))
         .join("indexes")
         .join(format!("{stem}.index.md"));
+
     let mut budget = store.config.index_chars;
     let mut body = String::new();
     for line in lines {
@@ -351,44 +692,15 @@ fn write_content_index(
         .map_err(|error| HarnessError::MemoryError(format!("{}: {error}", path.display())))
 }
 
-fn write_summary(
+pub(crate) fn write_summary(
     store: &super::MemoryStore,
     domain: &str,
     topic: &str,
     source_file: &str,
     text: &str,
-    chunks: &[(usize, usize, String)],
+    chunks: &[TextChunk],
 ) -> Result<(), HarnessError> {
-    let now = Utc::now();
-    let title = first_line(text, source_file);
-    let mut body = format!(
-        "FILE 1|{}/{}|{}|{}\n",
-        domain,
-        topic,
-        now.date_naive(),
-        escape(&title)
-    );
-    for (index, (_, _, chunk_text)) in chunks.iter().enumerate() {
-        let entities = extract_entities(chunk_text);
-        let keywords = super::search::tokenize(chunk_text)
-            .into_iter()
-            .take(6)
-            .collect::<Vec<_>>()
-            .join(";");
-        let quote: String = first_line(chunk_text, "").chars().take(160).collect();
-        body.push_str(&format!(
-            "S{}:{}|{}|\"{}\"|CORE|TECHNICAL\n",
-            index + 1,
-            escape(&entities.join(";")),
-            escape(&keywords),
-            escape(&quote)
-        ));
-    }
-    let yaml = format!(
-        "source_file: {}\nbuilt_at: {}\nlossy: true",
-        yaml_string(source_file),
-        now.to_rfc3339()
-    );
+    let summary = super::summary::generate_summary(domain, topic, source_file, 1, text, chunks);
     let stem = ids::safe_id(
         Path::new(source_file)
             .file_stem()
@@ -403,22 +715,23 @@ fn write_summary(
         .join(ids::slugify(topic))
         .join("summaries")
         .join(format!("{stem}.summary.md"));
-    atomic::write_str(&path, &super::frontmatter::render(&yaml, &body))
+    atomic::write_str(&path, &summary.render())
         .map_err(|error| HarnessError::MemoryError(format!("{}: {error}", path.display())))
 }
 
-fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace(['\r', '\n'], " ")
-}
-
-fn yaml_string(value: &str) -> String {
+pub(crate) fn yaml_string(value: &str) -> String {
     serde_yaml::to_string(&value)
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+pub(crate) fn first_line(body: &str, fallback: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(120).collect())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 #[cfg(test)]
@@ -427,12 +740,24 @@ mod tests {
     use crate::store::{MemoryStore, StoreConfig};
 
     #[test]
-    fn chunks_preserve_lines() {
-        let text = "one\ntwo\nthree\nfour\n";
-        let chunks = chunk(text, 200);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].0, 1);
-        assert_eq!(chunks[0].1, 4);
+    fn chunks_preserve_lines_and_split_paragraphs() {
+        let text = "First line\nSecond line\n\nThird line paragraph\nFourth line\n";
+        let chunks = chunk_text(text, 200, 20, 10);
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].line_start, 1);
+    }
+
+    #[test]
+    fn topic_detection_routes_by_folder_and_filename() {
+        assert_eq!(detect_topic(Path::new("src/ui/Button.tsx"), ""), "frontend");
+        assert_eq!(
+            detect_topic(Path::new("docs/architecture.md"), ""),
+            "documentation"
+        );
+        assert_eq!(
+            detect_topic(Path::new("tests/search_test.rs"), ""),
+            "testing"
+        );
     }
 
     #[test]
@@ -442,7 +767,7 @@ mod tests {
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
-            "pub struct MemoryStore;\n// the store keeps Markdown records\n",
+            "pub struct MemoryStore;\n// the store keeps Markdown records with plenty of words to pass min chunk size\n",
         )
         .unwrap();
         let store = MemoryStore::open(StoreConfig::new(dir.join(".memory"))).unwrap();

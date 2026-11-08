@@ -19,6 +19,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 walkdir = { workspace = true }
 serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 # The saver's tests need a real notes engine to prove the pointer bridge it writes; the library

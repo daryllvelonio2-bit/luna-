@@ -1,57 +1,174 @@
-//! Lexical (BM25) and hybrid retrieval over the in-memory record set.
+//! Lexical (Okapi-BM25) and hybrid retrieval over the in-memory record set.
 //!
-//! The lexical index is rebuilt from the Markdown records and never
-//! persisted, so it cannot drift from the canonical store. Hybrid scoring
-//! min-max normalizes each component over the candidate union, then blends
-//! by the configured weights. A query with no lexical or vector hits falls
-//! back to the caller's recency path.
+//! Direct port of MemPalace's `lexical.py` and `searcher/ranking.py`:
+//! - Okapi-BM25 with smoothed corpus-relative IDF over the candidate set
+//! - Min-max normalization on BM25 (`score / max_bm25`)
+//! - Absolute vector similarity (cosine clamped to [0, 1]), never normalized
+//!   relative to candidates to prevent candidate-set reshuffling
+//! - Default weights: 0.6 vector, 0.4 BM25
+//! - Deterministic tie-breaking: combined score desc, then vector distance desc.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 use crate::store::embed;
+
+pub const DEFAULT_VECTOR_WEIGHT: f32 = 0.6;
+pub const DEFAULT_BM25_WEIGHT: f32 = 0.4;
 
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
 
-const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
-    "her", "his", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "our", "she", "that",
-    "the", "their", "them", "they", "this", "to", "was", "we", "were", "what", "when", "where",
-    "which", "who", "will", "with", "you", "your",
+/// Stop words from MemPalace's canonical English locale (`i18n/en.json`).
+pub const MEMPALACE_STOPWORDS: &[&str] = &[
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "some",
+    "many",
+    "most",
+    "each",
+    "every",
+    "other",
+    "only",
+    "such",
+    "very",
+    "will",
+    "would",
+    "could",
+    "should",
+    "must",
+    "shall",
+    "yeah",
+    "okay",
+    "also",
+    "even",
+    "then",
+    "now",
+    "already",
+    "still",
+    "back",
+    "done",
+    "make",
+    "take",
+    "give",
+    "know",
+    "think",
+    "want",
+    "need",
+    "going",
+    "come",
+    "find",
+    "work",
+    "added",
+    "saved",
+    "session",
+    "summary",
+    "conversation",
+    "topics",
+    "source",
+    "about",
+    "once",
+    "just",
+    "really",
+    "actually",
+    "here",
+    "there",
+    "where",
+    "good",
+    "great",
+    "better",
+    "thank",
+    "please",
+    "sorry",
+    "right",
+    "wrong",
+    "true",
+    "false",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "as",
+    "is",
+    "was",
+    "are",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "may",
+    "might",
+    "can",
+    "it",
+    "its",
+    "they",
+    "them",
+    "their",
+    "we",
+    "our",
+    "you",
+    "your",
+    "i",
+    "my",
+    "me",
+    "he",
+    "she",
+    "his",
+    "her",
+    "who",
+    "what",
+    "when",
+    "why",
+    "how",
+    "which",
+    "if",
+    "so",
+    "not",
+    "no",
+    "yes",
+    "ok",
 ];
 
-/// Lowercase, split on non-alphanumerics and camel-case boundaries, drop
-/// one-letter fragments and stopwords.
-pub fn tokenize(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut previous_lower = false;
-    for c in text.chars() {
-        if c.is_alphanumeric() {
-            if c.is_uppercase() && previous_lower && !current.is_empty() {
-                push_token(&mut out, std::mem::take(&mut current));
-            }
-            for lower in c.to_lowercase() {
-                current.push(lower);
-            }
-            previous_lower = c.is_lowercase();
-        } else {
-            push_token(&mut out, std::mem::take(&mut current));
-            previous_lower = false;
-        }
-    }
-    push_token(&mut out, current);
-    out
+static TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+
+fn token_regex() -> &'static Regex {
+    TOKEN_RE.get_or_init(|| Regex::new(r"[\p{L}\p{N}_]{2,}").unwrap())
 }
 
-fn push_token(out: &mut Vec<String>, token: String) {
-    if token.chars().count() < 2 {
-        return;
+/// Lowercased word tokens of two or more characters, dropping canonical stop words.
+/// Matches MemPalace `lexical.py:tokenize` verbatim.
+pub fn tokenize(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
     }
-    if STOPWORDS.contains(&token.as_str()) {
-        return;
-    }
-    out.push(token);
+    let lower = text.to_lowercase();
+    let re = token_regex();
+    let stop_set: HashSet<&'static str> = MEMPALACE_STOPWORDS.iter().copied().collect();
+    re.find_iter(&lower)
+        .map(|m| m.as_str().to_string())
+        .filter(|t| !stop_set.contains(t.as_str()))
+        .collect()
 }
 
 struct Document {
@@ -60,7 +177,7 @@ struct Document {
     length: usize,
 }
 
-/// BM25 index over a fixed document set.
+/// Okapi-BM25 index over a candidate document set.
 pub struct LexicalIndex {
     documents: Vec<Document>,
     document_frequency: HashMap<String, usize>,
@@ -100,6 +217,7 @@ impl LexicalIndex {
         }
     }
 
+    /// Okapi-BM25 scoring matching MemPalace's `bm25_scores` formula.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(String, f64)> {
         let query_terms = tokenize(query);
         if query_terms.is_empty() || self.documents.is_empty() {
@@ -145,17 +263,44 @@ pub struct Hit {
     pub score: f32,
     pub lexical: f32,
     pub vector: f32,
+    pub closet_boost: f32,
+    pub matched_via: String,
 }
 
 struct Candidate {
     id: String,
     lexical: f64,
     vector: f64,
+    boost: f64,
 }
 
-/// Hybrid search. `documents` is `(id, text, precomputed vector)`.
+/// Hybrid search re-ranking.
+/// Matches MemPalace `_hybrid_rank` (searcher/ranking.py:170) verbatim:
+/// - Absolute vector similarity `vec_sim = cosine.max(0.0)` in [0, 1]
+/// - Okapi-BM25 divided by `max_bm25` (0 to 1)
+/// - Combined score: `vector_weight * vec_sim + bm25_weight * bm25_norm`
+/// - Tie-break: combined score desc, then raw vector similarity desc
 pub fn hybrid(
     documents: &[(String, String, Vec<f32>)],
+    query: &str,
+    vector_weight: f32,
+    lexical_weight: f32,
+    limit: usize,
+) -> Vec<Hit> {
+    hybrid_boosted(
+        documents,
+        &HashMap::new(),
+        query,
+        vector_weight,
+        lexical_weight,
+        limit,
+    )
+}
+
+/// Hybrid search re-ranking with closet boost support.
+pub fn hybrid_boosted(
+    documents: &[(String, String, Vec<f32>)],
+    boosts: &HashMap<String, f32>,
     query: &str,
     vector_weight: f32,
     lexical_weight: f32,
@@ -175,71 +320,82 @@ pub fn hybrid(
 
     let mut candidates: Vec<Candidate> = documents
         .iter()
-        .map(|(id, _, vector)| Candidate {
-            id: id.clone(),
-            lexical: *lexical_scores.get(id).unwrap_or(&0.0),
-            vector: embed::cosine(&query_vector, vector).max(0.0) as f64,
+        .map(|(id, _, vector)| {
+            let boost = *boosts.get(id).unwrap_or(&0.0f32) as f64;
+            Candidate {
+                id: id.clone(),
+                lexical: *lexical_scores.get(id).unwrap_or(&0.0),
+                // Absolute cosine similarity clamped to [0, 1], matching _distance_to_similarity
+                vector: embed::cosine(&query_vector, vector).max(0.0) as f64,
+                boost,
+            }
         })
-        .filter(|candidate| candidate.lexical > 0.0 || candidate.vector > 0.0)
+        .filter(|candidate| {
+            candidate.lexical > 0.0 || candidate.vector > 0.0 || candidate.boost > 0.0
+        })
         .collect();
+
     if candidates.is_empty() {
         return Vec::new();
     }
 
-    let (lexical_min, lexical_max) = bounds(candidates.iter().map(|c| c.lexical));
-    let (vector_min, vector_max) = bounds(candidates.iter().map(|c| c.vector));
-    for candidate in &mut candidates {
-        candidate.lexical = normalize(candidate.lexical, lexical_min, lexical_max);
-        candidate.vector = normalize(candidate.vector, vector_min, vector_max);
-    }
+    // Min-max normalize BM25 only: max_bm25 scaling matches MemPalace ranking.py:206-207
+    let max_bm25 = candidates.iter().map(|c| c.lexical).fold(0.0f64, f64::max);
+
     candidates.sort_by(|a, b| {
-        let a_score = a.vector * vector_weight as f64 + a.lexical * lexical_weight as f64;
-        let b_score = b.vector * vector_weight as f64 + b.lexical * lexical_weight as f64;
+        let a_bm25_norm = if max_bm25 > 0.0 {
+            a.lexical / max_bm25
+        } else {
+            0.0
+        };
+        let b_bm25_norm = if max_bm25 > 0.0 {
+            b.lexical / max_bm25
+        } else {
+            0.0
+        };
+
+        let a_vec_boosted = (a.vector + a.boost).clamp(0.0, 1.0);
+        let b_vec_boosted = (b.vector + b.boost).clamp(0.0, 1.0);
+
+        let a_score = a_vec_boosted * vector_weight as f64 + a_bm25_norm * lexical_weight as f64;
+        let b_score = b_vec_boosted * vector_weight as f64 + b_bm25_norm * lexical_weight as f64;
+
         b_score
             .partial_cmp(&a_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.vector
+                    .partial_cmp(&a.vector)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
+
     candidates.truncate(limit);
     candidates
         .into_iter()
-        .map(|candidate| Hit {
-            id: candidate.id,
-            score: (candidate.vector * vector_weight as f64
-                + candidate.lexical * lexical_weight as f64) as f32,
-            lexical: candidate.lexical as f32,
-            vector: candidate.vector as f32,
+        .map(|candidate| {
+            let bm25_norm = if max_bm25 > 0.0 {
+                candidate.lexical / max_bm25
+            } else {
+                0.0
+            };
+            let vec_boosted = (candidate.vector + candidate.boost).clamp(0.0, 1.0);
+            let score = vec_boosted * vector_weight as f64 + bm25_norm * lexical_weight as f64;
+            let matched_via = if candidate.boost > 0.0 {
+                "drawer+closet".to_string()
+            } else {
+                "drawer".to_string()
+            };
+            Hit {
+                id: candidate.id,
+                score: score as f32,
+                lexical: candidate.lexical as f32,
+                vector: candidate.vector as f32,
+                closet_boost: candidate.boost as f32,
+                matched_via,
+            }
         })
         .collect()
-}
-
-fn bounds(values: impl Iterator<Item = f64>) -> (f64, f64) {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for value in values {
-        if value < min {
-            min = value;
-        }
-        if value > max {
-            max = value;
-        }
-    }
-    if !min.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (min, max)
-    }
-}
-
-fn normalize(value: f64, min: f64, max: f64) -> f64 {
-    if (max - min).abs() < f64::EPSILON {
-        if max > 0.0 {
-            1.0
-        } else {
-            0.0
-        }
-    } else {
-        (value - min) / (max - min)
-    }
 }
 
 #[cfg(test)]
@@ -272,10 +428,26 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_splits_camel_case_and_drops_stopwords() {
-        assert_eq!(
-            tokenize("MemoryStore is a Markdown file"),
-            vec!["memory", "store", "markdown", "file"]
-        );
+    fn closet_boost_improves_ranking() {
+        let docs = vec![
+            document("a", "document alpha general discussion"),
+            document("b", "document beta general discussion"),
+        ];
+        // Without boost, a and b tie or have similar scores
+        let mut boosts = HashMap::new();
+        boosts.insert("b".to_string(), 0.40f32);
+        let hits = hybrid_boosted(&docs, &boosts, "general", 0.6, 0.4, 5);
+        assert_eq!(hits.first().map(|h| h.id.as_str()), Some("b"));
+        assert_eq!(hits[0].matched_via, "drawer+closet");
+        assert_eq!(hits[0].closet_boost, 0.40);
+    }
+
+    #[test]
+    fn tokenizer_drops_stopwords_and_keeps_words() {
+        let tokens = tokenize("MemoryStore is a Markdown file");
+        assert!(tokens.contains(&"memorystore".to_string()));
+        assert!(tokens.contains(&"markdown".to_string()));
+        assert!(tokens.contains(&"file".to_string()));
+        assert!(!tokens.contains(&"is".to_string()));
     }
 }

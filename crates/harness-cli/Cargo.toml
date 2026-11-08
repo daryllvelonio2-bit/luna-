@@ -16,7 +16,7 @@ flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = { workspace = true }
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = { workspace = true }
 harness-core = { workspace = true }
 harness-providers = { workspace = true }
 harness-memory = { workspace = true }

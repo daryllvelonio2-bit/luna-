@@ -6,12 +6,26 @@
 //! from the `.md` files and `reindex` simply drops it.
 
 pub mod atomic;
+pub mod context;
+pub mod convo;
+pub mod crosslinks;
+pub mod daemon;
 pub mod embed;
 pub mod engine;
+pub mod events;
 pub mod frontmatter;
+pub mod graph;
+pub mod hooks;
 pub mod ids;
+pub mod journal;
+pub mod kg;
+pub mod links;
+pub mod mcp;
 pub mod miner;
+pub mod pointer_index;
 pub mod search;
+pub mod sessions;
+pub mod summary;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -20,10 +34,34 @@ use std::sync::RwLock;
 
 use chrono::{DateTime, Utc};
 use harness_core::{HarnessError, MemoryCategory, MemoryRecord};
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
+pub use context::{Layer0, Layer1, Layer2, Layer3, MemoryStack};
+pub use convo::mine_convos;
+pub use crosslinks::{CrossLink, CrossLinksStore};
+pub use daemon::{
+    choose_write_route, parse_write_routing_policy, DaemonEndpointInfo, DaemonPaths, DaemonRuntime,
+    Job, NativeDaemonClient, QueueStore, WriteRoutingDecision, WriteRoutingPolicy,
+    WriteRoutingTarget, LOCK_REFUSAL_ERROR_CLASS, MAX_ATTEMPTS,
+};
 pub use engine::MarkdownMemoryEngine;
+pub use events::{ArtifactMeta, Event, EventsStore};
+pub use graph::{GraphData, GraphEdge, GraphIndex, GraphNode, TraversalStep, TunnelBridge};
+pub use hooks::{render_shared_brain_rules, run_hook, run_instructions};
+pub use journal::{JournalEntry, JournalStore};
+pub use kg::{
+    Entity, EntityAttribute, EntityCandidate, EntityQueryResult, KnowledgeGraph,
+    KnowledgeGraphStats, Triple,
+};
+pub use links::{DomainLink, LinksStore};
+pub use mcp::{all_mcp_tools, dispatch_mcp_tool, handle_mcp_jsonrpc, run_stdio_server, McpToolDef};
 pub use miner::MineReport;
+pub use pointer_index::{ClosetBoost, ContentIndex, PointerLine};
+pub use sessions::mine_sessions;
+pub use summary::{
+    CompactSummary, SummaryArc, SummaryCross, SummaryEntry, SummaryHeader, SUMMARY_SPEC,
+};
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 
@@ -78,7 +116,7 @@ pub fn default_root() -> PathBuf {
 /// The `subject`/`predicate`/`object` and timestamps mirror Luna's existing
 /// `MemoryRecord`, so the old `save_memory` / `update_memory` / `forget_memory`
 /// tools keep their contract while the file store replaces SQLite.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
     pub domain: String,
@@ -294,6 +332,9 @@ pub struct SearchResult {
     pub score: f32,
     pub lexical: f32,
     pub vector: f32,
+    pub closet_boost: f32,
+    pub matched_via: String,
+    pub closet_preview: Option<String>,
     pub excerpt: String,
 }
 
@@ -340,6 +381,7 @@ impl MemoryStore {
             root.join("graph").join("triples"),
             root.join("journal"),
             root.join("events"),
+            root.join("artifacts"),
             root.join("summaries"),
             root.join("search_index"),
         ] {
@@ -365,6 +407,10 @@ impl MemoryStore {
                 "# Identity\n\nLuna is the user's long-running engineering agent. This file is the always-injected identity layer; keep it short.\n",
             )
             .map_err(io_err)?;
+        }
+        let summary_md = root.join("SUMMARY.md");
+        if !summary_md.exists() {
+            atomic::write_str(&summary_md, summary::SUMMARY_SPEC).map_err(io_err)?;
         }
         Ok(())
     }
@@ -636,8 +682,22 @@ impl MemoryStore {
         let overfetch = limit
             .saturating_mul(self.config.overfetch.max(1))
             .max(limit);
-        let hits = search::hybrid(
+
+        // Load content indexes and compute closet rank boosts per source file
+        let indexes = self.content_indexes().unwrap_or_default();
+        let closet_boosts = pointer_index::calculate_closet_boosts(&indexes, query);
+        let mut boost_by_id: HashMap<String, f32> = HashMap::new();
+        for doc in &filtered {
+            if let Some(src) = &doc.record.source_file {
+                if let Some(cb) = closet_boosts.get(src) {
+                    boost_by_id.insert(doc.record.id.clone(), cb.boost);
+                }
+            }
+        }
+
+        let hits = search::hybrid_boosted(
             &documents,
+            &boost_by_id,
             query,
             self.config.vector_weight,
             self.config.bm25_weight,
@@ -651,12 +711,21 @@ impl MemoryStore {
             .into_iter()
             .filter_map(|hit| {
                 let doc = by_id.get(hit.id.as_str())?;
+                let preview = doc
+                    .record
+                    .source_file
+                    .as_ref()
+                    .and_then(|src| closet_boosts.get(src))
+                    .map(|b| b.preview.clone());
                 Some(SearchResult {
                     record: doc.record.clone(),
                     path: doc.path.clone(),
                     score: hit.score,
                     lexical: hit.lexical,
                     vector: hit.vector,
+                    closet_boost: hit.closet_boost,
+                    matched_via: hit.matched_via,
+                    closet_preview: preview,
                     excerpt: excerpt(&doc.record.body, query),
                 })
             })
@@ -676,6 +745,9 @@ impl MemoryStore {
                     score: 0.0,
                     lexical: 0.0,
                     vector: 0.0,
+                    closet_boost: 0.0,
+                    matched_via: "drawer".to_string(),
+                    closet_preview: None,
                     excerpt: excerpt(&doc.record.body, query),
                 })
                 .collect();
@@ -748,36 +820,69 @@ impl MemoryStore {
         lines.join("\n")
     }
 
-    /// L0 identity plus a bounded L1 recent-context block.
-    pub fn context_block(&self, limit: usize) -> Result<String, HarnessError> {
-        let identity = fs::read_to_string(self.config.root.join("identity.md")).unwrap_or_default();
-        let identity = strip_front_matter(&identity);
+    /// 4-layer context stack handle.
+    pub fn context_stack(&self) -> context::MemoryStack {
+        context::MemoryStack::new(self.config.root.clone())
+    }
+
+    /// Wake-up context: L0 (identity) + L1 (essential story), bounded under 900 tokens.
+    pub fn wake_up(&self, domain: Option<&str>) -> Result<String, HarnessError> {
         let records = self.active_records()?;
-        let mut out = String::new();
-        if !identity.trim().is_empty() {
-            out.push_str(identity.trim());
-            out.push_str("\n\n");
+        Ok(self.context_stack().wake_up(&records, domain))
+    }
+
+    /// On-demand L2 recall filtered by domain and/or topic.
+    pub fn recall(
+        &self,
+        domain: Option<&str>,
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<String, HarnessError> {
+        let records = self.active_records()?;
+        Ok(self.context_stack().recall(&records, domain, topic, limit))
+    }
+
+    /// L0 identity plus a bounded L1 recent-context block under 900 tokens.
+    pub fn context_block(&self, _limit: usize) -> Result<String, HarnessError> {
+        self.wake_up(None)
+    }
+
+    /// Load all parsed content indexes from disk.
+    pub fn content_indexes(&self) -> Result<Vec<pointer_index::ContentIndex>, HarnessError> {
+        let domains = self.config.root.join("domains");
+        if !domains.exists() {
+            return Ok(Vec::new());
         }
-        out.push_str("## Recent memory\n");
-        if records.is_empty() {
-            out.push_str("(no records yet)\n");
-        } else {
-            for record in records.iter().take(limit) {
-                let label = if record.object.trim().is_empty() {
-                    record.id.clone()
-                } else {
-                    record.object.trim().to_string()
-                };
-                out.push_str(&format!(
-                    "- {} [{}] {}:{}\n",
-                    record.updated_at.date_naive(),
-                    record.category,
-                    record.domain,
-                    label
-                ));
+        let mut paths = Vec::new();
+        collect_files_with_parent(&domains, "indexes", &mut paths)?;
+        let mut indexes = Vec::new();
+        for path in paths {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(index) = pointer_index::ContentIndex::parse(&content) {
+                    indexes.push(index);
+                }
             }
         }
-        Ok(out)
+        Ok(indexes)
+    }
+
+    /// Load all parsed compact summaries from disk.
+    pub fn summaries(&self) -> Result<Vec<summary::CompactSummary>, HarnessError> {
+        let domains = self.config.root.join("domains");
+        if !domains.exists() {
+            return Ok(Vec::new());
+        }
+        let mut paths = Vec::new();
+        collect_files_with_parent(&domains, "summaries", &mut paths)?;
+        let mut summaries = Vec::new();
+        for path in paths {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(sum) = summary::CompactSummary::parse(&content) {
+                    summaries.push(sum);
+                }
+            }
+        }
+        Ok(summaries)
     }
 
     /// Audit the canonical tree and report structural problems.
@@ -845,7 +950,227 @@ impl MemoryStore {
         cache.docs = docs;
         cache.loaded = true;
         self.write_manifest(count);
+
+        // Rebuild KG index and Graph adjacency
+        let _ = self.kg().rebuild_index();
+        let records: Vec<Record> = cache.docs.iter().map(|d| d.record.clone()).collect();
+        let links = self.links_store().list_all_links().unwrap_or_default();
+        let crosslinks = self
+            .crosslinks_store()
+            .list_all_crosslinks()
+            .unwrap_or_default();
+        let _ = self
+            .graph_index()
+            .build_and_save(&records, &links, &crosslinks);
+
         Ok(count)
+    }
+
+    pub fn kg(&self) -> kg::KnowledgeGraph {
+        kg::KnowledgeGraph::new(self.config.root.clone())
+    }
+
+    pub fn links_store(&self) -> links::LinksStore {
+        links::LinksStore::new(self.config.root.clone())
+    }
+
+    pub fn crosslinks_store(&self) -> crosslinks::CrossLinksStore {
+        crosslinks::CrossLinksStore::new(self.config.root.clone())
+    }
+
+    pub fn graph_index(&self) -> graph::GraphIndex {
+        graph::GraphIndex::new(self.config.root.clone())
+    }
+
+    pub fn kg_add_triple(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+        confidence: Option<f32>,
+        source_record: Option<&str>,
+        source_file: Option<&str>,
+        source_drawer_id: Option<&str>,
+        adapter_name: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        self.kg().add_triple(
+            subject,
+            predicate,
+            object,
+            valid_from,
+            valid_to,
+            confidence,
+            source_record,
+            source_file,
+            source_drawer_id,
+            adapter_name,
+        )
+    }
+
+    pub fn kg_invalidate(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        ended: Option<&str>,
+    ) -> Result<usize, HarnessError> {
+        self.kg().invalidate(subject, predicate, object, ended)
+    }
+
+    pub fn kg_supersede(
+        &self,
+        subject: &str,
+        predicate: &str,
+        old_obj: &str,
+        new_obj: &str,
+        at: Option<&str>,
+        confidence: Option<f32>,
+        source_record: Option<&str>,
+        source_file: Option<&str>,
+        source_drawer_id: Option<&str>,
+        adapter_name: Option<&str>,
+    ) -> Result<String, HarnessError> {
+        self.kg().supersede(
+            subject,
+            predicate,
+            old_obj,
+            new_obj,
+            at,
+            confidence,
+            source_record,
+            source_file,
+            source_drawer_id,
+            adapter_name,
+        )
+    }
+
+    pub fn kg_query(
+        &self,
+        entity: &str,
+        as_of: Option<&str>,
+        direction: Option<&str>,
+    ) -> Result<kg::EntityQueryResult, HarnessError> {
+        self.kg().query_entity(entity, as_of, direction)
+    }
+
+    pub fn kg_query_relationship(
+        &self,
+        predicate: &str,
+        as_of: Option<&str>,
+    ) -> Result<Vec<kg::Triple>, HarnessError> {
+        self.kg().query_relationship(predicate, as_of)
+    }
+
+    pub fn kg_timeline(
+        &self,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<kg::Triple>, HarnessError> {
+        self.kg().timeline(entity, limit, offset)
+    }
+
+    pub fn kg_stats(&self) -> Result<kg::KnowledgeGraphStats, HarnessError> {
+        self.kg().stats()
+    }
+
+    pub fn traverse(
+        &self,
+        start_node: &str,
+        max_hops: usize,
+    ) -> Result<Vec<graph::TraversalStep>, HarnessError> {
+        // Ensure graph index is current
+        let records = self.active_records().unwrap_or_default();
+        let links = self.links_store().list_all_links().unwrap_or_default();
+        let crosslinks = self
+            .crosslinks_store()
+            .list_all_crosslinks()
+            .unwrap_or_default();
+        let _ = self
+            .graph_index()
+            .build_and_save(&records, &links, &crosslinks);
+        self.graph_index().traverse(start_node, max_hops)
+    }
+
+    pub fn find_tunnels(
+        &self,
+        domain_a: Option<&str>,
+        domain_b: Option<&str>,
+    ) -> Result<Vec<graph::TunnelBridge>, HarnessError> {
+        self.graph_index().find_tunnels(domain_a, domain_b)
+    }
+
+    pub fn compute_links(&self, domain: &str) -> Result<Vec<links::DomainLink>, HarnessError> {
+        let records = self.active_records()?;
+        self.links_store()
+            .compute_links_for_domain(domain, &records)
+    }
+
+    pub fn list_links(&self, domain: Option<&str>) -> Result<Vec<links::DomainLink>, HarnessError> {
+        match domain {
+            Some(d) => self.links_store().get_links_for_domain(d),
+            None => self.links_store().list_all_links(),
+        }
+    }
+
+    pub fn prune_links(
+        &self,
+        domain: Option<&str>,
+        min_count: usize,
+    ) -> Result<usize, HarnessError> {
+        self.links_store().prune_links(domain, min_count)
+    }
+
+    pub fn crosslinks_propose(
+        &self,
+        max_proposals: usize,
+    ) -> Result<Vec<crosslinks::CrossLink>, HarnessError> {
+        let records = self.active_records()?;
+        self.crosslinks_store()
+            .propose_crosslinks(&records, max_proposals)
+    }
+
+    pub fn crosslinks_apply(&self) -> Result<usize, HarnessError> {
+        let count = self.crosslinks_store().apply_crosslinks()?;
+        if count > 0 {
+            let records = self.active_records()?;
+            let links = self.links_store().list_all_links().unwrap_or_default();
+            let crosslinks = self
+                .crosslinks_store()
+                .list_all_crosslinks()
+                .unwrap_or_default();
+            let _ = self
+                .graph_index()
+                .build_and_save(&records, &links, &crosslinks);
+        }
+        Ok(count)
+    }
+
+    pub fn crosslinks_prune(&self) -> Result<usize, HarnessError> {
+        let records = self.active_records()?;
+        let endpoints: Vec<String> = records
+            .into_iter()
+            .map(|r| format!("{}/{}", ids::slugify(&r.domain), ids::slugify(&r.topic)))
+            .collect();
+        let count = self.crosslinks_store().prune_crosslinks(Some(&endpoints))?;
+        if count > 0 {
+            let active = self.active_records()?;
+            let links = self.links_store().list_all_links().unwrap_or_default();
+            let crosslinks = self
+                .crosslinks_store()
+                .list_all_crosslinks()
+                .unwrap_or_default();
+            let _ = self
+                .graph_index()
+                .build_and_save(&active, &links, &crosslinks);
+        }
+        Ok(count)
+    }
+
+    pub fn list_crosslinks(&self) -> Result<Vec<crosslinks::CrossLink>, HarnessError> {
+        self.crosslinks_store().list_all_crosslinks()
     }
 
     fn write_manifest(&self, count: usize) {
@@ -868,6 +1193,114 @@ impl MemoryStore {
         let report = miner::mine(self, dir, domain)?;
         self.reindex()?;
         Ok(report)
+    }
+
+    /// Mine a SQLite `sessions.db` file into the `conversations` domain.
+    pub fn mine_sessions(
+        &self,
+        sessions_db_path: &Path,
+        domain: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<MineReport, HarnessError> {
+        sessions::mine_sessions(self, sessions_db_path, domain, topic)
+    }
+
+    /// Mine chat export transcripts (JSONL, JSON, TXT, MD) into the `conversations` domain.
+    pub fn mine_convos(
+        &self,
+        path: &Path,
+        domain: Option<&str>,
+        topic: Option<&str>,
+    ) -> Result<MineReport, HarnessError> {
+        convo::mine_convos(self, path, domain, topic)
+    }
+
+    /// Get the daily journal store.
+    pub fn journal(&self) -> JournalStore {
+        JournalStore::new(self.config.root.clone())
+    }
+
+    /// Append a daily journal entry for an agent.
+    pub fn journal_write(
+        &self,
+        agent: &str,
+        content: &str,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<JournalEntry, HarnessError> {
+        self.journal().write_entry(agent, content, timestamp)
+    }
+
+    /// Read journal entries for an agent.
+    pub fn journal_read(
+        &self,
+        agent: &str,
+        date: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<JournalEntry>, HarnessError> {
+        self.journal().read_entries(agent, date, limit)
+    }
+
+    /// Get the coordination events and artifacts store.
+    pub fn events(&self) -> EventsStore {
+        EventsStore::new(self.config.root.clone())
+    }
+
+    /// Append a coordination event to a stream.
+    pub fn event_append(
+        &self,
+        stream: &str,
+        event_type: &str,
+        from: &str,
+        to: Option<&str>,
+        body: &str,
+        correlation_id: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Event, HarnessError> {
+        self.events()
+            .append_event(stream, event_type, from, to, body, correlation_id, status)
+    }
+
+    /// List events from a stream.
+    pub fn event_list(
+        &self,
+        stream: &str,
+        since: Option<DateTime<Utc>>,
+        limit: Option<usize>,
+        unacked_by: Option<&str>,
+    ) -> Result<Vec<Event>, HarnessError> {
+        self.events().list_events(stream, since, limit, unacked_by)
+    }
+
+    /// Mark an event as acknowledged by an agent.
+    pub fn event_ack(&self, stream: &str, agent: &str, event_id: &str) -> Result<(), HarnessError> {
+        self.events().ack_event(stream, agent, event_id)
+    }
+
+    /// Wait for an event for an agent on a stream.
+    pub async fn event_wait(
+        &self,
+        stream: &str,
+        agent: &str,
+        timeout_ms: u64,
+    ) -> Result<Option<Event>, HarnessError> {
+        self.events()
+            .wait_for_event(stream, agent, timeout_ms)
+            .await
+    }
+
+    /// Put an artifact byte payload with metadata.
+    pub fn artifact_put(
+        &self,
+        id_opt: Option<&str>,
+        payload: &[u8],
+        extra_meta: HashMap<String, String>,
+    ) -> Result<String, HarnessError> {
+        self.events().put_artifact(id_opt, payload, extra_meta)
+    }
+
+    /// Get an artifact byte payload and metadata.
+    pub fn artifact_get(&self, id: &str) -> Result<Option<(Vec<u8>, ArtifactMeta)>, HarnessError> {
+        self.events().get_artifact(id)
     }
 
     /// Write a clean Markdown copy of the canonical tree.
@@ -1041,24 +1474,26 @@ fn excerpt(body: &str, query: &str) -> String {
     text
 }
 
-fn strip_front_matter(text: &str) -> String {
-    frontmatter::split(text)
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_else(|| text.to_string())
+fn collect_record_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HarnessError> {
+    collect_files_with_parent(dir, "records", out)
 }
 
-fn collect_record_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HarnessError> {
+fn collect_files_with_parent(
+    dir: &Path,
+    parent_name: &str,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), HarnessError> {
     let entries = fs::read_dir(dir).map_err(io_err)?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_record_paths(&path, out)?;
+            collect_files_with_parent(&path, parent_name, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("md")
             && path
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|name| name.to_str())
-                == Some("records")
+                == Some(parent_name)
         {
             out.push(path);
         }

@@ -6,8 +6,17 @@ pub mod tools;
 pub use engine::SqliteMemoryEngine;
 pub use saver::{MemorySaver, SaverPolicy, SAVER_SYSTEM_PROMPT};
 pub use store::{
-    default_root, AuditReport, MarkdownMemoryEngine, MemoryStore, MineReport, Record, SearchFilter,
-    SearchResult, StatusReport, StoreConfig,
+    all_mcp_tools, choose_write_route, default_root, dispatch_mcp_tool, handle_mcp_jsonrpc,
+    mine_convos, mine_sessions, parse_write_routing_policy, render_shared_brain_rules,
+    run_hook, run_instructions, run_stdio_server, ArtifactMeta, AuditReport, ClosetBoost,
+    CompactSummary, ContentIndex, CrossLink, CrossLinksStore, DaemonEndpointInfo, DaemonPaths,
+    DaemonRuntime, DomainLink, Entity, EntityAttribute, EntityCandidate, EntityQueryResult,
+    Event, EventsStore, GraphData, GraphEdge, GraphIndex, GraphNode, Job, JournalEntry,
+    JournalStore, KnowledgeGraph, KnowledgeGraphStats, Layer0, Layer1, Layer2, Layer3,
+    LinksStore, MarkdownMemoryEngine, McpToolDef, MemoryStack, MemoryStore, MineReport,
+    NativeDaemonClient, PointerLine, QueueStore, Record, SearchFilter, SearchResult,
+    StatusReport, StoreConfig, TraversalStep, Triple, TunnelBridge, WriteRoutingDecision,
+    WriteRoutingPolicy, WriteRoutingTarget, LOCK_REFUSAL_ERROR_CLASS, MAX_ATTEMPTS, SUMMARY_SPEC,
 };
 pub use tools::{ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
 

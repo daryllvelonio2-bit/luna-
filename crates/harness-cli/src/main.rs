@@ -654,7 +654,7 @@ async fn main() -> Result<(), HarnessError> {
             .await?;
         }
         Some(Commands::Memory { subcommand }) => {
-            handle_memory_command(subcommand, &config)?;
+            handle_memory_command(subcommand, &config).await?;
         }
         Some(Commands::Mcp { subcommand }) => {
             // Bare `luna mcp` reads the config, the cheap and safe default.
