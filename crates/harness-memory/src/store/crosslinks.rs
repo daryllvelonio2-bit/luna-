@@ -1,6 +1,6 @@
 //! Cross-domain links: proposal, review, approval, and pruning workflows.
 //!
-//! Direct port of MemPalace's `tunnels_tool.py` and `palace_graph.py` tunnels.
+//! Cross-link discovery and materialization.
 //! Cross-links connect entities between domains/topics, proposed via the
 //! weaker-side strength rule, reviewed in `crosslinks/proposal.md`, and
 //! materialized into canonical `crosslinks/<entity>.crosslinks.md`.
@@ -220,7 +220,7 @@ impl CrossLinksStore {
         Ok(all)
     }
 
-    /// Propose cross-links across domains using MemPalace's weaker-side strength rule.
+    /// Propose cross-links across domains using the reference design's weaker-side strength rule.
     /// Writes `crosslinks/proposal.md` for human review.
     pub fn propose_crosslinks(
         &self,

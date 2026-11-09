@@ -90,6 +90,11 @@ pub fn mine_convos(
         let topic_raw = topic_override.unwrap_or(stem);
         let topic = ids::slugify(topic_raw);
         let source_file = file_path.to_string_lossy().to_string();
+        let authored_at = fs::metadata(&file_path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(chrono::DateTime::<Utc>::from)
+            .unwrap_or_else(Utc::now);
 
         let exchanges = parse_exchanges(&file_path, &text);
         if exchanges.is_empty() {
@@ -132,7 +137,7 @@ pub fn mine_convos(
                 raw_content: exchange_body.clone(),
                 category: MemoryCategory::Fact,
                 confidence: 1.0,
-                created_at: Utc::now(),
+                created_at: authored_at,
                 updated_at: Utc::now(),
                 is_active: true,
                 superseded_by: None,

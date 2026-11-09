@@ -28,7 +28,7 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         // Store
         McpToolDef {
             name: "memory_status".to_string(),
-            description: "Palace overview — total records, domains, topics, and embedder".to_string(),
+            description: "Memory overview — total records, domains, topics, and embedder".to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         McpToolDef {
@@ -67,7 +67,8 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                     "domain": { "type": "string", "description": "Filter by domain (optional)" },
                     "topic": { "type": "string", "description": "Filter by topic (optional)" },
                     "limit": { "type": "integer", "description": "Max results (default: 8)" },
-                    "since": { "type": "string", "description": "RFC 3339 timestamp filter" }
+                    "since": { "type": "string", "description": "Only records authored at or after this RFC 3339 timestamp" },
+                    "before": { "type": "string", "description": "Only records authored before this RFC 3339 timestamp" }
                 },
                 "required": ["query"]
             }),
@@ -283,7 +284,7 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_find_crosslinks".to_string(),
-            description: "Find bridge entities (tunnels) connecting two domains".to_string(),
+            description: "Find bridge entities (cross-links) connecting two domains".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -392,7 +393,7 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                 "properties": {
                     "type": { "type": "string", "description": "Event type (task.request, task.reply, patch.ready, status)" },
                     "stream": { "type": "string", "description": "Project stream (default: main)" },
-                    "room": { "type": "string", "description": "Coordination room (default: delegation)" },
+                    "topic": { "type": "string", "description": "Coordination topic (default: delegation)" },
                     "from_agent": { "type": "string", "description": "Identity of sender" },
                     "to_agent": { "type": "string", "description": "Identity of recipient (or * for broadcast)" },
                     "correlation_id": { "type": "string", "description": "Task correlation ID" },
@@ -521,7 +522,11 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
     ]
 }
 
-pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Result<Value, HarnessError> {
+pub fn dispatch_mcp_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
     match tool {
         "memory_status" => {
             let status = store.status()?;
@@ -568,14 +573,33 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         "memory_get_summary_spec" => Ok(json!({ "spec": SUMMARY_SPEC })),
         "memory_search" => {
             let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-            let domain = args.get("domain").and_then(Value::as_str).map(str::to_string);
-            let topic = args.get("topic").and_then(Value::as_str).map(str::to_string);
+            let domain = args
+                .get("domain")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let topic = args
+                .get("topic")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+            let parse_filter_time =
+                |key: &str| -> Result<Option<chrono::DateTime<Utc>>, HarnessError> {
+                    match args.get(key).and_then(Value::as_str) {
+                        Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
+                            .map(|time| Some(time.with_timezone(&Utc)))
+                            .map_err(|error| {
+                                HarnessError::MemoryError(format!(
+                                    "invalid {key} timestamp '{raw}': {error}"
+                                ))
+                            }),
+                        None => Ok(None),
+                    }
+                };
             let filter = SearchFilter {
                 domain,
                 topic,
-                since: None,
-                before: None,
+                since: parse_filter_time("since")?,
+                before: parse_filter_time("before")?,
             };
             let results = store.search(query, &filter, limit)?;
             let formatted: Vec<Value> = results
@@ -665,16 +689,27 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
             Ok(json!({ "success": true, "reindexed": count }))
         }
         "memory_add_record" => {
-            let domain = args.get("domain").and_then(Value::as_str).unwrap_or("general");
+            let domain = args
+                .get("domain")
+                .and_then(Value::as_str)
+                .unwrap_or("general");
             let topic = args.get("topic").and_then(Value::as_str).unwrap_or("notes");
             let body = args.get("body").and_then(Value::as_str).unwrap_or("");
             let subject = args.get("subject").and_then(Value::as_str).unwrap_or(topic);
-            let predicate = args.get("predicate").and_then(Value::as_str).unwrap_or("profile");
+            let predicate = args
+                .get("predicate")
+                .and_then(Value::as_str)
+                .unwrap_or("profile");
             let object = args.get("object").and_then(Value::as_str).unwrap_or("");
             let tags: Vec<String> = args
                 .get("tags")
                 .and_then(Value::as_array)
-                .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
 
             let id = super::ids::record_id_from_content(domain, topic, body);
@@ -731,7 +766,10 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
             Ok(json!({ "success": true, "deleted": deleted }))
         }
         "memory_delete_by_source" => {
-            let source_file = args.get("source_file").and_then(Value::as_str).unwrap_or("");
+            let source_file = args
+                .get("source_file")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let records = store.active_records()?;
             let mut count = 0;
             for r in records {
@@ -755,7 +793,10 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         }
         "memory_mine" => {
             let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
-            let mode = args.get("mode").and_then(Value::as_str).unwrap_or("projects");
+            let mode = args
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("projects");
             let domain = args.get("domain").and_then(Value::as_str);
             let topic = args.get("topic").and_then(Value::as_str);
 
@@ -777,7 +818,10 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         "memory_kg_query" => {
             let entity = args.get("entity").and_then(Value::as_str).unwrap_or("");
             let as_of = args.get("as_of").and_then(Value::as_str);
-            let dir = args.get("direction").and_then(Value::as_str).unwrap_or("both");
+            let dir = args
+                .get("direction")
+                .and_then(Value::as_str)
+                .unwrap_or("both");
             let res = store.kg().query_entity(entity, as_of, Some(dir))?;
             Ok(json!({
                 "entity": entity,
@@ -837,17 +881,26 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         "memory_find_crosslinks" => {
             let da = args.get("domain_a").and_then(Value::as_str).unwrap_or("");
             let db = args.get("domain_b").and_then(Value::as_str).unwrap_or("");
-            let bridges = store.graph_index().find_tunnels(Some(da), Some(db))?;
+            let bridges = store.graph_index().find_cross_links(Some(da), Some(db))?;
             Ok(json!({ "domain_a": da, "domain_b": db, "bridges": bridges }))
         }
         "memory_list_crosslinks" => {
-            let links = store.crosslinks_store().list_all_crosslinks().unwrap_or_default();
+            let links = store
+                .crosslinks_store()
+                .list_all_crosslinks()
+                .unwrap_or_default();
             Ok(json!({ "crosslinks": links }))
         }
         "memory_follow_crosslinks" => {
             let domain = args.get("domain").and_then(Value::as_str).unwrap_or("");
-            let all = store.crosslinks_store().list_all_crosslinks().unwrap_or_default();
-            let filtered: Vec<_> = all.into_iter().filter(|l| l.from_endpoint == domain || l.to_endpoint == domain).collect();
+            let all = store
+                .crosslinks_store()
+                .list_all_crosslinks()
+                .unwrap_or_default();
+            let filtered: Vec<_> = all
+                .into_iter()
+                .filter(|l| l.from_endpoint == domain || l.to_endpoint == domain)
+                .collect();
             Ok(json!({ "domain": domain, "crosslinks": filtered }))
         }
         "memory_list_links" => {
@@ -868,12 +921,22 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
             Ok(json!({ "links": filtered }))
         }
         "memory_create_crosslink" => {
-            let fd = args.get("from_domain").and_then(Value::as_str).unwrap_or("");
+            let fd = args
+                .get("from_domain")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let td = args.get("to_domain").and_then(Value::as_str).unwrap_or("");
             let ent = args.get("entity").and_then(Value::as_str).unwrap_or("");
-            let mut links = store.crosslinks_store().get_crosslinks_for_entity(ent).unwrap_or_default();
-            links.push(super::crosslinks::CrossLink::new(ent, fd, td, None, 1, "approved"));
-            store.crosslinks_store().save_crosslinks_for_entity(ent, &links)?;
+            let mut links = store
+                .crosslinks_store()
+                .get_crosslinks_for_entity(ent)
+                .unwrap_or_default();
+            links.push(super::crosslinks::CrossLink::new(
+                ent, fd, td, None, 1, "approved",
+            ));
+            store
+                .crosslinks_store()
+                .save_crosslinks_for_entity(ent, &links)?;
             Ok(json!({ "success": true }))
         }
         "memory_delete_crosslink" => {
@@ -894,14 +957,23 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         "memory_journal_read" => {
             let agent = args.get("agent").and_then(Value::as_str).unwrap_or("luna");
             let date = args.get("date").and_then(Value::as_str);
-            let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as usize);
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
             let entries = store.journal_read(agent, date, limit)?;
             Ok(json!({ "agent": agent, "entries": entries }))
         }
         "memory_event_append" => {
-            let etype = args.get("type").and_then(Value::as_str).unwrap_or("message");
+            let etype = args
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("message");
             let stream = args.get("stream").and_then(Value::as_str).unwrap_or("main");
-            let from = args.get("from_agent").and_then(Value::as_str).unwrap_or("luna");
+            let from = args
+                .get("from_agent")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let to = args.get("to_agent").and_then(Value::as_str);
             let corr = args.get("correlation_id").and_then(Value::as_str);
             let body = args.get("body").and_then(Value::as_str).unwrap_or("");
@@ -911,17 +983,26 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         "memory_event_list" => {
             let stream = args.get("stream").and_then(Value::as_str).unwrap_or("main");
             let unacked = args.get("unacked_by").and_then(Value::as_str);
-            let limit = args.get("limit").and_then(Value::as_u64).map(|n| n as usize);
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
             let events = store.event_list(stream, None, limit, unacked)?;
             Ok(json!({ "events": events, "count": events.len() }))
         }
         "memory_event_wait" => {
             let agent = args.get("agent").and_then(Value::as_str).unwrap_or("luna");
             let stream = args.get("stream").and_then(Value::as_str).unwrap_or("main");
-            let timeout = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(5000);
-            let event = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(store.event_wait(stream, agent, timeout))
-            })?;
+            let timeout = args
+                .get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(5000);
+            // This dispatch path is synchronous: it serves both the stdio loop
+            // (no runtime) and the HTTP server. Use the blocking wait so there
+            // is no `Handle::current()` panic when no runtime exists.
+            let event = store
+                .events()
+                .wait_for_event_blocking(stream, agent, timeout)?;
             Ok(json!({ "event": event }))
         }
         "memory_event_ack" => {
@@ -932,31 +1013,65 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
             Ok(json!({ "success": true }))
         }
         "memory_task_create" => {
-            let project = args.get("project").and_then(Value::as_str).unwrap_or("default");
-            let from = args.get("from_agent").and_then(Value::as_str).unwrap_or("luna");
+            let project = args
+                .get("project")
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            let from = args
+                .get("from_agent")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let to = args.get("to_agent").and_then(Value::as_str).unwrap_or("*");
             let goal = args.get("goal").and_then(Value::as_str).unwrap_or("");
             let branch = args.get("branch").and_then(Value::as_str).unwrap_or("main");
-            let base = args.get("base_commit").and_then(Value::as_str).unwrap_or("HEAD");
+            let base = args
+                .get("base_commit")
+                .and_then(Value::as_str)
+                .unwrap_or("HEAD");
             let done = args.get("done").and_then(Value::as_str).unwrap_or("");
 
             let body = format!("goal: {goal}\nbranch: {branch}\nbase_commit: {base}\ndone: {done}");
             let corr = format!("task_{}", uuid::Uuid::new_v4().simple());
             let stream = format!("project/{project}");
-            let event = store.event_append(&stream, "task.request", from, Some(to), &body, Some(&corr), Some("open"))?;
+            let event = store.event_append(
+                &stream,
+                "task.request",
+                from,
+                Some(to),
+                &body,
+                Some(&corr),
+                Some("open"),
+            )?;
             Ok(json!({ "success": true, "correlation_id": corr, "event": event }))
         }
         "memory_patch_submit" => {
-            let project = args.get("project").and_then(Value::as_str).unwrap_or("default");
-            let from = args.get("from_agent").and_then(Value::as_str).unwrap_or("luna");
+            let project = args
+                .get("project")
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            let from = args
+                .get("from_agent")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let to = args.get("to_agent").and_then(Value::as_str).unwrap_or("*");
-            let patch = args.get("patch_content").and_then(Value::as_str).unwrap_or("");
+            let patch = args
+                .get("patch_content")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let corr = args.get("correlation_id").and_then(Value::as_str);
 
             let art_id = store.artifact_put(None, patch.as_bytes(), HashMap::new())?;
             let stream = format!("project/{project}");
             let body = format!("patch artifact: {art_id}");
-            let event = store.event_append(&stream, "patch.ready", from, Some(to), &body, corr, Some("submitted"))?;
+            let event = store.event_append(
+                &stream,
+                "patch.ready",
+                from,
+                Some(to),
+                &body,
+                corr,
+                Some("submitted"),
+            )?;
             Ok(json!({ "success": true, "artifact_id": art_id, "event": event }))
         }
         "memory_peers" => {
@@ -978,7 +1093,8 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
             let pair_opt = store.artifact_get(id)?;
             match pair_opt {
                 Some((bytes, _meta)) => {
-                    let text = String::from_utf8(bytes).unwrap_or_else(|e| format!("binary bytes (len {})", e.as_bytes().len()));
+                    let text = String::from_utf8(bytes)
+                        .unwrap_or_else(|e| format!("binary bytes (len {})", e.as_bytes().len()));
                     Ok(json!({ "id": id, "content": text }))
                 }
                 None => Ok(json!({ "error": format!("artifact '{id}' not found") })),
@@ -986,14 +1102,25 @@ pub fn dispatch_mcp_tool(store: &MemoryStore, tool: &str, args: &Value) -> Resul
         }
         "memory_checkpoint" => {
             let stream = args.get("stream").and_then(Value::as_str).unwrap_or("main");
-            let from = args.get("from_agent").and_then(Value::as_str).unwrap_or("luna");
+            let from = args
+                .get("from_agent")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let body = args.get("body").and_then(Value::as_str).unwrap_or("");
-            let ev = store.event_append(stream, "checkpoint", from, None, body, None, Some("checkpoint"))?;
+            let ev = store.event_append(
+                stream,
+                "checkpoint",
+                from,
+                None,
+                body,
+                None,
+                Some("checkpoint"),
+            )?;
             Ok(json!({ "success": true, "checkpoint_id": ev.id }))
         }
         "memory_hook_settings" => Ok(json!({
-            "hooks_save_interval": 10,
-            "auto_save": true,
+            "hooks_save_interval": store.config.hooks_save_interval,
+            "auto_save": store.config.hooks_auto_save,
             "silent_save": true
         })),
         other => Err(HarnessError::ToolNotFound(other.to_string())),
@@ -1090,10 +1217,15 @@ pub fn run_stdio_server(store: &MemoryStore) -> Result<(), HarnessError> {
 
         let resp = handle_mcp_jsonrpc(store, &req);
         if resp != json!({}) {
-            let mut out_bytes = serde_json::to_vec(&resp).map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+            let mut out_bytes = serde_json::to_vec(&resp)
+                .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
             out_bytes.push(b'\n');
-            stdout.write_all(&out_bytes).map_err(|e| HarnessError::Io(e.to_string()))?;
-            stdout.flush().map_err(|e| HarnessError::Io(e.to_string()))?;
+            stdout
+                .write_all(&out_bytes)
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
+            stdout
+                .flush()
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
         }
     }
     Ok(())

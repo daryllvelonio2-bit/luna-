@@ -72,7 +72,7 @@ impl MarkdownMemoryEngine {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         self.store.kg_add_triple(
@@ -84,7 +84,7 @@ impl MarkdownMemoryEngine {
             confidence,
             source_record,
             source_file,
-            source_drawer_id,
+            source_record_id,
             adapter_name,
         )
     }
@@ -109,7 +109,7 @@ impl MarkdownMemoryEngine {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         self.store.kg_supersede(
@@ -121,7 +121,7 @@ impl MarkdownMemoryEngine {
             confidence,
             source_record,
             source_file,
-            source_drawer_id,
+            source_record_id,
             adapter_name,
         )
     }
@@ -164,12 +164,12 @@ impl MarkdownMemoryEngine {
         self.store.traverse(start_node, max_hops)
     }
 
-    pub fn find_tunnels(
+    pub fn find_cross_links(
         &self,
         domain_a: Option<&str>,
         domain_b: Option<&str>,
-    ) -> Result<Vec<super::graph::TunnelBridge>, HarnessError> {
-        self.store.find_tunnels(domain_a, domain_b)
+    ) -> Result<Vec<super::graph::CrossLinkBridge>, HarnessError> {
+        self.store.find_cross_links(domain_a, domain_b)
     }
 
     pub fn mine_sessions(
@@ -262,6 +262,149 @@ impl MarkdownMemoryEngine {
     }
 }
 
+/// Save a `MemoryRecord`: write the incoming record and retire any active
+/// record with the same subject/predicate. Shared by the direct engine and the
+/// daemon job dispatcher so both write paths behave identically.
+pub fn save_record(store: &MemoryStore, record: &MemoryRecord) -> Result<(), HarnessError> {
+    if record.id.trim().is_empty() {
+        return Err(HarnessError::MemoryError(
+            "Cannot save a memory record with an empty id".to_string(),
+        ));
+    }
+
+    let incoming = Record::from_memory(record);
+
+    // Auto-supersede conflicting active records, matching the SQLite engine:
+    // one active record per (subject, predicate), case-insensitive. Note
+    // pointers match exactly because their predicate embeds the note id.
+    let conflicts: Vec<Record> = store
+        .all_records()?
+        .into_iter()
+        .filter(|existing| existing.is_active && existing.id != incoming.id)
+        .filter(|existing| {
+            if incoming.category == MemoryCategory::NotePointer
+                || existing.category == MemoryCategory::NotePointer
+            {
+                existing.subject == incoming.subject && existing.predicate == incoming.predicate
+            } else {
+                existing.subject.eq_ignore_ascii_case(&incoming.subject)
+                    && existing.predicate.eq_ignore_ascii_case(&incoming.predicate)
+            }
+        })
+        .collect();
+
+    store.write_record(incoming.clone())?;
+
+    for mut old in conflicts {
+        old.is_active = false;
+        old.superseded_by = Some(incoming.id.clone());
+        old.updated_at = Utc::now();
+        store.write_record(old)?;
+    }
+    Ok(())
+}
+
+/// Update a record in place or replace its identity. See `save_record`.
+pub fn update_record(
+    store: &MemoryStore,
+    id: &str,
+    updated: &MemoryRecord,
+) -> Result<(), HarnessError> {
+    let Some(target) = store.get_record(id)? else {
+        return Err(HarnessError::MemoryError(format!(
+            "Cannot update memory '{}': no such record (pass the record id shown in CURRENT ACTIVE MEMORIES)",
+            id
+        )));
+    };
+
+    if updated.id == target.id {
+        // Same identity: revise in place and keep the taxonomy placement.
+        let mut record = Record::from_memory(updated);
+        record.domain = target.domain.clone();
+        record.topic = target.topic.clone();
+        record.created_at = target.created_at;
+        record.is_active = true;
+        record.superseded_by = None;
+        store.write_record(record)?;
+    } else {
+        // A changed identity writes a replacement and retires the old file.
+        save_record(store, updated)?;
+        let mut old = target;
+        old.is_active = false;
+        old.superseded_by = Some(updated.id.clone());
+        old.updated_at = Utc::now();
+        store.write_record(old)?;
+    }
+
+    // Retire any other active duplicate, but not for note pointers.
+    if updated.category != MemoryCategory::NotePointer {
+        for mut duplicate in store.all_records()?.into_iter().filter(|record| {
+            record.is_active
+                && record.id != updated.id
+                && record.category != MemoryCategory::NotePointer
+                && record.subject.eq_ignore_ascii_case(&updated.subject)
+                && record.predicate.eq_ignore_ascii_case(&updated.predicate)
+        }) {
+            duplicate.is_active = false;
+            duplicate.superseded_by = Some(updated.id.clone());
+            duplicate.updated_at = Utc::now();
+            store.write_record(duplicate)?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete one or more records by id, subject, or note pointer. See `save_record`.
+pub fn forget_records(store: &MemoryStore, id: &str) -> Result<(), HarnessError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    if is_forget_all(trimmed) {
+        store.delete_all_records()?;
+        return Ok(());
+    }
+
+    let tokens: Vec<&str> = if trimmed.contains([';', ',', '\n']) {
+        trimmed
+            .split([';', ',', '\n'])
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .collect()
+    } else {
+        vec![trimmed]
+    };
+
+    let all = store.all_records()?;
+    for token in tokens {
+        let mut targets: Vec<String> = Vec::new();
+        for record in &all {
+            let exact_id = record.id.eq_ignore_ascii_case(token);
+            let note_pointer = record.id.eq_ignore_ascii_case(&format!("mem_ptr_{token}"));
+            let subject_match = !token.starts_with("mem_ptr_")
+                && record.category != MemoryCategory::NotePointer
+                && record.subject.eq_ignore_ascii_case(token);
+            if exact_id || note_pointer || subject_match {
+                targets.push(record.id.clone());
+            }
+        }
+        for target in targets {
+            store.delete_record(&target)?;
+            // Clear references from records that pointed at the deleted one.
+            for mut referrer in store
+                .all_records()?
+                .into_iter()
+                .filter(|record| record.superseded_by.as_deref() == Some(target.as_str()))
+            {
+                referrer.superseded_by = None;
+                store.write_record(referrer)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl MemoryEngine for MarkdownMemoryEngine {
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
@@ -269,139 +412,15 @@ impl MemoryEngine for MarkdownMemoryEngine {
     }
 
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
-        if record.id.trim().is_empty() {
-            return Err(HarnessError::MemoryError(
-                "Cannot save a memory record with an empty id".to_string(),
-            ));
-        }
-
-        let incoming = Record::from_memory(record);
-
-        // Auto-supersede conflicting active records, matching the SQLite
-        // engine: one active record per (subject, predicate), case-insensitive.
-        // Note pointers match exactly because their predicate embeds the note id.
-        let conflicts: Vec<Record> = self
-            .store
-            .all_records()?
-            .into_iter()
-            .filter(|existing| existing.is_active && existing.id != incoming.id)
-            .filter(|existing| {
-                if incoming.category == MemoryCategory::NotePointer
-                    || existing.category == MemoryCategory::NotePointer
-                {
-                    existing.subject == incoming.subject && existing.predicate == incoming.predicate
-                } else {
-                    existing.subject.eq_ignore_ascii_case(&incoming.subject)
-                        && existing.predicate.eq_ignore_ascii_case(&incoming.predicate)
-                }
-            })
-            .collect();
-
-        self.store.write_record(incoming.clone())?;
-
-        for mut old in conflicts {
-            old.is_active = false;
-            old.superseded_by = Some(incoming.id.clone());
-            old.updated_at = Utc::now();
-            self.store.write_record(old)?;
-        }
-        Ok(())
+        save_record(&self.store, record)
     }
 
     async fn update(&self, id: &str, updated: &MemoryRecord) -> Result<(), HarnessError> {
-        let Some(target) = self.store.get_record(id)? else {
-            return Err(HarnessError::MemoryError(format!(
-                "Cannot update memory '{}': no such record (pass the record id shown in CURRENT ACTIVE MEMORIES)",
-                id
-            )));
-        };
-
-        if updated.id == target.id {
-            // Same identity: revise in place and keep the taxonomy placement.
-            let mut record = Record::from_memory(updated);
-            record.domain = target.domain.clone();
-            record.topic = target.topic.clone();
-            record.created_at = target.created_at;
-            record.is_active = true;
-            record.superseded_by = None;
-            self.store.write_record(record)?;
-        } else {
-            // A changed identity writes a replacement and retires the old file.
-            self.save(updated).await?;
-            let mut old = target;
-            old.is_active = false;
-            old.superseded_by = Some(updated.id.clone());
-            old.updated_at = Utc::now();
-            self.store.write_record(old)?;
-        }
-
-        // Retire any other active duplicate, but not for note pointers.
-        if updated.category != MemoryCategory::NotePointer {
-            for mut duplicate in self.store.all_records()?.into_iter().filter(|record| {
-                record.is_active
-                    && record.id != updated.id
-                    && record.category != MemoryCategory::NotePointer
-                    && record.subject.eq_ignore_ascii_case(&updated.subject)
-                    && record.predicate.eq_ignore_ascii_case(&updated.predicate)
-            }) {
-                duplicate.is_active = false;
-                duplicate.superseded_by = Some(updated.id.clone());
-                duplicate.updated_at = Utc::now();
-                self.store.write_record(duplicate)?;
-            }
-        }
-        Ok(())
+        update_record(&self.store, id, updated)
     }
 
     async fn forget(&self, id: &str) -> Result<(), HarnessError> {
-        let trimmed = id.trim();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
-
-        if is_forget_all(trimmed) {
-            self.store.delete_all_records()?;
-            return Ok(());
-        }
-
-        let tokens: Vec<&str> = if trimmed.contains([';', ',', '\n']) {
-            trimmed
-                .split([';', ',', '\n'])
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-                .collect()
-        } else {
-            vec![trimmed]
-        };
-
-        let all = self.store.all_records()?;
-        for token in tokens {
-            let mut targets: Vec<String> = Vec::new();
-            for record in &all {
-                let exact_id = record.id.eq_ignore_ascii_case(token);
-                let note_pointer = record.id.eq_ignore_ascii_case(&format!("mem_ptr_{token}"));
-                let subject_match = !token.starts_with("mem_ptr_")
-                    && record.category != MemoryCategory::NotePointer
-                    && record.subject.eq_ignore_ascii_case(token);
-                if exact_id || note_pointer || subject_match {
-                    targets.push(record.id.clone());
-                }
-            }
-            for target in targets {
-                self.store.delete_record(&target)?;
-                // Clear references from records that pointed at the deleted one.
-                for mut referrer in self
-                    .store
-                    .all_records()?
-                    .into_iter()
-                    .filter(|record| record.superseded_by.as_deref() == Some(target.as_str()))
-                {
-                    referrer.superseded_by = None;
-                    self.store.write_record(referrer)?;
-                }
-            }
-        }
-        Ok(())
+        forget_records(&self.store, id)
     }
 
     async fn add_note_pointer(&self, note_id: &str, pointer: &str) -> Result<(), HarnessError> {
@@ -430,6 +449,90 @@ impl MemoryEngine for MarkdownMemoryEngine {
 
     fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {
         self.store.format_as_system_prompt(memories)
+    }
+}
+
+/// Engine that forwards writes to a running daemon, falling back to the direct
+/// store when the policy is `prefer` and the daemon is unreachable. Reads are
+/// served from Markdown after a light reload so daemon writes become visible.
+pub struct DaemonWriteEngine {
+    direct: MarkdownMemoryEngine,
+    client: super::daemon::NativeDaemonClient,
+    policy: super::daemon::WriteRoutingPolicy,
+}
+
+impl DaemonWriteEngine {
+    pub fn new(
+        direct: MarkdownMemoryEngine,
+        client: super::daemon::NativeDaemonClient,
+        policy: super::daemon::WriteRoutingPolicy,
+    ) -> Self {
+        Self {
+            direct,
+            client,
+            policy,
+        }
+    }
+
+    pub fn direct(&self) -> &MarkdownMemoryEngine {
+        &self.direct
+    }
+
+    fn may_fallback(&self) -> bool {
+        self.policy == super::daemon::WriteRoutingPolicy::Prefer
+    }
+
+    async fn forward(&self, kind: &str, payload: serde_json::Value) -> Result<(), HarnessError> {
+        self.client.execute(kind, payload).await.map(|_| ())
+    }
+}
+
+#[async_trait]
+impl MemoryEngine for DaemonWriteEngine {
+    async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.direct.store().reload()?;
+        self.direct.retrieve(query, limit).await
+    }
+
+    async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
+        let payload = serde_json::to_value(record)
+            .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+        match self.forward("save_memory", payload).await {
+            Ok(()) => Ok(()),
+            Err(_) if self.may_fallback() => self.direct.save(record).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn update(&self, id: &str, updated: &MemoryRecord) -> Result<(), HarnessError> {
+        let payload = serde_json::json!({ "id": id, "record": updated });
+        match self.forward("update_memory", payload).await {
+            Ok(()) => Ok(()),
+            Err(_) if self.may_fallback() => self.direct.update(id, updated).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn forget(&self, id: &str) -> Result<(), HarnessError> {
+        let payload = serde_json::json!({ "id": id });
+        match self.forward("forget_memory", payload).await {
+            Ok(()) => Ok(()),
+            Err(_) if self.may_fallback() => self.direct.forget(id).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn add_note_pointer(&self, note_id: &str, pointer: &str) -> Result<(), HarnessError> {
+        self.direct.add_note_pointer(note_id, pointer).await
+    }
+
+    async fn get_record(&self, id: &str) -> Result<Option<MemoryRecord>, HarnessError> {
+        self.direct.store().reload()?;
+        self.direct.get_record(id).await
+    }
+
+    fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {
+        self.direct.format_as_system_prompt(memories)
     }
 }
 

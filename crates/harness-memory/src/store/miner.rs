@@ -1,9 +1,9 @@
 //! Project miner: walk a tree, chunk text, and file verbatim records with
 //! content indexes and compact summaries.
 //!
-//! Direct port of MemPalace's `miner.py`, `room_detector_local.py`, and `palace/closets.py`:
+//! Project miner pipeline:
 //! - Paragraph-aware sliding window chunking (`chunk_text`)
-//! - Folder-to-room mapping (70+ patterns) and topic detection
+//! - Folder-to-topic mapping (70+ patterns) and topic detection
 //! - Compact pointer lines with action verbs, markdown headers, and quotes
 
 use std::collections::{HashMap, HashSet};
@@ -51,8 +51,8 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "zig", "nim", "cs", "fs", "vue", "svelte",
 ];
 
-/// 70+ folder-to-room mappings ported verbatim from MemPalace's `room_detector_local.py:FOLDER_ROOM_MAP`.
-const FOLDER_ROOM_MAP: &[(&str, &str)] = &[
+/// 70+ folder-to-topic mappings ported verbatim from the reference design's `folder-to-topic detector:FOLDER_TOPIC_MAP`.
+const FOLDER_TOPIC_MAP: &[(&str, &str)] = &[
     ("frontend", "frontend"),
     ("front-end", "frontend"),
     ("front_end", "frontend"),
@@ -144,8 +144,8 @@ pub struct TextChunk {
     pub line_end: usize,
 }
 
-/// Split content into drawer-sized chunks.
-/// Direct port of MemPalace's `miner.py:chunk_text`.
+/// Split content into record-sized chunks.
+/// Direct port of the reference design's `miner.py:chunk_text`.
 pub fn chunk_text(
     content: &str,
     chunk_size: usize,
@@ -266,7 +266,7 @@ pub fn chunk_text(
 }
 
 /// Tokenize a name into lowercased tokens split by '-', '_', '.', '/'.
-/// Matches MemPalace `miner.py:_tokens`.
+/// Matches the reference design `miner.py:_tokens`.
 fn name_tokens(val: &str) -> HashSet<String> {
     val.split(|c: char| c == '-' || c == '_' || c == '.' || c == '/')
         .map(|s| s.trim().to_lowercase())
@@ -275,7 +275,7 @@ fn name_tokens(val: &str) -> HashSet<String> {
 }
 
 /// Returns true when `a` and `b` match as equal strings or as separator-bounded tokens.
-/// Matches MemPalace `miner.py:_name_matches`.
+/// Matches the reference design `miner.py:_name_matches`.
 fn name_matches(a: &str, b: &str) -> bool {
     let a_low = a.to_lowercase();
     let b_low = b.to_lowercase();
@@ -288,20 +288,20 @@ fn name_matches(a: &str, b: &str) -> bool {
 }
 
 /// Route a file to the right topic.
-/// Direct port of MemPalace's `detect_room` (miner.py:679).
+/// Direct port of the reference design's `detect_topic` (miner.py:679).
 fn detect_topic(relative: &Path, content: &str) -> String {
     let components: Vec<String> = relative
         .components()
         .filter_map(|c| c.as_os_str().to_str().map(str::to_string))
         .collect();
 
-    // Priority 1: folder path matches FOLDER_ROOM_MAP
+    // Priority 1: folder path matches FOLDER_TOPIC_MAP
     if components.len() >= 2 {
         for part in &components[..components.len() - 1] {
             let part_lower = part.to_lowercase().replace('-', "_");
-            for &(pattern, room) in FOLDER_ROOM_MAP {
+            for &(pattern, topic) in FOLDER_TOPIC_MAP {
                 if name_matches(&part_lower, pattern) {
-                    return room.to_string();
+                    return topic.to_string();
                 }
             }
         }
@@ -314,15 +314,15 @@ fn detect_topic(relative: &Path, content: &str) -> String {
         }
     }
 
-    // Priority 2: filename matches known room/topic
+    // Priority 2: filename matches known topic
     let stem = relative
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    for &(pattern, room) in FOLDER_ROOM_MAP {
+    for &(pattern, topic) in FOLDER_TOPIC_MAP {
         if name_matches(&stem, pattern) {
-            return room.to_string();
+            return topic.to_string();
         }
     }
 
@@ -333,15 +333,15 @@ fn detect_topic(relative: &Path, content: &str) -> String {
         .collect::<String>()
         .to_lowercase();
     let mut scores: HashMap<&'static str, usize> = HashMap::new();
-    for &(pattern, room) in FOLDER_ROOM_MAP {
+    for &(pattern, topic) in FOLDER_TOPIC_MAP {
         let count = content_window.matches(pattern).count();
         if count > 0 {
-            *scores.entry(room).or_insert(0) += count;
+            *scores.entry(topic).or_insert(0) += count;
         }
     }
-    if let Some((&best_room, &score)) = scores.iter().max_by_key(|&(_, count)| count) {
+    if let Some((&best_topic, &score)) = scores.iter().max_by_key(|&(_, count)| count) {
         if score > 0 {
-            return best_room.to_string();
+            return best_topic.to_string();
         }
     }
 
@@ -407,6 +407,11 @@ pub fn mine(
             report.skipped += 1;
             continue;
         }
+        let authored_at = metadata
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<Utc>::from)
+            .unwrap_or_else(Utc::now);
         let Ok(text) = fs::read_to_string(path) else {
             report.skipped += 1;
             continue;
@@ -451,7 +456,7 @@ pub fn mine(
                 raw_content: chunk.content.clone(),
                 category: MemoryCategory::Fact,
                 confidence: 1.0,
-                created_at: Utc::now(),
+                created_at: authored_at,
                 updated_at: Utc::now(),
                 is_active: true,
                 superseded_by: None,
@@ -512,12 +517,11 @@ fn entity_word_regex() -> &'static Regex {
 }
 
 /// Extract entity proper nouns (frequency >= 2, top 5).
-/// Direct port of MemPalace's `palace/closets.py:build_closet_lines` entity extractor.
+/// Content-index entity extractor (`build_content_index_lines`).
 pub(crate) fn extract_entities(text: &str) -> Vec<String> {
     let re = entity_word_regex();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    let stop_words: HashSet<&'static str> =
-        super::search::MEMPALACE_STOPWORDS.iter().copied().collect();
+    let stop_words: HashSet<&'static str> = super::search::STOPWORDS.iter().copied().collect();
 
     for m in re.find_iter(text) {
         let word = m.as_str();
@@ -533,8 +537,8 @@ pub(crate) fn extract_entities(text: &str) -> Vec<String> {
     frequent.into_iter().take(5).map(|(w, _)| w).collect()
 }
 
-/// Build compact closet pointer lines from drawer chunks.
-/// Direct port of MemPalace `palace/closets.py:build_closet_lines`.
+/// Build compact content index pointer lines from record chunks.
+/// Content-index pointer builder (`build_content_index_lines`).
 pub(crate) fn build_pointer_lines(
     domain: &str,
     topic: &str,

@@ -45,9 +45,9 @@ pub use daemon::{
     Job, NativeDaemonClient, QueueStore, WriteRoutingDecision, WriteRoutingPolicy,
     WriteRoutingTarget, LOCK_REFUSAL_ERROR_CLASS, MAX_ATTEMPTS,
 };
-pub use engine::MarkdownMemoryEngine;
+pub use engine::{DaemonWriteEngine, MarkdownMemoryEngine};
 pub use events::{ArtifactMeta, Event, EventsStore};
-pub use graph::{GraphData, GraphEdge, GraphIndex, GraphNode, TraversalStep, TunnelBridge};
+pub use graph::{CrossLinkBridge, GraphData, GraphEdge, GraphIndex, GraphNode, TraversalStep};
 pub use hooks::{render_shared_brain_rules, run_hook, run_instructions};
 pub use journal::{JournalEntry, JournalStore};
 pub use kg::{
@@ -57,7 +57,7 @@ pub use kg::{
 pub use links::{DomainLink, LinksStore};
 pub use mcp::{all_mcp_tools, dispatch_mcp_tool, handle_mcp_jsonrpc, run_stdio_server, McpToolDef};
 pub use miner::MineReport;
-pub use pointer_index::{ClosetBoost, ContentIndex, PointerLine};
+pub use pointer_index::{ContentIndex, IndexBoost, PointerLine};
 pub use sessions::mine_sessions;
 pub use summary::{
     CompactSummary, SummaryArc, SummaryCross, SummaryEntry, SummaryHeader, SUMMARY_SPEC,
@@ -79,6 +79,12 @@ pub struct StoreConfig {
     pub auto_mine: bool,
     pub shard_after: usize,
     pub overfetch: usize,
+    /// Save every N human messages when hooks are enabled.
+    pub hooks_save_interval: usize,
+    /// Let lifecycle hooks write memory automatically.
+    pub hooks_auto_save: bool,
+    /// Legacy SQLite database to import when the Markdown store is empty.
+    pub legacy_db: Option<PathBuf>,
 }
 
 impl StoreConfig {
@@ -95,6 +101,9 @@ impl StoreConfig {
             auto_mine: false,
             shard_after: 5_000,
             overfetch: 4,
+            hooks_save_interval: hooks::DEFAULT_SAVE_INTERVAL,
+            hooks_auto_save: true,
+            legacy_db: None,
         }
     }
 }
@@ -332,9 +341,9 @@ pub struct SearchResult {
     pub score: f32,
     pub lexical: f32,
     pub vector: f32,
-    pub closet_boost: f32,
+    pub index_boost: f32,
     pub matched_via: String,
-    pub closet_preview: Option<String>,
+    pub index_preview: Option<String>,
     pub excerpt: String,
 }
 
@@ -363,6 +372,30 @@ impl MemoryStore {
             cache: RwLock::new(Cache::default()),
         };
         store.ensure_layout()?;
+        // One-time upgrade path: if the legacy SQLite database exists and the
+        // Markdown store is empty, import it automatically so an upgrade does
+        // not silently start with no recall.
+        if let Some(db) = store.config.legacy_db.clone() {
+            if db.exists() {
+                let empty = store
+                    .all_record_paths()
+                    .map(|paths| paths.is_empty())
+                    .unwrap_or(false);
+                if empty {
+                    match store.migrate_from_sqlite(&db) {
+                        Ok(count) if count > 0 => tracing::info!(
+                            "memory store: imported {count} record(s) from {}",
+                            db.display()
+                        ),
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            "memory store: could not import {}: {error}",
+                            db.display()
+                        ),
+                    }
+                }
+            }
+        }
         Ok(store)
     }
 
@@ -655,16 +688,20 @@ impl MemoryStore {
                     .map(|topic| ids::slugify(topic) == ids::slugify(&doc.record.topic))
                     .unwrap_or(true)
             })
+            // Time windows use the content's authored time (`created_at`),
+            // which miners populate from the source. `updated_at` only tracks
+            // the last write, so using it would hide older memories that were
+            // re-filed or superseded recently.
             .filter(|doc| {
                 filter
                     .since
-                    .map(|since| doc.record.updated_at >= since)
+                    .map(|since| doc.record.created_at >= since)
                     .unwrap_or(true)
             })
             .filter(|doc| {
                 filter
                     .before
-                    .map(|before| doc.record.updated_at < before)
+                    .map(|before| doc.record.created_at < before)
                     .unwrap_or(true)
             })
             .collect();
@@ -683,13 +720,13 @@ impl MemoryStore {
             .saturating_mul(self.config.overfetch.max(1))
             .max(limit);
 
-        // Load content indexes and compute closet rank boosts per source file
+        // Load content indexes and compute content-index rank boosts per source file
         let indexes = self.content_indexes().unwrap_or_default();
-        let closet_boosts = pointer_index::calculate_closet_boosts(&indexes, query);
+        let index_boosts = pointer_index::calculate_index_boosts(&indexes, query);
         let mut boost_by_id: HashMap<String, f32> = HashMap::new();
         for doc in &filtered {
             if let Some(src) = &doc.record.source_file {
-                if let Some(cb) = closet_boosts.get(src) {
+                if let Some(cb) = index_boosts.get(src) {
                     boost_by_id.insert(doc.record.id.clone(), cb.boost);
                 }
             }
@@ -715,7 +752,7 @@ impl MemoryStore {
                     .record
                     .source_file
                     .as_ref()
-                    .and_then(|src| closet_boosts.get(src))
+                    .and_then(|src| index_boosts.get(src))
                     .map(|b| b.preview.clone());
                 Some(SearchResult {
                     record: doc.record.clone(),
@@ -723,9 +760,9 @@ impl MemoryStore {
                     score: hit.score,
                     lexical: hit.lexical,
                     vector: hit.vector,
-                    closet_boost: hit.closet_boost,
+                    index_boost: hit.index_boost,
                     matched_via: hit.matched_via,
-                    closet_preview: preview,
+                    index_preview: preview,
                     excerpt: excerpt(&doc.record.body, query),
                 })
             })
@@ -745,9 +782,9 @@ impl MemoryStore {
                     score: 0.0,
                     lexical: 0.0,
                     vector: 0.0,
-                    closet_boost: 0.0,
-                    matched_via: "drawer".to_string(),
-                    closet_preview: None,
+                    index_boost: 0.0,
+                    matched_via: "record".to_string(),
+                    index_preview: None,
                     excerpt: excerpt(&doc.record.body, query),
                 })
                 .collect();
@@ -842,9 +879,13 @@ impl MemoryStore {
         Ok(self.context_stack().recall(&records, domain, topic, limit))
     }
 
-    /// L0 identity plus a bounded L1 recent-context block under 900 tokens.
-    pub fn context_block(&self, _limit: usize) -> Result<String, HarnessError> {
-        self.wake_up(None)
+    /// L0 identity plus a bounded L1 recent-context block. `limit` caps how
+    /// many records L1 may include; the character/token budget still applies.
+    pub fn context_block(&self, limit: usize) -> Result<String, HarnessError> {
+        let records = self.active_records()?;
+        let mut stack = self.context_stack();
+        stack.l1 = context::Layer1::new(limit.max(1), context::L1_MAX_CHARS);
+        Ok(stack.wake_up(&records, None))
     }
 
     /// Load all parsed content indexes from disk.
@@ -943,6 +984,17 @@ impl MemoryStore {
     }
 
     /// Rebuild the derived cache and manifest from Markdown.
+    /// Rebuild the in-memory cache from Markdown without rebuilding the
+    /// knowledge-graph or graph indexes. Used by daemon-backed engines so
+    /// writes made by another process become visible.
+    pub fn reload(&self) -> Result<(), HarnessError> {
+        let docs = self.load_all()?;
+        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        cache.docs = docs;
+        cache.loaded = true;
+        Ok(())
+    }
+
     pub fn reindex(&self) -> Result<usize, HarnessError> {
         let docs = self.load_all()?;
         let count = docs.len();
@@ -992,7 +1044,7 @@ impl MemoryStore {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         self.kg().add_triple(
@@ -1004,7 +1056,7 @@ impl MemoryStore {
             confidence,
             source_record,
             source_file,
-            source_drawer_id,
+            source_record_id,
             adapter_name,
         )
     }
@@ -1029,7 +1081,7 @@ impl MemoryStore {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         self.kg().supersede(
@@ -1041,7 +1093,7 @@ impl MemoryStore {
             confidence,
             source_record,
             source_file,
-            source_drawer_id,
+            source_record_id,
             adapter_name,
         )
     }
@@ -1094,12 +1146,12 @@ impl MemoryStore {
         self.graph_index().traverse(start_node, max_hops)
     }
 
-    pub fn find_tunnels(
+    pub fn find_cross_links(
         &self,
         domain_a: Option<&str>,
         domain_b: Option<&str>,
-    ) -> Result<Vec<graph::TunnelBridge>, HarnessError> {
-        self.graph_index().find_tunnels(domain_a, domain_b)
+    ) -> Result<Vec<graph::CrossLinkBridge>, HarnessError> {
+        self.graph_index().find_cross_links(domain_a, domain_b)
     }
 
     pub fn compute_links(&self, domain: &str) -> Result<Vec<links::DomainLink>, HarnessError> {

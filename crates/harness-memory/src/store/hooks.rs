@@ -37,6 +37,17 @@ pub fn run_hook(
     fs::create_dir_all(&state_dir).map_err(|e| HarnessError::Io(e.to_string()))?;
 
     let normalized = hook_name.replace('_', "-");
+    if !store.config.hooks_auto_save
+        && matches!(normalized.as_str(), "stop" | "session-end" | "precompact")
+    {
+        let res = json!({
+            "decision": "disabled",
+            "reason": "memory.store.hooks_auto_save is false",
+            "session_id": session_id,
+            "success": true
+        });
+        return Ok(serde_json::to_string_pretty(&res).unwrap());
+    }
     match normalized.as_str() {
         "session-start" => {
             let active = store.active_records()?;
@@ -57,25 +68,45 @@ pub fn run_hook(
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
 
-            let current_count = if let Some(path) = transcript_path {
-                count_messages_in_file(&path)
+            let current_count = if let Some(path) = transcript_path.as_deref() {
+                count_messages_in_file(path)
             } else {
-                input.get("exchange_count").and_then(Value::as_u64).unwrap_or(0) as usize
+                input
+                    .get("exchange_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize
             };
 
             let since = current_count.saturating_sub(last_save);
-            if since >= DEFAULT_SAVE_INTERVAL && current_count > 0 {
-                fs::write(&last_save_file, format!("{current_count}\n"))
-                    .map_err(|e| HarnessError::Io(e.to_string()))?;
-
-                let res = json!({
-                    "decision": "save_triggered",
-                    "session_id": session_id,
-                    "exchange_count": current_count,
-                    "messages_since_save": since,
-                    "success": true
-                });
-                Ok(serde_json::to_string_pretty(&res).unwrap())
+            let interval = store.config.hooks_save_interval.max(1);
+            if since >= interval && current_count > 0 {
+                match save_transcript(store, &session_id, transcript_path.as_deref())? {
+                    Some(report) => {
+                        fs::write(&last_save_file, format!("{current_count}\n"))
+                            .map_err(|e| HarnessError::Io(e.to_string()))?;
+                        let res = json!({
+                            "decision": "saved",
+                            "session_id": session_id,
+                            "exchange_count": current_count,
+                            "messages_since_save": since,
+                            "files_mined": report.files,
+                            "records_written": report.records,
+                            "success": true
+                        });
+                        Ok(serde_json::to_string_pretty(&res).unwrap())
+                    }
+                    None => {
+                        let res = json!({
+                            "decision": "pass",
+                            "reason": "no readable transcript",
+                            "session_id": session_id,
+                            "exchange_count": current_count,
+                            "messages_since_save": since,
+                            "success": true
+                        });
+                        Ok(serde_json::to_string_pretty(&res).unwrap())
+                    }
+                }
             } else {
                 let res = json!({
                     "decision": "pass",
@@ -88,27 +119,58 @@ pub fn run_hook(
             }
         }
         "session-end" => {
-            let _ = store.journal_write("luna", &format!("Session {session_id} ended cleanly."), None);
+            let saved = save_transcript(store, &session_id, transcript_path.as_deref())?;
+            let _ = store.journal_write(
+                "luna",
+                &format!("Session {session_id} ended cleanly."),
+                None,
+            );
             let last_save_file = state_dir.join(format!("{session_id}_last_save"));
             let _ = fs::remove_file(last_save_file);
 
             let res = json!({
-                "decision": "session_ended",
+                "decision": if saved.is_some() { "session_saved" } else { "session_ended" },
                 "session_id": session_id,
+                "records_written": saved.as_ref().map(|r| r.records).unwrap_or(0),
                 "success": true
             });
             Ok(serde_json::to_string_pretty(&res).unwrap())
         }
         "precompact" => {
+            let saved = save_transcript(store, &session_id, transcript_path.as_deref())?;
             let _ = store.reindex();
             let res = json!({
-                "decision": "precompact_mined",
+                "decision": if saved.is_some() { "precompact_mined" } else { "precompact_reindexed" },
                 "session_id": session_id,
+                "records_written": saved.as_ref().map(|r| r.records).unwrap_or(0),
                 "success": true
             });
             Ok(serde_json::to_string_pretty(&res).unwrap())
         }
         other => Err(HarnessError::MemoryError(format!("unknown hook: {other}"))),
+    }
+}
+
+/// Mine a session transcript into the store. Returns `None` when there is no
+/// readable transcript or it produced no records, so the hook never reports a
+/// save that did not happen.
+fn save_transcript(
+    store: &MemoryStore,
+    session_id: &str,
+    transcript_path: Option<&Path>,
+) -> Result<Option<super::miner::MineReport>, HarnessError> {
+    let Some(path) = transcript_path else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let topic = format!("session-{}", super::ids::slugify(session_id));
+    let report = super::convo::mine_convos(store, path, Some("conversations"), Some(&topic))?;
+    if report.records == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(report))
     }
 }
 
@@ -132,6 +194,8 @@ fn count_messages_in_file(path: &Path) -> usize {
                         count += 1;
                     }
                 }
+            } else if val.get("role").and_then(Value::as_str) == Some("user") {
+                count += 1;
             }
         }
     }
@@ -156,7 +220,8 @@ Initialize the local Markdown memory store layout.
    - summaries/
    - search_index/
 2. Writes initial identity.md, store.md, and SUMMARY.md.
-3. Sets up SQLite daemon queue and permissions."#.to_string()),
+3. Sets up SQLite daemon queue and permissions."#
+            .to_string()),
         "search" => Ok(r#"# Luna Memory Search
 
 Search memory records using hybrid BM25 lexical + MiniLM vector ranking.
@@ -164,7 +229,8 @@ Search memory records using hybrid BM25 lexical + MiniLM vector ranking.
 1. Provide search query text.
 2. Optionally specify --domain and --topic filters.
 3. Set --limit (default 8) and --since timestamp if needed.
-4. Results return structured scores, excerpts, and matched entity pointers."#.to_string()),
+4. Results return structured scores, excerpts, and matched entity pointers."#
+            .to_string()),
         "mine" => Ok(r#"# Luna Memory Mine
 
 Extract durable facts, architecture, rules, and notes from codebase or logs.
@@ -172,14 +238,16 @@ Extract durable facts, architecture, rules, and notes from codebase or logs.
 Modes:
 - projects: mines codefiles, docs, configs into domain records
 - convos: mines Claude JSONL conversation logs
-- sessions: mines sessions.db chat database into memory"#.to_string()),
+- sessions: mines sessions.db chat database into memory"#
+            .to_string()),
         "status" => Ok(r#"# Luna Memory Status
 
 Overview of current store state:
 - Total records count and active records
 - Domains and topics breakdown
 - Active embedder model
-- Search index freshness and knowledge graph stats"#.to_string()),
+- Search index freshness and knowledge graph stats"#
+            .to_string()),
         "audit" => Ok(r#"# Luna Memory Audit
 
 Verifies structural integrity of the memory store:
@@ -187,7 +255,8 @@ Verifies structural integrity of the memory store:
 - Unreadable files
 - Empty body detection
 - Dangling supersessions
-- Duplicate active (subject, predicate) records"#.to_string()),
+- Duplicate active (subject, predicate) records"#
+            .to_string()),
         "help" => Ok(r#"# Luna Memory Help
 
 Commands:
@@ -200,8 +269,11 @@ Commands:
 - luna memory serve [--host H --port P]
 - luna memory hook run <event>
 - luna memory instructions <name>
-- luna memory rules"#.to_string()),
-        other => Err(HarnessError::MemoryError(format!("unknown instructions topic: {other}"))),
+- luna memory rules"#
+            .to_string()),
+        other => Err(HarnessError::MemoryError(format!(
+            "unknown instructions topic: {other}"
+        ))),
     }
 }
 
@@ -238,10 +310,10 @@ Memory (recall + writing):
   without replacement: memory_kg_invalidate. Don't file secrets or
   tokens.
 
-Coordination (logstream):
+Coordination (event stream):
 - Chat sessions are declared-idle until a coordination loop starts.
   Do not arm a background watcher at session start. Focus on the user's
-  request first; engage the logstream when collaborating, delegating,
+  request first; engage the event stream when collaborating, delegating,
   or when asked to listen.
 - Inbox: when entering collaborative mode or before long tasks,
   memory_event_list with to_agent=<HOST>:<HARNESS>:<project>,

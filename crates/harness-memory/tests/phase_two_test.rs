@@ -224,7 +224,7 @@ async fn test_phase2_context_layers_and_budget() {
 }
 
 #[tokio::test]
-async fn test_phase2_search_improvement_via_closet_boost() {
+async fn test_phase2_search_improvement_via_index_boost() {
     let root = temp_root("search_boost");
     let engine = MarkdownMemoryEngine::from_root(root.clone()).unwrap();
 
@@ -263,7 +263,7 @@ async fn test_phase2_search_improvement_via_closet_boost() {
     engine.save(&rec_auth).await.unwrap();
     engine.save(&rec_other).await.unwrap();
 
-    // Now write a ContentIndex (closet) for auth that highlights "OAuth authentication authorization"
+    // Now write a ContentIndex for auth that highlights "OAuth authentication authorization"
     let index_dir = root
         .join("domains")
         .join("luna")
@@ -288,7 +288,7 @@ async fn test_phase2_search_improvement_via_closet_boost() {
 
     // Query for "OAuth authentication"
     // rec_auth's body does NOT have "OAuth" directly, but its content index DOES.
-    // The closet boost elevates rec_auth to rank 1 with matched_via="drawer+closet" and boost 0.40!
+    // The content index boost elevates rec_auth to rank 1 with matched_via="record+index" and boost 0.40!
     let results = engine
         .search("OAuth authentication", &SearchFilter::default(), 5)
         .unwrap();
@@ -296,8 +296,8 @@ async fn test_phase2_search_improvement_via_closet_boost() {
     assert!(!results.is_empty(), "Must return search results");
     let top = &results[0];
     assert_eq!(top.record.id, "luna.auth_jwt");
-    assert_eq!(top.matched_via, "drawer+closet");
-    assert_eq!(top.closet_boost, 0.40);
-    assert!(top.closet_preview.is_some());
+    assert_eq!(top.matched_via, "record+index");
+    assert_eq!(top.index_boost, 0.40);
+    assert!(top.index_preview.is_some());
     assert!(top.score > 0.40);
 }

@@ -76,7 +76,12 @@ fn test_queue_store_lifecycle_and_dedupe() {
 
     // 1. Enqueue with deduplication key
     let job1 = queue
-        .enqueue("sync", &json!({ "dry_run": false }), Some("dedupe-sync"), 10)
+        .enqueue(
+            "sync",
+            &json!({ "dry_run": false }),
+            Some("dedupe-sync"),
+            10,
+        )
         .unwrap();
     assert_eq!(job1.kind, "sync");
     assert_eq!(job1.state, "queued");
@@ -125,7 +130,7 @@ fn test_queue_store_lifecycle_and_dedupe() {
 
     // 5. Test recover_running dead-letters max attempts
     let doomed = queue
-        .enqueue("diary_write", &json!({ "entry": "x" }), None, 0)
+        .enqueue("journal_write", &json!({ "entry": "x" }), None, 0)
         .unwrap();
     // Simulate MAX_ATTEMPTS claims that crashed while running
     queue
@@ -245,7 +250,10 @@ fn test_mcp_jsonrpc_protocol_tools() {
         }
     });
     let add_resp = handle_mcp_jsonrpc(&store, &add_req);
-    assert!(add_resp["result"]["content"][0]["text"].as_str().unwrap().contains("success"));
+    assert!(add_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("success"));
 
     // 5. JSON-RPC tools/call memory_search
     let search_req = json!({
@@ -260,7 +268,9 @@ fn test_mcp_jsonrpc_protocol_tools() {
         }
     });
     let search_resp = handle_mcp_jsonrpc(&store, &search_req);
-    let search_text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let search_text = search_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(search_text.contains("project.luna"));
 
     // 6. JSON-RPC tools/call memory_status
@@ -274,14 +284,26 @@ fn test_mcp_jsonrpc_protocol_tools() {
         }
     });
     let status_resp = handle_mcp_jsonrpc(&store, &status_req);
-    let status_text = status_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let status_text = status_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(status_text.contains("records"));
 }
 
 #[test]
 fn test_semantic_lifecycle_hooks() {
     let root = temp_root("lifecycle-hooks");
-    let store = MemoryStore::open(StoreConfig::new(root)).unwrap();
+    let store = MemoryStore::open(StoreConfig::new(root.clone())).unwrap();
+
+    // A real transcript, so the stop/precompact hooks have something to mine.
+    let transcript = root.join("session-123.jsonl");
+    let mut lines = String::new();
+    for i in 0..12 {
+        lines.push_str(&format!(
+            "{{\"role\":\"user\",\"content\":\"question {i}\"}}\n{{\"role\":\"assistant\",\"content\":\"answer {i}\"}}\n"
+        ));
+    }
+    std::fs::write(&transcript, lines).unwrap();
 
     // 1. Session start hook -> returns context addition
     let start_input = json!({
@@ -302,27 +324,41 @@ fn test_semantic_lifecycle_hooks() {
         "session_id": "session-123",
         "exchange_count": 3
     });
-    let stop_out_low = run_hook("stop", "claude-code", &stop_input_low.to_string(), &store).unwrap();
+    let stop_out_low =
+        run_hook("stop", "claude-code", &stop_input_low.to_string(), &store).unwrap();
     assert!(stop_out_low.contains("pass"));
 
-    // 3. Stop hook exceeding save interval (>= 10) -> save_triggered
+    // 3. Stop hook exceeding save interval (>= 10) -> actually mines the transcript
     let stop_input_high = json!({
         "session_id": "session-123",
-        "exchange_count": 12
+        "exchange_count": 12,
+        "transcript_path": transcript.to_string_lossy()
     });
     let stop_out_high =
         run_hook("stop", "claude-code", &stop_input_high.to_string(), &store).unwrap();
-    assert!(stop_out_high.contains("save_triggered"));
+    assert!(stop_out_high.contains("\"saved\""));
+    assert!(
+        stop_out_high.contains("\"records_written\"")
+            && !stop_out_high.contains("\"records_written\": 0")
+    );
 
-    // 4. Session end hook -> cleans up session state and writes journal
+    // 4. Session end hook -> final save, cleanup, and journal write
     let end_input = json!({
-        "session_id": "session-123"
+        "session_id": "session-123",
+        "transcript_path": transcript.to_string_lossy()
     });
     let end_out = run_hook("session-end", "claude-code", &end_input.to_string(), &store).unwrap();
-    assert!(end_out.contains("session_ended"));
+    assert!(end_out.contains("session_saved"));
 
-    // 5. Precompact hook -> reindexes
-    let precompact_out = run_hook("precompact", "claude-code", "{}", &store).unwrap();
+    // 5. Precompact hook -> mines before compaction, then reindexes
+    let precompact_input = json!({ "transcript_path": transcript.to_string_lossy() });
+    let precompact_out = run_hook(
+        "precompact",
+        "claude-code",
+        &precompact_input.to_string(),
+        &store,
+    )
+    .unwrap();
     assert!(precompact_out.contains("precompact_mined"));
 }
 
@@ -338,6 +374,7 @@ fn test_instructions_and_shared_brain_rules() {
     assert!(rules.contains("linux:claude-code:harness"));
     assert!(rules.contains("memory_search"));
 
-    let rules_light = render_shared_brain_rules("linux", "claude-code", "harness", "light").unwrap();
+    let rules_light =
+        render_shared_brain_rules("linux", "claude-code", "harness", "light").unwrap();
     assert!(rules_light.contains("memory_query FIND"));
 }

@@ -238,6 +238,22 @@ impl EventsStore {
         Ok(())
     }
 
+    fn matching_event(
+        &self,
+        stream: &str,
+        agent_lower: &str,
+    ) -> Result<Option<Event>, HarnessError> {
+        let events = self.list_events(stream, None, Some(20), Some(agent_lower))?;
+        for ev in events {
+            match &ev.to {
+                Some(target) if target.to_lowercase() == agent_lower => return Ok(Some(ev)),
+                None => return Ok(Some(ev)), // broadcast event
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Wait until an unacknowledged event arrives for `agent` or timeout expires.
     pub async fn wait_for_event(
         &self,
@@ -250,22 +266,39 @@ impl EventsStore {
         let agent_lower = agent.to_lowercase();
 
         loop {
-            let events = self.list_events(stream, None, Some(20), Some(agent))?;
-            for ev in events {
-                if let Some(target) = &ev.to {
-                    if target.to_lowercase() == agent_lower {
-                        return Ok(Some(ev));
-                    }
-                } else {
-                    // Broadcast event
-                    return Ok(Some(ev));
-                }
+            if let Some(ev) = self.matching_event(stream, &agent_lower)? {
+                return Ok(Some(ev));
             }
-
             if start.elapsed() >= timeout {
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        Ok(None)
+    }
+
+    /// Synchronous wait for callers without a Tokio runtime (the stdio MCP
+    /// server). Blocks the calling thread, so async callers should use
+    /// [`Self::wait_for_event`].
+    pub fn wait_for_event_blocking(
+        &self,
+        stream: &str,
+        agent: &str,
+        timeout_ms: u64,
+    ) -> Result<Option<Event>, HarnessError> {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let agent_lower = agent.to_lowercase();
+
+        loop {
+            if let Some(ev) = self.matching_event(stream, &agent_lower)? {
+                return Ok(Some(ev));
+            }
+            if start.elapsed() >= timeout {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         Ok(None)

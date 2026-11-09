@@ -68,7 +68,7 @@ async fn test_phase3_entity_and_triple_file_formats() {
         confidence: 1.0,
         source_record: Some("rec_9f2c".to_string()),
         source_file: Some("crates/harness-memory/src/engine.rs".to_string()),
-        source_drawer_id: None,
+        source_record_id: None,
         adapter_name: None,
         extracted_at: Utc::now(),
     };
@@ -530,14 +530,14 @@ async fn test_phase3_crosslinks_proposal_apply_and_pruning() {
 }
 
 #[tokio::test]
-async fn test_phase3_exit_criterion_traverse_and_tunnels() {
+async fn test_phase3_exit_criterion_traverse_and_cross_links() {
     let root = temp_root("traverse");
     let engine = MarkdownMemoryEngine::from_root(root.clone()).unwrap();
 
     // Set up a multi-domain graph topology:
-    // Room A: "luna/memory" with entity "sqlite"
-    // Room B: "luna/storage" with entity "sqlite" and "nvme"
-    // Room C: "luna/hardware" with entity "nvme"
+    // Topic A: "luna/memory" with entity "sqlite"
+    // Topic B: "luna/storage" with entity "sqlite" and "nvme"
+    // Topic C: "luna/hardware" with entity "nvme"
     let mut rec1 = Record::from_memory(&MemoryRecord {
         id: "rec_1".to_string(),
         subject: "memory_engine".to_string(),
@@ -598,7 +598,7 @@ async fn test_phase3_exit_criterion_traverse_and_tunnels() {
     rec3.entities = vec!["nvme".to_string()];
     engine.write_record(rec3).unwrap();
 
-    // Create crosslink tunnel for sqlite between luna/memory and luna/storage
+    // Create crosslink cross-link for sqlite between luna/memory and luna/storage
     engine
         .store()
         .crosslinks_store()
@@ -629,10 +629,10 @@ async fn test_phase3_exit_criterion_traverse_and_tunnels() {
         .collect();
     assert!(hop1_nodes.contains(&"sqlite") || hop1_nodes.contains(&"luna/storage"));
 
-    // Find tunnels between domain "luna" and other nodes
-    let tunnels = engine.find_tunnels(Some("luna"), None).unwrap();
-    assert!(!tunnels.is_empty());
-    assert!(tunnels.iter().any(|t| t.bridge_entity == "sqlite"));
+    // Find cross_links between domain "luna" and other nodes
+    let cross_links = engine.find_cross_links(Some("luna"), None).unwrap();
+    assert!(!cross_links.is_empty());
+    assert!(cross_links.iter().any(|t| t.bridge_entity == "sqlite"));
 
     // Rebuild index and verify search_index/graph.json and search_index/kg.jsonl exist
     engine.store().reindex().unwrap();

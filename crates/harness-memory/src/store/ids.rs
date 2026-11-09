@@ -1,6 +1,6 @@
 //! Content-addressed identifiers and slugs for the memory store.
 //!
-//! Direct port of MemPalace's `ids.py` and `rooms.py:slugify_room`.
+//! Same hashing recipe as the reference `ids.py`.
 //! Prevents delimiter collisions by using length-prefixed parts (`{len}:{part}`)
 //! before hashing with SHA-256 and truncating to standard hex lengths.
 
@@ -11,7 +11,7 @@ pub const HASH_TRUNC_RECORD: usize = 24;
 pub const HASH_TRUNC_TRIPLE: usize = 12;
 
 /// Hash parts joined with length prefixes (`{len}:{part}`), truncated to `truncate` hex chars.
-/// Matches MemPalace's `_delimited_sha256` verbatim.
+/// Matches the reference design's `_delimited_sha256` verbatim.
 pub fn delimited_sha256(parts: &[&str], truncate: usize) -> String {
     let mut key = String::new();
     for part in parts {
@@ -25,7 +25,7 @@ pub fn delimited_sha256(parts: &[&str], truncate: usize) -> String {
     hex.chars().take(truncate).collect()
 }
 
-/// Turn arbitrary text into a filesystem-safe slug (matches MemPalace `slugify_room`).
+/// Turn arbitrary text into a filesystem-safe slug (same rule as the reference `slugify`).
 pub fn slugify(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -71,8 +71,8 @@ pub fn body_hash(body: &str) -> String {
 }
 
 /// Record ID for the chunked miner path.
-/// Matches MemPalace `make_drawer_id_from_chunk`:
-/// `f"drawer_{wing}_{room}_{_delimited_sha256((source_file, str(chunk_index)), 24)}"`
+/// Matches the reference design `make_record_id_from_chunk`:
+/// `f"record_{domain}_{topic}_{_delimited_sha256((source_file, str(chunk_index)), 24)}"`
 pub fn record_id_from_chunk(
     domain: &str,
     topic: &str,
@@ -85,8 +85,8 @@ pub fn record_id_from_chunk(
 }
 
 /// Record ID for the content / tool path.
-/// Matches MemPalace `make_drawer_id_from_content`:
-/// `f"drawer_{wing}_{room}_{_delimited_sha256((wing, room, content), 24)}"`
+/// Matches the reference design `make_record_id_from_content`:
+/// `f"record_{domain}_{topic}_{_delimited_sha256((domain, topic, content), 24)}"`
 pub fn record_id_from_content(domain: &str, topic: &str, content: &str) -> String {
     let hash = delimited_sha256(&[domain, topic, content], HASH_TRUNC_RECORD);
     format!("rec_{}_{}_{}", slugify(domain), slugify(topic), hash)
@@ -104,7 +104,7 @@ pub fn record_id(
 }
 
 /// NFC, lower-cased name with whitespace runs collapsed.
-/// Direct port of MemPalace's `canonical_entity_name`.
+/// Direct port of the reference design's `canonical_entity_name`.
 pub fn canonical_entity_name(name: &str) -> String {
     let lower = name.trim().to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
@@ -112,7 +112,7 @@ pub fn canonical_entity_name(name: &str) -> String {
 }
 
 /// Identifier that keeps punctuation so distinct names stay distinct.
-/// Direct port of MemPalace's `entity_id_for_name`:
+/// Direct port of the reference design's `entity_id_for_name`:
 /// `canonical_entity_name(name).replace("%", "%25").replace("_", "%5F").replace(" ", "_")`
 pub fn entity_id_for_name(name: &str) -> String {
     let text = canonical_entity_name(name)
@@ -122,7 +122,7 @@ pub fn entity_id_for_name(name: &str) -> String {
 }
 
 /// Triple ID for knowledge-graph insertion.
-/// Direct port of MemPalace's `make_triple_id`:
+/// Direct port of the reference design's `make_triple_id`:
 /// `f"t_{sub_id}_{predicate}_{obj_id}_{_delimited_sha256((valid_from, recorded_at), 12)}"`
 pub fn make_triple_id(
     sub_id: &str,

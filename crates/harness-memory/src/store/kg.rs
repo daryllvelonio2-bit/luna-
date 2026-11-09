@@ -1,6 +1,5 @@
 //! Knowledge Graph: temporal entity-relationship graph with canonical Markdown persistence.
 //!
-//! Direct port of MemPalace's `knowledge_graph.py` and `ids.py`.
 //! Stores canonical files per entity (`graph/entities/<entity_id>.md`) and
 //! per subject (`graph/triples/<subject_id>.md`).
 //!
@@ -266,7 +265,7 @@ pub struct Triple {
     pub confidence: f32,
     pub source_record: Option<String>,
     pub source_file: Option<String>,
-    pub source_drawer_id: Option<String>,
+    pub source_record_id: Option<String>,
     pub adapter_name: Option<String>,
     pub extracted_at: DateTime<Utc>,
 }
@@ -296,8 +295,8 @@ impl Triple {
         if let Some(file) = &self.source_file {
             parts.push(format!("file: {}", escape_pipe(file)));
         }
-        if let Some(drawer) = &self.source_drawer_id {
-            parts.push(format!("drawer: {}", escape_pipe(drawer)));
+        if let Some(record) = &self.source_record_id {
+            parts.push(format!("record: {}", escape_pipe(record)));
         }
         if let Some(adapter) = &self.adapter_name {
             parts.push(format!("adapter: {}", escape_pipe(adapter)));
@@ -317,7 +316,7 @@ impl Triple {
         let mut confidence = 1.0f32;
         let mut source_record = None;
         let mut source_file = None;
-        let mut source_drawer_id = None;
+        let mut source_record_id = None;
         let mut adapter_name = None;
 
         for part in content.split('|') {
@@ -352,10 +351,10 @@ impl Triple {
                 if !s.is_empty() {
                     source_file = Some(s);
                 }
-            } else if let Some(v) = p.strip_prefix("drawer:") {
+            } else if let Some(v) = p.strip_prefix("record:") {
                 let s = unescape_pipe(v.trim());
                 if !s.is_empty() {
-                    source_drawer_id = Some(s);
+                    source_record_id = Some(s);
                 }
             } else if let Some(v) = p.strip_prefix("adapter:") {
                 let s = unescape_pipe(v.trim());
@@ -389,7 +388,7 @@ impl Triple {
             confidence,
             source_record,
             source_file,
-            source_drawer_id,
+            source_record_id,
             adapter_name,
             extracted_at: Utc::now(),
         })
@@ -616,7 +615,7 @@ impl KnowledgeGraph {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         self.ensure_dirs()?;
@@ -680,7 +679,7 @@ impl KnowledgeGraph {
             confidence: confidence.unwrap_or(1.0),
             source_record: source_record.map(str::to_string),
             source_file: source_file.map(str::to_string),
-            source_drawer_id: source_drawer_id.map(str::to_string),
+            source_record_id: source_record_id.map(str::to_string),
             adapter_name: adapter_name.map(str::to_string),
             extracted_at: Utc::now(),
         };
@@ -742,7 +741,7 @@ impl KnowledgeGraph {
     }
 
     /// Atomically replace one fact with another at a single shared boundary.
-    /// Direct port of MemPalace's `supersede`.
+    /// Direct port of the reference design's `supersede`.
     pub fn supersede(
         &self,
         subject: &str,
@@ -753,7 +752,7 @@ impl KnowledgeGraph {
         confidence: Option<f32>,
         source_record: Option<&str>,
         source_file: Option<&str>,
-        source_drawer_id: Option<&str>,
+        source_record_id: Option<&str>,
         adapter_name: Option<&str>,
     ) -> Result<String, HarnessError> {
         let sub_id = entity_id_for_name(subject);
@@ -848,7 +847,7 @@ impl KnowledgeGraph {
             confidence: confidence.unwrap_or(1.0),
             source_record: source_record.map(str::to_string),
             source_file: source_file.map(str::to_string),
-            source_drawer_id: source_drawer_id.map(str::to_string),
+            source_record_id: source_record_id.map(str::to_string),
             adapter_name: adapter_name.map(str::to_string),
             extracted_at: Utc::now(),
         });
@@ -1070,7 +1069,7 @@ impl KnowledgeGraph {
             });
         }
 
-        // Order by valid_from ASC NULLS LAST, id ASC (matches MemPalace)
+        // Order by valid_from ASC NULLS LAST, id ASC (matches the reference design)
         all.sort_by(|a, b| {
             let ka = temporal_start_key(a.valid_from.as_deref());
             let kb = temporal_start_key(b.valid_from.as_deref());

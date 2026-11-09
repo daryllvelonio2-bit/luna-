@@ -1,6 +1,6 @@
 //! Lexical (Okapi-BM25) and hybrid retrieval over the in-memory record set.
 //!
-//! Direct port of MemPalace's `lexical.py` and `searcher/ranking.py`:
+//! Retrieval pipeline:
 //! - Okapi-BM25 with smoothed corpus-relative IDF over the candidate set
 //! - Min-max normalization on BM25 (`score / max_bm25`)
 //! - Absolute vector similarity (cosine clamped to [0, 1]), never normalized
@@ -21,8 +21,8 @@ pub const DEFAULT_BM25_WEIGHT: f32 = 0.4;
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
 
-/// Stop words from MemPalace's canonical English locale (`i18n/en.json`).
-pub const MEMPALACE_STOPWORDS: &[&str] = &[
+/// Stop words from the reference design's canonical English locale (`i18n/en.json`).
+pub const STOPWORDS: &[&str] = &[
     "the",
     "this",
     "that",
@@ -157,14 +157,14 @@ fn token_regex() -> &'static Regex {
 }
 
 /// Lowercased word tokens of two or more characters, dropping canonical stop words.
-/// Matches MemPalace `lexical.py:tokenize` verbatim.
+/// Matches the reference design `lexical.py:tokenize` verbatim.
 pub fn tokenize(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
     let lower = text.to_lowercase();
     let re = token_regex();
-    let stop_set: HashSet<&'static str> = MEMPALACE_STOPWORDS.iter().copied().collect();
+    let stop_set: HashSet<&'static str> = STOPWORDS.iter().copied().collect();
     re.find_iter(&lower)
         .map(|m| m.as_str().to_string())
         .filter(|t| !stop_set.contains(t.as_str()))
@@ -217,7 +217,7 @@ impl LexicalIndex {
         }
     }
 
-    /// Okapi-BM25 scoring matching MemPalace's `bm25_scores` formula.
+    /// Okapi-BM25 scoring matching the reference design's `bm25_scores` formula.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(String, f64)> {
         let query_terms = tokenize(query);
         if query_terms.is_empty() || self.documents.is_empty() {
@@ -263,7 +263,7 @@ pub struct Hit {
     pub score: f32,
     pub lexical: f32,
     pub vector: f32,
-    pub closet_boost: f32,
+    pub index_boost: f32,
     pub matched_via: String,
 }
 
@@ -275,7 +275,7 @@ struct Candidate {
 }
 
 /// Hybrid search re-ranking.
-/// Matches MemPalace `_hybrid_rank` (searcher/ranking.py:170) verbatim:
+/// Matches the reference design `_hybrid_rank` (searcher/ranking.py:170) verbatim:
 /// - Absolute vector similarity `vec_sim = cosine.max(0.0)` in [0, 1]
 /// - Okapi-BM25 divided by `max_bm25` (0 to 1)
 /// - Combined score: `vector_weight * vec_sim + bm25_weight * bm25_norm`
@@ -297,7 +297,7 @@ pub fn hybrid(
     )
 }
 
-/// Hybrid search re-ranking with closet boost support.
+/// Hybrid search re-ranking with content index boost support.
 pub fn hybrid_boosted(
     documents: &[(String, String, Vec<f32>)],
     boosts: &HashMap<String, f32>,
@@ -339,7 +339,7 @@ pub fn hybrid_boosted(
         return Vec::new();
     }
 
-    // Min-max normalize BM25 only: max_bm25 scaling matches MemPalace ranking.py:206-207
+    // Min-max normalize BM25 only: max_bm25 scaling matches the reference design ranking.py:206-207
     let max_bm25 = candidates.iter().map(|c| c.lexical).fold(0.0f64, f64::max);
 
     candidates.sort_by(|a, b| {
@@ -382,16 +382,16 @@ pub fn hybrid_boosted(
             let vec_boosted = (candidate.vector + candidate.boost).clamp(0.0, 1.0);
             let score = vec_boosted * vector_weight as f64 + bm25_norm * lexical_weight as f64;
             let matched_via = if candidate.boost > 0.0 {
-                "drawer+closet".to_string()
+                "record+index".to_string()
             } else {
-                "drawer".to_string()
+                "record".to_string()
             };
             Hit {
                 id: candidate.id,
                 score: score as f32,
                 lexical: candidate.lexical as f32,
                 vector: candidate.vector as f32,
-                closet_boost: candidate.boost as f32,
+                index_boost: candidate.boost as f32,
                 matched_via,
             }
         })
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn closet_boost_improves_ranking() {
+    fn index_boost_improves_ranking() {
         let docs = vec![
             document("a", "document alpha general discussion"),
             document("b", "document beta general discussion"),
@@ -438,8 +438,8 @@ mod tests {
         boosts.insert("b".to_string(), 0.40f32);
         let hits = hybrid_boosted(&docs, &boosts, "general", 0.6, 0.4, 5);
         assert_eq!(hits.first().map(|h| h.id.as_str()), Some("b"));
-        assert_eq!(hits[0].matched_via, "drawer+closet");
-        assert_eq!(hits[0].closet_boost, 0.40);
+        assert_eq!(hits[0].matched_via, "record+index");
+        assert_eq!(hits[0].index_boost, 0.40);
     }
 
     #[test]

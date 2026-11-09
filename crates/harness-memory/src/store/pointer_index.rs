@@ -1,11 +1,11 @@
-//! Content index (closet layer): compact pointer lines mapping topics and
+//! Content index: compact pointer lines mapping topics and
 //! entities to record IDs.
 //!
-//! Direct port of MemPalace's `palace/closets.py` and `searcher/query.py`:
+//! Content-index builder:
 //! - Pointer line grammar: `topic | entity;entity | [YYYY-MM-DD:Lstart-Lend] | →record_id[,record_id]`
 //! - Front matter tracking `source_file`, `records`, `built_at`, `chunk_indexes`
 //! - Size limits: `index_chars` (default 1,500), at most 3 record pointers per line
-//! - Closet boost: rank-based boosting (0.40 / 0.25 / 0.15 / 0.08 / 0.04) for hybrid search
+//! - Index boost: rank-based boosting (0.40 / 0.25 / 0.15 / 0.08 / 0.04) for hybrid search
 
 use std::collections::HashMap;
 
@@ -228,9 +228,9 @@ impl ContentIndex {
     }
 }
 
-/// The closet rank boost calculated for a source file.
+/// The content-index rank boost calculated for a source file.
 #[derive(Debug, Clone)]
-pub struct ClosetBoost {
+pub struct IndexBoost {
     pub source_file: String,
     pub rank: usize,
     pub boost: f32,
@@ -238,11 +238,11 @@ pub struct ClosetBoost {
 }
 
 /// Search content indexes using BM25 and calculate rank boosts per source file.
-/// Direct port of MemPalace's `_closet_boosts` (query.py:106, query.py:368).
-pub fn calculate_closet_boosts(
+/// Direct port of the reference design's `_index_boosts` (query.py:106, query.py:368).
+pub fn calculate_index_boosts(
     indexes: &[ContentIndex],
     query: &str,
-) -> HashMap<String, ClosetBoost> {
+) -> HashMap<String, IndexBoost> {
     if indexes.is_empty() || query.trim().is_empty() {
         return HashMap::new();
     }
@@ -291,7 +291,7 @@ pub fn calculate_closet_boosts(
 
         boosts.insert(
             index.source_file.clone(),
-            ClosetBoost {
+            IndexBoost {
                 source_file: index.source_file.clone(),
                 rank,
                 boost: boost_val,
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_closet_boost_calculation() {
+    fn test_index_boost_calculation() {
         let indexes = vec![
             ContentIndex {
                 source_file: "auth/login.rs".to_string(),
@@ -455,7 +455,7 @@ mod tests {
             },
         ];
 
-        let boosts = calculate_closet_boosts(&indexes, "authentication OAuth");
+        let boosts = calculate_index_boosts(&indexes, "authentication OAuth");
         assert!(boosts.contains_key("auth/login.rs"));
         let boost = &boosts["auth/login.rs"];
         assert_eq!(boost.rank, 0);

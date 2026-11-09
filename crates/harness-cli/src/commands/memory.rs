@@ -42,9 +42,12 @@ pub enum MemoryCommand {
         /// Maximum results (default 8)
         #[arg(long, default_value_t = 8)]
         limit: usize,
-        /// Only records updated since an RFC 3339 timestamp
+        /// Only records authored since an RFC 3339 timestamp
         #[arg(long)]
         since: Option<String>,
+        /// Only records authored before an RFC 3339 timestamp
+        #[arg(long)]
+        before: Option<String>,
         /// One JSON object on stdout
         #[arg(long)]
         json: bool,
@@ -108,8 +111,8 @@ pub enum MemoryCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Find bridge entities (tunnels) connecting two domains
-    Tunnels {
+    /// Find bridge entities (cross-links) connecting two domains
+    Bridges {
         #[arg(long)]
         domain_a: Option<String>,
         #[arg(long)]
@@ -153,9 +156,7 @@ pub enum MemoryCommand {
     #[command(subcommand)]
     Hook(HookCommand),
     /// Output skill instructions to stdout
-    Instructions {
-        name: Option<String>,
-    },
+    Instructions { name: Option<String> },
     /// Render shared-brain rules block for an agent identity
     Rules {
         #[arg(long, default_value = "local")]
@@ -475,14 +476,16 @@ pub async fn handle_memory_command(
             topic,
             limit,
             since,
+            before,
             json,
         } => {
             let since = since.as_deref().map(parse_time).transpose()?;
+            let before = before.as_deref().map(parse_time).transpose()?;
             let filter = SearchFilter {
                 domain,
                 topic,
                 since,
-                before: None,
+                before,
             };
             let results = store.search(&query, &filter, limit)?;
             if json {
@@ -499,9 +502,9 @@ pub async fn handle_memory_command(
                             "score": result.score,
                             "vector_score": result.vector,
                             "bm25_score": result.lexical,
-                            "closet_boost": result.closet_boost,
+                            "index_boost": result.index_boost,
                             "matched_via": result.matched_via,
-                            "closet_preview": result.closet_preview,
+                            "index_preview": result.index_preview,
                             "excerpt": result.excerpt,
                             "path": result.path,
                         })
@@ -530,8 +533,8 @@ pub async fn handle_memory_command(
                         .source_file
                         .as_deref()
                         .unwrap_or(&result.record.id);
-                    let via = if result.closet_boost > 0.0 {
-                        format!(" [boost +{:.2}]", result.closet_boost)
+                    let via = if result.index_boost > 0.0 {
+                        format!(" [boost +{:.2}]", result.index_boost)
                     } else {
                         String::new()
                     };
@@ -899,19 +902,19 @@ pub async fn handle_memory_command(
                 }
             }
         }
-        MemoryCommand::Tunnels {
+        MemoryCommand::Bridges {
             domain_a,
             domain_b,
             json,
         } => {
-            let tunnels = store.find_tunnels(domain_a.as_deref(), domain_b.as_deref())?;
+            let cross_links = store.find_cross_links(domain_a.as_deref(), domain_b.as_deref())?;
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&tunnels).unwrap_or_default()
+                    serde_json::to_string_pretty(&cross_links).unwrap_or_default()
                 );
             } else {
-                for t in &tunnels {
+                for t in &cross_links {
                     println!(
                         "bridge: {} | {} <-> {} (strength: {})",
                         t.bridge_entity, t.domain_a, t.domain_b, t.strength
@@ -1070,8 +1073,8 @@ pub async fn handle_memory_command(
         MemoryCommand::Daemon(cmd) => match cmd {
             DaemonCommand::Start { port, bg } => {
                 if bg {
-                    let exe = std::env::current_exe()
-                        .map_err(|e| HarnessError::Io(e.to_string()))?;
+                    let exe =
+                        std::env::current_exe().map_err(|e| HarnessError::Io(e.to_string()))?;
                     let child = std::process::Command::new(exe)
                         .args(["memory", "daemon", "start", "--port", &port.to_string()])
                         .stdin(std::process::Stdio::null())
@@ -1079,7 +1082,10 @@ pub async fn handle_memory_command(
                         .stderr(std::process::Stdio::null())
                         .spawn()
                         .map_err(|e| HarnessError::Io(e.to_string()))?;
-                    println!("daemon started in background (pid: {}) on port {port}", child.id());
+                    println!(
+                        "daemon started in background (pid: {}) on port {port}",
+                        child.id()
+                    );
                 } else {
                     println!("starting memory writer daemon on 127.0.0.1:{port}...");
                     let runtime = harness_memory::DaemonRuntime::new(store.root().to_path_buf())?;
@@ -1102,11 +1108,24 @@ pub async fn handle_memory_command(
                     Ok(client) => match client.ping().await {
                         Ok(val) => {
                             if json {
-                                println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&val).unwrap_or_default()
+                                );
                             } else {
                                 println!("daemon status: running");
-                                println!("pid:         {}", val.get("pid").and_then(serde_json::Value::as_u64).unwrap_or(0));
-                                println!("store_root:  {}", val.get("store_root").and_then(serde_json::Value::as_str).unwrap_or(""));
+                                println!(
+                                    "pid:         {}",
+                                    val.get("pid")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or(0)
+                                );
+                                println!(
+                                    "store_root:  {}",
+                                    val.get("store_root")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("")
+                                );
                                 if let Some(counts) = val.get("counts") {
                                     println!("queue:       {}", counts);
                                 }
@@ -1114,7 +1133,10 @@ pub async fn handle_memory_command(
                         }
                         Err(e) => {
                             if json {
-                                println!("{}", serde_json::json!({ "running": false, "error": e.to_string() }));
+                                println!(
+                                    "{}",
+                                    serde_json::json!({ "running": false, "error": e.to_string() })
+                                );
                             } else {
                                 println!("daemon not responding: {e}");
                             }
@@ -1133,11 +1155,17 @@ pub async fn handle_memory_command(
                 let client = harness_memory::NativeDaemonClient::connect_root(store.root())?;
                 let jobs = client.list_jobs(limit).await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&jobs).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&jobs).unwrap_or_default()
+                    );
                 } else {
                     println!("queued / recent jobs (limit {limit}):");
                     for j in jobs {
-                        println!("  {} | [{}] {} (attempts: {})", j.id, j.state, j.kind, j.attempts);
+                        println!(
+                            "  {} | [{}] {} (attempts: {})",
+                            j.id, j.state, j.kind, j.attempts
+                        );
                     }
                 }
             }
@@ -1147,7 +1175,8 @@ pub async fn handle_memory_command(
                 let deadline = std::time::Duration::from_secs(timeout_s);
                 loop {
                     let job = client.get_job(&job_id).await?;
-                    if job.state == "succeeded" || job.state == "failed" || job.state == "cancelled" {
+                    if job.state == "succeeded" || job.state == "failed" || job.state == "cancelled"
+                    {
                         println!("job {job_id} finished: {}", job.state);
                         if let Some(res) = job.result {
                             println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
@@ -1155,14 +1184,21 @@ pub async fn handle_memory_command(
                         break;
                     }
                     if start.elapsed() > deadline {
-                        println!("timed out waiting for job {job_id} (current state: {})", job.state);
+                        println!(
+                            "timed out waiting for job {job_id} (current state: {})",
+                            job.state
+                        );
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             }
         },
-        MemoryCommand::Mcp { stdio: _, http, port } => {
+        MemoryCommand::Mcp {
+            stdio: _,
+            http,
+            port,
+        } => {
             if http {
                 println!("starting MCP HTTP server on 127.0.0.1:{port}...");
                 let runtime = harness_memory::DaemonRuntime::new(store.root().to_path_buf())?;
@@ -1171,10 +1207,21 @@ pub async fn handle_memory_command(
                 harness_memory::run_stdio_server(&store)?;
             }
         }
-        MemoryCommand::Serve { host: _, port, .. } => {
-            println!("serving memory store on 127.0.0.1:{port}...");
+        MemoryCommand::Serve {
+            host,
+            port,
+            tls_cert,
+            tls_key,
+        } => {
+            if tls_cert.is_some() || tls_key.is_some() {
+                return Err(HarnessError::ConfigurationError(
+                    "TLS is not built into this binary; bind to loopback, or terminate TLS at a reverse proxy and forward to the daemon. Remove --tls-cert/--tls-key."
+                        .to_string(),
+                ));
+            }
+            println!("serving memory store on {host}:{port} (bearer token required)...");
             let runtime = harness_memory::DaemonRuntime::new(store.root().to_path_buf())?;
-            runtime.run_servers(port).await?;
+            runtime.run_servers_on(&host, port).await?;
         }
         MemoryCommand::Hook(cmd) => match cmd {
             HookCommand::Run { event, harness } => {
@@ -1188,7 +1235,12 @@ pub async fn handle_memory_command(
             let text = harness_memory::run_instructions(name.as_deref().unwrap_or("help"))?;
             println!("{text}");
         }
-        MemoryCommand::Rules { host, harness, project, mcp } => {
+        MemoryCommand::Rules {
+            host,
+            harness,
+            project,
+            mcp,
+        } => {
             let rules = harness_memory::render_shared_brain_rules(&host, &harness, &project, &mcp)?;
             println!("{rules}");
         }

@@ -1,6 +1,6 @@
-//! Compact summary (AAAK Dialect): structured symbolic summary layer.
+//! Compact summary: structured symbolic summary layer.
 //!
-//! Direct port of MemPalace's `dialect.py`:
+//! Compact summary encoder:
 //! - Grammar:
 //!     Header:  FILE_NUM|DOMAIN/TOPIC|DATE|TITLE
 //!     Entry:   S<id>:ENTITIES|topic_keywords|"key_quote"|WEIGHT|FLAGS
@@ -20,7 +20,7 @@ use crate::store::frontmatter;
 use crate::store::miner::TextChunk;
 use crate::store::search::tokenize;
 
-pub const SUMMARY_SPEC: &str = r#"# Compact Summary Specification (AAAK Dialect)
+pub const SUMMARY_SPEC: &str = r#"# Compact Summary Specification
 
 A lossy structured symbolic summary format for fast topical scanning and cross-linking.
 
@@ -55,7 +55,7 @@ fn entity_word_regex() -> &'static Regex {
     ENTITY_WORD_RE.get_or_init(|| Regex::new(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+|[A-Z]{2,})*\b").unwrap())
 }
 
-/// Port of MemPalace's `_FLAG_SIGNALS` in dialect.py.
+/// Port of the reference design's `_FLAG_SIGNALS` in summary encoder.
 const FLAG_SIGNALS: &[(&str, &str)] = &[
     ("decided", "DECISION"),
     ("chose", "DECISION"),
@@ -93,7 +93,7 @@ const FLAG_SIGNALS: &[(&str, &str)] = &[
     ("config", "TECHNICAL"),
 ];
 
-/// Port of MemPalace's `_EMOTION_SIGNALS` in dialect.py.
+/// Port of the reference design's `_EMOTION_SIGNALS` in summary encoder.
 const EMOTION_SIGNALS: &[(&str, &str)] = &[
     ("decided", "determ"),
     ("prefer", "convict"),
@@ -406,7 +406,7 @@ impl CompactSummary {
 }
 
 /// Generate a structured symbolic summary from file text and chunks.
-/// Direct port of MemPalace's `dialect.py:encode_text`.
+/// Direct port of the reference design's `summary encoder:encode_text`.
 pub fn generate_summary(
     domain: &str,
     topic: &str,
@@ -541,10 +541,8 @@ pub fn generate_summary(
 fn extract_entities(text: &str) -> Vec<String> {
     let re = entity_word_regex();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    let stop_words: HashSet<&'static str> = crate::store::search::MEMPALACE_STOPWORDS
-        .iter()
-        .copied()
-        .collect();
+    let stop_words: HashSet<&'static str> =
+        crate::store::search::STOPWORDS.iter().copied().collect();
 
     for m in re.find_iter(text) {
         let word = m.as_str();

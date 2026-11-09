@@ -1,7 +1,5 @@
 //! Within-domain entity co-occurrence links.
-//!
-//! Direct port of MemPalace's `hallways.py` and `links` topology.
-//! Stores within-domain entity connections in `links/<domain>.links.md`.
+//! Stores connections in `links/<domain>.links.md`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;

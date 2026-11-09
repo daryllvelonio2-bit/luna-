@@ -1,7 +1,9 @@
 # Luna memory store — Markdown-native design
 
-Status: Proposed (design record, no code yet).  
-Date: 2026-11-08.  
+Status: Implemented in `harness-memory` (0.1.6). This document records the
+shipped design; where the implementation uses a simpler mechanism than the
+original plan, the simpler behavior is documented here.
+Date: 2026-11-08, revised 2026-11-09.
 Scope: A full persistent-memory system for Luna, with **Markdown as the
 canonical store** and a **derived, rebuildable, pure-file search index**.
 
@@ -15,10 +17,10 @@ indexes → records**, **links**, **cross-links**, **compact summaries**,
 |---|---|---|
 | Canonical storage | Markdown files + YAML front matter | human-readable, git-diffable, user-editable, `cp -r` backup |
 | Record granularity | one `.md` per verbatim chunk | exact line spans, clean diffs, more files |
-| Search index | pure-file: Tantivy (BM25) + `vectors.f32` (exact cosine) | no SQLite anywhere; `search_index/` is disposable |
-| Vector search | brute-force exact cosine with a write-through append log | viable to ~100k records; optional ANN later behind a trait |
-| Embeddings | local ONNX MiniLM 384-d default, optional embeddinggemma | zero API calls by default |
-| SQLite | **not** the source of truth | existing `memory.db` is migrated, then retired |
+| Search index | Derived index: in-memory BM25 + in-memory 384-d vectors, rebuilt from Markdown; only `search_index/manifest.json` is persisted | no SQLite anywhere; `search_index/` is disposable |
+| Vector search | brute-force exact cosine over vectors recomputed on load | viable to ~100k records; optional ANN later behind a trait |
+| Embeddings | built-in feature hashing (384-d, `hash-fnv-v1`); no model download | zero API calls; the `Embedder` seam allows an ONNX backend later |
+| SQLite | **not** the source of truth | existing `memory.db` is imported once, then kept only as a backup |
 | Integration point | extend `harness-memory`, expose `luna memory` | no new crate, no new brand name |
 
 The one unavoidable deviation from a database-backed design: the search index
@@ -46,7 +48,7 @@ surface, hooks, daemon, ops — is preserved.
 
 - Multi-database backend adapters (not meaningful on files).
 - ANN at million-record scale (brute force is enough for personal use).
-- Multi-user authentication and remote hosting (a local hub is the v1 model).
+- Multi-user accounts; v1 has one bearer token and binds loopback by default.
 - Lossless reconstruction from a compact summary (it is a summary by design).
 
 ## 2. Design principles
@@ -60,7 +62,7 @@ surface, hooks, daemon, ops — is preserved.
 5. **Content-addressed ids.** A record id is a hash of its identity, so
    re-mining is idempotent and collisions are detectable.
 6. **Fail loud on model drift.** Opening an index built by a different
-   embedder must refuse, not silently degrade.
+   embedder must rebuild with the configured embedder, never mix vectors.
 7. **A pass that saves nothing is a success.** Luna's existing curation policy
    stays; the store is the substrate underneath it.
 
@@ -104,11 +106,6 @@ Default root: `~/.luna/memory` (`paths.memory_dir`).
   sources/                       # optional verbatim mirror (off by default)
   search_index/                  # DERIVED — safe to delete
     manifest.json
-    corpus.list
-    tantivy/
-    vectors.f32
-    vectors.ids
-    vectors.deleted
     kg.jsonl
     graph.json
 ```
@@ -116,10 +113,8 @@ Default root: `~/.luna/memory` (`paths.memory_dir`).
 Everything outside `search_index/` is canonical. `search_index/` is gitignored
 and rebuildable with `luna memory reindex`.
 
-Large stores may shard records by id prefix
-(`records/ab/<record-id>.md`) once a topic exceeds `memory.store.shard_after`
-(default 5,000 files). The path is resolved from the id, so sharding is not
-part of the logical model.
+`memory.store.shard_after` is reserved: the current writer always uses
+`records/<id>.md` and does not shard by prefix yet.
 
 ## 4. Data model
 
@@ -130,26 +125,27 @@ already a workspace dependency). The body is untouched source text.
 
 ```markdown
 ---
-id: rec_9f2c1a7b3d4e5f60718293a4
+id: rec_luna_memory_9f2c1a7b3d4e5f60718293a4
 domain: luna
 topic: memory
 source_file: crates/harness-memory/src/engine.rs
-source_hash: blake3:ab12cd34...
 chunk_index: 3
 line_start: 363
 line_end: 476
 filed_at: 2026-11-08T21:59:00Z
-authored_at: 2026-11-08T18:00:00Z
-authored_at_source: git
-content_date: 2026-11-08
-content_date_source: git
-entities: [retrieve, sqlite, like, confidence]
-extract_mode: code
-parent_record_id: null
-hlc: 1783038849123-000000-rep_local
-tags: [memory, retrieval]
-is_bookkeeping: false
-body_hash: blake3:9911...
+entities: retrieve, sqlite, like, confidence
+tags: memory, retrieval
+body_hash: hash:9911ab22cd33ef44aa55bb66
+subject: engine.retrieval
+predicate: uses
+object: SQLite
+name: engine.rs
+path: crates/harness-memory/src/engine.rs
+category: fact
+confidence: 0.9000
+created_at: 2026-11-08T18:00:00Z
+updated_at: 2026-11-08T21:59:00Z
+is_active: true
 ---
 <verbatim chunk, byte-for-byte as read after decoding>
 ```
@@ -158,22 +154,24 @@ Field rules:
 
 | Field | Meaning |
 |---|---|
-| `id` | `rec_` + first 24 hex of `blake3(domain, topic, source_file, chunk_index, content)` |
+| `id` | `rec_<domain>_<topic>_<24 hex of SHA-256 over the delimited source/chunk tuple>` |
 | `domain` / `topic` | taxonomy placement; lowercase slugs |
 | `source_file` | absolute or repo-relative path at mine time |
-| `source_hash` | hash of the whole source file when mined |
 | `chunk_index` | 0-based index within the source |
 | `line_start` / `line_end` | 1-based inclusive span in the source |
 | `filed_at` | when the store wrote it (UTC) |
-| `authored_at` | when the content was authored, if known |
-| `authored_at_source` | `git`, `frontmatter`, `filesystem`, `unknown` |
-| `content_date` | the date the content is *about* (for temporal queries) |
-| `content_date_source` | `git`, `frontmatter`, `filename`, `unknown` |
-| `entities` | extracted candidate entities (see §7.3) |
-| `extract_mode` | `code`, `prose`, `transcript`, `journal` (affects chunking) |
-| `parent_record_id` | set when this is a chunk of a logical entry |
-| `hlc` | hybrid logical clock stamp for replica-safe merge order |
-| `body_hash` | hash of the body, used by the incremental indexer |
+| `entities` / `tags` | extracted candidates, comma-separated |
+| `body_hash` | `hash:` plus a truncated SHA-256 of the body |
+| `subject` / `predicate` / `object` | the one-line memory triple used by prompts and supersession |
+| `name` / `path` | optional display name and source path |
+| `category` | `fact`, `user_profile`, `code_pattern`, `workflow_rule`, `note_pointer` |
+| `confidence` | 0.0–1.0 |
+| `created_at` | authored time: source mtime for mined files, transcript message time for sessions |
+| `updated_at` | last write; not used for `since`/`before` filters |
+| `is_active` / `superseded_by` | supersession state |
+
+SQLite-backed columns such as `created_at` are preserved on import, so a
+migrated store keeps its original ordering.
 
 Missing or unparseable front matter is a hard error for the indexer and a
 warning for the reader: the file is listed under `memory audit` but never
@@ -203,9 +201,9 @@ description: crates/harness-memory
 ---
 ```
 
-Topics are assigned by the miner (§6) and can be renamed by
-`luna memory topics apply`. A rename rewrites `topic:` in every affected
-record front matter and regenerates content indexes.
+Topics are assigned by the miner (§6). There is no rename command yet: to
+rename a topic, move its directory and rewrite `topic:` in the affected record
+front matter, then run `luna memory reindex`.
 
 ### 4.3 Content index
 
@@ -396,69 +394,60 @@ because an artifact is defined by being byte-exact.
 ```json
 {
   "schema": 1,
-  "embedder": { "name": "all-MiniLM-L6-v2", "dim": 384, "revision": "v1" },
+  "embedder": { "name": "hash", "dim": 384 },
   "record_count": 1234,
-  "corpus_hash": "blake3:...",
-  "built_at": "2026-11-08T22:00:00Z",
-  "tantivy_schema": 1
+  "built_at": "2026-11-08T22:00:00Z"
 }
 ```
 
+The manifest is informational and detects a changed embedder; the index itself
+is rebuilt from Markdown rather than read from disk.
+
 Open rules:
 
-1. No manifest → build.
-2. `embedder` ≠ configured embedder → refuse with
-   `embedder identity mismatch` and the exact reindex command.
-3. `corpus_hash` ≠ current `corpus.list` hash → incremental update.
-4. `schema` unknown → refuse (newer store, older binary).
+1. No manifest → build from Markdown and write one.
+2. `embedder` ≠ configured embedder → rebuild from Markdown with the new
+   embedder, then overwrite the manifest.
+3. `schema` unknown → rebuild from Markdown.
+4. `record_count` is advisory; the actual count always comes from scanning
+   `domains/`.
 
-`corpus.list` is the indexer's work list: one line per record,
-`<id>\t<body_hash>\t<relative_path>`, sorted by id. It is maintained by the
-single writer and can also be rebuilt by scanning front matter only.
+There is no `corpus.list` file: the scan in step 1 is the work list, and it is
+rebuilt whenever the process loads or `reindex` runs.
 
-### 5.2 Lexical index (Tantivy)
+### 5.2 Lexical index (in-memory BM25)
 
-Schema (one document per record):
+The shipped build does not link Tantivy. On first read (or after `reindex`) the
+store loads every record, tokenizes `search_text(record)` (subject, predicate,
+object, entities, tags, and body), and keeps the postings in memory. BM25 is
+scored per query with corpus-relative IDF, then min-max normalized over the
+candidate set.
 
-| field | type | stored | indexed |
-|---|---|---|---|
-| `id` | STRING | yes | exact |
-| `domain` | STRING | yes | exact/facet |
-| `topic` | STRING | yes | exact/facet |
-| `source_file` | STRING | yes | exact |
-| `filed_at` | STRING (ISO) | yes | fast |
-| `authored_at` | STRING (ISO) | yes | fast |
-| `content_date` | STRING (ISO) | yes | fast |
-| `entities` | STRING | yes | tokenized |
-| `text` | TEXT | yes | tokenized (BM25) |
-| `body_hash` | STRING | yes | no |
+| field | used for |
+|---|---|
+| `id`, `domain`, `topic`, `source_file` | filtering |
+| `created_at` | time windows (`since`/`before`) |
+| `entities`, `tags`, `body` | BM25 terms |
 
-`text` includes the content-index topic line and the body when the record is
-short, otherwise the body alone. Deletes use `delete_term(id)`. Commits are
-batched per mine run or per MCP write.
+`search_index/manifest.json` records the schema, embedder identity, and record
+count so a stale or mismatched cache can be detected. The index itself is not
+persisted; deleting `search_index/` only forces a rebuild.
 
-### 5.3 Vector index (append-only exact cosine)
+### 5.3 Vector index (in-memory exact cosine)
 
-No ANN in v1. Vectors are L2-normalized at write, so cosine is a dot product.
+No ANN in v1. Vectors are L2-normalized when produced, so cosine is a dot
+product. The shipped embedder is `hash-fnv-v1`, a deterministic feature hasher
+over word unigrams, word bigrams, and character trigrams. It needs no model
+download and no network, and its identity is part of the manifest so changing
+it forces a reindex.
 
-Files:
+Vectors are not persisted. On first read the store recomputes each record's
+384-d vector from its text and keeps it beside the parsed record; `reindex`
+drops and recomputes the set. A query is embedded the same way and scored
+against every live candidate with exact cosine, then blended with BM25.
 
-- `vectors.f32` — header (`LPV1`, `u32 dim`, `u64 count`) then row-major
-  little-endian `f32` rows.
-- `vectors.ids` — one record id per line, same row order.
-- `vectors.deleted` — tombstoned ids, one per line.
-
-Query: `memmap2` the matrix, iterate live rows, dot with the query vector,
-keep a bounded min-heap of the top `k * overfetch`. Skip ids in
-`vectors.deleted` (a `HashSet` loaded once). At 100k × 384 this is ~150 MB
-mapped and a few milliseconds of SIMD-able work.
-
-Writes append the new vector and id, then atomically replace the header count.
-Deletes append to `vectors.deleted`. Compaction (`reindex` or when tombstones
-exceed 20%) rewrites the live matrix and atomically renames it over the old one.
-
-`SearchIndexBackend` is a trait so an ANN (`hnsw_rs`, `usearch`) or `sqlite-vec`
-backend can be added later without touching the store or the query pipeline.
+`Embedder` is a trait, so a local model backend can replace the hasher later
+without touching the store or the query pipeline.
 
 ### 5.4 Graph indexes
 
@@ -476,34 +465,37 @@ Both are rebuilt by `reindex` and updated on the corresponding write.
 
 All mutations follow the same sequence:
 
-1. Acquire the store lock (`search_index/.lock`, `fs2` exclusive) or route to
-   the daemon.
+1. Acquire the store lock (`search_index/.lock`, exclusive-create file with
+   stale detection) or route to the daemon.
 2. Compute ids and hashes.
-3. Write each file to a temp path in the same directory, `fsync`, then rename.
-4. Append the index delta (Tantivy add/delete, vector append) or enqueue it in
-   `search_index/pending.jsonl` when batching.
-5. Append to the run journal `search_index/journal/<run_id>.jsonl`.
-6. Release the lock.
+3. Write each file to a temp path in the same directory, then `rename` it over
+   the target.
+4. Update the in-memory cache and rewrite `search_index/manifest.json`.
+5. Release the lock.
 
-Crash recovery replays the journal: every entry is idempotent because ids are
-content-addressed. A temp file left behind is removed on the next write.
+Writes are idempotent because a record id is stable for a given source and
+chunk index, so re-running a mine overwrites the same file. A temp file left
+behind by a crash is removed on the next write to that path.
 
 ### 6.2 Project miner
 
 `luna memory mine <dir>`:
 
-- Walk the tree with gitignore rules (`ignore` crate), skipping
-  `.git`, `node_modules`, `target`, binaries, and `memory.store.skip_dirs`.
-- Detect file kind: code, prose, config, transcript.
-- Route to a topic by directory and content signals; a `memory.yaml` in the
-  project supplies explicit `domain`/`topics` overrides.
+- Walk the tree with `walkdir`, skipping hidden directories, `node_modules`,
+  `target`, and the other members of `SKIP_DIRS`.
+- Accept only known text extensions; binaries and unknown files are skipped.
+- Route to a topic by directory and filename signals; `FOLDER_TOPIC_MAP` maps
+  well-known folders (e.g. `crates/<name>`, `src/`, `docs/`) to topics.
 - Chunk ~`memory.store.chunk_chars` (default 800) on paragraph/symbol
   boundaries; never mid-UTF-8; preserve line spans.
-- Rewrite a source only if `source_hash` changed; purge records for deleted or
-  newly ignored files (`sync`).
+- Re-mining a source writes the new chunks and deletes that source's old record
+  ids in the same domain, so edits do not leave duplicates. Deleted files are
+  cleaned up on the next mine of their directory.
 - Build content indexes and compact summaries for each source after its records
   land.
-- Emit link updates for the domain.
+- Within-domain links are computed on demand with `luna memory links --domain D`,
+  not during mining; `reindex` then folds the saved links and cross-links into
+  the graph.
 
 ### 6.3 Conversation miner
 
@@ -512,17 +504,17 @@ content-addressed. A temp file left behind is removed on the next write.
 - Claude Code JSONL, ChatGPT export, Slack export, Codex transcripts, plain
   text.
 - Normalize to a canonical exchange stream; pair user+assistant as one unit.
-- One record per exchange (or per bounded window for long turns), with
-  `extract_mode: transcript`, `authored_at` from the message, and
-  `parent_record_id` for the session.
+- One record per exchange (or per bounded window for long turns), stored
+  verbatim. Authored time is carried in `created_at`: session mining uses the
+  transcript message timestamp, and file mining uses the file modified time.
 - Never summarise; store verbatim.
 
 ### 6.4 Notes and sessions
 
-- `luna memory index-notes` indexes `paths.notes_dir` **by reference**: the
-  record body is the note body, and `source_file` points at the note. The note
-  stays canonical; no copy is made.
-- `luna memory mine --mode sessions` mines `sessions.db` transcripts into a
+- Notes stay canonical in `harness-notes`; the memory store does not copy or
+  re-index note bodies. The background saver writes short note-pointer records
+  (`category: note_pointer`) so prompts know a note exists.
+- `luna memory mine --mode sessions <sessions.db>` mines transcript rows into a
   `conversations` domain. This is how Luna's existing history becomes
   searchable.
 
@@ -530,25 +522,27 @@ content-addressed. A temp file left behind is removed on the next write.
 
 Pipeline, in order:
 
-1. Sanitize the query (length, control chars, path traversal).
-2. Parse filters: domain, topic, source_file, `since`, `before`, `as_of`.
-3. Embed the query locally.
-4. Vector search over `vectors.f32`.
-5. BM25 search over Tantivy.
-6. Blend: `score = wv * vector_norm + wb * bm25_norm`, defaults `0.6 / 0.4`,
+1. Load the in-memory record set (rebuilding it from Markdown if stale).
+2. Parse filters: domain, topic, `since`, `before` (both compare `created_at`).
+3. Embed the query with the configured embedder.
+4. Exact cosine over every live candidate's in-memory vector.
+5. BM25 over the in-memory record set.
+6. Blend: `score = wv * vector + wb * bm25_norm`, defaults `0.6 / 0.4`,
    configurable (`memory.store.hybrid_vector_weight`,
-   `memory.store.hybrid_bm25_weight`). Each component is min-max normalized
-   over the candidate union.
+   `memory.store.hybrid_bm25_weight`). BM25 is min-max normalized over the
+   candidate union; vector similarity is absolute cosine clamped to `[0, 1]`
+   and never normalized, so the candidate set cannot reshuffle the vector
+   signal.
 7. Content-index boost: the best pointer-index hit per `source_file` adds
    `+ memory.store.index_boost * (1 - rank / n_hits)` to that source's records.
    Content indexes never remove candidates.
-8. Optional LLM rerank (`memory.store.rerank: off | local | provider`), off by
-   default; never required for the headline retrieval path.
-9. Deduplicate chunks that belong to the same `parent_record_id`; keep the best.
-10. Read the best records' bodies and return id, path, span, score components,
-    and provenance.
+8. Sort by score and truncate to `limit`.
 
-Result shape (shared by CLI and MCP):
+Reranking and `parent_record_id` deduplication are not implemented; every hit
+is an independent record.
+
+Result shape (CLI `--json`; MCP returns the same records inside a `content`
+text block and adds `count`):
 
 ```json
 {
@@ -565,87 +559,89 @@ Result shape (shared by CLI and MCP):
       "vector_score": 0.81,
       "bm25_score": 0.63,
       "index_boost": 0.04,
+      "matched_via": "record",
+      "index_preview": null,
       "excerpt": "...",
-      "body": "..."
+      "path": "/home/janelle/.luna/memory/domains/..."
     }
   ],
   "truncated": false
 }
 ```
 
-Time windows compare `content_date` when present, else `authored_at`, else
-`filed_at`; the response says which field was used.
+Time windows compare the record's authored time, stored in `created_at`.
+Project and conversation miners populate it from the source file's modified
+time (sessions use the transcript message timestamp); `updated_at` is only the
+last-write time and is deliberately not used for `since`/`before`.
 
 ## 8. Temporal model
 
-- `filed_at` — store write time.
-- `authored_at` — when the content was written (git commit, transcript
-  timestamp, front matter, else filesystem, else unknown).
-- `content_date` — the date the content describes (best effort).
-- HLC — 13-digit ms, 6-hex counter, replica id; lexicographic order equals
-  causal order. Stored per record and per KG write so two replicas can merge
-  without trusting wall clocks.
+- `created_at` — authored time: when the content was written (source mtime for
+  files, transcript message time for sessions, preserved on SQLite import).
+- `updated_at` — last write time.
 - KG validity — `from`/`to`; `as_of` returns only triples valid at that
   instant; `supersede` edits the boundary atomically.
 - Deletes leave no tombstone in Markdown: a removed record is removed from
-  disk, but the run journal and git history retain it.
+  disk, but the journal and git history retain it.
 
 ## 9. Write routing and concurrency
 
 | policy | behavior |
 |---|---|
 | `direct` | write files directly under the store lock |
-| `prefer` | use the daemon if running, else direct |
-| `require` | daemon only; block if unavailable |
+| `prefer` | send `save`/`update`/`forget` to the daemon if its endpoint is present; fall back to direct on failure |
+| `require` | daemon only; startup fails if no daemon endpoint exists, and a failed write is an error |
 
 Config: `memory.store.write_routing: direct | prefer | require` (default
-`prefer`). Hooks never cold-start the daemon and keep a 500 ms budget.
+`direct`). The daemon-backed engine reloads Markdown before reads so writes made
+by the daemon process are visible. Note-pointer writes stay direct. Hooks never
+cold-start the daemon.
 
 The daemon (`luna memory daemon start`) is the single long-lived writer. It
 provides two endpoints: a native Luna connection (default, IPC/socket with no
-MCP overhead) and an optional MCP/HTTP server for external agents. It owns the
-Tantivy writer and serializes index commits. Readers open the index directly and
-never touch the lock.
+MCP overhead) and an optional MCP/HTTP server for external agents. It serializes
+queued work and index commits. Readers reload from Markdown.
+
+Both endpoints require the bearer token stored at
+`<memory root>/daemon/token` (mode `0600`); `/health` is the only public route.
+`luna memory serve --host H` binds the requested interface. TLS is not built in:
+the process refuses `--tls-cert`/`--tls-key` rather than silently ignoring them,
+so terminate TLS at a reverse proxy.
 
 ## 10. CLI surface
 
 ```
-luna memory init [dir]
-luna memory mine <dir> [--mode projects|convos|sessions] [--domain D] [--topic T]
-luna memory sweep
-luna memory sync [--dry-run]
-luna memory search <query> [--domain D] [--topic T] [--since D] [--before D] [--results N]
-luna memory compact [--domain D]
-luna memory context [--domain D]
-luna memory split <dir>
-luna memory hook run <event>
-luna memory instructions
-luna memory rules
-luna memory repair [--max-seq-id | --encoding | ...]
-luna memory daemon start|stop|status|jobs|wait
-luna memory mcp [--stdio|--http]
-luna memory serve [--host H --port P] [--tls-cert C --tls-key K]
-luna memory reindex [--force]
-luna memory migrate [--from-memory-db|--from-notes|--from-sessions]
-luna memory migrate-domains
-luna memory links [--domain D] [--prune]
+luna memory init
+luna memory status [--json]
+luna memory mine [dir] [--mode projects|convos|sessions] [--domain D] [--topic T]
+luna memory search <query> [--domain D] [--topic T] [--since RFC3339] [--before RFC3339] [--limit N]
+luna memory show <id|subject|subject.predicate>
+luna memory context [--limit N]
+luna memory reindex
 luna memory audit
-luna memory topics propose|apply
-luna memory domains split
-luna memory kg query|add|invalidate|supersede|timeline|stats|normalize|import-legacy
-luna memory crosslinks propose|apply|prune
-luna memory status
-luna memory export [--out DIR]
-luna memory update check|plan|configure
-luna memory events append|list|wait|watch|ack|sync
-luna memory task create|launch
+luna memory export <dir>
+luna memory migrate [--from-memory-db <memory.db>]
+luna memory forget <id|all>
+luna memory domains
+luna memory kg query|add|invalidate|supersede|timeline|stats
+luna memory links [--domain D]
+luna memory crosslinks propose|apply|prune|list
+luna memory traverse <start> [--domain-a D --domain-b D]
+luna memory bridges [--domain-a D --domain-b D]
+luna memory journal write|read
+luna memory events append|list|ack|wait
 luna memory artifact put|get
-luna memory set-embedder
+luna memory daemon start|stop|status|jobs|wait
+luna memory mcp [--stdio|--http] [--port N]
+luna memory serve [--host H] [--port N]
+luna memory hook run <event> [--harness H]
+luna memory instructions [name]
+luna memory rules [--host H --harness H --project P]
 ```
 
-Backed by `harness-memory`; `harness-cli` gets a `memory` subcommand. Command
-implementations live in `harness-memory/src/store/ops/` so the MCP server and
-CLI share one code path.
+`serve` accepts `--tls-cert`/`--tls-key` only to reject them with an explanatory
+error; TLS is not built in. Backed by `harness-memory`; `harness-cli` wires the
+`memory` subcommand. The MCP server and CLI call the same store methods.
 
 ## 11. Communication endpoints: Native Luna & MCP
 
@@ -657,7 +653,7 @@ The memory subsystem exposes two distinct endpoints:
    interactive sessions, background savers, and hooks.
 2. **MCP server endpoint (optional)**: For external tools and third-party agents
    (Claude Code, Codex, Cursor). Run `luna memory mcp` (stdio) or `luna memory serve`
-   (HTTP, optional TLS and bearer token). Tool names use the `memory_` prefix so
+   (HTTP, bearer token required). Tool names use the `memory_` prefix so
    they never collide with Luna's existing `mcp__server__tool` namespace.
 
 | Group | Tools |
@@ -683,20 +679,23 @@ The memory store adds semantic hooks:
 |---|---|
 | `session_start` | inject L0 + L1 via the memory prompt block |
 | `stop` | auto-save every `memory.store.hooks_save_interval` human messages (default 10) |
-| `session_end` | final async mine + journal entry |
+| `session_end` | final mine + journal entry |
 | `precompact` | synchronous mine before compaction |
 
-They are off unless `hooks.enabled` and `memory.store.hooks_auto_save` are
-true. Background work is detached/spawned so a hook returns within its budget
-(500 ms target). Workspace-provided hooks still require `hooks.trust_workspace`.
+Clients should invoke these only when `hooks.enabled` and
+`memory.store.hooks_auto_save` are true. The memory side independently refuses
+writes when `hooks_auto_save` is false. Background work is detached/spawned so a
+hook returns within its budget (500 ms target). Workspace-provided hooks still
+require `hooks.trust_workspace`.
 
-Client plugins (Claude Code, Codex, Cursor) can be generated by
-`luna memory hooks install <client>`; they call `luna memory hook run <event>`
-and receive the same JSON contract Luna's hooks already use.
+Client plugins (Claude Code, Codex, Cursor) call `luna memory hook run <event>`
+with a JSON payload and receive the same JSON contract Luna's hooks already
+use. There is no installer command yet; wire the hook in the client's own
+settings.
 
 ## 13. Configuration
 
-Add to `harness-core/src/config.rs`:
+Shipped in `harness-core/src/config.rs`:
 
 ```rust
 pub struct MemorySettings {
@@ -705,8 +704,8 @@ pub struct MemorySettings {
 }
 
 pub struct MemoryStoreSettings {
-    pub enabled: bool,              // default true once migrated
-    pub embedder: String,           // "minilm" | "embeddinggemma" | "none"
+    pub enabled: bool,              // default true
+    pub embedder: String,           // "hash" (shipped) | "none"; model names warn and fall back
     pub chunk_chars: usize,         // 800
     pub index_chars: usize,         // 1500
     pub index_scan_chars: usize,    // 5000
@@ -719,9 +718,12 @@ pub struct MemoryStoreSettings {
     pub hooks_save_interval: usize, // 10
     pub write_routing: String,      // "direct" | "prefer" | "require"
     pub shard_after: usize,         // 5000 files per topic
-    pub overfetch: usize,           // 4
 }
 ```
+
+The internal `StoreConfig` also carries `overfetch` (4), but it has no
+user-facing setting. `rerank` is accepted and stored but not yet acted on; all
+retrieval uses the hybrid blend.
 
 And `paths.memory_dir` (`~/.luna/memory`). Env overrides follow the existing
 `LUNA_` convention, e.g. `LUNA_MEMORY_STORE_ENABLED=false`.
@@ -733,49 +735,54 @@ keep working.
 
 ## 14. Migration from current Luna memory
 
-`luna memory migrate` is idempotent and preserves the old files as backups.
+The Markdown store imports `memory.db` automatically the first time it opens
+and finds no record files. `luna memory migrate` runs the same import
+explicitly. The import is idempotent because each row keeps its original id.
 
 | Source | Destination | Rule |
 |---|---|---|
-| `memory.db` rows | `domains/legacy/topics/memory/records/` | one record per active row; `subject/predicate/object` becomes a KG triple |
-| `notes/*.md` | indexed by reference under `domains/notes/` | no copy; `source_file` points at the note |
+| `memory.db` rows | `domains/<derived>/topics/<derived>/records/` | one record per row, id preserved |
+| `notes/*.md` | not imported | notes stay in `harness-notes`; memory keeps note-pointer records |
 | `sessions.db` | `domains/conversations/` | mined as transcripts, one record per exchange |
 | `notes.db` | already imported by `harness-notes` | untouched |
 
-After a successful migration, `memory.db` is renamed
-`memory.db.store-imported`; the store is the writer from then on. The old
-`save_memory`/`update_memory`/`forget_memory` tools remain as adapters so a
-rollback is possible.
+`memory.db` is left in place as a backup; it is no longer the writer. The old
+`save_memory`/`update_memory`/`forget_memory` tools use the Markdown engine, so
+a rollback means setting `memory.store.enabled = false`.
 
 ## 15. Operations
 
+Shipped today:
+
 | Command | Behavior |
 |---|---|
-| `audit` | score topics, naming, cross-links, links, KG; report unreachable records, broken links, invalid front matter |
-| `repair` | fix front matter, rebuild missing content indexes/summaries, drop dangling pointers, normalize ids, repair encoding |
-| `export` | write a clean Markdown tree (records + KG + journal) outside the store |
-| `sync` | remove records whose source is deleted, moved, or gitignored |
-| `backup` | `cp -r` (content) + optionally `tar` the search index; retention by count |
-| `reindex` | full rebuild from Markdown; verifies manifest and embedder identity |
-| `set-embedder` | re-embed every record into a new index generation, or refuse |
-| `status` | counts by domain/topic, index age, embedder, stale sources |
+| `audit` | report invalid front matter, duplicate active records, empty bodies, and dangling supersessions |
+| `export` | copy the canonical Markdown tree to another directory |
+| `reindex` | drop the cache and rebuild it from Markdown; rewrite the manifest |
+| `status` | counts by domain/topic, root, and embedder |
+| `migrate` | import rows from the legacy SQLite database |
+| `forget` | delete one record, or every record with `all` |
 
-Because the store is files, backup and export are trivial; the hard part is
-the search index, and the answer is always "rebuild it."
+Planned but not shipped: `repair`, `sync`, `backup`, `set-embedder`. Until
+they exist, repair means editing Markdown by hand, sync means re-running
+`mine`, and backup is `cp -r` of the store root (the index rebuilds itself).
 
 ## 16. Performance and scale
 
-| Corpus | Text | Vectors (384-d f32) | Tantivy | Query |
-|---|---|---|---|---|
-| 5k records | ~4 MB | ~8 MB | ~2 MB | < 30 ms |
-| 50k records | ~40 MB | ~77 MB | ~20 MB | < 100 ms |
-| 100k records | ~80 MB | ~154 MB | ~40 MB | < 200 ms |
-| 500k records | ~400 MB | ~768 MB | ~200 MB | use ANN backend |
+| Corpus | Text | Vectors (384-d f32, RAM) | Query |
+|---|---|---|---|
+| 5k records | ~4 MB | ~8 MB | < 30 ms |
+| 50k records | ~40 MB | ~77 MB | < 100 ms |
+| 100k records | ~80 MB | ~154 MB | < 200 ms |
+| 500k records | ~400 MB | ~768 MB | use ANN backend |
 
-File count is the real cost. At 50k records the tree is large but workable;
-sharding by id prefix keeps `read_dir` fast. If this becomes a problem, a
-`pack` mode can move a topic's records into one Markdown file with section
-fences, at the cost of exact line spans.
+Because the index is rebuilt from Markdown on load, cold start is proportional
+to corpus size; steady-state queries are in-memory scans.
+
+File count is the real cost. At 50k records the tree is large but workable.
+Prefix sharding is reserved rather than implemented, so a very large topic is
+one directory; if that becomes a problem, the `shard_after` setting is the
+intended knob.
 
 ## 17. Crate layout
 
@@ -785,67 +792,46 @@ surface.
 ```
 crates/harness-memory/
   Cargo.toml
-  src/lib.rs
+  src/lib.rs               # engine selection, config wiring
   src/engine.rs            # legacy SQLite engine (compatibility)
   src/saver.rs             # existing background saver
-  src/tools.rs             # existing save/update/forget adapters
+  src/tools.rs             # save/update/forget adapters
   src/store/
-    mod.rs
-    config.rs
-    error.rs
+    mod.rs                 # store, search, audit, export, migration
     ids.rs
     frontmatter.rs
     atomic.rs
-    record.rs
+    embed.rs               # hash embedder
     pointer_index.rs       # the content-index layer
     summary.rs             # compact summary
     context.rs             # L0-L3
     kg.rs
     links.rs
     crosslinks.rs
+    graph.rs
     journal.rs
     events.rs
-    migrate.rs
     mcp.rs
     hooks.rs
     daemon.rs
-    ops/
-      audit.rs
-      repair.rs
-      export.rs
-      sync.rs
-      backup.rs
-    mine/
-      mod.rs
-      project.rs
-      convo.rs
-      notes.rs
-      sessions.rs
-  src/search/
-    mod.rs
-    query.rs
-    ranking.rs
-    render.rs
-  src/search_index/
-    mod.rs
-    manifest.rs
-    lexical.rs             # Tantivy
-    vectors.rs             # append-only f32 matrix
-    kg_index.rs
-    graph.rs
+    engine.rs              # Markdown engine + daemon write routing
+    miner.rs               # project miner
+    convo.rs               # conversation miner
+    sessions.rs            # sessions.db miner
+    search.rs              # BM25 and blending
   tests/
 ```
 
-Dependencies to add to the workspace:
+Dependencies actually used by the store:
 
-- `tantivy` — BM25 index.
-- `fastembed` (or `ort` + `tokenizers`) — local MiniLM/embeddinggemma.
-- `memmap2` — vector matrix reads.
-- `fs2` — file locks.
-- `blake3` — content hashes.
-- `ignore` — gitignore-aware walking.
-- `serde_yaml` — already present.
-- `pulldown-cmark` — already present, for rendering.
+- `sha2` — content and cache-tag hashing.
+- `regex` — compact-summary signal extraction.
+- `walkdir` — tree walking.
+- `serde_yaml` — front matter.
+- `rusqlite` — legacy migration source and the daemon job queue.
+- `tokio` — daemon sockets and HTTP/MCP serving.
+
+No Tantivy, ONNX, or vector-file dependency is linked; the index is in memory.
 
 `harness-notes` stays as the user's note store and is indexed by reference.
 
@@ -854,12 +840,12 @@ Dependencies to add to the workspace:
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | 0 | scaffolding: config, front matter, ids, atomic writes, lock | round-trip a record file |
-| 1 | project miner + Tantivy + vector matrix + hybrid search | `mine` a repo, `search` returns the correct record |
+| 1 | project miner + in-memory BM25 + vectors + hybrid search | `mine` a repo, `search` returns the correct record |
 | 2 | content indexes, compact summaries, L0–L3 context | context text under 900 tokens, search improves |
 | 3 | KG + temporal + links/cross-links | `kg query --as-of`, `traverse` work |
 | 4 | conversation/session miner, journal, event log | mine `sessions.db`, query it |
 | 5 | native daemon connection (default) + optional MCP server, hooks, plugins | native Luna connection active; Claude Code/Codex can read and write via MCP |
-| 6 | audit/repair/export/sync/backup, migration, eval | `luna memory migrate` + R@5 harness |
+| 6 | audit/export/migration, eval | `luna memory migrate` + R@5 harness |
 
 Phase 1 is the load-bearing one: if hybrid retrieval over Markdown is not good,
 nothing above it matters.
@@ -868,16 +854,16 @@ nothing above it matters.
 
 | Risk | Mitigation |
 |---|---|
-| Index and files drift | manifest `corpus_hash`; reindex; index is disposable |
-| File count / inode pressure | shard by id prefix; optional pack mode |
+| Index and files drift | index is rebuilt from Markdown on load; `reindex` forces it; index is disposable |
+| File count / inode pressure | one file per record; topic directory boundaries; prefix sharding is reserved |
 | Concurrent writes | single-writer lock + daemon; idempotent content-addressed ids |
-| Partial multi-file writes | run journal + replay; atomic rename per file |
+| Partial multi-file writes | atomic rename per file; a failed mine can be re-run idempotently |
 | User edits break front matter | validate on read; `audit` lists; never silently drop |
-| Embedding model drift | recorded identity; refuse and require `set-embedder` |
+| Embedding model drift | embedder identity recorded in the manifest; changing it triggers a rebuild |
 | Markdown escaping in pointer lines | escape `|`, `\`, newlines; validate on read |
-| KG edits leave inconsistent triples | one-line-per-triple files; `kg normalize`; supersede is atomic |
+| KG edits leave inconsistent triples | one-line-per-triple files; `supersede` is atomic |
 | Large binary index in backups | index is gitignored; backups copy Markdown, rebuild index |
-| Tantivy is a heavy dependency | isolate in `search_index/lexical.rs`; a fallback substring scan exists for degraded mode |
+| In-memory index costs cold-start time | rebuild once on load; manifest lets a future persistent index be added behind the same query path |
 
 ## 20. Open questions
 
@@ -886,36 +872,35 @@ nothing above it matters.
    Luna's current file-per-note model.
 2. **Compact-summary generation.** Local heuristic only, or optional LLM
    refinement? Recommend heuristic by default, LLM opt-in.
-3. **Embedding distribution.** `fastembed` bundles ONNX; embeddinggemma is
-   ~300 MB. Ship MiniLM only, make embeddinggemma a download.
+3. **Embedding distribution.** The shipped default is the dependency-free
+   `hash` embedder. A local ONNX MiniLM backend can be added behind the
+   `Embedder` trait; it would be a download, not a build dependency.
 4. **Keep the legacy SQLite engine forever?** Recommend: adapter for one
    release, then deprecate once migration and tests are stable.
-5. **Multi-agent hub in v1?** Recommend: yes for MCP/HTTP, no auth beyond a
-   bearer token and loopback default.
+5. **Multi-agent hub in v1?** Yes for MCP/HTTP, with a required bearer token.
+   The default bind stays loopback; non-loopback binds are allowed but still
+   authenticated, and TLS is expected to terminate at a reverse proxy.
 
 ## 21. Module map
 
 | Concept | Module |
 |---|---|
-| record | `store/record.rs`, `store/frontmatter.rs` |
+| record, store, migration, audit, export | `store/mod.rs`, `store/frontmatter.rs`, `store/ids.rs` |
 | content index | `store/pointer_index.rs` |
 | compact summary | `store/summary.rs` |
 | context layers | `store/context.rs` |
-| knowledge graph | `store/kg.rs`, `search_index/kg_index.rs` |
-| links / cross-links | `store/links.rs`, `store/crosslinks.rs`, `search_index/graph.rs` |
-| search pipeline | `search/query.rs`, `search/ranking.rs`, `search/render.rs` |
-| lexical index | `search_index/lexical.rs` |
-| vector index | `search_index/vectors.rs` |
-| project miner | `store/mine/project.rs` |
-| conversation miner | `store/mine/convo.rs`, `store/mine/sessions.rs` |
+| knowledge graph | `store/kg.rs` |
+| links / cross-links | `store/links.rs`, `store/crosslinks.rs`, `store/graph.rs` |
+| search pipeline | `store/search.rs`, `store/embed.rs` |
+| project miner | `store/miner.rs` |
+| conversation miner | `store/convo.rs`, `store/sessions.rs` |
 | MCP surface | `store/mcp.rs` |
 | hooks | `store/hooks.rs` |
-| daemon / routing | `store/daemon.rs`, `store/atomic.rs` |
-| backups, repair, audit, sync, export | `store/ops/*` |
+| daemon / routing | `store/daemon.rs`, `store/atomic.rs`, `store/engine.rs` |
 | journal | `store/journal.rs` |
 | event log | `store/events.rs` |
-| migration | `store/migrate.rs` |
+| engine selection | `lib.rs` (`build_memory_engine`) |
 
 Deliberately not reproduced: multi-database backend adapters, ANN capacity and
 repair machinery, and database/index synchronization. Their job is done by the
-file store, the append-only vector log, the manifest, and `reindex`.
+Markdown store, an in-memory index, the manifest, and `reindex`.

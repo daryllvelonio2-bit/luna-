@@ -7,16 +7,16 @@ pub use engine::SqliteMemoryEngine;
 pub use saver::{MemorySaver, SaverPolicy, SAVER_SYSTEM_PROMPT};
 pub use store::{
     all_mcp_tools, choose_write_route, default_root, dispatch_mcp_tool, handle_mcp_jsonrpc,
-    mine_convos, mine_sessions, parse_write_routing_policy, render_shared_brain_rules,
-    run_hook, run_instructions, run_stdio_server, ArtifactMeta, AuditReport, ClosetBoost,
-    CompactSummary, ContentIndex, CrossLink, CrossLinksStore, DaemonEndpointInfo, DaemonPaths,
-    DaemonRuntime, DomainLink, Entity, EntityAttribute, EntityCandidate, EntityQueryResult,
-    Event, EventsStore, GraphData, GraphEdge, GraphIndex, GraphNode, Job, JournalEntry,
-    JournalStore, KnowledgeGraph, KnowledgeGraphStats, Layer0, Layer1, Layer2, Layer3,
-    LinksStore, MarkdownMemoryEngine, McpToolDef, MemoryStack, MemoryStore, MineReport,
-    NativeDaemonClient, PointerLine, QueueStore, Record, SearchFilter, SearchResult,
-    StatusReport, StoreConfig, TraversalStep, Triple, TunnelBridge, WriteRoutingDecision,
-    WriteRoutingPolicy, WriteRoutingTarget, LOCK_REFUSAL_ERROR_CLASS, MAX_ATTEMPTS, SUMMARY_SPEC,
+    mine_convos, mine_sessions, parse_write_routing_policy, render_shared_brain_rules, run_hook,
+    run_instructions, run_stdio_server, ArtifactMeta, AuditReport, CompactSummary, ContentIndex,
+    CrossLink, CrossLinkBridge, CrossLinksStore, DaemonEndpointInfo, DaemonPaths, DaemonRuntime,
+    DaemonWriteEngine, DomainLink, Entity, EntityAttribute, EntityCandidate, EntityQueryResult,
+    Event, EventsStore, GraphData, GraphEdge, GraphIndex, GraphNode, IndexBoost, Job, JournalEntry,
+    JournalStore, KnowledgeGraph, KnowledgeGraphStats, Layer0, Layer1, Layer2, Layer3, LinksStore,
+    MarkdownMemoryEngine, McpToolDef, MemoryStack, MemoryStore, MineReport, NativeDaemonClient,
+    PointerLine, QueueStore, Record, SearchFilter, SearchResult, StatusReport, StoreConfig,
+    TraversalStep, Triple, WriteRoutingDecision, WriteRoutingPolicy, WriteRoutingTarget,
+    LOCK_REFUSAL_ERROR_CLASS, MAX_ATTEMPTS, SUMMARY_SPEC,
 };
 pub use tools::{ForgetMemoryTool, MemorySearchTool, SaveMemoryTool, UpdateMemoryTool};
 
@@ -34,12 +34,14 @@ use harness_core::{HarnessError, MemoryEngine, MemoryRecord};
 pub enum MemoryEngineKind {
     Sqlite(SqliteMemoryEngine),
     Markdown(MarkdownMemoryEngine),
+    Daemon(DaemonWriteEngine),
 }
 
 impl MemoryEngineKind {
     pub fn markdown(&self) -> Option<&MarkdownMemoryEngine> {
         match self {
             Self::Markdown(engine) => Some(engine),
+            Self::Daemon(engine) => Some(engine.direct()),
             Self::Sqlite(_) => None,
         }
     }
@@ -51,6 +53,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.retrieve(query, limit).await,
             Self::Markdown(engine) => engine.retrieve(query, limit).await,
+            Self::Daemon(engine) => engine.retrieve(query, limit).await,
         }
     }
 
@@ -58,6 +61,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.save(record).await,
             Self::Markdown(engine) => engine.save(record).await,
+            Self::Daemon(engine) => engine.save(record).await,
         }
     }
 
@@ -65,6 +69,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.update(id, updated).await,
             Self::Markdown(engine) => engine.update(id, updated).await,
+            Self::Daemon(engine) => engine.update(id, updated).await,
         }
     }
 
@@ -72,6 +77,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.forget(id).await,
             Self::Markdown(engine) => engine.forget(id).await,
+            Self::Daemon(engine) => engine.forget(id).await,
         }
     }
 
@@ -79,6 +85,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.add_note_pointer(note_id, pointer).await,
             Self::Markdown(engine) => engine.add_note_pointer(note_id, pointer).await,
+            Self::Daemon(engine) => engine.add_note_pointer(note_id, pointer).await,
         }
     }
 
@@ -86,6 +93,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.remove_note_pointer(note_id).await,
             Self::Markdown(engine) => engine.remove_note_pointer(note_id).await,
+            Self::Daemon(engine) => engine.remove_note_pointer(note_id).await,
         }
     }
 
@@ -93,6 +101,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.get_record(id).await,
             Self::Markdown(engine) => engine.get_record(id).await,
+            Self::Daemon(engine) => engine.get_record(id).await,
         }
     }
 
@@ -100,6 +109,7 @@ impl MemoryEngine for MemoryEngineKind {
         match self {
             Self::Sqlite(engine) => engine.format_as_system_prompt(memories),
             Self::Markdown(engine) => engine.format_as_system_prompt(memories),
+            Self::Daemon(engine) => engine.format_as_system_prompt(memories),
         }
     }
 }
@@ -117,6 +127,9 @@ pub fn store_config(config: &harness_core::config::Config) -> StoreConfig {
     store.index_boost = settings.index_boost;
     store.auto_mine = settings.auto_mine;
     store.shard_after = settings.shard_after.max(100);
+    store.hooks_save_interval = settings.hooks_save_interval.max(1);
+    store.hooks_auto_save = settings.hooks_auto_save;
+    store.legacy_db = Some(config.paths.memory_db.clone());
     // The shipped embedder is the zero-dependency feature hasher. If a model
     // backend is configured before it is implemented, the manifest must still
     // record what actually produced the vectors.
@@ -143,7 +156,24 @@ pub fn build_memory_engine(
             Some(config.paths.memory_db.clone()),
         )?)));
     }
-    Ok(Arc::new(MemoryEngineKind::Markdown(
-        MarkdownMemoryEngine::new(store_config(config))?,
-    )))
+    let policy = store::parse_write_routing_policy(&config.memory.store.write_routing, false)?;
+    let direct = MarkdownMemoryEngine::new(store_config(config))?;
+    match policy {
+        store::WriteRoutingPolicy::Direct => {
+            Ok(Arc::new(MemoryEngineKind::Markdown(direct)))
+        }
+        store::WriteRoutingPolicy::Prefer | store::WriteRoutingPolicy::Require => {
+            match NativeDaemonClient::connect_root(&config.paths.memory_dir) {
+                Ok(client) => Ok(Arc::new(MemoryEngineKind::Daemon(
+                    DaemonWriteEngine::new(direct, client, policy),
+                ))),
+                Err(error) if policy == store::WriteRoutingPolicy::Require => {
+                    Err(HarnessError::ConfigurationError(format!(
+                        "memory.store.write_routing = 'require' but the daemon is not running: {error}. Start it with `luna memory daemon start --bg`."
+                    )))
+                }
+                Err(_) => Ok(Arc::new(MemoryEngineKind::Markdown(direct))),
+            }
+        }
+    }
 }

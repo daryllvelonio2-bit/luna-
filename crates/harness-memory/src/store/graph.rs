@@ -1,6 +1,6 @@
-//! Graph index and traversal: BFS walking across domain topologies and cross-link tunnels.
+//! Graph index and traversal: BFS across domain topologies and cross-links.
 //!
-//! Direct port of MemPalace's `palace_graph.py:traverse` and `find_tunnels`.
+//! Builds the traversal graph and discovers cross-link bridge entities.
 //! Rebuilds `search_index/graph.json` from records, within-domain links, and crosslinks.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -56,9 +56,9 @@ pub struct TraversalStep {
     pub connected_via: Option<String>,
 }
 
-/// Tunnel bridge between two domains.
+/// Cross-link bridge between two domains.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TunnelBridge {
+pub struct CrossLinkBridge {
     pub bridge_entity: String,
     pub domain_a: String,
     pub domain_b: String,
@@ -154,7 +154,7 @@ impl GraphIndex {
             });
         }
 
-        // 3. Ingest cross-links (tunnels)
+        // 3. Ingest cross-links
         for cl in crosslinks {
             if cl.status == "approved" {
                 edges.push(GraphEdge {
@@ -188,8 +188,8 @@ impl GraphIndex {
         Ok(graph_data)
     }
 
-    /// Walk the graph from a starting room/entity/topic using BFS.
-    /// Direct port of MemPalace's `palace_graph.py:traverse`.
+    /// Walk the graph from a starting domain/topic/entity using BFS.
+    /// Direct port of the reference design's `graph traversal:traverse`.
     ///
     /// Returns connected nodes sorted by (hop, -count), capped at 50.
     pub fn traverse(
@@ -291,12 +291,12 @@ impl GraphIndex {
     }
 
     /// Find bridge entities connecting two domains or topics.
-    /// Direct port of MemPalace's `palace_graph.py:find_tunnels`.
-    pub fn find_tunnels(
+    /// Direct port of the reference design's `graph traversal:find_cross_links`.
+    pub fn find_cross_links(
         &self,
         domain_a: Option<&str>,
         domain_b: Option<&str>,
-    ) -> Result<Vec<TunnelBridge>, HarnessError> {
+    ) -> Result<Vec<CrossLinkBridge>, HarnessError> {
         let graph = self.load_graph()?;
         let da = domain_a.map(slugify);
         let db = domain_b.map(slugify);
@@ -310,7 +310,7 @@ impl GraphIndex {
                 || ep.split('/').any(|part| part.eq_ignore_ascii_case(f))
         };
 
-        let mut tunnels = Vec::new();
+        let mut cross_links = Vec::new();
         let mut seen = BTreeSet::new();
 
         // 1. Bridges from crosslink edges
@@ -329,7 +329,7 @@ impl GraphIndex {
                     let key = (edge.bridge.clone(), from.clone(), to.clone());
                     if !seen.contains(&key) {
                         seen.insert(key);
-                        tunnels.push(TunnelBridge {
+                        cross_links.push(CrossLinkBridge {
                             bridge_entity: edge.bridge.clone(),
                             domain_a: from.clone(),
                             domain_b: to.clone(),
@@ -355,7 +355,7 @@ impl GraphIndex {
                             let key = (name.clone(), dom_a.clone(), dom_b.clone());
                             if !seen.contains(&key) {
                                 seen.insert(key);
-                                tunnels.push(TunnelBridge {
+                                cross_links.push(CrossLinkBridge {
                                     bridge_entity: name.clone(),
                                     domain_a: dom_a.clone(),
                                     domain_b: dom_b.clone(),
@@ -379,7 +379,7 @@ impl GraphIndex {
                             let key = (name.clone(), ep_a.clone(), ep_b.clone());
                             if !seen.contains(&key) {
                                 seen.insert(key);
-                                tunnels.push(TunnelBridge {
+                                cross_links.push(CrossLinkBridge {
                                     bridge_entity: name.clone(),
                                     domain_a: ep_a,
                                     domain_b: ep_b,
@@ -392,11 +392,11 @@ impl GraphIndex {
             }
         }
 
-        tunnels.sort_by(|x, y| {
+        cross_links.sort_by(|x, y| {
             y.strength
                 .cmp(&x.strength)
                 .then_with(|| x.bridge_entity.cmp(&y.bridge_entity))
         });
-        Ok(tunnels)
+        Ok(cross_links)
     }
 }

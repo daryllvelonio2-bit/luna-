@@ -2,8 +2,8 @@
 //! 1. Native Luna connection (default): Unix domain socket IPC with zero MCP overhead.
 //! 2. MCP server endpoint (optional): JSON-RPC MCP over HTTP/SSE or stdio for external agents.
 //!
-//! Write routing policy (`direct`, `prefer`, `require`) mirrors MemPalace's battle-tested
-//! concurrency guarantees.
+//! Write routing policy (`direct`, `prefer`, `require`) controls whether writes
+//! go through the daemon or directly to the store.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -45,7 +45,10 @@ impl Default for WriteRoutingPolicy {
     }
 }
 
-pub fn parse_write_routing_policy(value: &str, legacy_boolean: bool) -> Result<WriteRoutingPolicy, HarnessError> {
+pub fn parse_write_routing_policy(
+    value: &str,
+    legacy_boolean: bool,
+) -> Result<WriteRoutingPolicy, HarnessError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "direct" => Ok(WriteRoutingPolicy::Direct),
@@ -253,7 +256,9 @@ impl QueueStore {
                         return Ok(job);
                     }
                 }
-                Err(HarnessError::MemoryError("deduplication collision".to_string()))
+                Err(HarnessError::MemoryError(
+                    "deduplication collision".to_string(),
+                ))
             }
             Err(e) => Err(HarnessError::MemoryError(e.to_string())),
         }
@@ -387,7 +392,9 @@ impl QueueStore {
             .prepare("SELECT state, COUNT(*) FROM jobs GROUP BY state")
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            })
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         let mut map = HashMap::new();
@@ -401,7 +408,9 @@ impl QueueStore {
     pub fn recover_running(&self) -> Result<usize, HarnessError> {
         let conn = self.connect()?;
         let now = Utc::now().to_rfc3339();
-        let max_err = json!({"error_class": "MaxAttemptsExceeded", "message": "max attempts exceeded"}).to_string();
+        let max_err =
+            json!({"error_class": "MaxAttemptsExceeded", "message": "max attempts exceeded"})
+                .to_string();
 
         conn.execute(
             "UPDATE jobs SET state = 'failed', finished_at = ?1, error_json = COALESCE(error_json, ?2)
@@ -522,6 +531,7 @@ pub fn ensure_token(paths: &DaemonPaths) -> Result<String, HarnessError> {
         if let Ok(tok) = fs::read_to_string(&paths.token_file) {
             let trimmed = tok.trim().to_string();
             if !trimmed.is_empty() {
+                tighten_permissions(&paths.token_file);
                 return Ok(trimmed);
             }
         }
@@ -529,7 +539,18 @@ pub fn ensure_token(paths: &DaemonPaths) -> Result<String, HarnessError> {
     let token = uuid::Uuid::new_v4().to_string();
     fs::write(&paths.token_file, format!("{token}\n"))
         .map_err(|e| HarnessError::Io(e.to_string()))?;
+    tighten_permissions(&paths.token_file);
     Ok(token)
+}
+
+fn tighten_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Native Luna daemon client over Unix Domain Socket or TCP loopback.
@@ -563,7 +584,8 @@ impl NativeDaemonClient {
     }
 
     pub async fn is_alive(&self) -> bool {
-        match tokio::time::timeout(Duration::from_millis(HOOK_PROBE_TIMEOUT_MS), self.ping()).await {
+        match tokio::time::timeout(Duration::from_millis(HOOK_PROBE_TIMEOUT_MS), self.ping()).await
+        {
             Ok(Ok(val)) => val.get("ok").and_then(Value::as_bool).unwrap_or(false),
             _ => false,
         }
@@ -588,7 +610,8 @@ impl NativeDaemonClient {
         let job_val = res
             .get("job")
             .ok_or_else(|| HarnessError::MemoryError("missing job in daemon reply".to_string()))?;
-        serde_json::from_value(job_val.clone()).map_err(|e| HarnessError::MemoryError(e.to_string()))
+        serde_json::from_value(job_val.clone())
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))
     }
 
     pub async fn execute(&self, kind: &str, payload: Value) -> Result<Value, HarnessError> {
@@ -612,7 +635,8 @@ impl NativeDaemonClient {
         let job_val = res
             .get("job")
             .ok_or_else(|| HarnessError::MemoryError("missing job in daemon reply".to_string()))?;
-        serde_json::from_value(job_val.clone()).map_err(|e| HarnessError::MemoryError(e.to_string()))
+        serde_json::from_value(job_val.clone())
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))
     }
 
     pub async fn list_jobs(&self, limit: usize) -> Result<Vec<Job>, HarnessError> {
@@ -625,16 +649,18 @@ impl NativeDaemonClient {
         let jobs_val = res
             .get("jobs")
             .ok_or_else(|| HarnessError::MemoryError("missing jobs in daemon reply".to_string()))?;
-        serde_json::from_value(jobs_val.clone()).map_err(|e| HarnessError::MemoryError(e.to_string()))
+        serde_json::from_value(jobs_val.clone())
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))
     }
 
     pub async fn counts(&self) -> Result<HashMap<String, usize>, HarnessError> {
         let req = json!({ "action": "counts", "token": self.token });
         let res = self.send_command(req).await?;
-        let counts_val = res
-            .get("counts")
-            .ok_or_else(|| HarnessError::MemoryError("missing counts in daemon reply".to_string()))?;
-        serde_json::from_value(counts_val.clone()).map_err(|e| HarnessError::MemoryError(e.to_string()))
+        let counts_val = res.get("counts").ok_or_else(|| {
+            HarnessError::MemoryError("missing counts in daemon reply".to_string())
+        })?;
+        serde_json::from_value(counts_val.clone())
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))
     }
 
     pub async fn shutdown(&self) -> Result<(), HarnessError> {
@@ -668,9 +694,9 @@ impl NativeDaemonClient {
 
         if let Some(port) = self.tcp_port {
             let addr = format!("127.0.0.1:{port}");
-            let mut stream = TcpStream::connect(&addr)
-                .await
-                .map_err(|e| HarnessError::Io(format!("failed to connect to daemon at {addr}: {e}")))?;
+            let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
+                HarnessError::Io(format!("failed to connect to daemon at {addr}: {e}"))
+            })?;
             stream
                 .write_all(req_bytes.as_bytes())
                 .await
@@ -681,10 +707,13 @@ impl NativeDaemonClient {
                 .read_line(&mut line)
                 .await
                 .map_err(|e| HarnessError::Io(e.to_string()))?;
-            return serde_json::from_str(&line).map_err(|e| HarnessError::SerializationError(e.to_string()));
+            return serde_json::from_str(&line)
+                .map_err(|e| HarnessError::SerializationError(e.to_string()));
         }
 
-        Err(HarnessError::MemoryError("no active transport for daemon client".to_string()))
+        Err(HarnessError::MemoryError(
+            "no active transport for daemon client".to_string(),
+        ))
     }
 }
 
@@ -699,7 +728,10 @@ pub fn execute_job_dispatch(
             let dir_str = payload.get("dir").and_then(Value::as_str).unwrap_or(".");
             let domain = payload.get("domain").and_then(Value::as_str);
             let topic = payload.get("topic").and_then(Value::as_str);
-            let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("projects");
+            let mode = payload
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("projects");
 
             if mode == "convos" {
                 let report = store.mine_convos(Path::new(dir_str), domain, topic)?;
@@ -754,25 +786,67 @@ pub fn execute_job_dispatch(
             let deleted = store.delete_record(id)?;
             Ok(json!({ "success": true, "deleted": deleted }))
         }
+        "save_memory" => {
+            let record: harness_core::MemoryRecord = serde_json::from_value(payload.clone())
+                .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+            super::engine::save_record(store, &record)?;
+            Ok(json!({ "success": true }))
+        }
+        "update_memory" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| HarnessError::MemoryError("missing id".to_string()))?;
+            let record: harness_core::MemoryRecord =
+                serde_json::from_value(payload.get("record").cloned().unwrap_or(Value::Null))
+                    .map_err(|e| HarnessError::SerializationError(e.to_string()))?;
+            super::engine::update_record(store, id, &record)?;
+            Ok(json!({ "success": true }))
+        }
+        "forget_memory" => {
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| HarnessError::MemoryError("missing id".to_string()))?;
+            super::engine::forget_records(store, id)?;
+            Ok(json!({ "success": true }))
+        }
         "kg_add" => {
             let subject = payload.get("subject").and_then(Value::as_str).unwrap_or("");
-            let predicate = payload.get("predicate").and_then(Value::as_str).unwrap_or("");
+            let predicate = payload
+                .get("predicate")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let object = payload.get("object").and_then(Value::as_str).unwrap_or("");
             let from = payload.get("valid_from").and_then(Value::as_str);
             let to = payload.get("valid_to").and_then(Value::as_str);
-            let triple_id = store.kg_add_triple(subject, predicate, object, from, to, None, None, None, None, None)?;
+            let triple_id = store.kg_add_triple(
+                subject, predicate, object, from, to, None, None, None, None, None,
+            )?;
             Ok(json!({ "success": true, "triple_id": triple_id }))
         }
         "journal_write" => {
             let content = payload.get("content").and_then(Value::as_str).unwrap_or("");
-            let agent = payload.get("agent").and_then(Value::as_str).unwrap_or("luna");
+            let agent = payload
+                .get("agent")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let entry = store.journal_write(agent, content, None)?;
             Ok(json!({ "success": true, "entry": entry }))
         }
         "event_append" => {
-            let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("message");
-            let stream = payload.get("stream").and_then(Value::as_str).unwrap_or("main");
-            let from = payload.get("from").and_then(Value::as_str).unwrap_or("luna");
+            let event_type = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("message");
+            let stream = payload
+                .get("stream")
+                .and_then(Value::as_str)
+                .unwrap_or("main");
+            let from = payload
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("luna");
             let to = payload.get("to").and_then(Value::as_str);
             let corr = payload.get("correlation_id").and_then(Value::as_str);
             let body = payload.get("body").and_then(Value::as_str).unwrap_or("");
@@ -784,7 +858,9 @@ pub fn execute_job_dispatch(
             let args = payload.get("arguments").cloned().unwrap_or(json!({}));
             super::mcp::dispatch_mcp_tool(store, tool, &args)
         }
-        other => Err(HarnessError::MemoryError(format!("unknown daemon job kind: {other}"))),
+        other => Err(HarnessError::MemoryError(format!(
+            "unknown daemon job kind: {other}"
+        ))),
     }
 }
 
@@ -851,7 +927,8 @@ impl DaemonRuntime {
                                     "error_class": LOCK_REFUSAL_ERROR_CLASS,
                                     "message": err_msg
                                 });
-                                let _ = queue.defer(&job.id, job.started_at.as_deref(), Some(&err_val));
+                                let _ =
+                                    queue.defer(&job.id, job.started_at.as_deref(), Some(&err_val));
                                 deferred_until.insert(
                                     job.id,
                                     Instant::now() + Duration::from_secs(LOCK_DEFER_BACKOFF_SECS),
@@ -870,7 +947,20 @@ impl DaemonRuntime {
             .expect("failed to spawn daemon worker thread");
     }
 
+    /// Serve on loopback only.
     pub async fn run_servers(&self, port: u16) -> Result<(), HarnessError> {
+        self.run_servers_on("127.0.0.1", port).await
+    }
+
+    /// Serve on an explicit interface. Authentication is always required, so
+    /// binding a non-loopback address does not expose unauthenticated writes.
+    pub async fn run_servers_on(&self, host: &str, port: u16) -> Result<(), HarnessError> {
+        let bind_host = host.trim();
+        if bind_host.is_empty() {
+            return Err(HarnessError::ConfigurationError(
+                "memory serve host must not be empty".to_string(),
+            ));
+        }
         let token = ensure_token(&self.paths)?;
         let pid = std::process::id();
 
@@ -899,16 +989,19 @@ impl DaemonRuntime {
 
         self.start_worker();
 
-        let tcp_listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        let tcp_listener = TcpListener::bind((bind_host, port))
             .await
-            .map_err(|e| HarnessError::Io(format!("failed to bind TCP port {port}: {e}")))?;
+            .map_err(|e| HarnessError::Io(format!("failed to bind {bind_host}:{port}: {e}")))?;
 
         #[cfg(unix)]
         let unix_listener_opt = {
             if self.paths.socket_file.exists() {
                 let _ = fs::remove_file(&self.paths.socket_file);
             }
-            UnixListener::bind(&self.paths.socket_file).ok()
+            let listener = UnixListener::bind(&self.paths.socket_file).ok();
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.paths.socket_file, fs::Permissions::from_mode(0o600));
+            listener
         };
 
         let queue = self.queue.clone();
@@ -989,8 +1082,13 @@ where
 
         // Check if line is an HTTP request (e.g. "GET /health HTTP/1.1" or "POST /mcp HTTP/1.1")
         if line.starts_with("GET ") || line.starts_with("POST ") {
-            let res = handle_http_request(line, &mut lines, &queue, &store, &expected_token, &shutdown).await;
-            writer.write_all(res.as_bytes()).await.map_err(|e| HarnessError::Io(e.to_string()))?;
+            let res =
+                handle_http_request(line, &mut lines, &queue, &store, &expected_token, &shutdown)
+                    .await;
+            writer
+                .write_all(res.as_bytes())
+                .await
+                .map_err(|e| HarnessError::Io(e.to_string()))?;
             break;
         }
 
@@ -998,13 +1096,21 @@ where
         let req_val: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                let err_reply = json!({ "ok": false, "error": format!("invalid JSON: {e}") }).to_string() + "\n";
+                let err_reply = json!({ "ok": false, "error": format!("invalid JSON: {e}") })
+                    .to_string()
+                    + "\n";
                 let _ = writer.write_all(err_reply.as_bytes()).await;
                 continue;
             }
         };
 
         let action = req_val.get("action").and_then(Value::as_str).unwrap_or("");
+        let supplied_token = req_val.get("token").and_then(Value::as_str).unwrap_or("");
+        if action != "ping" && supplied_token != expected_token {
+            let err_reply = json!({ "ok": false, "error": "unauthorized" }).to_string() + "\n";
+            let _ = writer.write_all(err_reply.as_bytes()).await;
+            continue;
+        }
         let reply = match action {
             "ping" => {
                 let counts = queue.counts().unwrap_or_default();
@@ -1132,17 +1238,20 @@ where
                 content_length = val.trim().parse().unwrap_or(0);
             }
         } else if lower.starts_with("authorization:") {
-            if let Some(val) = trimmed.split(':').nth(1) {
-                let token_cand = val.trim();
-                if token_cand == format!("Bearer {expected_token}") {
+            if let Some((_, val)) = trimmed.split_once(':') {
+                if val.trim() == format!("Bearer {expected_token}") {
                     authorized = true;
                 }
             }
         }
     }
 
-    // Default loopback allowance or token match
-    let _ = authorized;
+    // `/health` stays public so process supervisors can probe liveness without
+    // holding the token. Every other endpoint, including `/jobs`, `/mcp`, and
+    // `/shutdown`, requires `Authorization: Bearer <token>`.
+    if !(method == "GET" && path == "/health") && !authorized {
+        return format_http_json_response(401, &json!({ "error": "unauthorized" }));
+    }
 
     let body = if content_length > 0 {
         // Read body from stream
@@ -1175,7 +1284,9 @@ where
         } else if let Some(id) = path.strip_prefix("/jobs/") {
             match queue.get(id) {
                 Ok(job) => return format_http_json_response(200, &json!({ "job": job })),
-                Err(_) => return format_http_json_response(404, &json!({ "error": "job not found" })),
+                Err(_) => {
+                    return format_http_json_response(404, &json!({ "error": "job not found" }))
+                }
             }
         }
     }
@@ -1213,6 +1324,7 @@ fn format_http_json_response(status_code: u16, payload: &Value) -> String {
         200 => "200 OK",
         202 => "202 Accepted",
         400 => "400 Bad Request",
+        401 => "401 Unauthorized",
         404 => "404 Not Found",
         _ => "500 Internal Server Error",
     };
