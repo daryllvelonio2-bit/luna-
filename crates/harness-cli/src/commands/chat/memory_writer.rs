@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use harness_core::config::Config;
-use harness_core::{MemoryEngine, NotesEngine};
+use harness_core::{HarnessError, MemoryEngine, NotesEngine};
 use harness_memory::{MemorySaver, SaverPolicy};
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
@@ -58,14 +58,16 @@ pub fn build_saver(
         .background_model
         .clone()
         .unwrap_or_else(|| session_model.to_string());
-    let client = match GenericProviderClient::new(
-        provider_id.clone(),
-        model.clone(),
+    match build_saver_for(
+        config,
+        memory,
+        notes,
+        &provider_id,
+        &model,
         cred_manager,
         discovery,
-        config.providers.get(&provider_id),
     ) {
-        Ok(client) => client,
+        Ok(saver) => Some(Arc::new(saver)),
         // Unusable saver config is a warning, not a startup failure: the session runs either way,
         // and the missing pass is visible in the log. The session keeps writing memory itself, so
         // the fallback is the mode the user already had.
@@ -73,11 +75,33 @@ pub fn build_saver(
             eprintln!(
                 "warning: the background memory saver is off (provider '{provider_id}', model '{model}'): {error}"
             );
-            return None;
+            None
         }
-    };
+    }
+}
 
-    let mut policy = SaverPolicy::new(model);
+/// Build one saver for an explicit provider/model pair.
+///
+/// Unlike [`build_saver`], this returns the provider error so a slash command can reject a broken
+/// choice instead of silently persisting it and leaving the saver disabled.
+pub(crate) fn build_saver_for(
+    config: &Config,
+    memory: &Arc<dyn MemoryEngine>,
+    notes: Arc<dyn NotesEngine>,
+    provider_id: &str,
+    model: &str,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+) -> Result<MemorySaver, HarnessError> {
+    let client = GenericProviderClient::new(
+        provider_id.to_string(),
+        model.to_string(),
+        cred_manager,
+        discovery,
+        config.providers.get(provider_id),
+    )?;
+
+    let mut policy = SaverPolicy::new(model.to_string());
     policy.every_turns = config.memory.background_every_turns;
     policy.tail_messages = config.memory.background_tail_messages;
     policy.notes = config.memory.background_notes;
@@ -86,12 +110,12 @@ pub fn build_saver(
     policy.max_memory_writes = config.memory.background_max_memory_writes;
     policy.max_note_writes = config.memory.background_max_note_writes;
     policy.max_operations = config.memory.background_max_operations;
-    Some(Arc::new(MemorySaver::new(
+    Ok(MemorySaver::new(
         Arc::new(client),
         memory.clone(),
-        notes.clone(),
+        notes,
         policy,
-    )))
+    ))
 }
 
 /// The startup line that tells the user which writer is active.
@@ -219,5 +243,49 @@ mod tests {
         assert_eq!(saver.every_turns(), 0);
         // `SaverHook::due` treats 0 as "off"; the agent never dispatches it.
         assert!(!harness_core::SaverHook::from_saver(saver).due(1));
+    }
+
+    #[test]
+    fn an_explicit_pair_overrides_the_configured_saver_model() {
+        let mut config = Config::default();
+        config.memory.mode = harness_core::MemoryMode::Background;
+        config.memory.background_model = Some("configured-model".to_string());
+        config.memory.background_provider = Some("nvidia".to_string());
+
+        let (memory, notes) = temp_engines();
+        let (cred_manager, discovery) = provider_parts();
+        let saver = build_saver_for(
+            &config,
+            &memory,
+            notes,
+            "nvidia",
+            "picked-model",
+            cred_manager,
+            discovery,
+        )
+        .expect("the explicit pair builds");
+
+        assert_eq!(saver.model(), "picked-model");
+    }
+
+    #[test]
+    fn an_invalid_pair_is_an_error_so_a_command_can_refuse_it() {
+        let config = Config::default();
+        let (memory, notes) = temp_engines();
+        let (cred_manager, discovery) = provider_parts();
+
+        assert!(
+            build_saver_for(
+                &config,
+                &memory,
+                notes,
+                "not-a-real-provider",
+                "picked-model",
+                cred_manager,
+                discovery,
+            )
+            .is_err(),
+            "the slash command needs the error, not a silently disabled saver"
+        );
     }
 }

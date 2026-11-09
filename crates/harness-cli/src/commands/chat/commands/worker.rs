@@ -262,6 +262,7 @@ pub(crate) const RESERVED_COMMAND_NAMES: &[&str] = &[
     "/default_model",
     "/default-model",
     "/compact-model",
+    "/bgsaver-model",
     "/thinking",
     "/think",
     "/reasoning",

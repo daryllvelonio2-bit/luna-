@@ -286,6 +286,43 @@ fn slash_commands_includes_sessions_picker() {
     );
 }
 
+#[test]
+fn slash_commands_includes_background_saver_model() {
+    use super::commands::SLASH_COMMANDS;
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|cmd| cmd.name == "/bgsaver-model"),
+        "/bgsaver-model must be registered in SLASH_COMMANDS"
+    );
+}
+
+#[test]
+fn a_worker_cannot_shadow_the_background_saver_command() {
+    use super::commands::command_entries;
+    use harness_core::{Config, WorkerProfile};
+
+    let mut config = Config::default();
+    config.workers.insert(
+        "bgsaver-model".to_string(),
+        WorkerProfile {
+            provider: "nvidia".to_string(),
+            model: "tiny-model".to_string(),
+            reasoning_effort: None,
+        },
+    );
+
+    let entries = command_entries(&config, &[], true);
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry.name == "/bgsaver-model")
+            .count()
+            == 1,
+        "the built-in /bgsaver-model must not be duplicated by a worker"
+    );
+}
+
 /// The usage report is a command of its own: it reads the ledger, so it has to be reachable by
 /// name and not only through the terminal's `luna usage`.
 #[test]

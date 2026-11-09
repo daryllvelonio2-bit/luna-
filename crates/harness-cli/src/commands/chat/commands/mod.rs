@@ -33,6 +33,9 @@ mod usage;
 mod worker;
 pub(crate) use usage::handle_usage_command;
 
+mod bgsaver;
+pub(crate) use bgsaver::handle_bgsaver_model_command;
+
 mod dir;
 pub(crate) use dir::handle_dir_command;
 
@@ -360,6 +363,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Choose provider and model for context compaction",
     },
     SlashCommand {
+        name: "/bgsaver-model",
+        details: "Choose provider and model for the background memory saver",
+    },
+    SlashCommand {
         name: "/thinking",
         details: "Set thinking level (off, low, medium, high)",
     },
@@ -636,6 +643,30 @@ pub(crate) async fn execute_slash_command(
             {
                 ui.emit_above(&format!(
                     "{} Failed to set compaction model: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
+            Ok(SlashOutcome::Continue)
+        }
+        "/bgsaver-model" => {
+            ui.redraw_input_line();
+            if let Err(e) = handle_bgsaver_model_command(
+                Some(key_rx),
+                ui,
+                config,
+                cred_manager,
+                discovery,
+                agent,
+                toggles,
+                current_provider.as_str(),
+                current_model.as_str(),
+                arg,
+            )
+            .await
+            {
+                ui.emit_above(&format!(
+                    "{} Failed to set background saver model: {}",
                     "✖".red().bold(),
                     e
                 ));
