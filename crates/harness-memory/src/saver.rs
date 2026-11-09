@@ -314,6 +314,10 @@ struct Operation {
     tags: Vec<String>,
     #[serde(default)]
     mode: Option<String>,
+    /// Any field the struct did not name. Some models put the operation kind in the key itself:
+    /// `{"add_memory": {"subject": …}}` rather than `{"op": "add_memory", "memory": {…}}`.
+    #[serde(flatten)]
+    extra: HashMap<String, serde_json::Value>,
     /// True when this came from the legacy `{memories, notes}` shape, which predates evidence.
     #[serde(skip)]
     legacy: bool,
@@ -325,6 +329,9 @@ impl Operation {
     /// An operation that still names no kind and carries no payload is left alone, so the planner
     /// can refuse it with its usual "missing op" reason.
     fn normalized(mut self) -> Self {
+        if self.op.trim().is_empty() {
+            self.lift_keyed_operation();
+        }
         if self.op.trim().is_empty() {
             self.op = if self.memory.is_some() {
                 "add_memory"
@@ -367,6 +374,93 @@ impl Operation {
         }
         self
     }
+
+    /// Read an operation whose kind is the key: `{"add_memory": {…}, "confidence": 0.9}`.
+    fn lift_keyed_operation(&mut self) {
+        let Some((key, value)) = self
+            .extra
+            .iter()
+            .find(|(key, _)| is_keyed_operation(key))
+            .map(|(key, value)| (key.to_ascii_lowercase(), value.clone()))
+        else {
+            return;
+        };
+        let object = value.as_object();
+        let field = |name: &str| {
+            object
+                .and_then(|object| object.get(name))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        if self.target_id.is_none() {
+            self.target_id = field("target_id");
+        }
+        if self.target_ids.is_empty() {
+            self.target_ids = object
+                .and_then(|object| object.get("target_ids"))
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        if self.reason.is_none() {
+            self.reason = field("reason");
+        }
+        if self.confidence.is_none() {
+            self.confidence = object
+                .and_then(|object| object.get("confidence"))
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32);
+        }
+
+        self.op = key.clone();
+        match key.as_str() {
+            "add_memory" | "memory_add" | "add" | "update_memory" | "memory_update" | "update"
+            | "merge_memories" | "memory_merge" => {
+                if self.memory.is_none() {
+                    self.memory = serde_json::from_value::<Item>(value).ok();
+                }
+            }
+            "create_note" | "add_note" | "note_create" | "update_note" | "note_update"
+            | "merge_notes" | "note_merge" => {
+                if self.note.is_none() {
+                    self.note = serde_json::from_value::<NoteItem>(value).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether `key` is an operation name a model used as a wrapper key.
+fn is_keyed_operation(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "add_memory"
+            | "memory_add"
+            | "add"
+            | "update_memory"
+            | "memory_update"
+            | "update"
+            | "delete_memory"
+            | "memory_delete"
+            | "merge_memories"
+            | "memory_merge"
+            | "create_note"
+            | "add_note"
+            | "note_create"
+            | "update_note"
+            | "note_update"
+            | "merge_notes"
+            | "note_merge"
+            | "delete_note"
+            | "note_delete"
+            | "noop"
+    )
 }
 
 /// The shape the saver expects back.
@@ -2407,7 +2501,8 @@ mod tests {
                 {"type":"add_memory","subject":"garden-defense","predicate":"build command","object":"rojo build"},
                 {"action":"create_note","title":"Build","content":"rojo build -o build.rbxl"},
                 {"operation":"noop","reason":"nothing durable"},
-                {"memory":{"subject":"a","predicate":"b","object":"c"}}
+                {"memory":{"subject":"a","predicate":"b","object":"c"}},
+                {"add_memory":{"subject":"d","predicate":"e","object":"f"},"confidence":0.9}
             ]}"#,
         )
         .expect("parses");
@@ -2418,6 +2513,9 @@ mod tests {
         assert_eq!(ops[1].note.as_ref().expect("note").title, "Build");
         assert_eq!(ops[2].op, "noop");
         assert_eq!(ops[3].op, "add_memory");
+        assert_eq!(ops[4].op, "add_memory");
+        assert_eq!(ops[4].memory.as_ref().expect("memory").object, "f");
+        assert_eq!(ops[4].confidence, Some(0.9));
     }
 
     #[test]
