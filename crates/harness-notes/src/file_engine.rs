@@ -401,30 +401,35 @@ pub fn chunk_note_content(content: &str, _target_size: usize, max_size: usize) -
     let mut current = String::new();
 
     for block in content.split("\n\n") {
+        if block.len() > max_size {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            for line in block.lines() {
+                if current.is_empty() {
+                    current.push_str(line);
+                } else if current.len() + 1 + line.len() <= max_size {
+                    current.push('\n');
+                    current.push_str(line);
+                } else {
+                    chunks.push(std::mem::take(&mut current));
+                    current.push_str(line);
+                }
+            }
+            if current.len() >= NOTE_CHUNK_MIN_BYTES {
+                chunks.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
         if current.is_empty() {
             current.push_str(block);
         } else if current.len() + 2 + block.len() <= max_size {
             current.push_str("\n\n");
             current.push_str(block);
         } else {
-            if current.len() >= NOTE_CHUNK_MIN_BYTES || current.len() + block.len() > max_size {
-                chunks.push(std::mem::take(&mut current));
-            }
-            if block.len() > max_size {
-                for line in block.lines() {
-                    if current.is_empty() {
-                        current.push_str(line);
-                    } else if current.len() + 1 + line.len() <= max_size {
-                        current.push('\n');
-                        current.push_str(line);
-                    } else {
-                        chunks.push(std::mem::take(&mut current));
-                        current.push_str(line);
-                    }
-                }
-            } else {
-                current.push_str(block);
-            }
+            chunks.push(std::mem::take(&mut current));
+            current.push_str(block);
         }
     }
     if !current.is_empty() {
