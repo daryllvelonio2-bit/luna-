@@ -411,6 +411,9 @@ impl Operation {
         if self.reason.is_none() {
             self.reason = field("reason");
         }
+        if self.evidence.is_none() {
+            self.evidence = field("evidence");
+        }
         if self.confidence.is_none() {
             self.confidence = object
                 .and_then(|object| object.get("confidence"))
@@ -1017,9 +1020,11 @@ impl MemorySaver {
                 report.skip(storage, display, "missing evidence");
                 return None;
             }
-            // Models often quote a whole answer. A long quote is shortened rather than refused:
-            // the prefix is still verbatim, and a paraphrase still fails the check below. Cut
-            // without an ellipsis so the prefix is an exact substring of the transcript.
+            // Models often quote a whole answer, and some prefix the quote with a role label
+            // (`USER: "…"`). A long quote is shortened rather than refused: the prefix is still
+            // verbatim, and a paraphrase still fails the check below. Cut without an ellipsis so
+            // the prefix is an exact substring of the transcript.
+            let evidence = strip_evidence_decoration(evidence);
             let evidence: String = evidence.chars().take(EVIDENCE_MAX_CHARS).collect();
             if !evidence_supported(&evidence, transcript) {
                 report.skip(storage, display, "evidence not found in the conversation");
@@ -1627,6 +1632,37 @@ fn already_known(records: &[MemoryRecord], subject: &str, predicate: &str, objec
             && record.predicate.eq_ignore_ascii_case(predicate)
             && normalize(record.object.trim()) == normalize(object)
     })
+}
+
+/// Remove decorations a model adds around an otherwise verbatim quote: a leading role label
+/// (`USER:`, `Assistant —`) and one matched pair of surrounding quotes.
+fn strip_evidence_decoration(evidence: &str) -> &str {
+    let mut text = evidence.trim();
+    for label in ["user", "assistant", "system", "tool"] {
+        if let Some(rest) = text.get(..label.len()) {
+            if rest.eq_ignore_ascii_case(label) {
+                let rest = text[label.len()..].trim_start_matches([' ', '\t', ':', '—', '-']);
+                text = rest.trim();
+                break;
+            }
+        }
+    }
+    for quote in ['"', '\'', '“', '‘'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(closing_quote(quote)) {
+            text = &text[quote.len_utf8()..text.len() - closing_quote(quote).len_utf8()];
+            text = text.trim();
+            break;
+        }
+    }
+    text
+}
+
+fn closing_quote(open: char) -> char {
+    match open {
+        '“' => '”',
+        '‘' => '’',
+        other => other,
+    }
 }
 
 /// Whether an evidence quote appears in the rendered transcript.
@@ -2619,6 +2655,34 @@ mod tests {
         assert_eq!(ops[0].memory.as_ref().expect("memory").object, "rokit");
         assert_eq!(ops[1].op, "create_note");
         assert_eq!(ops[1].note.as_ref().expect("note").title, "Runbook");
+    }
+
+    #[test]
+    fn a_keyed_operation_carries_its_evidence_and_reason_from_the_wrapper() {
+        let distilled = parse_distilled(
+            r#"{"operations":[
+                {"add_memory":{"memory":{"subject":"pure-gpt","predicate":"build command","object":"cargo build --release"},"evidence":"I always build with cargo","confidence":0.95,"reason":"explicit preference"}}
+            ]}"#,
+        )
+        .expect("parses");
+        let ops = distilled.into_operations();
+        assert_eq!(ops[0].op, "add_memory");
+        assert_eq!(ops[0].evidence.as_deref(), Some("I always build with cargo"));
+        assert_eq!(ops[0].confidence, Some(0.95));
+        assert_eq!(ops[0].reason.as_deref(), Some("explicit preference"));
+    }
+
+    #[test]
+    fn a_role_label_or_surrounding_quotes_do_not_hide_a_verbatim_quote() {
+        assert_eq!(
+            strip_evidence_decoration(r#"USER: "I always build with cargo""#),
+            "I always build with cargo"
+        );
+        assert_eq!(
+            strip_evidence_decoration("Assistant — cargo test --all"),
+            "cargo test --all"
+        );
+        assert_eq!(strip_evidence_decoration("plain quote"), "plain quote");
     }
 
     #[test]
