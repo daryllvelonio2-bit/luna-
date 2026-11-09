@@ -121,6 +121,22 @@ DO NOT SAVE:
 
 A verified brief, runbook, diagnosis, or decision record is not a "summary of what was discussed". It is new durable content and must be filed verbatim.
 
+VERBATIM PROTOCOL
+
+- Copy, do not compose. A note body must be text that already appears in the transcript or a tool result.
+- Do not shorten a long answer. If the answer is a brief, a diagnosis, or a runbook, copy it in full.
+- Preserve the exact words, punctuation, code, paths, commands, and line breaks.
+- A heading may label a copied span; it may not replace the span.
+- A note that paraphrases is a failure. Use noop before you paraphrase.
+
+Examples:
+- GOOD: copy `Build: cargo build --release` exactly.
+- BAD: `The project is built in release mode.`
+- GOOD: copy the assistant's full repository brief into the note body.
+- BAD: `The repo is a Rust inference engine with several modules.`
+
+If the transcript contains a complete answer that satisfies the user's request, that answer is the note.
+
 APPROVAL RULES
 
 A plan is approved only when the user explicitly accepts it:
@@ -2347,6 +2363,7 @@ mod tests {
         assert!(system.contains("Memory is identity"), "{system}");
         assert!(system.contains("100% recall is the design requirement"), "{system}");
         assert!(system.contains("Verbatim always"), "{system}");
+        assert!(system.contains("VERBATIM PROTOCOL"), "{system}");
         assert!(
             system.contains("A repository or codebase brief"),
             "{system}"
