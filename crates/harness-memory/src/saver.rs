@@ -1638,7 +1638,7 @@ fn already_known(records: &[MemoryRecord], subject: &str, predicate: &str, objec
 /// (`USER:`, `Assistant —`) and one matched pair of surrounding quotes.
 fn strip_evidence_decoration(evidence: &str) -> &str {
     let mut text = evidence.trim();
-    for label in ["user", "assistant", "system", "tool"] {
+    for label in ["user", "assistant", "luna", "system", "tool"] {
         if let Some(rest) = text.get(..label.len()) {
             if rest.eq_ignore_ascii_case(label) {
                 let rest = text[label.len()..].trim_start_matches([' ', '\t', ':', '—', '-']);
@@ -1653,6 +1653,12 @@ fn strip_evidence_decoration(evidence: &str) -> &str {
             text = text.trim();
             break;
         }
+    }
+    // A model may mark a shortened quote with an ellipsis. The text before it is still verbatim.
+    if let Some(rest) = text.strip_suffix("...") {
+        text = rest.trim_end();
+    } else if let Some(rest) = text.strip_suffix('…') {
+        text = rest.trim_end();
     }
     text
 }
@@ -2681,6 +2687,10 @@ mod tests {
         assert_eq!(
             strip_evidence_decoration("Assistant — cargo test --all"),
             "cargo test --all"
+        );
+        assert_eq!(
+            strip_evidence_decoration("LUNA: pure-gpt is a Rust runner..."),
+            "pure-gpt is a Rust runner"
         );
         assert_eq!(strip_evidence_decoration("plain quote"), "plain quote");
     }
