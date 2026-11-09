@@ -487,10 +487,10 @@ impl Operation {
                 }
             }
             "create_note" | "add_note" | "note_create" | "update_note" | "note_update"
-            | "merge_notes" | "note_merge" => {
-                if self.note.is_none() {
-                    self.note = serde_json::from_value::<NoteItem>(payload).ok();
-                }
+            | "merge_notes" | "note_merge"
+                if self.note.is_none() =>
+            {
+                self.note = serde_json::from_value::<NoteItem>(payload).ok();
             }
             _ => {}
         }
@@ -902,21 +902,19 @@ impl MemorySaver {
             .await
     }
 
-    /// One model call, returning the text to parse.
-    async fn call(
+    /// One model call with explicit messages, returning the text to parse.
+    async fn call_messages(
         &self,
-        system: &str,
-        user: String,
+        messages: &[Message],
         max_tokens: u32,
     ) -> Result<String, HarnessError> {
-        let messages = vec![Message::system(system), Message::user(user)];
         let options = CompletionOptions {
             model: Some(self.policy.model.clone()),
             temperature: Some(0.0),
             max_tokens: Some(max_tokens),
             ..CompletionOptions::default()
         };
-        let response = self.provider.complete(&messages, &[], &options).await?;
+        let response = self.provider.complete(messages, &[], &options).await?;
         let text = response.content.as_deref().unwrap_or_default();
         Ok(
             if (text.is_empty() || text == harness_core::types::NO_TEXT_RESPONSE)
@@ -933,19 +931,45 @@ impl MemorySaver {
         )
     }
 
+    /// One model call, returning the text to parse.
+    async fn call(
+        &self,
+        system: &str,
+        user: String,
+        max_tokens: u32,
+    ) -> Result<String, HarnessError> {
+        self.call_messages(&[Message::system(system), Message::user(user)], max_tokens)
+            .await
+    }
+
     async fn curate(
         &self,
         inventory: &Inventory,
         transcript: &str,
     ) -> Result<Distilled, HarnessError> {
+        let prompt = self.curation_prompt(inventory, transcript);
         let text = self
-            .call(
-                SAVER_SYSTEM_PROMPT,
-                self.curation_prompt(inventory, transcript),
-                4_096,
-            )
+            .call(SAVER_SYSTEM_PROMPT, prompt.clone(), 4_096)
             .await?;
-        parse_distilled(&text)
+        match parse_distilled(&text) {
+            Ok(distilled) => Ok(distilled),
+            Err(error) => {
+                tracing::warn!(
+                    "saver JSON parse failed ({}), retrying once with error feedback",
+                    error
+                );
+                let retry_messages = vec![
+                    Message::system(SAVER_SYSTEM_PROMPT),
+                    Message::user(prompt),
+                    Message::assistant(text),
+                    Message::user(format!(
+                        "Your response was not valid JSON ({error}). Return ONLY a valid JSON object starting with {{\"operations\": [...]}}. Do not include markdown fences, comments, or trailing text."
+                    )),
+                ];
+                let retry_text = self.call_messages(&retry_messages, 4_096).await?;
+                parse_distilled(&retry_text)
+            }
+        }
     }
 
     async fn extract(
@@ -958,8 +982,28 @@ impl MemorySaver {
             self.render_inventory(inventory),
             transcript
         );
-        let text = self.call(EXTRACT_SYSTEM_PROMPT, user, 2_048).await?;
-        Ok(parse_candidates(&text)?.candidates)
+        let text = self
+            .call(EXTRACT_SYSTEM_PROMPT, user.clone(), 2_048)
+            .await?;
+        match parse_candidates(&text) {
+            Ok(candidates) => Ok(candidates.candidates),
+            Err(error) => {
+                tracing::warn!(
+                    "saver scout JSON parse failed ({}), retrying once with error feedback",
+                    error
+                );
+                let retry_messages = vec![
+                    Message::system(EXTRACT_SYSTEM_PROMPT),
+                    Message::user(user),
+                    Message::assistant(text),
+                    Message::user(format!(
+                        "Your response was not valid JSON ({error}). Return ONLY a valid JSON object starting with {{\"candidates\": [...]}}. Do not include markdown fences, comments, or trailing text."
+                    )),
+                ];
+                let retry_text = self.call_messages(&retry_messages, 2_048).await?;
+                Ok(parse_candidates(&retry_text)?.candidates)
+            }
+        }
     }
 
     async fn reconcile(
@@ -968,16 +1012,34 @@ impl MemorySaver {
         transcript: &str,
         candidates: &[Candidate],
     ) -> Result<Distilled, HarnessError> {
-        let candidates = serde_json::to_string_pretty(candidates).unwrap_or_default();
+        let candidates_str = serde_json::to_string_pretty(candidates).unwrap_or_default();
         let user = format!(
             "{}\n\n<CANDIDATES>\n{}\n</CANDIDATES>\n\n<CONVERSATION>\n{}\n</CONVERSATION>\n\n<OBSERVED_AT>\n{}\n</OBSERVED_AT>",
             self.render_inventory(inventory),
-            candidates,
+            candidates_str,
             transcript,
             today()
         );
-        let text = self.call(SAVER_SYSTEM_PROMPT, user, 4_096).await?;
-        parse_distilled(&text)
+        let text = self.call(SAVER_SYSTEM_PROMPT, user.clone(), 4_096).await?;
+        match parse_distilled(&text) {
+            Ok(distilled) => Ok(distilled),
+            Err(error) => {
+                tracing::warn!(
+                    "saver reconcile JSON parse failed ({}), retrying once with error feedback",
+                    error
+                );
+                let retry_messages = vec![
+                    Message::system(SAVER_SYSTEM_PROMPT),
+                    Message::user(user),
+                    Message::assistant(text),
+                    Message::user(format!(
+                        "Your response was not valid JSON ({error}). Return ONLY a valid JSON object starting with {{\"operations\": [...]}}. Do not include markdown fences, comments, or trailing text."
+                    )),
+                ];
+                let retry_text = self.call_messages(&retry_messages, 4_096).await?;
+                parse_distilled(&retry_text)
+            }
+        }
     }
 
     /// Validate every operation, then write what survives.
@@ -1853,30 +1915,32 @@ fn closing_quote(open: char) -> char {
     }
 }
 
+/// Strip markdown heading lines (`# ...`).
+fn strip_headings(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Whether a note body is copied from the transcript rather than written from memory.
 ///
-/// A note may add headings to label copied spans. Every other block must appear verbatim in the
-/// transcript after whitespace normalization; a paraphrase fails, and a note that adds a single
-/// sentence of its own is refused rather than silently stored as a summary.
+/// A note may add markdown headings (`# ...`) to label the copied span. The entire non-heading
+/// body must appear as a single contiguous span in the transcript after whitespace normalization.
+/// Stitching disconnected paragraphs from different turns or injecting invented sentences is
+/// refused.
 fn note_is_verbatim(content: &str, transcript: &str) -> bool {
-    let transcript = normalize(transcript);
-    let mut checked = false;
-    for block in content.split("\n\n") {
-        let block = block
-            .lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let block = normalize(&block);
-        if block.is_empty() {
-            continue;
-        }
-        checked = true;
-        if !transcript.contains(&block) {
-            return false;
-        }
+    let body = strip_headings(content);
+    let body = normalize(&body);
+    if body.is_empty() {
+        return false;
     }
-    checked
+    let norm_transcript = normalize(transcript);
+    if norm_transcript.contains(&body) {
+        return true;
+    }
+    let stripped_transcript = normalize(&strip_headings(transcript));
+    stripped_transcript.contains(&body)
 }
 
 /// Whether an evidence quote appears in the rendered transcript.
@@ -2073,10 +2137,8 @@ fn repaired_object(text: &str) -> Option<String> {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.pop() != Some(ch) {
-                    return None;
-                }
+            '}' | ']' if stack.pop() != Some(ch) => {
+                return None;
             }
             _ => {}
         }
@@ -3370,5 +3432,41 @@ mod tests {
             "the note was not marked unverified: {:?}",
             stored[0].tags
         );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_first_response_is_recovered_by_the_repair_retry() {
+        let provider = CannedProvider::scripted(&[
+            "this is not valid json at all",
+            r#"{"operations":[{"op":"add_memory","memory":{"subject":"user","predicate":"preference.build","object":"cargo"},"evidence":"I always build with cargo","confidence":0.95}]}"#,
+        ]);
+        let (saver, memory, _notes) = saver(provider);
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.memories, 1);
+        let stored = memory.retrieve_cards("", 10).await.expect("retrieves");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].object, "cargo");
+    }
+
+    #[tokio::test]
+    async fn a_stitched_note_across_different_turns_is_refused() {
+        let multi_turn = vec![
+            Message::user("First topic is apples"),
+            Message::assistant("Understood apples"),
+            Message::user("Second topic is oranges"),
+            Message::assistant("Understood oranges"),
+        ];
+        let provider = CannedProvider::new(
+            r###"{"operations":[{"op":"create_note","note":{"title":"Fruits","content":"## Apples\n\nFirst topic is apples\n\n## Oranges\n\nSecond topic is oranges","tags":["fruit"]},"evidence":"First topic is apples","confidence":0.9}]}"###,
+        );
+        let (saver, _memory, notes) = saver(provider);
+
+        let report = saver.distil(&multi_turn).await.expect("distils");
+
+        assert_eq!(report.notes, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
     }
 }
