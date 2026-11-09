@@ -62,7 +62,7 @@ pub const NOTE_INDEX_LIMIT: usize = 100;
 /// Above this many stored items the pass splits into extract + reconcile.
 pub const TWO_PASS_THRESHOLD: usize = 20;
 /// Longest evidence quote accepted.
-pub const EVIDENCE_MAX_CHARS: usize = 200;
+pub const EVIDENCE_MAX_CHARS: usize = 500;
 
 /// The instructions handed to the curation model.
 ///
@@ -152,7 +152,7 @@ Return a JSON object with an "operations" array. Each operation is one of:
 - noop: decline to save. Fields: reason.
 
 Every operation except noop must include:
-- evidence: a short verbatim quote from the conversation or a tool result (max 200 characters).
+- evidence: a verbatim quote from the conversation or a tool result (max 500 characters).
 - confidence: 0.0-1.0. Use >= 0.8 only for explicit user statements or verified outcomes. Use 0.6-0.8 for a well-supported inference. Below 0.65 use noop.
 - reason: one sentence explaining why this is durable and actionable.
 
@@ -417,18 +417,24 @@ impl Operation {
                 .map(|value| value as f32);
         }
 
+        // Some models add one wrapper too many: `{"add_memory": {"memory": {…}}}`.
+        let payload = object
+            .and_then(|object| object.get("memory").or_else(|| object.get("note")))
+            .cloned()
+            .unwrap_or(value);
+
         self.op = key.clone();
         match key.as_str() {
             "add_memory" | "memory_add" | "add" | "update_memory" | "memory_update" | "update"
             | "merge_memories" | "memory_merge" => {
                 if self.memory.is_none() {
-                    self.memory = serde_json::from_value::<Item>(value).ok();
+                    self.memory = serde_json::from_value::<Item>(payload).ok();
                 }
             }
             "create_note" | "add_note" | "note_create" | "update_note" | "note_update"
             | "merge_notes" | "note_merge" => {
                 if self.note.is_none() {
-                    self.note = serde_json::from_value::<NoteItem>(value).ok();
+                    self.note = serde_json::from_value::<NoteItem>(payload).ok();
                 }
             }
             _ => {}
@@ -2516,6 +2522,22 @@ mod tests {
         assert_eq!(ops[4].op, "add_memory");
         assert_eq!(ops[4].memory.as_ref().expect("memory").object, "f");
         assert_eq!(ops[4].confidence, Some(0.9));
+    }
+
+    #[test]
+    fn a_keyed_operation_may_wrap_its_payload_one_level_too_deep() {
+        let distilled = parse_distilled(
+            r#"{"operations":[
+                {"add_memory":{"memory":{"subject":"project","predicate":"toolchain","object":"rokit"}}},
+                {"create_note":{"note":{"title":"Runbook","content":"verify.sh"}}}
+            ]}"#,
+        )
+        .expect("parses");
+        let ops = distilled.into_operations();
+        assert_eq!(ops[0].op, "add_memory");
+        assert_eq!(ops[0].memory.as_ref().expect("memory").object, "rokit");
+        assert_eq!(ops[1].op, "create_note");
+        assert_eq!(ops[1].note.as_ref().expect("note").title, "Runbook");
     }
 
     #[test]
