@@ -61,7 +61,8 @@ pub const INDEX_LIMIT: usize = 200;
 pub const NOTE_INDEX_LIMIT: usize = 100;
 /// Above this many stored items the pass splits into extract + reconcile.
 pub const TWO_PASS_THRESHOLD: usize = 20;
-/// Longest evidence quote accepted.
+/// Longest evidence prefix checked. A longer quote is shortened, not refused: the prefix is still
+/// verbatim and its presence still proves the operation came from the conversation.
 pub const EVIDENCE_MAX_CHARS: usize = 500;
 
 /// The instructions handed to the curation model.
@@ -1016,11 +1017,11 @@ impl MemorySaver {
                 report.skip(storage, display, "missing evidence");
                 return None;
             }
-            if evidence.chars().count() > EVIDENCE_MAX_CHARS {
-                report.skip(storage, display, "evidence quote too long");
-                return None;
-            }
-            if !evidence_supported(evidence, transcript) {
+            // Models often quote a whole answer. A long quote is shortened rather than refused:
+            // the prefix is still verbatim, and a paraphrase still fails the check below. Cut
+            // without an ellipsis so the prefix is an exact substring of the transcript.
+            let evidence: String = evidence.chars().take(EVIDENCE_MAX_CHARS).collect();
+            if !evidence_supported(&evidence, transcript) {
                 report.skip(storage, display, "evidence not found in the conversation");
                 return None;
             }
@@ -2064,6 +2065,37 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].object, "concise, no filler");
         assert_eq!(stored[0].category, MemoryCategory::UserProfile);
+    }
+
+    #[tokio::test]
+    async fn a_long_verbatim_quote_is_truncated_and_still_accepted() {
+        let long = "I always build with cargo. ".repeat(40);
+        let conversation = vec![
+            Message::system("system prompt"),
+            Message::user(long.clone()),
+        ];
+        let answer = json!({
+            "operations": [{
+                "op": "add_memory",
+                "memory": {"subject": "user", "predicate": "build", "object": "cargo"},
+                "evidence": long,
+                "confidence": 0.99
+            }]
+        })
+        .to_string();
+        let provider = CannedProvider::new(&answer);
+        let (saver, memory, _notes) = saver(provider);
+
+        let report = saver.distil(&conversation).await.expect("distils");
+
+        assert_eq!(
+            report.memories, 1,
+            "a long verbatim quote must not be refused"
+        );
+        assert_eq!(
+            memory.retrieve("cargo", 5).await.expect("retrieves").len(),
+            1
+        );
     }
 
     #[tokio::test]
