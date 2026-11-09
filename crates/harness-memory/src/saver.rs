@@ -764,6 +764,27 @@ impl MemorySaver {
             }
         }
 
+        // The summary line says how many operations were refused; this says which rule refused
+        // each one. Without it a pass that saves nothing is indistinguishable from a pass the
+        // model declined, and the store gives no clue about the gap.
+        for outcome in &report.outcomes {
+            match &outcome.reason {
+                Some(reason) => tracing::debug!(
+                    "memory saver {} '{}': {} ({})",
+                    outcome.status.as_str(),
+                    outcome.name,
+                    reason,
+                    outcome.storage.as_str()
+                ),
+                None => tracing::debug!(
+                    "memory saver {} '{}' ({})",
+                    outcome.status.as_str(),
+                    outcome.name,
+                    outcome.storage.as_str()
+                ),
+            }
+        }
+
         Ok(report)
     }
 
@@ -1512,7 +1533,10 @@ fn parse_distilled(text: &str) -> Result<Distilled, HarnessError> {
     let candidate = json_object(text, "background-saver")?;
     serde_json::from_str::<Distilled>(&candidate).map_err(|error| HarnessError::ProviderError {
         provider: "background-saver".to_string(),
-        message: format!("could not parse the saver's JSON: {error}"),
+        message: format!(
+            "could not parse the saver's JSON: {error} (saw: {})",
+            truncate(candidate.trim(), 240)
+        ),
     })
 }
 
@@ -1527,16 +1551,54 @@ fn parse_candidates(text: &str) -> Result<CandidateSet, HarnessError> {
 /// Strip a fence, find the outermost object, and name the failure when there is none.
 fn json_object(text: &str, provider: &str) -> Result<String, HarnessError> {
     let cleaned = strip_fence(text);
-    match (cleaned.find('{'), cleaned.rfind('}')) {
-        (Some(start), Some(end)) if end > start => Ok(cleaned[start..=end].to_string()),
-        _ => Err(HarnessError::ProviderError {
-            provider: provider.to_string(),
-            message: format!(
-                "the saver did not answer with JSON: {}",
-                truncate(text.trim(), 200)
-            ),
-        }),
+    if let Some(object) = first_balanced_object(&cleaned) {
+        return Ok(object);
     }
+    Err(HarnessError::ProviderError {
+        provider: provider.to_string(),
+        message: format!(
+            "the saver did not answer with JSON: {}",
+            truncate(text.trim(), 200)
+        ),
+    })
+}
+
+/// The first complete `{…}` in `text`, brace-balanced and string-aware.
+///
+/// Models sometimes append a second object, a note, or a stray `}` to an otherwise valid answer.
+/// Taking the outermost `{` through the last `}` swallowed that trailing text and made a valid
+/// answer fail with "trailing characters"; taking the first balanced object keeps the answer the
+/// model meant to give.
+fn first_balanced_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Some(text[start..end].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Strip a ```json fence, which models add even when told not to.
@@ -2246,6 +2308,14 @@ mod tests {
         assert!(parse_distilled("{\"operations\":[]}").is_ok());
         assert!(parse_distilled("Sure! {\"memories\":[],\"notes\":[]}").is_ok());
         assert!(parse_distilled("no json at all").is_err());
+    }
+
+    #[test]
+    fn a_trailing_object_or_note_does_not_invalidate_the_first_answer() {
+        assert!(parse_distilled("{\"operations\":[]}{\"operations\":[]}").is_ok());
+        assert!(parse_distilled("{\"operations\":[]} That is all.").is_ok());
+        // Braces inside strings must not end the object early.
+        assert!(parse_distilled("{\"operations\":[],\"note\":\"use { and }\"}").is_ok());
     }
 
     #[test]
