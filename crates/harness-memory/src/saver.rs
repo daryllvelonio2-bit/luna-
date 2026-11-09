@@ -1742,8 +1742,13 @@ fn parse_candidates(text: &str) -> Result<CandidateSet, HarnessError> {
 /// Strip a fence, find the outermost object, and name the failure when there is none.
 fn json_object(text: &str, provider: &str) -> Result<String, HarnessError> {
     let cleaned = strip_fence(text);
-    if let Some(object) = first_balanced_object(&cleaned) {
+    if let Some(object) = balanced_object(&cleaned) {
         return Ok(object);
+    }
+    // A model that runs out of tokens can leave the answer one `]}` short. Close what is open
+    // rather than throwing away a complete set of operations.
+    if let Some(repaired) = repaired_object(&cleaned) {
+        return Ok(repaired);
     }
     Err(HarnessError::ProviderError {
         provider: provider.to_string(),
@@ -1754,15 +1759,15 @@ fn json_object(text: &str, provider: &str) -> Result<String, HarnessError> {
     })
 }
 
-/// The first complete `{…}` in `text`, brace-balanced and string-aware.
+/// The first complete `{…}` in `text`, bracket- and brace-balanced and string-aware.
 ///
 /// Models sometimes append a second object, a note, or a stray `}` to an otherwise valid answer.
 /// Taking the outermost `{` through the last `}` swallowed that trailing text and made a valid
 /// answer fail with "trailing characters"; taking the first balanced object keeps the answer the
-/// model meant to give.
-fn first_balanced_object(text: &str) -> Option<String> {
+/// model meant to give. Arrays count too: `{"operations":[ {…} }` is brace-balanced but invalid.
+fn balanced_object(text: &str) -> Option<String> {
     let start = text.find('{')?;
-    let mut depth = 0usize;
+    let mut stack: Vec<char> = Vec::new();
     let mut in_string = false;
     let mut escaped = false;
     for (offset, ch) in text[start..].char_indices() {
@@ -1778,10 +1783,13 @@ fn first_balanced_object(text: &str) -> Option<String> {
         }
         match ch {
             '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop() != Some(ch) {
+                    return None;
+                }
+                if stack.is_empty() {
                     let end = start + offset + ch.len_utf8();
                     return Some(text[start..end].to_string());
                 }
@@ -1790,6 +1798,47 @@ fn first_balanced_object(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Close a truncated JSON object and return it only if the result parses.
+fn repaired_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut stack: Vec<char> = Vec::new();
+    let mut out = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text[start..].chars() {
+        out.push(ch);
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop() != Some(ch) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if in_string {
+        out.push('"');
+    }
+    while let Some(close) = stack.pop() {
+        out.push(close);
+    }
+    serde_json::from_str::<serde_json::Value>(&out).ok()?;
+    Some(out)
 }
 
 /// Strip a ```json fence, which models add even when told not to.
@@ -2570,6 +2619,12 @@ mod tests {
         assert_eq!(ops[0].memory.as_ref().expect("memory").object, "rokit");
         assert_eq!(ops[1].op, "create_note");
         assert_eq!(ops[1].note.as_ref().expect("note").title, "Runbook");
+    }
+
+    #[test]
+    fn a_truncated_answer_is_closed_when_what_it_contains_is_complete() {
+        assert!(parse_distilled(r#"{"operations":[{"op":"noop","reason":"x"}"#).is_ok());
+        assert!(parse_distilled(r#"{"operations":[{"op":"noop","reason":"x"#).is_ok());
     }
 
     #[test]
