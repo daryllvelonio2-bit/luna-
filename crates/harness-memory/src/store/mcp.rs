@@ -600,6 +600,7 @@ pub fn dispatch_mcp_tool(
                 topic,
                 since: parse_filter_time("since")?,
                 before: parse_filter_time("before")?,
+                exclude_category: None,
             };
             let results = store.search(query, &filter, limit)?;
             let formatted: Vec<Value> = results

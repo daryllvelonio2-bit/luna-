@@ -93,6 +93,19 @@ pub trait MemoryEngine: Send + Sync {
     /// Retrieve semantically and relationally relevant memories
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError>;
 
+    /// Retrieve records for the always-loaded prompt block.
+    ///
+    /// Raw [`MemoryCategory::Transcript`] records are excluded: they are long by design and are
+    /// discovered on demand through [`retrieve`](Self::retrieve) (and `memory_search`), not
+    /// injected on every turn. The default keeps engines that do not hold transcripts compatible.
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.retrieve(query, limit).await
+    }
+
     /// Save a new memory record, resolving contradictions and superseding previous matches
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError>;
 

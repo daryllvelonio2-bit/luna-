@@ -137,7 +137,9 @@ pub async fn run_exec(
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
         .await?;
     registry
-        .register(Arc::new(MemorySearchTool::new(memory.clone())))
+        .register(Arc::new(
+            MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
+        ))
         .await?;
 
     let mut all_skills = Vec::new();

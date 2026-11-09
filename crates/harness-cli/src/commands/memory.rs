@@ -486,6 +486,7 @@ pub async fn handle_memory_command(
                 topic,
                 since,
                 before,
+                exclude_category: None,
             };
             let results = store.search(&query, &filter, limit)?;
             if json {

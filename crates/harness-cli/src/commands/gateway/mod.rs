@@ -346,7 +346,7 @@ pub async fn run_gateway(
                         let _ = registry.register(Arc::new(SearchNotesTool::new(notes.clone()))).await;
                         let _ = registry.register(Arc::new(ListNotesTool::new(notes.clone()))).await;
                         let _ = registry.register(Arc::new(ReadNoteTool::new(notes.clone()))).await;
-                        let _ = registry.register(Arc::new(MemorySearchTool::new(memory.clone()))).await;
+                        let _ = registry.register(Arc::new(MemorySearchTool::new(memory.clone()).with_notes(notes.clone()))).await;
 
                         let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
                         let bg_queue = Arc::new(

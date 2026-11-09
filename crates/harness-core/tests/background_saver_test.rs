@@ -356,6 +356,62 @@ async fn without_a_saver_nothing_is_spawned_and_the_turn_is_unchanged() {
     assert_eq!(outcome.reply, "Done!");
 }
 
+/// The interval pass and the idle timer see the same window. Once a pass has read it, an idle
+/// tick must not pay for the same model call again; a new turn changes the fingerprint, and an
+/// explicit `/remember` always runs.
+#[tokio::test]
+async fn an_unchanged_tail_is_not_sent_to_the_saver_twice() {
+    let passes = Arc::new(Mutex::new(Vec::new()));
+    let saver = RecordingSaver::new(passes.clone(), 1, 24);
+    let store = Arc::new(SqliteSessionStore::in_memory().expect("in-memory store"));
+    let agent = agent(saver.clone()).with_session(SessionBinding {
+        store,
+        session_id: "s_saver_fingerprint".to_string(),
+        resume_max_messages: 200,
+    });
+
+    agent
+        .run_turn("first turn", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+    assert_eq!(saver.calls.load(Ordering::SeqCst), 1);
+
+    agent.spawn_memory_pass_now().await;
+    settle().await;
+    assert_eq!(
+        saver.calls.load(Ordering::SeqCst),
+        1,
+        "the idle pass repeated a tail the interval pass had already read"
+    );
+
+    agent
+        .run_turn("second turn", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+    assert_eq!(
+        saver.calls.load(Ordering::SeqCst),
+        2,
+        "a changed tail must run"
+    );
+
+    agent.run_memory_pass_now().await.expect("forced pass runs");
+    assert_eq!(
+        saver.calls.load(Ordering::SeqCst),
+        3,
+        "/remember must run even when the tail is unchanged"
+    );
+
+    agent.spawn_memory_pass_now().await;
+    settle().await;
+    assert_eq!(
+        saver.calls.load(Ordering::SeqCst),
+        3,
+        "the idle pass after /remember repeated the same tail"
+    );
+}
+
 #[tokio::test]
 async fn a_zero_interval_disables_the_saver_entirely() {
     let passes = Arc::new(Mutex::new(Vec::new()));

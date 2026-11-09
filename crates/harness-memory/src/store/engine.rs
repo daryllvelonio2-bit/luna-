@@ -411,6 +411,14 @@ impl MemoryEngine for MarkdownMemoryEngine {
         self.store.retrieve(query, limit)
     }
 
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.store.retrieve_cards(query, limit)
+    }
+
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         save_record(&self.store, record)
     }
@@ -492,6 +500,15 @@ impl MemoryEngine for DaemonWriteEngine {
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
         self.direct.store().reload()?;
         self.direct.retrieve(query, limit).await
+    }
+
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.direct.store().reload()?;
+        self.direct.retrieve_cards(query, limit).await
     }
 
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {

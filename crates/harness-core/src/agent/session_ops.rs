@@ -110,10 +110,19 @@ where
         if tail.is_empty() {
             return;
         }
+        let fingerprint = crate::saver::tail_fingerprint(&tail);
+        if !self.claim_saver_fingerprint(fingerprint) {
+            debug!(
+                "background memory saver skipped after turn {}: unchanged tail",
+                completed
+            );
+            return;
+        }
         let saver = hook.saver.clone();
         // The pass runs on a detached task, so the observer has to travel with it: the turn that
         // triggered the write has already returned, and the CLI still needs to say what landed.
         let observer = self.observer.clone();
+        let fingerprint_slot = self.saver_fingerprint.clone();
         debug!(
             "dispatching background memory saver after turn {} ({} messages, model {})",
             completed,
@@ -126,9 +135,39 @@ where
                     info!("background memory saver: {}", report.summary());
                     announce_save_report(&report, &observer);
                 }
-                Err(error) => warn!("background memory saver failed: {}", error),
+                Err(error) => {
+                    // A failed pass did not read the store: let the next tick retry this same
+                    // transcript instead of waiting for a new turn.
+                    Self::release_saver_fingerprint(&fingerprint_slot, fingerprint);
+                    warn!("background memory saver failed: {}", error);
+                }
             }
         });
+    }
+
+    /// Claim an automatic saver pass, or report that this exact tail was already handled.
+    ///
+    /// Claiming happens *before* the detached pass runs, so the interval and idle timers cannot
+    /// both send the same transcript to the model. A failing pass calls
+    /// [`release_saver_fingerprint`](Self::release_saver_fingerprint) so the retry is not lost.
+    fn claim_saver_fingerprint(&self, fingerprint: u64) -> bool {
+        let mut last = self
+            .saver_fingerprint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *last == Some(fingerprint) {
+            return false;
+        }
+        *last = Some(fingerprint);
+        true
+    }
+
+    /// Undo a claim after a failed pass, unless a newer pass has already claimed a different tail.
+    fn release_saver_fingerprint(slot: &std::sync::Mutex<Option<u64>>, fingerprint: u64) {
+        let mut last = slot.lock().unwrap_or_else(|error| error.into_inner());
+        if *last == Some(fingerprint) {
+            *last = None;
+        }
     }
 
     /// Run one background-saver pass over the current session right now (`/remember`).
@@ -152,6 +191,13 @@ where
             return Ok(crate::saver::SaveReport::default());
         }
         let report = hook.saver.distil(&tail).await?;
+        // An explicit `/remember` always runs, but it has now seen this tail: an idle pass over
+        // the same window would only pay for the same model call again.
+        *self
+            .saver_fingerprint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some(crate::saver::tail_fingerprint(&tail));
         announce_save_report(&report, &self.observer);
         Ok(report)
     }
@@ -177,8 +223,14 @@ where
         if tail.is_empty() {
             return;
         }
+        let fingerprint = crate::saver::tail_fingerprint(&tail);
+        if !self.claim_saver_fingerprint(fingerprint) {
+            debug!("idle memory saver skipped: unchanged tail");
+            return;
+        }
         let saver = hook.saver.clone();
         let observer = self.observer.clone();
+        let fingerprint_slot = self.saver_fingerprint.clone();
         debug!(
             "dispatching idle memory saver ({} messages, model {})",
             tail.len(),
@@ -190,7 +242,10 @@ where
                     info!("idle memory saver: {}", report.summary());
                     announce_save_report(&report, &observer);
                 }
-                Err(error) => warn!("idle memory saver failed: {}", error),
+                Err(error) => {
+                    Self::release_saver_fingerprint(&fingerprint_slot, fingerprint);
+                    warn!("idle memory saver failed: {}", error);
+                }
             }
         });
     }

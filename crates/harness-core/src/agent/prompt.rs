@@ -42,7 +42,7 @@ where
             .or(self.config.profile_behavior.as_deref())
             .unwrap_or(&default_profile.behavior);
         let memory_prompt = if self.config.memory_enabled {
-            let relevant_memories = self.memory.retrieve(user_input, 10).await?;
+            let relevant_memories = self.memory.retrieve_cards(user_input, 10).await?;
             self.memory.format_as_system_prompt(&relevant_memories)
         } else {
             String::new()

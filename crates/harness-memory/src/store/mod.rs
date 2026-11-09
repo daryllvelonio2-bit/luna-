@@ -260,6 +260,7 @@ impl Record {
             Some("code_pattern") => MemoryCategory::CodePattern,
             Some("workflow_rule") => MemoryCategory::WorkflowRule,
             Some("note_pointer") => MemoryCategory::NotePointer,
+            Some("transcript") => MemoryCategory::Transcript,
             _ => MemoryCategory::Fact,
         };
         let domain = frontmatter::string(&value, "domain").unwrap_or_else(|| "memory".to_string());
@@ -331,6 +332,9 @@ pub struct SearchFilter {
     pub topic: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub before: Option<DateTime<Utc>>,
+    /// Drop records of this category before ranking. The prompt block uses it to keep raw
+    /// transcripts out of the always-loaded list while leaving them searchable.
+    pub exclude_category: Option<MemoryCategory>,
 }
 
 /// One search result, carrying the record and its score components.
@@ -704,6 +708,12 @@ impl MemoryStore {
                     .map(|before| doc.record.created_at < before)
                     .unwrap_or(true)
             })
+            .filter(|doc| {
+                filter
+                    .exclude_category
+                    .map(|category| doc.record.category != category)
+                    .unwrap_or(true)
+            })
             .collect();
 
         let documents: Vec<(String, String, Vec<f32>)> = filtered
@@ -801,6 +811,23 @@ impl MemoryStore {
             .collect())
     }
 
+    /// Retrieve records for the prompt block, excluding raw transcripts.
+    pub fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        let filter = SearchFilter {
+            exclude_category: Some(MemoryCategory::Transcript),
+            ..SearchFilter::default()
+        };
+        Ok(self
+            .search(query, &filter, limit)?
+            .into_iter()
+            .map(|result| result.record.to_memory())
+            .collect())
+    }
+
     /// Records rendered into the system-prompt block. Kept byte-compatible
     /// with the SQLite engine so prompt caching and model behavior do not shift.
     pub fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {
@@ -820,6 +847,7 @@ impl MemoryStore {
                     MemoryCategory::WorkflowRule => "Workflow Rule",
                     MemoryCategory::Fact => "Fact",
                     MemoryCategory::NotePointer => "Note",
+                    MemoryCategory::Transcript => "Transcript",
                 };
 
                 let mut parts = Vec::new();

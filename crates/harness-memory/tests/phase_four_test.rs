@@ -166,6 +166,7 @@ async fn test_phase4_sessions_db_mining_and_hybrid_query() {
         topic: None,
         since: None,
         before: None,
+        exclude_category: None,
     };
     let hits = store
         .search("helm values-prod kubernetes", &filter, 5)
@@ -237,6 +238,7 @@ Assistant: Yes, journal_read allows querying by agent and date range."#;
         topic: None,
         since: None,
         before: None,
+        exclude_category: None,
     };
     let hits = store
         .search("Tantivy BM25 scoring index_writer", &filter, 5)

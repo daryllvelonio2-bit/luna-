@@ -299,6 +299,13 @@ pub enum MemoryCategory {
     WorkflowRule,
     Fact,
     NotePointer,
+    /// A raw user/assistant exchange captured mechanically, not distilled.
+    ///
+    /// Transcripts are canonical records but never part of the always-loaded prompt or the
+    /// saver's inventory: they exist so a paraphrase refusal cannot lose the conversation, and
+    /// so `memory_search` can return the exact words. They are deliberately long, so putting
+    /// them in the per-turn block would crowd out the cards that belong there.
+    Transcript,
 }
 
 impl std::fmt::Display for MemoryCategory {
@@ -309,6 +316,7 @@ impl std::fmt::Display for MemoryCategory {
             Self::WorkflowRule => write!(f, "workflow_rule"),
             Self::Fact => write!(f, "fact"),
             Self::NotePointer => write!(f, "note_pointer"),
+            Self::Transcript => write!(f, "transcript"),
         }
     }
 }

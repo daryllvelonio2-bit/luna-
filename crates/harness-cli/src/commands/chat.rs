@@ -458,7 +458,9 @@ pub async fn run_interactive_chat(
         .await?;
     // Recall is read-only and available in both writer modes.
     registry
-        .register(Arc::new(MemorySearchTool::new(memory.clone())))
+        .register(Arc::new(
+            MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
+        ))
         .await?;
 
     // One line of notice, because a mode that changes *where* records come from is worth stating.

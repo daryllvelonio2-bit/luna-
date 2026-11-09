@@ -20,6 +20,15 @@ use harness_core::{HarnessError, Note, NotesEngine};
 /// Marks the end of the front matter block.
 const FRONT_MATTER_FENCE: &str = "---";
 
+/// Words too common to identify a note. Without this, a natural-language query would match every
+/// note on its articles and prepositions; the exact-phrase check still uses the whole query.
+const SEARCH_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were", "has", "have",
+    "had", "but", "not", "you", "your", "can", "how", "what", "when", "where", "which", "who",
+    "why", "does", "did", "doing", "into", "about", "over", "under", "then", "than", "them",
+    "they", "its", "our", "out", "use", "using", "would", "should", "could", "there",
+];
+
 /// Turns a title into a filename-safe slug (`Stripe Spec 2026` → `stripe-spec-2026`).
 pub fn slugify(text: &str) -> String {
     let mut slug = String::new();
@@ -382,18 +391,39 @@ impl NotesEngine for FileNotesEngine {
             return Ok(Vec::new());
         }
 
+        // Substring matching only ever found a note when the caller guessed its exact wording.
+        // Score terms as well, so "build command" reaches a note that says
+        // "cargo build --release": an exact phrase is still the strongest signal, then how many
+        // query terms appear, then how often they appear.
+        let terms: Vec<String> = needle
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|term| term.chars().count() >= 2)
+            .filter(|term| !SEARCH_STOPWORDS.contains(term))
+            .map(str::to_string)
+            .collect();
+
         let mut scored: Vec<(usize, Note)> = Vec::new();
         for note in self.load_all()? {
             let haystack =
                 format!("{}\n{}\n{}", note.title, note.content, note.tags.join(" ")).to_lowercase();
-            let hits = haystack.matches(&needle).count();
-            if hits > 0 {
-                scored.push((hits, note));
+            let exact = haystack.matches(&needle).count();
+            let distinct = terms
+                .iter()
+                .filter(|term| haystack.contains(term.as_str()))
+                .count();
+            if exact == 0 && distinct == 0 {
+                continue;
             }
+            let occurrences: usize = terms
+                .iter()
+                .map(|term| haystack.matches(term.as_str()).count())
+                .sum();
+            let score = exact * 10_000 + distinct * 100 + occurrences;
+            scored.push((score, note));
         }
 
-        // Most mentions first — a document that names the term five times is more likely the one
-        // being asked about than a passing reference. Ties keep the newest-update ordering.
+        // Strongest match first. The sort is stable, so equal scores keep the newest-update
+        // ordering `load_all` already provides.
         scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         Ok(scored.into_iter().take(limit).map(|(_, n)| n).collect())
     }

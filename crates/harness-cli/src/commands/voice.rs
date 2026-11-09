@@ -145,7 +145,9 @@ pub async fn run_voice_loop(
         .register(Arc::new(ReadNoteTool::new(notes.clone())))
         .await?;
     registry
-        .register(Arc::new(MemorySearchTool::new(memory.clone())))
+        .register(Arc::new(
+            MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
+        ))
         .await?;
 
     // Register core filesystem and shell tools (§2.2)

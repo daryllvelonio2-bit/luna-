@@ -57,6 +57,18 @@ impl MemoryEngine for MemoryEngineKind {
         }
     }
 
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        match self {
+            Self::Sqlite(engine) => engine.retrieve_cards(query, limit).await,
+            Self::Markdown(engine) => engine.retrieve_cards(query, limit).await,
+            Self::Daemon(engine) => engine.retrieve_cards(query, limit).await,
+        }
+    }
+
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         match self {
             Self::Sqlite(engine) => engine.save(record).await,

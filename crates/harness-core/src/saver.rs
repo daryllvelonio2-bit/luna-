@@ -234,6 +234,38 @@ pub fn transcript_tail(messages: &[Message], limit: usize) -> Vec<Message> {
     conversational[start..].to_vec()
 }
 
+/// A fingerprint of the messages a pass would read.
+///
+/// The interval pass and the idle pass see overlapping windows of the same conversation. The loop
+/// uses this to skip an automatic pass whose input is byte-for-byte the last one a pass saw; a new
+/// turn, a new tool result, or a changed reply changes the hash. It is deliberately not stable
+/// across processes: it only answers "is this the same tail I just handled?".
+pub fn tail_fingerprint(tail: &[Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for message in tail {
+        match message.role {
+            Role::System => 0u8,
+            Role::User => 1,
+            Role::Assistant => 2,
+            Role::Tool => 3,
+        }
+        .hash(&mut hasher);
+        message.content.hash(&mut hasher);
+        for call in &message.tool_calls {
+            call.name.hash(&mut hasher);
+            call.arguments.to_string().hash(&mut hasher);
+        }
+        if let Some(result) = &message.tool_result {
+            result.call_id.hash(&mut hasher);
+            result.content.hash(&mut hasher);
+            result.is_error.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 /// Attach a saver to a session: the pair the agent loop stores.
 #[derive(Clone)]
 pub struct SaverHook {

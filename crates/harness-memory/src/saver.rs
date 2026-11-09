@@ -7,7 +7,13 @@
 //! merge, or an explicit `noop` — and every operation is validated against what the store already
 //! holds before anything is written.
 //!
-//! The pass is deliberately conservative:
+//! Before the model sees anything, the pass files every complete user/assistant exchange as a raw
+//! [`MemoryCategory::Transcript`] record. That half is deterministic: a provider failure, a
+//! paraphrased reply, or an explicit `noop` cannot lose the conversation. The records are
+//! content-addressed, so the overlapping interval and idle windows are idempotent, and they are
+//! kept out of the always-loaded prompt while staying visible to `memory_search`.
+//!
+//! The model-facing half is deliberately conservative:
 //!
 //! - the model is a curator, not a summarizer. Its default answer is "save nothing";
 //! - it sees the active memory cards *and* the active notes, with ids, so it can choose `update`
@@ -692,11 +698,74 @@ impl MemorySaver {
         self.curation_prompt(&inventory, &transcript)
     }
 
+    /// File every complete user/assistant exchange in `tail` as a raw transcript record.
+    ///
+    /// This is the mechanical half of the saver. It runs before the model and does not depend on
+    /// the model's answer, so a provider outage, a refused note, or a paraphrased reply can no
+    /// longer lose the conversation. Records are content-addressed, which makes overlapping
+    /// interval/idle tails idempotent, and tool output is deliberately omitted: it is
+    /// reproducible, often enormous, and the distilled cards are what make it useful. The user's
+    /// words and the model's reply are the part that cannot be reconstructed.
+    ///
+    /// Returns how many new transcript records were written.
+    async fn capture(&self, tail: &[Message]) -> usize {
+        if !self.memory_enabled.load(Ordering::Relaxed) {
+            return 0;
+        }
+
+        let mut written = 0;
+        for body in exchanges(tail) {
+            let hash = crate::store::ids::delimited_sha256(&[&body], 24);
+            let id = format!("transcript.{hash}");
+            match self.memory.get_record(&id).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        "background saver could not check transcript '{}': {}",
+                        id,
+                        error
+                    );
+                    continue;
+                }
+            }
+
+            let record = MemoryRecord {
+                id: id.clone(),
+                // A unique subject per exchange is what keeps `save` from superseding the
+                // previous transcript: one record per exchange, not one per session.
+                subject: id.clone(),
+                predicate: "exchange".to_string(),
+                object: transcript_label(&body),
+                name: None,
+                path: None,
+                raw_content: body,
+                category: MemoryCategory::Transcript,
+                confidence: 1.0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                is_active: true,
+                superseded_by: None,
+            };
+            match self.memory.save(&record).await {
+                Ok(()) => written += 1,
+                Err(error) => {
+                    tracing::warn!("background saver could not file a transcript: {}", error)
+                }
+            }
+        }
+        written
+    }
+
     /// Read what the store already holds, bounded and with stable ids.
+    ///
+    /// Uses [`MemoryEngine::retrieve_cards`] so raw transcripts never enter the inventory or the
+    /// curation prompt: they are deliberately long, and the pass would otherwise re-read its own
+    /// captured output on every run.
     async fn inventory(&self) -> Inventory {
         let mut records = self
             .memory
-            .retrieve("", INDEX_LIMIT + 1)
+            .retrieve_cards("", INDEX_LIMIT + 1)
             .await
             .unwrap_or_default();
         let memories_truncated = records.len().saturating_sub(INDEX_LIMIT);
@@ -1585,6 +1654,12 @@ impl MemorySaver {
 #[async_trait]
 impl BackgroundSaver for MemorySaver {
     async fn distil(&self, tail: &[Message]) -> Result<SaveReport, HarnessError> {
+        // Capture first and unconditionally: the raw exchange must survive a provider error or
+        // a model that declines to write anything.
+        let captured = self.capture(tail).await;
+        if captured > 0 {
+            tracing::debug!("background saver filed {} raw transcript(s)", captured);
+        }
         self.run(tail).await
     }
 
@@ -1976,6 +2051,69 @@ fn strip_fence(text: &str) -> String {
 }
 
 /// The transcript as the saver reads it: who spoke, and a bounded amount of what they said.
+/// Split a transcript tail into complete user/assistant exchanges.
+///
+/// An exchange starts at a user message and runs until the next user message. Assistant text is
+/// joined with blank lines; tool rows are skipped. A leading assistant fragment with no user
+/// message in the window is dropped — it belongs to the previous exchange, which an earlier pass
+/// with an overlapping tail has already filed.
+fn exchanges(messages: &[Message]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut user: Option<String> = None;
+    let mut replies: Vec<String> = Vec::new();
+
+    for message in messages {
+        match message.role {
+            Role::User => {
+                flush_exchange(&mut out, &mut user, &mut replies);
+                user = message
+                    .content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+            }
+            Role::Assistant => {
+                if let Some(text) = message
+                    .content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    replies.push(text.to_string());
+                }
+            }
+            Role::Tool | Role::System => {}
+        }
+    }
+    flush_exchange(&mut out, &mut user, &mut replies);
+    out
+}
+
+fn flush_exchange(out: &mut Vec<String>, user: &mut Option<String>, replies: &mut Vec<String>) {
+    let Some(user) = user.take() else {
+        replies.clear();
+        return;
+    };
+    let mut body = format!("> {user}");
+    for reply in replies.drain(..) {
+        body.push_str("\n\n");
+        body.push_str(&reply);
+    }
+    out.push(body);
+}
+
+/// A short searchable label for a raw exchange: the user's first non-empty line.
+fn transcript_label(body: &str) -> String {
+    let first = body
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('>')
+        .trim();
+    truncate(first, 160)
+}
+
 fn render_transcript(messages: &[Message]) -> String {
     let mut rendered = String::new();
     for message in messages {
@@ -2197,7 +2335,7 @@ mod tests {
         assert_eq!(report.skipped, 0);
 
         let stored = memory
-            .retrieve("build_command", 5)
+            .retrieve_cards("build_command", 5)
             .await
             .expect("retrieves");
         assert_eq!(stored.len(), 1);
@@ -2226,7 +2364,7 @@ mod tests {
 
         assert_eq!(report.memories, 1);
         let stored = memory
-            .retrieve("response_style", 5)
+            .retrieve_cards("response_style", 5)
             .await
             .expect("retrieves");
         assert_eq!(stored.len(), 1);
@@ -2260,7 +2398,11 @@ mod tests {
             "a long verbatim quote must not be refused"
         );
         assert_eq!(
-            memory.retrieve("cargo", 5).await.expect("retrieves").len(),
+            memory
+                .retrieve_cards("cargo", 5)
+                .await
+                .expect("retrieves")
+                .len(),
             1
         );
     }
@@ -2276,7 +2418,11 @@ mod tests {
 
         assert_eq!(report.memories, 0);
         assert_eq!(report.skipped, 1);
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
         assert_eq!(
             report.outcomes[0].reason.as_deref(),
             Some("evidence not found in the conversation")
@@ -2295,7 +2441,11 @@ mod tests {
         assert_eq!(report.memories, 0);
         assert_eq!(report.skipped, 0);
         assert_eq!(report.declined, 1);
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2312,7 +2462,7 @@ mod tests {
         let report = saver.distil(&conversation()).await.expect("distils");
 
         assert_eq!(report.memories, 1);
-        let stored = memory.retrieve("", 10).await.expect("retrieves");
+        let stored = memory.retrieve_cards("", 10).await.expect("retrieves");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].object, "cargo build --release");
         assert_eq!(stored[0].id, "user.build_command");
@@ -2334,7 +2484,11 @@ mod tests {
 
         assert_eq!(report.memories, 1);
         assert_eq!(report.saved[0].status, MemorySaveStatus::Deleted);
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2365,7 +2519,11 @@ mod tests {
 
         assert_eq!(report.memories, 0);
         assert_eq!(report.skipped, 1);
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
         assert_eq!(
             report.outcomes[0].reason.as_deref(),
             Some("secret detected")
@@ -2456,7 +2614,14 @@ mod tests {
         assert_eq!(first.memories, 1);
         assert_eq!(second.memories, 0);
         assert_eq!(second.skipped, 1, "a repeat must be reported as skipped");
-        assert_eq!(memory.retrieve("", 10).await.expect("retrieves").len(), 1);
+        assert_eq!(
+            memory
+                .retrieve_cards("", 10)
+                .await
+                .expect("retrieves")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2520,7 +2685,14 @@ mod tests {
         assert_eq!(report.memories, 1);
         assert_eq!(report.notes, 0);
         assert_eq!(report.skipped, 4);
-        assert_eq!(memory.retrieve("", 10).await.expect("retrieves").len(), 1);
+        assert_eq!(
+            memory
+                .retrieve_cards("", 10)
+                .await
+                .expect("retrieves")
+                .len(),
+            1
+        );
         assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
     }
 
@@ -2538,7 +2710,10 @@ mod tests {
         let stored = notes.list_notes(10, 0).await.expect("lists");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].title, "Build Recipe");
-        let pointers = memory.retrieve("mem_ptr", 10).await.expect("retrieves");
+        let pointers = memory
+            .retrieve_cards("mem_ptr", 10)
+            .await
+            .expect("retrieves");
         assert!(
             !pointers.is_empty(),
             "the note pointer was not registered: {pointers:?}"
@@ -2560,7 +2735,7 @@ mod tests {
         assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
         assert!(
             memory
-                .retrieve("mem_ptr", 10)
+                .retrieve_cards("mem_ptr", 10)
                 .await
                 .expect("retrieves")
                 .is_empty(),
@@ -2611,7 +2786,7 @@ mod tests {
         assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
         assert!(
             memory
-                .retrieve("mem_ptr", 10)
+                .retrieve_cards("mem_ptr", 10)
                 .await
                 .expect("retrieves")
                 .is_empty(),
@@ -2724,7 +2899,11 @@ mod tests {
 
         assert!(error.contains("did not answer with JSON"), "{error}");
         assert!(error.contains("three memories"), "{error}");
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2732,7 +2911,11 @@ mod tests {
         let (saver, memory, _notes) = saver(CannedProvider::failing());
 
         assert!(saver.distil(&conversation()).await.is_err());
-        assert!(memory.retrieve("", 10).await.expect("retrieves").is_empty());
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
     }
 
     #[test]
@@ -2864,6 +3047,99 @@ mod tests {
             rendered.starts_with("(earlier turns omitted)"),
             "{rendered}"
         );
+    }
+
+    async fn transcripts(memory: &SqliteMemoryEngine) -> Vec<MemoryRecord> {
+        memory
+            .retrieve("", 100)
+            .await
+            .expect("retrieves")
+            .into_iter()
+            .filter(|record| record.category == MemoryCategory::Transcript)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn raw_exchanges_are_filed_verbatim_even_when_the_model_fails() {
+        let (saver, memory, _notes) = saver(CannedProvider::failing());
+        let tail = vec![
+            Message::user("I build this repo with cargo build --release"),
+            Message::assistant("Understood: `cargo build --release`."),
+            Message::tool(harness_core::ToolResult::success(
+                "call-1",
+                "Finished release [optimized] target(s)",
+            )),
+            Message::user("Tests run with cargo test --all"),
+            Message::assistant("And `cargo test --all`."),
+        ];
+
+        // The provider is down, but the raw exchange is the part that must not depend on it.
+        assert!(saver.distil(&tail).await.is_err());
+
+        let stored = transcripts(&memory).await;
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        let bodies: Vec<&str> = stored
+            .iter()
+            .map(|record| record.raw_content.as_str())
+            .collect();
+        assert!(
+            bodies.contains(
+                &"> I build this repo with cargo build --release\n\nUnderstood: `cargo build --release`."
+            ),
+            "{bodies:?}"
+        );
+        assert!(
+            bodies.contains(&"> Tests run with cargo test --all\n\nAnd `cargo test --all`."),
+            "{bodies:?}"
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|record| !record.raw_content.contains("Finished release")),
+            "tool output must not be filed as conversation: {stored:?}"
+        );
+        // The always-loaded block stays cards-only.
+        assert!(memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_capture_is_idempotent_across_overlapping_tails() {
+        let (saver, memory, _notes) = saver(CannedProvider::new(
+            r#"{"operations":[{"op":"noop","reason":"nothing"}]}"#,
+        ));
+        let tail = vec![
+            Message::user("deploy with make release"),
+            Message::assistant("Deploys use `make release`."),
+        ];
+
+        saver.distil(&tail).await.expect("distils");
+        // The interval pass and the idle pass see overlapping windows. The second read must not
+        // create a second copy of the same exchange.
+        saver.distil(&tail).await.expect("distils again");
+        assert_eq!(transcripts(&memory).await.len(), 1);
+
+        let mut extended = tail.clone();
+        extended.push(Message::user("Rollback with make rollback"));
+        extended.push(Message::assistant("Rollback uses `make rollback`."));
+        saver.distil(&extended).await.expect("distils the new tail");
+        assert_eq!(transcripts(&memory).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_off_skips_raw_capture() {
+        let (saver, memory, _notes) = saver(CannedProvider::new(
+            r#"{"operations":[{"op":"noop","reason":"nothing"}]}"#,
+        ));
+        saver.set_memory_enabled(false);
+        saver
+            .distil(&[Message::user("remember this"), Message::assistant("stored")])
+            .await
+            .expect("distils");
+        assert!(transcripts(&memory).await.is_empty());
     }
 
     #[test]

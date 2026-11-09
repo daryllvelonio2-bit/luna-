@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use harness_core::{
-    HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, Tool, ToolPreview, ToolResult,
+    HarnessError, MemoryCategory, MemoryEngine, MemoryRecord, NotesEngine, Tool, ToolPreview,
+    ToolResult,
 };
 
 pub struct SaveMemoryTool {
@@ -541,11 +542,23 @@ impl Tool for ForgetMemoryTool {
 
 pub struct MemorySearchTool {
     engine: Arc<dyn MemoryEngine>,
+    /// When attached, one query also searches note bodies. A note's pointer card is often only
+    /// its title, so without this a note is effectively write-only unless the model guesses
+    /// `search_notes`; recall should not depend on that guess.
+    notes: Option<Arc<dyn NotesEngine>>,
 }
 
 impl MemorySearchTool {
     pub fn new(engine: Arc<dyn MemoryEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            notes: None,
+        }
+    }
+
+    pub fn with_notes(mut self, notes: Arc<dyn NotesEngine>) -> Self {
+        self.notes = Some(notes);
+        self
     }
 }
 
@@ -556,7 +569,7 @@ impl Tool for MemorySearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search persistent memory before answering about people, projects, prior decisions, past work, preferences, or anything that may already be stored. Returns verbatim record text. Quote it; never paraphrase stored facts. Do not use for pure greenfield coding with no memory relevance."
+        "Search persistent memory and stored notes before answering about people, projects, prior decisions, past work, preferences, or anything that may already be stored. Returns verbatim record text plus full matching notes. Quote it; never paraphrase stored facts. Do not use for pure greenfield coding with no memory relevance."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -613,18 +626,107 @@ impl Tool for MemorySearchTool {
                 })
             })
             .collect();
+
+        // A note body is authoritative and verbatim; return the whole thing so one search can
+        // answer "what is the build command?" without a second round trip.
+        let notes = match &self.notes {
+            Some(engine) => match engine.search_notes(query, limit).await {
+                Ok(notes) => notes,
+                Err(error) => {
+                    tracing::warn!("memory_search could not search notes: {}", error);
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let note_results: Vec<serde_json::Value> = notes
+            .iter()
+            .map(|note| {
+                json!({
+                    "id": note.id,
+                    "title": note.title,
+                    "summary_pointer": note.summary_pointer,
+                    "tags": note.tags,
+                    "text": note.content,
+                    "updated_at": note.updated_at,
+                })
+            })
+            .collect();
+
         Ok(ToolResult::success(
             call_id,
             json!({
                 "query": query,
                 "results": results,
-                "count": results_len(&records),
+                "notes": note_results,
+                "count": results.len() + note_results.len(),
             })
             .to_string(),
         ))
     }
 }
 
-fn results_len(records: &[MemoryRecord]) -> usize {
-    records.len()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SqliteMemoryEngine;
+    use harness_notes::FileNotesEngine;
+
+    #[tokio::test]
+    async fn memory_search_returns_matching_note_bodies_when_notes_are_attached() {
+        let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory"));
+        let notes = Arc::new(FileNotesEngine::in_memory().expect("notes"));
+        let note = notes
+            .save_note(
+                "pure-gpt repository brief",
+                "Build with `cargo build --release`.\n\nRun the suite with `cargo test --all`.",
+                &["pure-gpt".to_string()],
+            )
+            .await
+            .expect("saves the note");
+        memory
+            .add_note_pointer(&note.id, "pure-gpt repository brief")
+            .await
+            .expect("saves the pointer");
+
+        let tool = MemorySearchTool::new(memory).with_notes(notes);
+        let output = tool
+            .execute(
+                "call-1",
+                &json!({"query": "build command"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("searches");
+
+        assert!(!output.is_error, "{}", output.content);
+        let body: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+        let notes = body["notes"].as_array().expect("notes array");
+        assert_eq!(notes.len(), 1, "{body}");
+        assert_eq!(notes[0]["id"], note.id);
+        assert!(
+            notes[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cargo test --all"),
+            "the full verbatim note body must come back, not just a pointer: {body}"
+        );
+        assert_eq!(body["count"], 2, "pointer card plus note: {body}");
+    }
+
+    #[tokio::test]
+    async fn memory_search_without_notes_does_not_silently_claim_note_results() {
+        let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory"));
+        let tool = MemorySearchTool::new(memory);
+        let output = tool
+            .execute(
+                "call-1",
+                &json!({"query": "anything"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("searches");
+        let body: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+        assert!(body["notes"].as_array().expect("notes array").is_empty());
+    }
 }

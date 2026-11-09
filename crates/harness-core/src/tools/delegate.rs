@@ -236,6 +236,13 @@ impl MemoryEngine for DynMemory {
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
         self.0.retrieve(query, limit).await
     }
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.0.retrieve_cards(query, limit).await
+    }
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         self.0.save(record).await
     }

@@ -455,6 +455,12 @@ where
     saver: Option<SaverHook>,
     /// Completed turns in this agent's lifetime; the saver's interval counts turns, not wall time.
     turns_completed: AtomicUsize,
+    /// Fingerprint of the transcript the last successful automatic pass read.
+    ///
+    /// The interval pass and the idle pass see overlapping windows of the same conversation, so
+    /// without this an unchanged tail is sent to the saver model twice. `/remember` ignores it:
+    /// an explicit request always runs.
+    saver_fingerprint: Arc<Mutex<Option<u64>>>,
     /// `true` while an automatic fold is in flight.
     ///
     /// The fold runs off the turn's path, so a later turn can arrive while the summary call is
@@ -535,6 +541,7 @@ where
             interrupt: Arc::new(InterruptHandle::new()),
             saver: None,
             turns_completed: AtomicUsize::new(0),
+            saver_fingerprint: Arc::new(Mutex::new(None)),
             fold_in_flight: Arc::new(AtomicBool::new(false)),
             fold_disabled_this_turn: Arc::new(AtomicBool::new(false)),
             completed_fold: Arc::new(Mutex::new(None)),
@@ -559,6 +566,11 @@ where
             self.config.memory_mode = crate::config::MemoryMode::Session;
         }
         self.saver = saver.map(SaverHook::from_saver);
+        // A new saver has not seen any of the transcript, so the next automatic pass must run.
+        self.saver_fingerprint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     /// Update the memory mode at runtime.

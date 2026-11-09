@@ -64,16 +64,75 @@ impl SqliteMemoryEngine {
         // Migration for pre-existing databases: ensure lean fields exist.
         Self::add_column_if_missing(conn, "memories", "name", "TEXT")?;
         Self::add_column_if_missing(conn, "memories", "path", "TEXT")?;
+        // The transcript category was added after the first schema. A CHECK constraint cannot be
+        // altered in place, so rewrite the table once when the old one is found.
+        Self::ensure_transcript_category(conn)?;
 
         // Normalize any legacy categories (e.g. from obsolete experiments) that would violate CHECK
         let _ = conn.execute(
-            "UPDATE memories SET category = 'fact' WHERE category NOT IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer')",
+            "UPDATE memories SET category = 'fact' WHERE category NOT IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'transcript')",
             [],
         );
 
         // Enforce topic uniqueness: collapse multiple active records for the same topic.
         Self::collapse_duplicate_active_topics(conn)?;
 
+        Ok(())
+    }
+
+    /// Rewrite `memories` when its CHECK predates the `transcript` category.
+    ///
+    /// `legacy_alter_table` keeps `memory_embeddings`' foreign key pointing at the *name*
+    /// `memories` instead of following the temporary rename, and disabling foreign keys keeps the
+    /// move from cascading a delete through that table.
+    fn ensure_transcript_category(conn: &Connection) -> Result<(), HarnessError> {
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let Some(sql) = sql else {
+            return Ok(());
+        };
+        if sql.contains("'transcript'") {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;
+             BEGIN;
+             ALTER TABLE memories RENAME TO memories_legacy;
+             CREATE TABLE memories (
+                 id TEXT PRIMARY KEY,
+                 subject TEXT NOT NULL,
+                 predicate TEXT NOT NULL,
+                 object TEXT NOT NULL,
+                 raw_content TEXT NOT NULL,
+                 category TEXT NOT NULL CHECK(category IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer', 'transcript')),
+                 confidence REAL NOT NULL DEFAULT 1.0,
+                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 is_active INTEGER NOT NULL DEFAULT 1,
+                 superseded_by TEXT REFERENCES memories(id),
+                 name TEXT,
+                 path TEXT
+             );
+             INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path)
+                 SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path FROM memories_legacy;
+             DROP TABLE memories_legacy;
+             CREATE INDEX IF NOT EXISTS idx_memories_subject_predicate ON memories(subject, predicate);
+             CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active);
+             COMMIT;
+             PRAGMA legacy_alter_table = OFF;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|e| {
+            HarnessError::MemoryError(format!("Transcript category migration failed: {}", e))
+        })?;
         Ok(())
     }
 
@@ -358,6 +417,40 @@ impl SqliteMemoryEngine {
     }
 }
 
+/// Map the shared memory row shape to a [`MemoryRecord`].
+fn memory_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    let cat_str: String = row.get(5)?;
+    let category = match cat_str.as_str() {
+        "user_profile" => MemoryCategory::UserProfile,
+        "code_pattern" => MemoryCategory::CodePattern,
+        "workflow_rule" => MemoryCategory::WorkflowRule,
+        "note_pointer" => MemoryCategory::NotePointer,
+        "transcript" => MemoryCategory::Transcript,
+        _ => MemoryCategory::Fact,
+    };
+    let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let updated_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    Ok(MemoryRecord {
+        id: row.get(0)?,
+        subject: row.get(1)?,
+        predicate: row.get(2)?,
+        object: row.get(3)?,
+        name: row.get(11)?,
+        path: row.get(12)?,
+        raw_content: row.get(4)?,
+        category,
+        confidence: row.get(6)?,
+        created_at,
+        updated_at,
+        is_active: row.get::<_, i64>(9)? != 0,
+        superseded_by: row.get(10)?,
+    })
+}
+
 #[async_trait]
 impl MemoryEngine for SqliteMemoryEngine {
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
@@ -376,42 +469,7 @@ impl MemoryEngine for SqliteMemoryEngine {
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![query_pattern, limit as i64], |row| {
-                let cat_str: String = row.get(5)?;
-                let category = match cat_str.as_str() {
-                    "user_profile" => MemoryCategory::UserProfile,
-                    "code_pattern" => MemoryCategory::CodePattern,
-                    "workflow_rule" => MemoryCategory::WorkflowRule,
-                    "note_pointer" => MemoryCategory::NotePointer,
-                    _ => MemoryCategory::Fact,
-                };
-
-                let created_raw: String = row.get(7)?;
-                let updated_raw: String = row.get(8)?;
-
-                let created_at = DateTime::parse_from_rfc3339(&created_raw)
-                    .map(|d| d.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                let updated_at = DateTime::parse_from_rfc3339(&updated_raw)
-                    .map(|d| d.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-
-                Ok(MemoryRecord {
-                    id: row.get(0)?,
-                    subject: row.get(1)?,
-                    predicate: row.get(2)?,
-                    object: row.get(3)?,
-                    name: row.get(11)?,
-                    path: row.get(12)?,
-                    raw_content: row.get(4)?,
-                    category,
-                    confidence: row.get(6)?,
-                    created_at,
-                    updated_at,
-                    is_active: row.get::<_, i64>(9)? != 0,
-                    superseded_by: row.get(10)?,
-                })
-            })
+            .query_map(params![query_pattern, limit as i64], memory_from_row)
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         let mut memories: Vec<_> = rows.flatten().collect();
@@ -430,42 +488,64 @@ impl MemoryEngine for SqliteMemoryEngine {
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
             let recent_rows = recent_stmt
-                .query_map(params![remaining as i64], |row| {
-                    let cat_str: String = row.get(5)?;
-                    let category = match cat_str.as_str() {
-                        "user_profile" => MemoryCategory::UserProfile,
-                        "code_pattern" => MemoryCategory::CodePattern,
-                        "workflow_rule" => MemoryCategory::WorkflowRule,
-                        "note_pointer" => MemoryCategory::NotePointer,
-                        _ => MemoryCategory::Fact,
-                    };
-                    let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .map(|d| d.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now());
-                    let updated_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                        .map(|d| d.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now());
-                    Ok(MemoryRecord {
-                        id: row.get(0)?,
-                        subject: row.get(1)?,
-                        predicate: row.get(2)?,
-                        object: row.get(3)?,
-                        name: row.get(11)?,
-                        path: row.get(12)?,
-                        raw_content: row.get(4)?,
-                        category,
-                        confidence: row.get(6)?,
-                        created_at,
-                        updated_at,
-                        is_active: row.get::<_, i64>(9)? != 0,
-                        superseded_by: row.get(10)?,
-                    })
-                })
+                .query_map(params![remaining as i64], memory_from_row)
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
             for m in recent_rows.flatten() {
                 if !memories.iter().any(|existing| existing.id == m.id) {
                     memories.push(m);
+                }
+            }
+        }
+
+        Ok(memories)
+    }
+
+    /// The prompt-block variant: same lookup, minus raw transcripts.
+    async fn retrieve_cards(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        let conn = self.conn.lock().await;
+        let query_pattern = format!("%{}%", query.trim());
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                 FROM memories
+                 WHERE is_active = 1
+                   AND category != 'transcript'
+                   AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
+                 ORDER BY confidence DESC, updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![query_pattern, limit as i64], memory_from_row)
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let mut memories: Vec<_> = rows.flatten().collect();
+
+        // The recency fallback has to apply the same exclusion, or a busy session's raw
+        // transcripts would be the only thing the prompt ever sees.
+        if memories.len() < limit {
+            let remaining = limit - memories.len();
+            let mut recent_stmt = conn
+                .prepare(
+                    "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                     FROM memories
+                     WHERE is_active = 1 AND category != 'transcript'
+                     ORDER BY updated_at DESC
+                     LIMIT ?1",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let recent_rows = recent_stmt
+                .query_map(params![remaining as i64], memory_from_row)
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            for record in recent_rows.flatten() {
+                if !memories.iter().any(|existing| existing.id == record.id) {
+                    memories.push(record);
                 }
             }
         }
@@ -746,6 +826,7 @@ impl MemoryEngine for SqliteMemoryEngine {
                     "code_pattern" => MemoryCategory::CodePattern,
                     "workflow_rule" => MemoryCategory::WorkflowRule,
                     "note_pointer" => MemoryCategory::NotePointer,
+                    "transcript" => MemoryCategory::Transcript,
                     _ => MemoryCategory::Fact,
                 };
                 let created_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
@@ -792,6 +873,7 @@ impl MemoryEngine for SqliteMemoryEngine {
                     MemoryCategory::WorkflowRule => "Workflow Rule",
                     MemoryCategory::Fact => "Fact",
                     MemoryCategory::NotePointer => "Note",
+                    MemoryCategory::Transcript => "Transcript",
                 };
 
                 let mut parts = Vec::new();
@@ -827,5 +909,91 @@ impl MemoryEngine for SqliteMemoryEngine {
             }
         }
         lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "luna-transcript-migration-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_database_with_the_old_check_keeps_its_rows_and_accepts_transcripts() {
+        let path = temp_db();
+        {
+            let conn = Connection::open(&path).expect("creates the old db");
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    subject TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    object TEXT NOT NULL,
+                    raw_content TEXT NOT NULL,
+                    category TEXT NOT NULL CHECK(category IN ('user_profile', 'code_pattern', 'workflow_rule', 'fact', 'note_pointer')),
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    superseded_by TEXT REFERENCES memories(id),
+                    name TEXT,
+                    path TEXT
+                );
+                INSERT INTO memories (id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at)
+                VALUES ('user.editor', 'user', 'editor', 'neovim', 'user editor neovim', 'user_profile', 1.0,
+                        '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');",
+            )
+            .expect("seeds the old db");
+        }
+
+        let engine = SqliteMemoryEngine::new(Some(path.clone())).expect("migrates on open");
+        let existing = engine
+            .get_record("user.editor")
+            .await
+            .expect("reads")
+            .expect("the old row survived");
+        assert_eq!(existing.object, "neovim");
+
+        let transcript = MemoryRecord {
+            id: "transcript.abc123".to_string(),
+            subject: "transcript.abc123".to_string(),
+            predicate: "exchange".to_string(),
+            object: "build with cargo".to_string(),
+            name: None,
+            path: None,
+            raw_content: "> build with cargo\n\nUnderstood.".to_string(),
+            category: MemoryCategory::Transcript,
+            confidence: 1.0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            is_active: true,
+            superseded_by: None,
+        };
+        engine.save(&transcript).await.expect("writes a transcript");
+
+        let stored = engine
+            .get_record(&transcript.id)
+            .await
+            .expect("reads")
+            .expect("the transcript is stored");
+        assert_eq!(stored.category, MemoryCategory::Transcript);
+        assert!(
+            engine
+                .retrieve_cards("", 10)
+                .await
+                .expect("reads cards")
+                .iter()
+                .all(|record| record.category != MemoryCategory::Transcript),
+            "a transcript must not enter the prompt-block retrieval"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 }
