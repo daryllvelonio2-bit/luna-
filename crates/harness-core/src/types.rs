@@ -355,7 +355,7 @@ pub struct MemoryRecord {
     pub superseded_by: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Note {
     pub title: String,
     pub id: String,
@@ -364,6 +364,14 @@ pub struct Note {
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

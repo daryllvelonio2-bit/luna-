@@ -240,3 +240,111 @@ async fn test_path_traversal_prevention() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_long_note_chunking_and_reconstruction_with_hash_dedupe() {
+    let engine = FileNotesEngine::in_memory().unwrap();
+
+    // Create a 16 KB document with distinct paragraphs
+    let paragraph = "This is a detailed section of the architecture specification with important technical context.\n".repeat(40);
+    let mut content = String::new();
+    for i in 1..=6 {
+        content.push_str(&format!("## Section {}\n\n", i));
+        content.push_str(&paragraph);
+        content.push_str("\n\n");
+    }
+    assert!(content.len() > 14_000, "content len: {}", content.len());
+
+    let note = engine
+        .save_note(
+            "Large System Specification",
+            &content,
+            &["spec".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // Verify chunk files were created on disk
+    let part1 = engine.dir().join(format!("{}-part-1.md", note.id));
+    let part2 = engine.dir().join(format!("{}-part-2.md", note.id));
+    assert!(part1.exists(), "part 1 must exist at {}", part1.display());
+    assert!(part2.exists(), "part 2 must exist at {}", part2.display());
+
+    // Verify reading part 1 directly
+    let p1_note = engine
+        .read_note(&format!("{}-part-1", note.id))
+        .await
+        .unwrap();
+    assert_eq!(p1_note.parent_id.as_deref(), Some(note.id.as_str()));
+    assert_eq!(p1_note.part_number, Some(1));
+    assert!(p1_note.content_hash.is_some());
+
+    // Verify reading by parent ID returns full content seamlessly
+    let full = engine.read_note(&note.id).await.unwrap();
+    assert!(full.content.contains("## Section 1"));
+    assert!(full.content.contains("## Section 6"));
+
+    // Hash dedupe: re-saving with same content keeps existing parts intact
+    let mtime_before = std::fs::metadata(&part1).unwrap().modified().unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+    engine
+        .update_note(&note.id, None, Some(&content), None)
+        .await
+        .unwrap();
+    let mtime_after = std::fs::metadata(&part1).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_before, mtime_after,
+        "hash dedupe must not re-write unchanged parts"
+    );
+
+    // Deleting parent note deletes all parts too
+    assert!(engine.delete_note(&note.id).await.unwrap());
+    assert!(!part1.exists(), "part 1 must be deleted");
+    assert!(!part2.exists(), "part 2 must be deleted");
+}
+
+#[tokio::test]
+async fn test_near_match_reconciliation_converts_to_append_instead_of_duplicate() {
+    let engine = FileNotesEngine::in_memory().unwrap();
+
+    let initial = "Step 1: Install dependencies with cargo build.\nStep 2: Run test suite.";
+    let note1 = engine
+        .save_note("Deployment Recipe", initial, &["devops".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(note1.id, "deployment-recipe");
+
+    // Save with near-match title and additional tag
+    let addition =
+        "## Verification\n\nStep 3: Check endpoint with curl -f http://localhost:8080/health.";
+    let note2 = engine
+        .save_note(
+            "Deployment Recipe (Production Verified)",
+            addition,
+            &["devops".to_string(), "prod".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // Reconciled onto existing note: same ID, no duplicate file!
+    assert_eq!(note2.id, note1.id);
+
+    // List notes must have exactly 1 note (no duplicate deployment-recipe-1.md)
+    let notes = engine.list_notes(10, 0).await.unwrap();
+    assert_eq!(notes.len(), 1, "must not create duplicate note files");
+    assert!(notes[0].content.contains("Step 1: Install dependencies"));
+    assert!(notes[0].content.contains("Step 3: Check endpoint"));
+    assert!(notes[0].tags.contains(&"devops".to_string()));
+    assert!(notes[0].tags.contains(&"prod".to_string()));
+
+    // Idempotent: saving the exact same content again does not duplicate lines
+    let note3 = engine
+        .save_note("Deployment Recipe", addition, &[])
+        .await
+        .unwrap();
+    let count = note3.content.matches("Step 3: Check endpoint").count();
+    assert_eq!(
+        count, 1,
+        "content must not be duplicated when already present"
+    );
+}

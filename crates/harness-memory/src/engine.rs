@@ -474,6 +474,72 @@ impl MemoryEngine for SqliteMemoryEngine {
 
         let mut memories: Vec<_> = rows.flatten().collect();
 
+        // Keyword scoring fallback if exact substring search returned fewer than limit
+        let stopwords = [
+            "the", "and", "for", "with", "that", "this", "from", "are", "was", "were", "has",
+            "have", "had", "but", "not", "you", "your", "can", "how", "what", "when", "where",
+            "which", "who", "why", "does", "did", "doing", "into", "about", "over", "under",
+            "then", "than", "them", "they", "its", "our", "out", "use", "using", "would", "should",
+            "could", "there", "i", "do", "we", "my",
+        ];
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 2 && !stopwords.contains(w))
+            .map(str::to_string)
+            .collect();
+
+        if memories.len() < limit && !terms.is_empty() {
+            let mut all_stmt = conn
+                .prepare(
+                    "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                     FROM memories
+                     WHERE is_active = 1",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let all_rows = all_stmt
+                .query_map([], memory_from_row)
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            let mut scored: Vec<(usize, MemoryRecord)> = Vec::new();
+            for m in all_rows.flatten() {
+                if memories.iter().any(|existing| existing.id == m.id) {
+                    continue;
+                }
+                let haystack = format!(
+                    "{} {} {} {} {} {}",
+                    m.subject,
+                    m.predicate,
+                    m.object,
+                    m.raw_content,
+                    m.name.as_deref().unwrap_or(""),
+                    m.path.as_deref().unwrap_or("")
+                )
+                .to_lowercase();
+                let matches = terms
+                    .iter()
+                    .filter(|t| haystack.contains(t.as_str()))
+                    .count();
+                if matches > 0 {
+                    scored.push((matches, m));
+                }
+            }
+            scored.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| {
+                        b.1.confidence
+                            .partial_cmp(&a.1.confidence)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| b.1.updated_at.cmp(&a.1.updated_at))
+            });
+            for (_, m) in scored {
+                memories.push(m);
+                if memories.len() >= limit {
+                    break;
+                }
+            }
+        }
+
         // If query search returned fewer than limit, also fetch recent top active memories
         if memories.len() < limit {
             let remaining = limit - memories.len();
@@ -508,27 +574,61 @@ impl MemoryEngine for SqliteMemoryEngine {
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, HarnessError> {
         let conn = self.conn.lock().await;
-        let query_pattern = format!("%{}%", query.trim());
+        let mut memories: Vec<MemoryRecord> = Vec::new();
 
-        let mut stmt = conn
+        // 1. L0/L1 Priority: Top project cards, canonical commands, and user profile
+        let mut l0_l1_stmt = conn
             .prepare(
                 "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                  FROM memories
                  WHERE is_active = 1
                    AND category != 'transcript'
-                   AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
+                   AND (
+                       category = 'user_profile'
+                       OR subject LIKE 'project%'
+                       OR predicate IN ('build-command', 'build_command', 'test-command', 'test_command', 'run-command', 'run_command', 'root', 'stack', 'runbook')
+                   )
                  ORDER BY confidence DESC, updated_at DESC
-                 LIMIT ?2",
+                 LIMIT ?1",
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-
-        let rows = stmt
-            .query_map(params![query_pattern, limit as i64], memory_from_row)
+        let l0_l1_rows = l0_l1_stmt
+            .query_map(params![limit.min(6) as i64], memory_from_row)
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
-        let mut memories: Vec<_> = rows.flatten().collect();
+        for record in l0_l1_rows.flatten() {
+            if !memories.iter().any(|existing| existing.id == record.id) {
+                memories.push(record);
+            }
+        }
 
-        // The recency fallback has to apply the same exclusion, or a busy session's raw
-        // transcripts would be the only thing the prompt ever sees.
+        // 2. Query-specific matches
+        let trimmed_query = query.trim();
+        if !trimmed_query.is_empty() && memories.len() < limit {
+            let query_pattern = format!("%{}%", trimmed_query);
+            let remaining = limit - memories.len();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                     FROM memories
+                     WHERE is_active = 1
+                       AND category != 'transcript'
+                       AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
+                     ORDER BY confidence DESC, updated_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![query_pattern, remaining as i64], memory_from_row)
+                .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+            for record in rows.flatten() {
+                if !memories.iter().any(|existing| existing.id == record.id) {
+                    memories.push(record);
+                }
+            }
+        }
+
+        // 3. Recency fallback if still under limit
         if memories.len() < limit {
             let remaining = limit - memories.len();
             let mut recent_stmt = conn

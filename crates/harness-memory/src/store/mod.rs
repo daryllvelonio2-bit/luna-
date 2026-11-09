@@ -817,15 +817,77 @@ impl MemoryStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, HarnessError> {
-        let filter = SearchFilter {
-            exclude_category: Some(MemoryCategory::Transcript),
-            ..SearchFilter::default()
-        };
-        Ok(self
-            .search(query, &filter, limit)?
-            .into_iter()
-            .map(|result| result.record.to_memory())
-            .collect())
+        let mut memories: Vec<MemoryRecord> = Vec::new();
+
+        // 1. L0/L1 Priority: Top project cards, canonical commands, and user profile
+        if let Ok(active) = self.active_records() {
+            let mut l0_l1: Vec<&Record> = active
+                .iter()
+                .filter(|r| r.category != MemoryCategory::Transcript)
+                .filter(|r| {
+                    r.category == MemoryCategory::UserProfile
+                        || r.domain.eq_ignore_ascii_case("project")
+                        || r.topic.eq_ignore_ascii_case("project")
+                        || r.subject.starts_with("project.")
+                        || matches!(
+                            r.predicate.as_str(),
+                            "build-command"
+                                | "build_command"
+                                | "test-command"
+                                | "test_command"
+                                | "run-command"
+                                | "run_command"
+                                | "root"
+                                | "stack"
+                                | "runbook"
+                        )
+                })
+                .collect();
+            l0_l1.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.filed_at.cmp(&a.filed_at))
+            });
+            for r in l0_l1.into_iter().take(limit.min(6)) {
+                memories.push(r.to_memory());
+            }
+        }
+
+        // 2. Query search
+        if !query.trim().is_empty() && memories.len() < limit {
+            let filter = SearchFilter {
+                exclude_category: Some(MemoryCategory::Transcript),
+                ..SearchFilter::default()
+            };
+            if let Ok(results) = self.search(query, &filter, limit - memories.len()) {
+                for res in results {
+                    let mem = res.record.to_memory();
+                    if !memories.iter().any(|m| m.id == mem.id) {
+                        memories.push(mem);
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback to active records if still under limit
+        if memories.len() < limit {
+            if let Ok(mut active) = self.active_records() {
+                active.retain(|r| r.category != MemoryCategory::Transcript);
+                active.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+                for r in active {
+                    let mem = r.to_memory();
+                    if !memories.iter().any(|m| m.id == mem.id) {
+                        memories.push(mem);
+                        if memories.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(memories)
     }
 
     /// Records rendered into the system-prompt block. Kept byte-compatible

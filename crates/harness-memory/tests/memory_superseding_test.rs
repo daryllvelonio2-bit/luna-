@@ -485,3 +485,52 @@ async fn test_forget_memory_tool_all() {
     assert_eq!(engine.retrieve("user", 5).await.unwrap().len(), 0);
     assert_eq!(engine.retrieve("luna", 5).await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn test_l0_l1_context_cards_retrieval_prioritizes_project_and_commands() {
+    let engine = SqliteMemoryEngine::in_memory().unwrap();
+
+    // 1. Add canonical project command and profile cards
+    let mut run_cmd = record(
+        "project.my-app.run-command",
+        "project.my-app",
+        "run-command",
+        "./run.sh serve",
+    );
+    run_cmd.category = MemoryCategory::WorkflowRule;
+    run_cmd.confidence = 0.95;
+    engine.save(&run_cmd).await.unwrap();
+
+    let mut user_pref = record(
+        "user.preference.style",
+        "user.preference",
+        "style",
+        "concise, no filler",
+    );
+    user_pref.category = MemoryCategory::UserProfile;
+    user_pref.confidence = 0.90;
+    engine.save(&user_pref).await.unwrap();
+
+    // 2. Add an unrelated recent fact
+    let trivia = record(
+        "trivia.weather",
+        "trivia",
+        "weather",
+        "sunny today in California",
+    );
+    engine.save(&trivia).await.unwrap();
+
+    // 3. Query with a generic prompt like "go" or "hello"
+    let cards = engine.retrieve_cards("go", 5).await.unwrap();
+
+    // L0/L1 priority guarantees project canonical commands and user profile are surfaced
+    let subjects: Vec<&str> = cards.iter().map(|c| c.subject.as_str()).collect();
+    assert!(
+        subjects.contains(&"project.my-app"),
+        "cards must contain project canonical command: {cards:?}"
+    );
+    assert!(
+        subjects.contains(&"user.preference"),
+        "cards must contain user profile: {cards:?}"
+    );
+}

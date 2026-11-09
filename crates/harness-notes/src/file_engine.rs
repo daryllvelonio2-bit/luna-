@@ -186,6 +186,7 @@ impl FileNotesEngine {
                             tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                             created_at: parse_timestamp(&created),
                             updated_at: parse_timestamp(&updated),
+                            ..Default::default()
                         };
                         match write_note(dir, &note, true) {
                             Ok(_) => imported += 1,
@@ -314,6 +315,53 @@ impl FileNotesEngine {
                     return parse_note_file(&direct);
                 }
             }
+            let part1_id = format!("{}-part-1", id);
+            if let Ok(part1_path) = self.note_path(&part1_id) {
+                if part1_path.is_file() {
+                    let mut parts = Vec::new();
+                    let mut p = 1;
+                    while let Ok(part_path) = self.note_path(&format!("{}-part-{}", id, p)) {
+                        if part_path.is_file() {
+                            if let Ok(part_note) = parse_note_file(&part_path) {
+                                parts.push(part_note);
+                            }
+                            p += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let first = &parts[0];
+                        let full_content = parts
+                            .iter()
+                            .map(|p| p.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let title = first
+                            .title
+                            .split(" (Part 1 of ")
+                            .next()
+                            .unwrap_or(&first.title)
+                            .to_string();
+                        return Ok(Note {
+                            id: id.to_string(),
+                            title,
+                            content: full_content,
+                            summary_pointer: first.summary_pointer.clone(),
+                            tags: first.tags.clone(),
+                            created_at: first.created_at,
+                            updated_at: parts
+                                .last()
+                                .map(|p| p.updated_at)
+                                .unwrap_or(first.updated_at),
+                            parent_id: None,
+                            part_number: None,
+                            part_count: Some(parts.len()),
+                            content_hash: None,
+                        });
+                    }
+                }
+            }
         }
 
         self.load_all()?
@@ -329,6 +377,168 @@ impl FileNotesEngine {
     }
 }
 
+/// Target chunk size for long notes (4-8 KB). Target is ~6 KB.
+pub const NOTE_CHUNK_TARGET_BYTES: usize = 6_000;
+/// Maximum chunk size before splitting a part.
+pub const NOTE_CHUNK_MAX_BYTES: usize = 8_192;
+/// Minimum chunk size before creating a new split.
+pub const NOTE_CHUNK_MIN_BYTES: usize = 4_096;
+
+/// Computes a stable hex digest for note content deduplication.
+pub fn compute_content_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+/// Splits long note content into 4-8 KB parts, preserving paragraph and line boundaries.
+pub fn chunk_note_content(content: &str, _target_size: usize, max_size: usize) -> Vec<String> {
+    if content.len() <= max_size {
+        return vec![content.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for block in content.split("\n\n") {
+        if current.is_empty() {
+            current.push_str(block);
+        } else if current.len() + 2 + block.len() <= max_size {
+            current.push_str("\n\n");
+            current.push_str(block);
+        } else {
+            if current.len() >= NOTE_CHUNK_MIN_BYTES || current.len() + block.len() > max_size {
+                chunks.push(std::mem::take(&mut current));
+            }
+            if block.len() > max_size {
+                for line in block.lines() {
+                    if current.is_empty() {
+                        current.push_str(line);
+                    } else if current.len() + 1 + line.len() <= max_size {
+                        current.push('\n');
+                        current.push_str(line);
+                    } else {
+                        chunks.push(std::mem::take(&mut current));
+                        current.push_str(line);
+                    }
+                }
+            } else {
+                current.push_str(block);
+            }
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Extracts significant words from a note title for similarity comparison.
+fn title_words(title: &str) -> std::collections::HashSet<String> {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| {
+            !w.is_empty() && !SEARCH_STOPWORDS.contains(w) && *w != "note" && *w != "document"
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether two titles refer to the same document topic.
+fn titles_near_match(a: &str, b: &str) -> bool {
+    let slug_a = slugify(a);
+    let slug_b = slugify(b);
+    if slug_a == slug_b {
+        return true;
+    }
+    let words_a = title_words(a);
+    let words_b = title_words(b);
+    if words_a.len() < 2 || words_b.len() < 2 {
+        return false;
+    }
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+    if union == 0 {
+        return false;
+    }
+    let jaccard = intersection as f32 / union as f32;
+    jaccard >= 0.70
+        || (intersection >= 2 && (intersection == words_a.len() || intersection == words_b.len()))
+}
+
+/// Whether two sets of tags strongly overlap on a specific domain.
+fn tags_near_match(tags_a: &[String], tags_b: &[String]) -> bool {
+    if tags_a.is_empty() || tags_b.is_empty() {
+        return false;
+    }
+    let set_a: std::collections::HashSet<String> =
+        tags_a.iter().map(|t| t.trim().to_lowercase()).collect();
+    let set_b: std::collections::HashSet<String> =
+        tags_b.iter().map(|t| t.trim().to_lowercase()).collect();
+    let shared = set_a.intersection(&set_b).count();
+    shared >= 2 || (shared >= 1 && (set_a.len() == 1 || set_b.len() == 1))
+}
+
+fn write_note_with_chunks(dir: &Path, note: &Note) -> Result<PathBuf, HarnessError> {
+    if note.content.len() <= NOTE_CHUNK_MAX_BYTES {
+        let mut single = note.clone();
+        single.content_hash = Some(compute_content_hash(&single.content));
+        return write_note(dir, &single, false);
+    }
+
+    let chunks = chunk_note_content(&note.content, NOTE_CHUNK_TARGET_BYTES, NOTE_CHUNK_MAX_BYTES);
+    let total_parts = chunks.len();
+
+    // Write chunk files with stable parent id, part number, and hash dedupe
+    for (i, chunk_body) in chunks.iter().enumerate() {
+        let part_number = i + 1;
+        let part_id = format!("{}-part-{}", note.id, part_number);
+        let part_hash = compute_content_hash(chunk_body);
+        let part_path = dir.join(format!("{}.md", part_id));
+
+        // Hash dedupe: if file exists and has identical hash, skip writing
+        if part_path.is_file() {
+            if let Ok(existing_part) = parse_note_file(&part_path) {
+                if existing_part.content_hash.as_deref() == Some(&part_hash) {
+                    continue;
+                }
+            }
+        }
+
+        let part_note = Note {
+            id: part_id,
+            title: format!("{} (Part {} of {})", note.title, part_number, total_parts),
+            content: chunk_body.clone(),
+            summary_pointer: format!("{} (Part {})", note.summary_pointer, part_number),
+            tags: note.tags.clone(),
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+            parent_id: Some(note.id.clone()),
+            part_number: Some(part_number),
+            part_count: Some(total_parts),
+            content_hash: Some(part_hash),
+        };
+        write_note(dir, &part_note, false)?;
+    }
+
+    // Clean up any stale old parts if previous count was higher
+    let mut check_part = total_parts + 1;
+    while dir
+        .join(format!("{}-part-{}.md", note.id, check_part))
+        .is_file()
+    {
+        let _ = std::fs::remove_file(dir.join(format!("{}-part-{}.md", note.id, check_part)));
+        check_part += 1;
+    }
+
+    // Also write the parent note file containing the full document
+    let mut parent = note.clone();
+    parent.part_count = Some(total_parts);
+    parent.content_hash = Some(compute_content_hash(&note.content));
+    write_note(dir, &parent, false)
+}
+
 #[async_trait]
 impl NotesEngine for FileNotesEngine {
     async fn save_note(
@@ -339,14 +549,53 @@ impl NotesEngine for FileNotesEngine {
     ) -> Result<Note, HarnessError> {
         let slug = slugify(title);
 
-        // Consolidate: if a note for this topic/title already exists, update it rather than creating duplicate slug-1.md
-        if let Ok(existing) = self.find(title).or_else(|_| self.find(&slug)) {
+        // Near-match title and tag reconciliation:
+        let all_notes = self.load_all()?;
+        let existing = all_notes.into_iter().find(|n| {
+            if n.parent_id.is_some() {
+                return false;
+            }
+            n.id == slug
+                || n.id == title
+                || n.title.eq_ignore_ascii_case(title)
+                || (titles_near_match(&n.title, title)
+                    && (tags.is_empty()
+                        || tags_near_match(&n.tags, tags)
+                        || title_words(&n.title) == title_words(title)))
+        });
+
+        if let Some(existing) = existing {
             info!(
                 "Consolidating note for '{}' onto existing note '{}'",
                 title, existing.id
             );
+            // Reconcile by appending new content if not already present
+            let target_content = if existing.content.contains(content.trim()) {
+                existing.content.clone()
+            } else if content.trim().contains(existing.content.trim()) {
+                content.trim().to_string()
+            } else {
+                let mut combined = existing.content.trim_end().to_string();
+                combined.push_str("\n\n");
+                combined.push_str(content.trim());
+                combined
+            };
+
+            // Merge tags
+            let mut merged_tags = existing.tags.clone();
+            for tag in tags {
+                if !merged_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                    merged_tags.push(tag.clone());
+                }
+            }
+
             return self
-                .update_note(&existing.id, Some(title), Some(content), Some(tags))
+                .update_note(
+                    &existing.id,
+                    Some(title),
+                    Some(&target_content),
+                    Some(&merged_tags),
+                )
                 .await;
         }
 
@@ -373,9 +622,13 @@ impl NotesEngine for FileNotesEngine {
             tags: tags.to_vec(),
             created_at: now,
             updated_at: now,
+            parent_id: None,
+            part_number: None,
+            part_count: None,
+            content_hash: Some(compute_content_hash(content)),
         };
 
-        let path = write_note(&self.dir, &note, false)?;
+        let path = write_note_with_chunks(&self.dir, &note)?;
         info!(
             "Saved note '{}' to '{}' (Pointer: '{}')",
             note.id,
@@ -462,8 +715,12 @@ impl NotesEngine for FileNotesEngine {
             tags: new_tags,
             created_at: current.created_at,
             updated_at: Utc::now(),
+            parent_id: current.parent_id,
+            part_number: current.part_number,
+            part_count: current.part_count,
+            content_hash: None,
         };
-        let path = write_note(&self.dir, &note, false)?;
+        let path = write_note_with_chunks(&self.dir, &note)?;
 
         info!("Updated note '{}' ('{}')", note.id, path.display());
         Ok(note)
@@ -476,19 +733,34 @@ impl NotesEngine for FileNotesEngine {
         };
 
         let path = self.note_path(&note.id)?;
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                info!("Deleted note '{}'", note.id);
+        let mut deleted = false;
+        if path.is_file() {
+            if std::fs::remove_file(&path).is_ok() {
+                deleted = true;
                 if let Ok(mut cache) = self.cache.write() {
                     cache.remove(&path);
                 }
-                Ok(true)
             }
-            Err(error) => Err(HarnessError::NotesError(format!(
-                "Failed to delete note '{}': {}",
-                path.display(),
-                error
-            ))),
+        }
+        let mut p = 1;
+        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", note.id, p)) {
+            if part_path.is_file() {
+                let _ = std::fs::remove_file(&part_path);
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.remove(&part_path);
+                }
+                deleted = true;
+                p += 1;
+            } else {
+                break;
+            }
+        }
+
+        if deleted {
+            info!("Deleted note '{}'", note.id);
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -506,20 +778,38 @@ impl NotesEngine for FileNotesEngine {
                 e
             ))
         })?;
-        let target = archive_dir.join(format!("{}.md", note.id));
-        harness_core::fsutil::replace_file(&path, &target).map_err(|e| {
-            HarnessError::NotesError(format!(
-                "Failed to archive note '{}' to '{}': {}",
-                path.display(),
-                target.display(),
-                e
-            ))
-        })?;
-        if let Ok(mut cache) = self.cache.write() {
-            cache.remove(&path);
+
+        let mut archived_any = false;
+        if path.is_file() {
+            let target = archive_dir.join(format!("{}.md", note.id));
+            if harness_core::fsutil::replace_file(&path, &target).is_ok() {
+                archived_any = true;
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.remove(&path);
+                }
+            }
         }
-        info!("Archived note '{}' to '{}'", note.id, target.display());
-        Ok(true)
+        let mut p = 1;
+        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", note.id, p)) {
+            if part_path.is_file() {
+                let part_target = archive_dir.join(format!("{}-part-{}.md", note.id, p));
+                let _ = harness_core::fsutil::replace_file(&part_path, &part_target);
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.remove(&part_path);
+                }
+                archived_any = true;
+                p += 1;
+            } else {
+                break;
+            }
+        }
+
+        if archived_any {
+            info!("Archived note '{}' to '{}'", note.id, archive_dir.display());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -577,6 +867,18 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
     body.push_str(FRONT_MATTER_FENCE);
     body.push('\n');
     body.push_str(&format!("id: {}\n", note.id));
+    if let Some(parent_id) = &note.parent_id {
+        body.push_str(&format!("parent_id: {}\n", single_line(parent_id)));
+    }
+    if let Some(part_number) = note.part_number {
+        body.push_str(&format!("part_number: {}\n", part_number));
+    }
+    if let Some(part_count) = note.part_count {
+        body.push_str(&format!("part_count: {}\n", part_count));
+    }
+    if let Some(content_hash) = &note.content_hash {
+        body.push_str(&format!("content_hash: {}\n", single_line(content_hash)));
+    }
     body.push_str(&format!("title: {}\n", single_line(&note.title)));
     body.push_str(&format!("summary_pointer: {}\n", single_line(&pointer)));
     if !tags.is_empty() {
@@ -626,6 +928,10 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
     let mut tags: Vec<String> = Vec::new();
     let mut created = String::new();
     let mut updated = String::new();
+    let mut parent_id: Option<String> = None;
+    let mut part_number: Option<usize> = None;
+    let mut part_count: Option<usize> = None;
+    let mut content_hash: Option<String> = None;
 
     let body_lines: Vec<&str>;
 
@@ -646,6 +952,10 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
                 }
                 match key.trim() {
                     "id" => id = value,
+                    "parent_id" => parent_id = Some(value),
+                    "part_number" => part_number = value.parse().ok(),
+                    "part_count" => part_count = value.parse().ok(),
+                    "content_hash" => content_hash = Some(value),
                     "title" => title = value,
                     "summary_pointer" => pointer = value,
                     "created_at" => created = value,
@@ -704,6 +1014,10 @@ fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
         } else {
             parse_timestamp(&updated)
         },
+        parent_id,
+        part_number,
+        part_count,
+        content_hash,
     };
     Ok(note)
 }

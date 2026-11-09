@@ -288,6 +288,7 @@ impl NotesEngine for MockNotes {
             tags: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            ..Default::default()
         })
     }
     async fn search_notes(&self, _query: &str, _limit: usize) -> Result<Vec<Note>, HarnessError> {
