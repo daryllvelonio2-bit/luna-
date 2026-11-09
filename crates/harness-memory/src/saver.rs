@@ -123,7 +123,7 @@ A verified brief, runbook, diagnosis, or decision record is not a "summary of wh
 
 VERBATIM PROTOCOL
 
-- Note bodies are checked against the transcript. A note that is not an exact copy of a contiguous span is discarded.
+- Note bodies are checked against the transcript. Every non-heading block must appear verbatim in the transcript, or the note is discarded.
 - Copy, do not compose. A note body must be text that already appears in the transcript or a tool result.
 - Do not shorten a long answer. If the answer is a brief, a diagnosis, or a runbook, copy it in full.
 - Preserve the exact words, punctuation, code, paths, commands, and line breaks.
