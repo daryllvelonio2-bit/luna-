@@ -265,9 +265,19 @@ struct NoteItem {
 }
 
 /// One operation, as the model returned it.
+///
+/// Models do not always use the exact field names in the prompt. `op` accepts the common aliases,
+/// and the memory/note fields may arrive at the top level of the operation instead of nested under
+/// `memory`/`note`; [`Operation::normalized`] folds both shapes into the one the planner expects.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Operation {
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "type",
+        alias = "action",
+        alias = "operation",
+        alias = "kind"
+    )]
     op: String,
     #[serde(default)]
     target_id: Option<String>,
@@ -283,9 +293,80 @@ struct Operation {
     confidence: Option<f32>,
     #[serde(default)]
     reason: Option<String>,
+    // Top-level payload fields, for models that omit the `memory` / `note` wrapper.
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    predicate: String,
+    #[serde(default)]
+    object: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    mode: Option<String>,
     /// True when this came from the legacy `{memories, notes}` shape, which predates evidence.
     #[serde(skip)]
     legacy: bool,
+}
+
+impl Operation {
+    /// Fold an aliased or flat shape into `op` plus a `memory` or `note` payload.
+    ///
+    /// An operation that still names no kind and carries no payload is left alone, so the planner
+    /// can refuse it with its usual "missing op" reason.
+    fn normalized(mut self) -> Self {
+        if self.op.trim().is_empty() {
+            self.op = if self.memory.is_some() {
+                "add_memory"
+            } else if self.note.is_some() {
+                "create_note"
+            } else if !self.title.trim().is_empty() {
+                "create_note"
+            } else if !self.subject.trim().is_empty()
+                || !self.predicate.trim().is_empty()
+                || !self.object.trim().is_empty()
+            {
+                "add_memory"
+            } else {
+                ""
+            }
+            .to_string();
+        }
+        if self.memory.is_none()
+            && (!self.subject.trim().is_empty()
+                || !self.predicate.trim().is_empty()
+                || !self.object.trim().is_empty())
+        {
+            self.memory = Some(Item {
+                subject: self.subject.clone(),
+                predicate: self.predicate.clone(),
+                object: self.object.clone(),
+                name: self.name.clone(),
+                path: self.path.clone(),
+                category: self.category.clone(),
+                confidence: self.confidence,
+            });
+        }
+        if self.note.is_none() && !self.title.trim().is_empty() {
+            self.note = Some(NoteItem {
+                title: self.title.clone(),
+                content: self.content.clone(),
+                tags: self.tags.clone(),
+                mode: self.mode.clone(),
+            });
+        }
+        self
+    }
 }
 
 /// The shape the saver expects back.
@@ -302,7 +383,11 @@ struct Distilled {
 impl Distilled {
     /// Fold the legacy `{memories, notes}` shape into add operations.
     fn into_operations(self) -> Vec<Operation> {
-        let mut operations = self.operations;
+        let mut operations: Vec<Operation> = self
+            .operations
+            .into_iter()
+            .map(Operation::normalized)
+            .collect();
         for item in self.memories {
             let confidence = item.confidence;
             operations.push(Operation {
@@ -1531,6 +1616,7 @@ fn contains_secret(text: &str) -> bool {
 /// error naming what it saw rather than silently dropping the pass.
 fn parse_distilled(text: &str) -> Result<Distilled, HarnessError> {
     let candidate = json_object(text, "background-saver")?;
+    tracing::debug!("background saver answered: {}", truncate(&candidate, 2_000));
     serde_json::from_str::<Distilled>(&candidate).map_err(|error| HarnessError::ProviderError {
         provider: "background-saver".to_string(),
         message: format!(
@@ -1542,6 +1628,10 @@ fn parse_distilled(text: &str) -> Result<Distilled, HarnessError> {
 
 fn parse_candidates(text: &str) -> Result<CandidateSet, HarnessError> {
     let candidate = json_object(text, "background-saver")?;
+    tracing::debug!(
+        "background saver scout answered: {}",
+        truncate(&candidate, 2_000)
+    );
     serde_json::from_str::<CandidateSet>(&candidate).map_err(|error| HarnessError::ProviderError {
         provider: "background-saver".to_string(),
         message: format!("could not parse the scout's JSON: {error}"),
@@ -2308,6 +2398,26 @@ mod tests {
         assert!(parse_distilled("{\"operations\":[]}").is_ok());
         assert!(parse_distilled("Sure! {\"memories\":[],\"notes\":[]}").is_ok());
         assert!(parse_distilled("no json at all").is_err());
+    }
+
+    #[test]
+    fn common_model_shapes_are_normalized_before_planning() {
+        let distilled = parse_distilled(
+            r#"{"operations":[
+                {"type":"add_memory","subject":"garden-defense","predicate":"build command","object":"rojo build"},
+                {"action":"create_note","title":"Build","content":"rojo build -o build.rbxl"},
+                {"operation":"noop","reason":"nothing durable"},
+                {"memory":{"subject":"a","predicate":"b","object":"c"}}
+            ]}"#,
+        )
+        .expect("parses");
+        let ops = distilled.into_operations();
+        assert_eq!(ops[0].op, "add_memory");
+        assert_eq!(ops[0].memory.as_ref().expect("memory").object, "rojo build");
+        assert_eq!(ops[1].op, "create_note");
+        assert_eq!(ops[1].note.as_ref().expect("note").title, "Build");
+        assert_eq!(ops[2].op, "noop");
+        assert_eq!(ops[3].op, "add_memory");
     }
 
     #[test]
