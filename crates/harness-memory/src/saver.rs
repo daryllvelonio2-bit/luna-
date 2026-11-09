@@ -123,6 +123,7 @@ A verified brief, runbook, diagnosis, or decision record is not a "summary of wh
 
 VERBATIM PROTOCOL
 
+- Note bodies are checked against the transcript. A note that is not an exact copy of a contiguous span is discarded.
 - Copy, do not compose. A note body must be text that already appears in the transcript or a tool result.
 - Do not shorten a long answer. If the answer is a brief, a diagnosis, or a runbook, copy it in full.
 - Preserve the exact words, punctuation, code, paths, commands, and line breaks.
@@ -192,6 +193,8 @@ Target ids must come from CURRENT MEMORY or CURRENT NOTES. Never invent an id. I
 FINAL CHECK
 
 Before returning, ask: if this session ended now, what would the next session need to read? If the answer is a document, create or update a note and copy it verbatim. If the answer is one canonical fact, add a memory card. If there is nothing durable, use noop.
+
+File every durable artifact in the slice. A repository brief and its canonical facts are complementary: create the note and the cards. Do not let one category cancel another.
 
 SECURITY
 
@@ -1190,6 +1193,10 @@ impl MemorySaver {
                     report.skip(SaveStorage::Note, display, "note too short");
                     return None;
                 }
+                if !note_is_verbatim(&note.content, transcript) {
+                    report.skip(SaveStorage::Note, display, "note is not verbatim");
+                    return None;
+                }
                 Some(Planned::CreateNote { note })
             }
             "update_note" | "note_update" => {
@@ -1208,6 +1215,12 @@ impl MemorySaver {
                     || !update.tags.is_empty();
                 if !has_change {
                     report.skip(SaveStorage::Note, display, "note update changes nothing");
+                    return None;
+                }
+                if !update.content.trim().is_empty()
+                    && !note_is_verbatim(&update.content, transcript)
+                {
+                    report.skip(SaveStorage::Note, display, "note is not verbatim");
                     return None;
                 }
                 Some(Planned::UpdateNote {
@@ -1706,6 +1719,32 @@ fn closing_quote(open: char) -> char {
         '‘' => '’',
         other => other,
     }
+}
+
+/// Whether a note body is copied from the transcript rather than written from memory.
+///
+/// A note may add headings to label copied spans. Every other block must appear verbatim in the
+/// transcript after whitespace normalization; a paraphrase fails, and a note that adds a single
+/// sentence of its own is refused rather than silently stored as a summary.
+fn note_is_verbatim(content: &str, transcript: &str) -> bool {
+    let transcript = normalize(transcript);
+    let mut checked = false;
+    for block in content.split("\n\n") {
+        let block = block
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = normalize(&block);
+        if block.is_empty() {
+            continue;
+        }
+        checked = true;
+        if !transcript.contains(&block) {
+            return false;
+        }
+    }
+    checked
 }
 
 /// Whether an evidence quote appears in the rendered transcript.
@@ -2361,7 +2400,10 @@ mod tests {
         let system = provider.systems();
         assert!(system.contains("memory keeper"), "{system}");
         assert!(system.contains("Memory is identity"), "{system}");
-        assert!(system.contains("100% recall is the design requirement"), "{system}");
+        assert!(
+            system.contains("100% recall is the design requirement"),
+            "{system}"
+        );
         assert!(system.contains("Verbatim always"), "{system}");
         assert!(system.contains("VERBATIM PROTOCOL"), "{system}");
         assert!(
@@ -2426,9 +2468,20 @@ mod tests {
                 )
             })
             .collect();
-        let notes: Vec<String> = (0..5)
-            .map(|index| {
-                format!(r#"{{"title":"Note {index}","content":"body {index}","tags":[]}}"#)
+        // Note bodies must be copied from the transcript, so each one repeats a phrase that
+        // actually appears in the canned conversation.
+        let note_bodies = [
+            "I always build with cargo",
+            "run tests with cargo test",
+            "Noted: cargo, and `cargo test`.",
+            "I always build with cargo and run tests with cargo test",
+            "cargo test",
+        ];
+        let notes: Vec<String> = note_bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                format!(r#"{{"title":"Note {index}","content":"{body}","tags":[]}}"#)
             })
             .collect();
         let provider = CannedProvider::new(&format!(
@@ -2475,7 +2528,7 @@ mod tests {
     async fn a_note_is_saved_with_its_pointer_bridge() {
         let provider = CannedProvider::new(&format!(
             r#"{{"memories":[],"notes":[{{"title":"Build Recipe","content":"{}","tags":["build"]}}]}}"#,
-            "step ".repeat(60)
+            "I always build with cargo and run tests with cargo test"
         ));
         let (saver, memory, notes) = saver(provider);
 
@@ -2494,9 +2547,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_note_that_paraphrases_the_transcript_is_refused() {
+        let provider = CannedProvider::new(
+            r#"{"memories":[],"notes":[{"title":"Build Recipe","content":"The user builds with cargo and uses cargo test.","tags":[]}]}"#,
+        );
+        let (saver, memory, notes) = saver(provider);
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.notes, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
+        assert!(
+            memory
+                .retrieve("mem_ptr", 10)
+                .await
+                .expect("retrieves")
+                .is_empty(),
+            "a refused note must not leave a pointer behind"
+        );
+    }
+
+    #[tokio::test]
     async fn an_update_note_operation_appends_instead_of_creating_a_second_note() {
         let provider = CannedProvider::new(
-            r###"{"operations":[{"op":"update_note","target_id":"build-recipe","note":{"mode":"append","content":"## Verified\n\ncargo build --release"},"evidence":"I always build with cargo","confidence":0.9,"reason":"new verified step"}]}"###,
+            r###"{"operations":[{"op":"update_note","target_id":"build-recipe","note":{"mode":"append","content":"## Verified\n\nI always build with cargo"},"evidence":"I always build with cargo","confidence":0.9,"reason":"new verified step"}]}"###,
         );
         let (saver, _memory, notes) = saver(provider);
         notes
@@ -2510,7 +2585,7 @@ mod tests {
         let stored = notes.list_notes(10, 0).await.expect("lists");
         assert_eq!(stored.len(), 1);
         assert!(stored[0].content.contains("cargo test"));
-        assert!(stored[0].content.contains("cargo build --release"));
+        assert!(stored[0].content.contains("I always build with cargo"));
         assert_eq!(report.saved_notes[0].status, SaveStatus::Updated);
     }
 
@@ -2718,7 +2793,10 @@ mod tests {
         .expect("parses");
         let ops = distilled.into_operations();
         assert_eq!(ops[0].op, "add_memory");
-        assert_eq!(ops[0].evidence.as_deref(), Some("I always build with cargo"));
+        assert_eq!(
+            ops[0].evidence.as_deref(),
+            Some("I always build with cargo")
+        );
         assert_eq!(ops[0].confidence, Some(0.95));
         assert_eq!(ops[0].reason.as_deref(), Some("explicit preference"));
     }
