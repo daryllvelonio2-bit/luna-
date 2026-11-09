@@ -217,10 +217,12 @@ async fn a_saved_memory_is_announced_to_the_observer() {
         saved: vec![
             SavedMemory {
                 name: "Astra".to_string(),
+                detail: None,
                 status: MemorySaveStatus::Updated,
             },
             SavedMemory {
                 name: "Luna".to_string(),
+                detail: None,
                 status: MemorySaveStatus::Saved,
             },
         ],
@@ -229,7 +231,7 @@ async fn a_saved_memory_is_announced_to_the_observer() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_obs = seen.clone();
     let agent = agent(saver).with_observer(Arc::new(move |event| {
-        if let AgentEvent::MemorySaved { name, status } = event {
+        if let AgentEvent::MemorySaved { name, status, .. } = event {
             seen_obs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -261,6 +263,7 @@ async fn a_saved_note_is_announced_to_the_observer() {
         notes: 1,
         saved_notes: vec![SavedNote {
             name: "Memory Saver Plan".to_string(),
+            detail: None,
             status: SaveStatus::Updated,
         }],
         ..SaveReport::default()
@@ -268,7 +271,7 @@ async fn a_saved_note_is_announced_to_the_observer() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_obs = seen.clone();
     let agent = agent(saver).with_observer(Arc::new(move |event| {
-        if let AgentEvent::NoteSaved { name, status } = event {
+        if let AgentEvent::NoteSaved { name, status, .. } = event {
             seen_obs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

@@ -2370,6 +2370,28 @@ pub fn format_tool_result(is_error: bool, output: &str) -> String {
                     id_suffix.dimmed()
                 );
             }
+            if let Some(status_str) = val.get("status").and_then(|s| s.as_str()) {
+                if status_str == "updated" || status_str == "saved" {
+                    let mem_id = val
+                        .get("new_memory_id")
+                        .or_else(|| val.get("memory_id"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    let object = val.get("object").and_then(|o| o.as_str()).unwrap_or("");
+                    let obj_str = if !object.is_empty() {
+                        format!(": \"{}\"", truncate_visible(object, 40))
+                    } else {
+                        String::new()
+                    };
+                    return format!(
+                        "  {} Memory \"{}\" {}{}",
+                        "✓".green(),
+                        mem_id.bold(),
+                        status_str,
+                        obj_str.dimmed()
+                    );
+                }
+            }
         }
     }
 

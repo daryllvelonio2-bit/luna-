@@ -689,13 +689,21 @@ pub async fn run_interactive_chat(
                     ui_obs.update_context_used(tokens_used);
                 }
             }
-            harness_core::AgentEvent::MemorySaved { name, status } => {
+            harness_core::AgentEvent::MemorySaved {
+                name,
+                detail,
+                status,
+            } => {
                 // The detached saver lands after the turn; show what it wrote above the
                 // composer until the next turn clears it.
-                ui_obs.push_memory_notice(&name, status.as_str());
+                ui_obs.push_memory_notice_with_detail(&name, detail.as_deref(), status.as_str());
             }
-            harness_core::AgentEvent::NoteSaved { name, status } => {
-                ui_obs.push_note_notice(&name, status.as_str());
+            harness_core::AgentEvent::NoteSaved {
+                name,
+                detail,
+                status,
+            } => {
+                ui_obs.push_note_notice_with_detail(&name, detail.as_deref(), status.as_str());
             }
             harness_core::AgentEvent::ToolExecuting { name, arguments } => {
                 ui_obs.finish_reasoning();

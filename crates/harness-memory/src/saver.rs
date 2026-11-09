@@ -1479,6 +1479,22 @@ impl MemorySaver {
                     args["confidence"] = json!(confidence.clamp(0.0, 1.0));
                 }
 
+                let display = memory_display(item);
+                let display_name = if display.is_empty() || display == "-" {
+                    if !subject.is_empty() && !predicate.is_empty() {
+                        format!("{}.{}", subject, predicate)
+                    } else {
+                        "memory".to_string()
+                    }
+                } else {
+                    display
+                };
+                let detail = if !object.is_empty() {
+                    Some(format!("\"{}\"", object))
+                } else {
+                    None
+                };
+
                 let tool = SaveMemoryTool::new(self.memory.clone());
                 let call_id = format!("saver_mem_{}", report.memories + 1);
                 match tool
@@ -1487,8 +1503,9 @@ impl MemorySaver {
                 {
                     Ok(result) if !result.is_error => {
                         written_keys.insert(key);
-                        report.memory_written(
-                            memory_display(item),
+                        report.memory_written_with_detail(
+                            display_name,
+                            detail,
                             if existed {
                                 SaveStatus::Updated
                             } else {
@@ -1506,13 +1523,13 @@ impl MemorySaver {
                 }
             }
             Planned::UpdateMemory { target, item } => {
-                self.update_memory(target, item, report).await;
+                self.update_memory(target, item, inventory, report).await;
             }
             Planned::MergeMemories { targets, item } => {
                 let Some(first) = targets.first() else {
                     return;
                 };
-                if self.update_memory(first, item, report).await {
+                if self.update_memory(first, item, inventory, report).await {
                     for target in targets.iter().skip(1) {
                         if let Err(error) = self.memory.forget(target).await {
                             tracing::warn!(
@@ -1550,8 +1567,11 @@ impl MemorySaver {
                         {
                             tracing::warn!("could not register the note pointer: {}", error);
                         }
-                        report.note_written(
+                        let line_count = content.lines().count();
+                        let detail = Some(format!("{} lines", line_count));
+                        report.note_written_with_detail(
                             saved.title.clone(),
+                            detail,
                             if existed {
                                 SaveStatus::Updated
                             } else {
@@ -1588,7 +1608,15 @@ impl MemorySaver {
                 }
             }
             Planned::DeleteMemory { target, reason } => match self.memory.forget(target).await {
-                Ok(()) => report.memory_written(target.clone(), SaveStatus::Deleted),
+                Ok(()) => {
+                    let display_name = inventory
+                        .memory(target)
+                        .map(|r| format!("{}.{}", r.subject, r.predicate))
+                        .unwrap_or_else(|| target.clone());
+                    let detail = (!reason.trim().is_empty())
+                        .then(|| format!("reason: {}", reason.trim()));
+                    report.memory_written_with_detail(display_name, detail, SaveStatus::Deleted);
+                }
                 Err(error) => {
                     tracing::warn!(
                         "could not delete memory '{}' ({}): {}",
@@ -1601,7 +1629,9 @@ impl MemorySaver {
             },
             Planned::DeleteNote { target, reason } => {
                 if self.remove_note(target).await {
-                    report.note_written(target.clone(), SaveStatus::Deleted);
+                    let detail = (!reason.trim().is_empty())
+                        .then(|| format!("reason: {}", reason.trim()));
+                    report.note_written_with_detail(target.clone(), detail, SaveStatus::Deleted);
                 } else {
                     report.skip(
                         SaveStorage::Note,
@@ -1614,7 +1644,13 @@ impl MemorySaver {
     }
 
     /// Revise a memory card through the same partial-update tool the session uses.
-    async fn update_memory(&self, target: &str, item: &Item, report: &mut SaveReport) -> bool {
+    async fn update_memory(
+        &self,
+        target: &str,
+        item: &Item,
+        inventory: &Inventory,
+        report: &mut SaveReport,
+    ) -> bool {
         let mut args = json!({ "memory_id": target });
         if !item.object.trim().is_empty() {
             args["object"] = json!(item.object.trim());
@@ -1625,15 +1661,39 @@ impl MemorySaver {
         if !item.predicate.trim().is_empty() {
             args["predicate"] = json!(item.predicate.trim());
         }
-        if let Some(name) = item.name.as_deref().filter(|name| !name.trim().is_empty()) {
+        if let Some(name) = item
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty() && *name != "-")
+        {
             args["name"] = json!(name.trim());
         }
-        if let Some(path) = item.path.as_deref().filter(|path| !path.trim().is_empty()) {
+        if let Some(path) = item
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty() && *path != "-")
+        {
             args["path"] = json!(path.trim());
         }
         if let Some(category) = item.category.as_deref().filter(|c| !c.trim().is_empty()) {
             args["category"] = json!(category.trim());
         }
+
+        let existing = inventory.memory(target);
+        let display_name = {
+            let item_disp = memory_display(item);
+            if !item_disp.is_empty() && item_disp != "-" && item_disp != "." {
+                item_disp
+            } else if let Some(rec) = existing {
+                rec.name
+                    .as_deref()
+                    .filter(|n| !n.trim().is_empty() && *n != "-")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}.{}", rec.subject.trim(), rec.predicate.trim()))
+            } else {
+                target.to_string()
+            }
+        };
 
         let tool = UpdateMemoryTool::new(self.memory.clone());
         let call_id = format!("saver_mem_{}", report.memories + 1);
@@ -1642,20 +1702,37 @@ impl MemorySaver {
             .await
         {
             Ok(result) if !result.is_error => {
-                report.memory_written(memory_display(item), SaveStatus::Updated);
+                let detail = if let Some(rec) = existing {
+                    if !rec.object.trim().is_empty()
+                        && !item.object.trim().is_empty()
+                        && rec.object.trim() != item.object.trim()
+                    {
+                        Some(format!(
+                            "\"{}\" → \"{}\"",
+                            rec.object.trim(),
+                            item.object.trim()
+                        ))
+                    } else if !item.object.trim().is_empty() {
+                        Some(format!("\"{}\"", item.object.trim()))
+                    } else {
+                        None
+                    }
+                } else if !item.object.trim().is_empty() {
+                    Some(format!("\"{}\"", item.object.trim()))
+                } else {
+                    None
+                };
+
+                report.memory_written_with_detail(display_name, detail, SaveStatus::Updated);
                 true
             }
             Ok(_) => {
-                report.skip(
-                    SaveStorage::Memory,
-                    memory_display(item),
-                    "store refused update",
-                );
+                report.skip(SaveStorage::Memory, display_name, "store refused update");
                 false
             }
             Err(error) => {
                 tracing::warn!("background saver could not update a memory: {}", error);
-                report.skip(SaveStorage::Memory, memory_display(item), "store error");
+                report.skip(SaveStorage::Memory, display_name, "store error");
                 false
             }
         }
@@ -1709,7 +1786,10 @@ impl MemorySaver {
                 {
                     tracing::warn!("could not refresh the note pointer: {}", error);
                 }
-                report.note_written(saved.title.clone(), SaveStatus::Updated);
+                let mode_str = if append { "append" } else { "replace" };
+                let lines = update.content.trim().lines().count();
+                let detail = Some(format!("{mode_str}, +{lines} lines"));
+                report.note_written_with_detail(saved.title.clone(), detail, SaveStatus::Updated);
                 Some(saved.title)
             }
             Err(error) => {
@@ -1844,9 +1924,22 @@ fn operation_name(operation: &Operation) -> String {
 /// The friendly name of a planned operation.
 fn planned_name(op: &Planned) -> String {
     match op {
-        Planned::AddMemory { item }
-        | Planned::UpdateMemory { item, .. }
-        | Planned::MergeMemories { item, .. } => memory_display(item),
+        Planned::AddMemory { item } | Planned::MergeMemories { item, .. } => {
+            let display = memory_display(item);
+            if display.is_empty() || display == "-" {
+                "(unnamed memory)".to_string()
+            } else {
+                display
+            }
+        }
+        Planned::UpdateMemory { target, item } => {
+            let display = memory_display(item);
+            if display.is_empty() || display == "-" || display == "." {
+                target.clone()
+            } else {
+                display
+            }
+        }
         Planned::CreateNote { note }
         | Planned::UpdateNote { note, .. }
         | Planned::MergeNotes { note, .. } => {
@@ -1861,12 +1954,25 @@ fn planned_name(op: &Planned) -> String {
 }
 
 fn memory_display(item: &Item) -> String {
-    item.name
+    if let Some(name) = item
+        .name
         .as_deref()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{}.{}", item.subject.trim(), item.predicate.trim()))
+        .filter(|name| !name.is_empty() && *name != "-" && *name != "none")
+    {
+        return name.to_string();
+    }
+    let sub = item.subject.trim();
+    let pred = item.predicate.trim();
+    if !sub.is_empty() && !pred.is_empty() {
+        format!("{}.{}", sub, pred)
+    } else if !sub.is_empty() {
+        sub.to_string()
+    } else if !pred.is_empty() {
+        pred.to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Whether the store already states this triple.
@@ -2554,6 +2660,7 @@ mod tests {
             report.saved,
             vec![harness_core::SavedMemory {
                 name: "user.build_command".to_string(),
+                detail: Some("\"cargo test\"".to_string()),
                 status: MemorySaveStatus::Saved,
             }]
         );

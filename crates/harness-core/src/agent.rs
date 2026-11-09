@@ -398,13 +398,18 @@ pub enum AgentEvent {
     /// id; `status` says whether the write created a record or replaced an active one.
     MemorySaved {
         name: String,
+        detail: Option<String>,
         status: MemorySaveStatus,
     },
     /// The background saver wrote, updated, archived, or merged one note.
     ///
     /// Like [`AgentEvent::MemorySaved`] this arrives after the reply, while the session is idle.
     /// `name` is the note's title (the human name), not its slug.
-    NoteSaved { name: String, status: SaveStatus },
+    NoteSaved {
+        name: String,
+        detail: Option<String>,
+        status: SaveStatus,
+    },
 }
 
 pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;

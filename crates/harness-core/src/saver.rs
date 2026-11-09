@@ -80,6 +80,8 @@ impl SaveStorage {
 pub struct SavedMemory {
     /// Friendly name when the model gave one, otherwise the record's `subject.predicate` id.
     pub name: String,
+    /// Detail showing what was saved or changed (e.g. object value or before/after diff).
+    pub detail: Option<String>,
     /// Created, replaced, deactivated, or merged.
     pub status: MemorySaveStatus,
 }
@@ -89,6 +91,8 @@ pub struct SavedMemory {
 pub struct SavedNote {
     /// The note's title (the human name), never its slug.
     pub name: String,
+    /// Detail showing mode, line count, or summary.
+    pub detail: Option<String>,
     /// Created, updated, deleted, or merged.
     pub status: SaveStatus,
 }
@@ -101,6 +105,7 @@ pub struct SavedNote {
 pub struct SaveOutcome {
     pub storage: SaveStorage,
     pub name: String,
+    pub detail: Option<String>,
     pub status: SaveStatus,
     /// Present when `status` is `Skipped`: what rule refused it.
     pub reason: Option<String>,
@@ -133,28 +138,58 @@ impl SaveReport {
 
     /// Record one applied memory write and its notification.
     pub fn memory_written(&mut self, name: impl Into<String>, status: SaveStatus) {
+        self.memory_written_with_detail(name, None, status);
+    }
+
+    /// Record one applied memory write with detailed change information and its notification.
+    pub fn memory_written_with_detail(
+        &mut self,
+        name: impl Into<String>,
+        detail: Option<String>,
+        status: SaveStatus,
+    ) {
         let name = name.into();
         self.memories += 1;
         self.outcomes.push(SaveOutcome {
             storage: SaveStorage::Memory,
             name: name.clone(),
+            detail: detail.clone(),
             status,
             reason: None,
         });
-        self.saved.push(SavedMemory { name, status });
+        self.saved.push(SavedMemory {
+            name,
+            detail,
+            status,
+        });
     }
 
     /// Record one applied note write and its notification.
     pub fn note_written(&mut self, name: impl Into<String>, status: SaveStatus) {
+        self.note_written_with_detail(name, None, status);
+    }
+
+    /// Record one applied note write with detailed change information and its notification.
+    pub fn note_written_with_detail(
+        &mut self,
+        name: impl Into<String>,
+        detail: Option<String>,
+        status: SaveStatus,
+    ) {
         let name = name.into();
         self.notes += 1;
         self.outcomes.push(SaveOutcome {
             storage: SaveStorage::Note,
             name: name.clone(),
+            detail: detail.clone(),
             status,
             reason: None,
         });
-        self.saved_notes.push(SavedNote { name, status });
+        self.saved_notes.push(SavedNote {
+            name,
+            detail,
+            status,
+        });
     }
 
     /// Record one refused operation and why.
@@ -168,6 +203,7 @@ impl SaveReport {
         self.outcomes.push(SaveOutcome {
             storage,
             name: name.into(),
+            detail: None,
             status: SaveStatus::Skipped,
             reason: Some(reason.into()),
         });

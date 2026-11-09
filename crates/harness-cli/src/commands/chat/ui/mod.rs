@@ -341,37 +341,77 @@ struct MemoryNotice {
     /// `memory` or `note`: what kind of thing the row is about.
     storage: String,
     name: String,
+    detail: Option<String>,
     status: String,
 }
 
 /// Longest friendly name a notice shows before the CLI trims it. Even on a wide terminal a long
 /// generated title should not push the status off the row.
-const MAX_MEMORY_NOTICE_NAME_CELLS: usize = 40;
+const MAX_MEMORY_NOTICE_NAME_CELLS: usize = 36;
 
 /// How many notices stack above the composer. A pass can write many records; the newest are the
 /// ones still worth a glance.
 const MAX_MEMORY_NOTICES: usize = 5;
 
-/// One composer row for a write: `memory <name> <saved|updated>` or `note <title> <saved>`.
-fn format_save_notice(storage: &str, name: &str, status: &str, width: usize) -> String {
-    let status = status.trim();
-    let fixed = visible_width(storage) + 1 + 1 + visible_width(status);
-    let budget = width
-        .saturating_sub(fixed)
-        .min(MAX_MEMORY_NOTICE_NAME_CELLS);
-    let name = truncate_to_cells(name, budget);
-    let status = match status {
-        "saved" => status.green(),
-        "updated" => status.yellow(),
-        "deleted" => status.red(),
-        "merged" => status.cyan(),
+/// One composer row for a write: `memory <name> <saved|updated>` or `note <title> <saved>`,
+/// cleanly displaying changes when available.
+fn format_save_notice(
+    storage: &str,
+    name: &str,
+    detail: Option<&str>,
+    status: &str,
+    width: usize,
+) -> String {
+    let status_str = status.trim();
+    let status_styled = match status_str {
+        "saved" => status_str.green(),
+        "updated" => status_str.yellow(),
+        "deleted" => status_str.red(),
+        "merged" => status_str.cyan(),
         other => other.normal(),
     };
-    let storage = match storage {
+    let storage_styled = match storage {
         "note" => storage.magenta(),
         _ => storage.dimmed(),
     };
-    format!("{} {} {}", storage, name.cyan(), status)
+
+    let clean_name = if name.trim().is_empty() || name.trim() == "-" {
+        storage
+    } else {
+        name.trim()
+    };
+
+    if let Some(detail_str) = detail.map(str::trim).filter(|d| !d.is_empty()) {
+        let base_fixed = visible_width(storage) + 1 + 1 + visible_width(status_str) + 2;
+        if width > base_fixed + 8 {
+            let max_name = MAX_MEMORY_NOTICE_NAME_CELLS.min(width.saturating_sub(base_fixed) / 2);
+            let truncated_name = truncate_to_cells(clean_name, max_name.max(12));
+            let used_for_prefix = visible_width(storage)
+                + 1
+                + visible_width(&truncated_name)
+                + 1
+                + visible_width(status_str)
+                + 2;
+            let budget_detail = width.saturating_sub(used_for_prefix);
+            if budget_detail >= 6 {
+                let truncated_detail = truncate_to_cells(detail_str, budget_detail);
+                return format!(
+                    "{} {} {}: {}",
+                    storage_styled,
+                    truncated_name.cyan(),
+                    status_styled,
+                    truncated_detail.dimmed()
+                );
+            }
+        }
+    }
+
+    let fixed = visible_width(storage) + 1 + 1 + visible_width(status_str);
+    let budget = width
+        .saturating_sub(fixed)
+        .min(MAX_MEMORY_NOTICE_NAME_CELLS);
+    let truncated_name = truncate_to_cells(clean_name, budget);
+    format!("{} {} {}", storage_styled, truncated_name.cyan(), status_styled)
 }
 
 /// A fold of the oldest turns, as far as the animation is concerned.
@@ -859,26 +899,35 @@ impl ChatUi {
     }
 
     /// Announce one memory the background saver wrote.
-    ///
-    /// The saver's pass is detached and can finish long after the reply, so this arrives from the
-    /// agent's observer. The name is normalised and trimmed at paint time; the status is kept
-    /// whole because it is the part that answers "did it replace something?".
+    #[allow(dead_code)]
     pub fn push_memory_notice(&self, name: &str, status: &str) {
-        self.push_save_notice("memory", name, status);
+        self.push_memory_notice_with_detail(name, None, status);
+    }
+
+    /// Announce one memory the background saver wrote, with detail.
+    pub fn push_memory_notice_with_detail(&self, name: &str, detail: Option<&str>, status: &str) {
+        self.push_save_notice("memory", name, detail, status);
     }
 
     /// Announce a note the background saver wrote, updated, archived, or merged.
+    #[allow(dead_code)]
     pub fn push_note_notice(&self, name: &str, status: &str) {
-        self.push_save_notice("note", name, status);
+        self.push_note_notice_with_detail(name, None, status);
+    }
+
+    /// Announce a note the background saver wrote, updated, archived, or merged, with detail.
+    pub fn push_note_notice_with_detail(&self, name: &str, detail: Option<&str>, status: &str) {
+        self.push_save_notice("note", name, detail, status);
     }
 
     /// The shared notice path: one temporary row per stored item, whatever store it lives in.
-    fn push_save_notice(&self, storage: &str, name: &str, status: &str) {
+    fn push_save_notice(&self, storage: &str, name: &str, detail: Option<&str>, status: &str) {
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        if name.is_empty() {
+        if name.is_empty() || name == "-" {
             return;
         }
         let status = status.trim().to_string();
+        let detail = detail.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
         let changed = {
             let mut notices = self
                 .memory_notices
@@ -890,16 +939,18 @@ impl ChatUi {
                 .iter_mut()
                 .find(|notice| notice.storage == storage && notice.name == name)
             {
-                if existing.status == status {
+                if existing.status == status && existing.detail == detail {
                     false
                 } else {
                     existing.status = status.clone();
+                    existing.detail = detail.clone();
                     true
                 }
             } else {
                 notices.push(MemoryNotice {
                     storage: storage.to_string(),
                     name: name.clone(),
+                    detail: detail.clone(),
                     status: status.clone(),
                 });
                 if notices.len() > MAX_MEMORY_NOTICES {
@@ -919,6 +970,7 @@ impl ChatUi {
             self.emit_above(&format_save_notice(
                 storage,
                 &name,
+                detail.as_deref(),
                 &status,
                 get_terminal_width(),
             ));
@@ -947,7 +999,15 @@ impl ChatUi {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|notice| format_save_notice(&notice.storage, &notice.name, &notice.status, width))
+            .map(|notice| {
+                format_save_notice(
+                    &notice.storage,
+                    &notice.name,
+                    notice.detail.as_deref(),
+                    &notice.status,
+                    width,
+                )
+            })
             .collect()
     }
 

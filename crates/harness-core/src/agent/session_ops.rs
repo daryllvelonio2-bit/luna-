@@ -26,12 +26,14 @@ fn announce_save_report(
     for saved in &report.saved {
         observer(super::AgentEvent::MemorySaved {
             name: saved.name.clone(),
+            detail: saved.detail.clone(),
             status: saved.status,
         });
     }
     for saved in &report.saved_notes {
         observer(super::AgentEvent::NoteSaved {
             name: saved.name.clone(),
+            detail: saved.detail.clone(),
             status: saved.status,
         });
     }

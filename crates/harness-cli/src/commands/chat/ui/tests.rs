@@ -1157,6 +1157,27 @@ fn memory_notices_are_temporary_and_keep_one_row_per_memory() {
 }
 
 #[test]
+fn a_memory_notice_with_detail_shows_changes_properly() {
+    let ui = ChatUi::new(true);
+    ui.push_memory_notice_with_detail(
+        "user.relationship.occasion",
+        Some("\"girlfriend monthsary today\" → \"December 9 is our anniversary\""),
+        "updated",
+    );
+
+    let rows = ui.memory_notice_rows(120);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("memory"), "{}", rows[0]);
+    assert!(rows[0].contains("user.relationship.occasion"), "{}", rows[0]);
+    assert!(rows[0].contains("updated"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("\"girlfriend monthsary today\" → \"December 9 is our anniversary\""),
+        "{}",
+        rows[0]
+    );
+}
+
+#[test]
 fn delegate_task_notification_format_contains_title_tool_and_running_time() {
     let title =
         crate::commands::chat::render::format_delegate_title("Extract all role credentials");
