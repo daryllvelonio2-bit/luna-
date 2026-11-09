@@ -144,6 +144,13 @@ Examples:
 
 If the transcript contains a complete answer that satisfies the user's request, that answer is the note.
 
+EVIDENCE PROVENANCE
+
+- A line spoken by USER or printed by TOOL can mint a memory card. A line written by LUNA cannot, even when it is correct.
+- If the only support for a fact is the assistant's own answer, file the exact text as a note instead. The note is tagged `unverified` automatically and must not be promoted to a card.
+- Cite the source line itself, not the assistant restating it. A quote the assistant repeats is still the assistant speaking.
+- A verified outcome must be quoted from the tool output or the user's confirmation, not from the assistant's description of it.
+
 APPROVAL RULES
 
 A plan is approved only when the user explicitly accepts it:
@@ -382,9 +389,7 @@ impl Operation {
         if self.op.trim().is_empty() {
             self.op = if self.memory.is_some() {
                 "add_memory"
-            } else if self.note.is_some() {
-                "create_note"
-            } else if !self.title.trim().is_empty() {
+            } else if self.note.is_some() || !self.title.trim().is_empty() {
                 "create_note"
             } else if !self.subject.trim().is_empty()
                 || !self.predicate.trim().is_empty()
@@ -695,7 +700,7 @@ impl MemorySaver {
     pub async fn prompt(&self, tail: &[Message]) -> String {
         let inventory = self.inventory().await;
         let transcript = render_transcript(tail);
-        self.curation_prompt(&inventory, &transcript)
+        self.curation_prompt(&inventory, &transcript.text)
     }
 
     /// File every complete user/assistant exchange in `tail` as a raw transcript record.
@@ -880,17 +885,19 @@ impl MemorySaver {
         let transcript = render_transcript(tail);
 
         if self.policy.two_pass && inventory.total() > TWO_PASS_THRESHOLD {
-            let candidates = self.extract(&inventory, &transcript).await?;
+            let candidates = self.extract(&inventory, &transcript.text).await?;
             if candidates.is_empty() {
                 return Ok(SaveReport::default());
             }
-            let distilled = self.reconcile(&inventory, &transcript, &candidates).await?;
+            let distilled = self
+                .reconcile(&inventory, &transcript.text, &candidates)
+                .await?;
             return self
                 .apply(distilled.into_operations(), &inventory, &transcript)
                 .await;
         }
 
-        let distilled = self.curate(&inventory, &transcript).await?;
+        let distilled = self.curate(&inventory, &transcript.text).await?;
         self.apply(distilled.into_operations(), &inventory, &transcript)
             .await
     }
@@ -978,7 +985,7 @@ impl MemorySaver {
         &self,
         operations: Vec<Operation>,
         inventory: &Inventory,
-        transcript: &str,
+        transcript: &RenderedTranscript,
     ) -> Result<SaveReport, HarnessError> {
         let mut report = SaveReport::default();
         let mut planned: Vec<Planned> = Vec::new();
@@ -1089,9 +1096,9 @@ impl MemorySaver {
     /// Turn one raw operation into a validated plan, or record why it was refused.
     fn plan_one(
         &self,
-        operation: Operation,
+        mut operation: Operation,
         inventory: &Inventory,
-        transcript: &str,
+        transcript: &RenderedTranscript,
         report: &mut SaveReport,
     ) -> Option<Planned> {
         let name = operation.op.trim().to_ascii_lowercase();
@@ -1138,6 +1145,26 @@ impl MemorySaver {
             if !evidence_supported(&evidence, transcript) {
                 report.skip(storage, display, "evidence not found in the conversation");
                 return None;
+            }
+            // A card is an assertion of fact, so it needs a user line or tool output behind it.
+            // The assistant's own answer is a claim, not proof: it may be kept verbatim in a note,
+            // where the `unverified` tag keeps a future session from treating it as established.
+            let authoritative = matches!(
+                transcript.provenance_of(&evidence),
+                Some(Provenance::User | Provenance::Tool)
+            );
+            if !authoritative {
+                if is_memory_operation(&name) {
+                    report.skip(
+                        storage,
+                        display,
+                        "assistant-only evidence cannot mint a memory card",
+                    );
+                    return None;
+                }
+                if let Some(note) = operation.note.as_mut() {
+                    mark_unverified(note);
+                }
             }
         }
 
@@ -1693,6 +1720,36 @@ fn storage_for(op: &str) -> SaveStorage {
     }
 }
 
+/// Whether an operation writes a memory card rather than a note.
+fn is_memory_operation(name: &str) -> bool {
+    matches!(
+        name,
+        "add_memory"
+            | "add"
+            | "memory_add"
+            | "update_memory"
+            | "update"
+            | "memory_update"
+            | "delete_memory"
+            | "memory_delete"
+            | "merge_memories"
+            | "memory_merge"
+    )
+}
+
+/// The tag a note carries when its only support is the assistant's own answer.
+const UNVERIFIED_TAG: &str = "unverified";
+
+fn mark_unverified(note: &mut NoteItem) {
+    if !note
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(UNVERIFIED_TAG))
+    {
+        note.tags.push(UNVERIFIED_TAG.to_string());
+    }
+}
+
 fn planned_storage(op: &Planned) -> SaveStorage {
     match op {
         Planned::AddMemory { .. }
@@ -2114,13 +2171,71 @@ fn transcript_label(body: &str) -> String {
     truncate(first, 160)
 }
 
-fn render_transcript(messages: &[Message]) -> String {
-    let mut rendered = String::new();
+/// Who said a line the saver cites as evidence.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Provenance {
+    User,
+    Tool,
+    Assistant,
+}
+
+/// One message that reached the transcript, kept so a quote can be attributed to its speaker.
+struct Segment {
+    provenance: Provenance,
+    body: String,
+}
+
+/// The rendered conversation plus the segments its text is made of.
+struct RenderedTranscript {
+    text: String,
+    segments: Vec<Segment>,
+}
+
+impl RenderedTranscript {
+    /// Which message a quote came from, if one message contains all of it.
+    ///
+    /// A user or tool line wins over an assistant line even when the assistant repeats it: the
+    /// authoritative source is what makes a claim citable. A quote that spans messages, or is not
+    /// found, returns `None`.
+    fn provenance_of(&self, evidence: &str) -> Option<Provenance> {
+        let needle = normalize(evidence);
+        if needle.is_empty() {
+            return None;
+        }
+        let mut assistant = false;
+        for segment in &self.segments {
+            if normalize(&segment.body).contains(&needle) {
+                match segment.provenance {
+                    Provenance::User | Provenance::Tool => return Some(segment.provenance),
+                    Provenance::Assistant => assistant = true,
+                }
+            }
+        }
+        assistant.then_some(Provenance::Assistant)
+    }
+}
+
+impl std::ops::Deref for RenderedTranscript {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for RenderedTranscript {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+fn render_transcript(messages: &[Message]) -> RenderedTranscript {
+    let mut segments: Vec<Segment> = Vec::new();
     for message in messages {
-        let speaker = match message.role {
-            Role::User => "USER",
-            Role::Assistant => "LUNA",
-            Role::Tool => "TOOL",
+        let provenance = match message.role {
+            Role::User => Provenance::User,
+            Role::Assistant => Provenance::Assistant,
+            Role::Tool => Provenance::Tool,
             Role::System => continue,
         };
         let body = match message.content.as_deref() {
@@ -2139,16 +2254,45 @@ fn render_transcript(messages: &[Message]) -> String {
                 format!("(called {})", calls.join(", "))
             }
         };
-        rendered.push_str(&format!("{speaker}: {body}\n"));
+        let label = match provenance {
+            Provenance::User => "USER",
+            Provenance::Assistant => "LUNA",
+            Provenance::Tool => "TOOL",
+        };
+        segments.push(Segment {
+            provenance,
+            body: format!("{label}: {body}"),
+        });
     }
+
     // Budget from the end: the newest turns carry the decision, the oldest are already reflected in
-    // the inventory the model was shown.
-    if rendered.chars().count() > TRANSCRIPT_CHAR_BUDGET {
-        let skip = rendered.chars().count() - TRANSCRIPT_CHAR_BUDGET;
-        rendered = rendered.chars().skip(skip).collect();
-        rendered.insert_str(0, "(earlier turns omitted)\n");
+    // the inventory the model was shown. Whole messages are dropped so the text and the provenance
+    // segments stay in step.
+    let mut omitted = false;
+    let mut text = join_segments(&segments);
+    while text.chars().count() > TRANSCRIPT_CHAR_BUDGET && segments.len() > 1 {
+        segments.remove(0);
+        omitted = true;
+        text = join_segments(&segments);
     }
-    rendered
+    if text.chars().count() > TRANSCRIPT_CHAR_BUDGET {
+        let skip = text.chars().count() - TRANSCRIPT_CHAR_BUDGET;
+        text = text.chars().skip(skip).collect();
+    }
+    if omitted {
+        text.insert_str(0, "(earlier turns omitted)\n");
+    }
+    RenderedTranscript { text, segments }
+}
+
+fn join_segments(segments: &[Segment]) -> String {
+    let mut text = segments
+        .iter()
+        .map(|segment| segment.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text
 }
 
 /// Shorten `text` to `limit` characters, marking that it was cut.
@@ -3159,5 +3303,72 @@ mod tests {
             transcript
         ));
         assert!(!evidence_supported("", transcript));
+    }
+
+    #[test]
+    fn provenance_names_the_speaker_and_prefers_a_user_or_tool_line() {
+        let transcript = render_transcript(&[
+            Message::user("run cargo test"),
+            Message::assistant("I will run cargo test now"),
+            Message::tool(harness_core::ToolResult::success(
+                "1",
+                "cargo test: 12 passed",
+            )),
+        ]);
+        assert_eq!(
+            transcript.provenance_of("run cargo test"),
+            Some(Provenance::User)
+        );
+        assert_eq!(
+            transcript.provenance_of("cargo test: 12 passed"),
+            Some(Provenance::Tool)
+        );
+        assert_eq!(
+            transcript.provenance_of("I will run cargo test now"),
+            Some(Provenance::Assistant)
+        );
+        assert_eq!(transcript.provenance_of("not in the transcript"), None);
+    }
+
+    #[tokio::test]
+    async fn an_assistant_only_claim_cannot_mint_a_memory_card() {
+        let provider = CannedProvider::new(
+            r#"{"operations":[{"op":"add_memory","memory":{"subject":"pure-gpt","predicate":"tests","object":"none"},"evidence":"Noted: cargo, and `cargo test`.","confidence":0.95,"reason":"assistant said so"}]}"#,
+        );
+        let (saver, memory, _notes) = saver(provider);
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.memories, 0, "{report:?}");
+        assert!(
+            memory
+                .retrieve_cards("", 10)
+                .await
+                .expect("retrieves")
+                .is_empty(),
+            "an assistant-only claim became a card"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_assistant_only_note_is_kept_and_tagged_unverified() {
+        let provider = CannedProvider::new(
+            r#"{"operations":[{"op":"create_note","note":{"title":"Build Notes","content":"Noted: cargo, and `cargo test`.","tags":["build"]},"evidence":"Noted: cargo, and `cargo test`.","confidence":0.9,"reason":"assistant brief"}]}"#,
+        );
+        let (saver, _memory, notes) = saver(provider);
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.notes, 1, "{report:?}");
+        let stored = notes.list_notes(10, 0).await.expect("lists");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0]
+                .tags
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(UNVERIFIED_TAG)),
+            "the note was not marked unverified: {:?}",
+            stored[0].tags
+        );
     }
 }
