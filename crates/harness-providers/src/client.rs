@@ -788,13 +788,10 @@ impl ModelProvider for GenericProviderClient {
                     .get("arguments")
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
-                // An empty fragment is "no arguments"; a non-empty fragment that is not JSON is a
-                // tool call the provider cut off. Running it as `{}` is how a truncated
-                // `read_file` became a missing-argument error instead of a retry.
-                let args: serde_json::Value = if args_raw.trim().is_empty() {
-                    json!({})
-                } else {
-                    match serde_json::from_str(args_raw) {
+                // An empty fragment is "no arguments"; a whole value followed by trailing junk
+                // keeps its first value. Only a value that ends early is a cut-off call.
+                let args: serde_json::Value =
+                    match harness_core::json::parse_tool_arguments(args_raw) {
                         Ok(value) => value,
                         Err(error) => {
                             return Err(HarnessError::ProviderError {
@@ -805,8 +802,7 @@ impl ModelProvider for GenericProviderClient {
                                 ),
                             });
                         }
-                    }
-                };
+                    };
                 tool_calls.push(ToolCall {
                     id,
                     name,

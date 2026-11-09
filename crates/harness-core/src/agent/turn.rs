@@ -954,18 +954,15 @@ where
             .enumerate()
             .map(|(position, (_, mut call))| {
                 call.arguments = match call.arguments {
+                    // An empty fragment means "no arguments". Trailing junk after a whole value is
+                    // ignored rather than treated as truncation; only a value that ends early is
+                    // an incomplete call. See `crate::json::parse_tool_arguments`.
                     serde_json::Value::String(raw) => {
-                        // An empty fragment means "no arguments", which is valid for a tool that
-                        // takes none; only a non-empty fragment that fails to parse is truncated.
-                        if raw.trim().is_empty() {
-                            json!({})
-                        } else {
-                            match serde_json::from_str(&raw) {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    incomplete = Some((call.name.clone(), error.to_string()));
-                                    json!({})
-                                }
+                        match crate::json::parse_tool_arguments(&raw) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                incomplete = Some((call.name.clone(), error.to_string()));
+                                json!({})
                             }
                         }
                     }

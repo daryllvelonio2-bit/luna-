@@ -7,6 +7,7 @@ pub mod error;
 pub mod fsutil;
 pub mod glob;
 pub mod hooks;
+pub mod json;
 pub mod permission;
 pub mod profiles;
 pub mod prompts;
