@@ -248,7 +248,7 @@ enum Commands {
         #[command(subcommand)]
         subcommand: MemoryCommand,
     },
-    /// Build a knowledge graph over the Markdown notes store
+    /// Work with the per-project notes workspace: notes, docs, and graph
     Notes {
         #[command(subcommand)]
         subcommand: NotesCommand,

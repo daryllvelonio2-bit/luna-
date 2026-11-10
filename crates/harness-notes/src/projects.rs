@@ -76,6 +76,34 @@ impl Project {
     pub fn graph_dir(&self) -> PathBuf {
         self.dir.join(GRAPH_SUBDIR)
     }
+
+    /// The manifest as written on disk, if it parses.
+    pub fn manifest(&self) -> Option<ProjectManifest> {
+        std::fs::read_to_string(self.dir.join(MANIFEST))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+    }
+
+    /// The creation time recorded in the manifest, or an empty string for an old folder.
+    pub fn created_at(&self) -> String {
+        self.manifest()
+            .map(|manifest| manifest.created_at)
+            .unwrap_or_default()
+    }
+
+    /// The source tree linked by the manifest, resolved relative to the project folder.
+    pub fn source_root(&self) -> Option<PathBuf> {
+        let root = self.manifest()?.root?;
+        if root.trim().is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(root);
+        Some(if path.is_absolute() {
+            path
+        } else {
+            self.dir.join(path)
+        })
+    }
 }
 
 /// Manifest written to `<project>/project.json`.
@@ -87,6 +115,10 @@ pub struct ProjectManifest {
     /// Layout version, so a future change can migrate without guessing.
     #[serde(default = "current_layout")]
     pub layout: u32,
+    /// Optional source tree this project documents. Relative paths are resolved against the
+    /// project folder, so a project can travel with its notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 
 fn current_layout() -> u32 {
@@ -231,6 +263,7 @@ pub fn ensure(notes_dir: &Path, name: &str) -> Result<Project, HarnessError> {
             slug: project.slug.clone(),
             created_at: Utc::now().to_rfc3339(),
             layout: current_layout(),
+            root: None,
         };
         let json = serde_json::to_string_pretty(&manifest)
             .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
@@ -245,6 +278,35 @@ pub fn ensure(notes_dir: &Path, name: &str) -> Result<Project, HarnessError> {
 
     write_docs_scaffold(&project)?;
     Ok(project)
+}
+
+/// Point a project's manifest at a source tree (or clear it with `None`).
+///
+/// The manifest is rewritten rather than replaced, so the creation date and layout version
+/// survive. This is what lets `luna notes docs` document code instead of only notes.
+pub fn link_source(project: &Project, root: Option<&Path>) -> Result<(), HarnessError> {
+    let path = project.dir.join(MANIFEST);
+    let mut manifest = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ProjectManifest>(&raw).ok())
+        .unwrap_or(ProjectManifest {
+            name: project.name.clone(),
+            slug: project.slug.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            layout: current_layout(),
+            root: None,
+        });
+    manifest.root = root.map(|root| root.display().to_string());
+
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
+    std::fs::write(&path, format!("{json}\n")).map_err(|error| {
+        HarnessError::NotesError(format!(
+            "Failed to write project manifest '{}': {}",
+            path.display(),
+            error
+        ))
+    })
 }
 
 /// The documentation a project starts with.
@@ -270,7 +332,8 @@ fn write_docs_scaffold(project: &Project) -> Result<(), HarnessError> {
         5. [Data and storage](system.md#data-and-storage) — where state lives and how it moves.\n\
         6. [Operations](system.md#operations) — build, test, deploy, recover.\n\
         7. [Decisions](system.md#decisions) — what was chosen, and what was rejected.\n\n\
-        Regenerate the graph with `luna notes graph --project {slug}`.\n",
+        Regenerate the graph with `luna notes graph --project {slug}` and this documentation\n\
+        with `luna notes docs --project {slug}`.\n",
         project.name,
         slug = project.slug,
         GRAPH_SUBDIR = GRAPH_SUBDIR,

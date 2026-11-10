@@ -1394,6 +1394,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "harness-core",
+ "harness-note-graph",
  "pulldown-cmark",
  "rusqlite",
  "serde",

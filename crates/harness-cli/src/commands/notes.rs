@@ -23,7 +23,10 @@ use harness_note_graph::{
     analyze::{QuestionKind, SurpriseReason},
     export, graph_notes, validate, BuiltGraph,
 };
-use harness_notes::{projects, FileNotesEngine};
+use harness_notes::{
+    docs::{self, DocInput},
+    projects, FileNotesEngine,
+};
 use serde_json::json;
 
 /// Report file written beside `graph.json`.
@@ -52,6 +55,21 @@ pub enum NotesCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Generate deterministic system documentation for one project or all of them
+    Docs {
+        /// Output directory (default: `<notes_dir>/<project>/docs`)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// One JSON summary on stdout
+        #[arg(long)]
+        json: bool,
+        /// Restrict to one project (for example `inbox` or `my-app`)
+        #[arg(long)]
+        project: Option<String>,
+        /// Source tree to document; overrides the manifest's `root`
+        #[arg(long)]
+        source: Option<PathBuf>,
+    },
     /// Inspect and create project folders
     Project {
         #[command(subcommand)]
@@ -71,6 +89,9 @@ pub enum ProjectCommand {
     New {
         /// Display name; the folder is its slug (`My App` -> `my-app`)
         name: String,
+        /// Source tree to document; stored in the project manifest
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -86,6 +107,12 @@ pub async fn handle_notes_command(
             no_visual,
             project,
         } => run_graph(config, out, json, no_wiki, no_visual, project).await,
+        NotesCommand::Docs {
+            out,
+            json,
+            project,
+            source,
+        } => run_docs(config, out, json, project, source).await,
         NotesCommand::Project { command } => run_project(command, config).await,
     }
 }
@@ -106,13 +133,19 @@ fn project_of(note: &Note) -> String {
 async fn run_project(command: ProjectCommand, config: &Config) -> Result<(), HarnessError> {
     let notes_dir = &config.paths.notes_dir;
     match command {
-        ProjectCommand::New { name } => {
+        ProjectCommand::New { name, root } => {
             let project = projects::ensure(notes_dir, &name)?;
+            if let Some(root) = root.as_deref() {
+                projects::link_source(&project, Some(root))?;
+            }
             println!("project: {}", project.slug);
             println!("name:    {}", project.name);
             println!("notes:   {}", project.notes_dir().display());
             println!("docs:    {}", project.docs_dir().display());
             println!("graph:   {}", project.graph_dir().display());
+            if let Some(root) = project.source_root() {
+                println!("source:  {}", root.display());
+            }
             Ok(())
         }
         ProjectCommand::List { json } => {
@@ -157,6 +190,160 @@ async fn run_project(command: ProjectCommand, config: &Config) -> Result<(), Har
             Ok(())
         }
     }
+}
+
+/// The CLI surface, captured once so every project's document describes the same binary.
+fn cli_facts() -> docs::CliFacts {
+    use clap::CommandFactory;
+    let command = crate::Cli::command();
+    let mut subcommands: Vec<(String, String)> = command
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != "help")
+        .map(|sub| {
+            (
+                sub.get_name().to_string(),
+                sub.get_about()
+                    .map(|about| about.to_string())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    subcommands.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut top = command.clone();
+    let top_help = top.render_long_help().to_string();
+    let notes_help = command
+        .find_subcommand("notes")
+        .map(|notes| {
+            let mut notes = notes.clone();
+            notes.render_long_help().to_string()
+        })
+        .unwrap_or_default();
+
+    docs::CliFacts {
+        version: crate::VERSION.to_string(),
+        top_help,
+        notes_help,
+        subcommands,
+    }
+}
+
+async fn run_docs(
+    config: &Config,
+    out: Option<PathBuf>,
+    json: bool,
+    project: Option<String>,
+    source: Option<PathBuf>,
+) -> Result<(), HarnessError> {
+    let notes_dir = &config.paths.notes_dir;
+    if project.is_none() && (out.is_some() || source.is_some()) {
+        return Err(HarnessError::NotesError(
+            "`--out` and `--source` apply to one project; pass `--project <name>`".to_string(),
+        ));
+    }
+
+    let engine = open_engine(config)?;
+    let notes = engine.list_notes(usize::MAX, 0).await?;
+    let mut groups: BTreeMap<String, Vec<Note>> = BTreeMap::new();
+    for note in notes {
+        groups.entry(project_of(&note)).or_default().push(note);
+    }
+
+    let available = projects::list(notes_dir)?;
+    if available.is_empty() {
+        return Err(HarnessError::NotesError(format!(
+            "no projects found in '{}'; run `luna notes project new <name>` first",
+            notes_dir.display()
+        )));
+    }
+
+    let targets = if let Some(slug) = project.as_deref() {
+        let slug = projects::slugify_project(slug);
+        let known: Vec<String> = available.iter().map(|entry| entry.slug.clone()).collect();
+        match available
+            .into_iter()
+            .find(|candidate| candidate.slug == slug)
+        {
+            Some(target) => vec![target],
+            None => {
+                return Err(HarnessError::NotesError(format!(
+                    "project '{}' does not exist (known: {})",
+                    slug,
+                    known.join(", ")
+                )))
+            }
+        }
+    } else {
+        available
+    };
+
+    let cli = cli_facts();
+    let mut summaries = Vec::new();
+
+    for target in targets {
+        let subset = groups.get(&target.slug).cloned().unwrap_or_default();
+        let built = graph_notes(&subset);
+        let root = source.clone().or_else(|| target.source_root());
+        let snapshot = match root.as_deref() {
+            Some(root) => Some(docs::scan_source(root).map_err(|error| {
+                HarnessError::NotesError(format!(
+                    "cannot document source root '{}': {}",
+                    root.display(),
+                    error
+                ))
+            })?),
+            None => None,
+        };
+
+        let created = target.created_at();
+        let input = DocInput {
+            project: &target,
+            created_at: &created,
+            notes: &subset,
+            built: &built,
+            source: snapshot.as_ref(),
+            cli: &cli,
+        };
+        let rendered = docs::render_docs(&input);
+        let dir = out.clone().unwrap_or_else(|| target.docs_dir());
+        let written = docs::write_docs(&dir, &rendered)?;
+
+        if json {
+            summaries.push(json!({
+                "project": target.slug,
+                "name": target.name,
+                "docs": dir,
+                "files": written,
+                "notes": subset.len(),
+                "nodes": built.graph.nodes.len(),
+                "edges": built.graph.edges.len(),
+                "source": snapshot.as_ref().map(|snapshot| snapshot.root.clone()),
+            }));
+        } else {
+            println!(
+                "{:<18} docs: {} files  notes: {}  nodes: {}  source: {}",
+                target.slug,
+                rendered.len(),
+                subset.len(),
+                built.graph.nodes.len(),
+                snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.root.as_str())
+                    .unwrap_or("not linked")
+            );
+            println!("{:<18} path: {}", "", dir.display());
+        }
+    }
+
+    if json {
+        let value = json!({ "notes_dir": notes_dir, "docs": summaries });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value)
+                .map_err(|error| HarnessError::SerializationError(error.to_string()))?
+        );
+    }
+    Ok(())
 }
 
 /// Counts and paths for one graph build, so printing and `--json` share the same source.
