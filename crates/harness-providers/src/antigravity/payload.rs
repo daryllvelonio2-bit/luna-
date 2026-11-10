@@ -214,6 +214,10 @@ pub(super) fn build_antigravity_payload(
     options: &CompletionOptions,
     model: &str,
 ) -> serde_json::Value {
+    // Resolved once, before the history is translated: the signature rule is keyed on the
+    // backend model, and the switcher now hands over a display name such as "Gemini 4 Argon"
+    // that carries no `gemini-<major>` for the rule to read.
+    let resolved_model = resolve_antigravity_model(model, options.reasoning_effort.as_ref());
     let mut gemini_contents = Vec::new();
     // Every system message is kept, joined in order. The vector carries two by design: the
     // session's system prompt first, then the synthetic compaction summary. Assigning instead
@@ -295,7 +299,7 @@ pub(super) fn build_antigravity_payload(
                     // validator skip the check. Omitting the field is what 400s the whole request.
                     if let Some(signature) = thought_signature::signature_for_replay(
                         c.signature.as_deref(),
-                        thought_signature::model_enforces_thought_signature(model),
+                        thought_signature::model_enforces_thought_signature(&resolved_model),
                     ) {
                         call_part["thoughtSignature"] = json!(signature);
                     }
@@ -494,7 +498,6 @@ pub(super) fn build_antigravity_payload(
         gen_config["topP"] = json!(top_p);
     }
 
-    let resolved_model = resolve_antigravity_model(model, options.reasoning_effort.as_ref());
     let budget = options.reasoning_effort.map(thinking_budget);
     if let Some(budget) = budget {
         gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });

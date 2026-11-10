@@ -358,46 +358,211 @@ pub async fn retrieve_antigravity_quota(
     Ok(summary)
 }
 
+/// The rows the Antigravity CLI's model switcher shows, in its order.
+///
+/// These are the names the CLI puts in front of the user, not the backend keys: the switcher has
+/// one row per model family and a separate effort control, and `gpt-oss` has only its medium tier
+/// so its tier is part of the name. The endpoint does not publish `gemini-4-argon` at all (it
+/// publishes the single tiered Gemini key), and it still lists retired models such as
+/// `gemini-2.5-pro`; mirroring the live table verbatim is exactly how the picker drifted from the
+/// CLI. This list is the fallback and the ordering the live listing is folded into.
 pub const ANTIGRAVITY_MODELS: &[&str] = &[
-    "gemini-3.8-flash",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-3-flash-preview",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-    "gpt-oss-120b",
-    "gpt-oss-20b",
+    "Gemini 4 Argon",
+    "Gemini 3.8 Flash",
+    "Claude Opus 5.5",
+    "Claude Sonnet 5.5",
+    "GPT-OSS 120B (Medium)",
 ];
 
-/// Resolves user-facing clean model names and reasoning effort settings to backend Code Assist model names.
+/// The effort tier a model request asks for, from an explicit suffix or the session's effort.
+///
+/// The CLI exposes low/medium/high beside the model, and a name that already carries a tier (an
+/// old session, or an id copied from `agy models`) keeps that tier rather than being re-tiered by
+/// the current session setting.
+fn requested_tier(lower: &str, effort: Option<&ReasoningEffort>) -> &'static str {
+    for (suffix, tier) in [
+        ("-low", "low"),
+        ("(low)", "low"),
+        ("-medium", "medium"),
+        ("(medium)", "medium"),
+        ("-high", "high"),
+        ("(high)", "high"),
+        ("-max", "max"),
+        ("(max)", "max"),
+    ] {
+        if lower.ends_with(suffix) {
+            return tier;
+        }
+    }
+    match effort {
+        Some(ReasoningEffort::Minimal) | Some(ReasoningEffort::Low) => "low",
+        Some(ReasoningEffort::High) | Some(ReasoningEffort::Xhigh) => "high",
+        // The account publishes low/medium/high Claude tiers; max exists in the client registry
+        // but is not among the available models, so the highest usable tier is high.
+        Some(ReasoningEffort::Max) => "high",
+        _ => "medium",
+    }
+}
+
+/// Whether a Claude name refers to the 5.5 generation rather than the retired 4.6 one.
+fn is_claude_55(lower: &str) -> bool {
+    lower.contains("5-5") || lower.contains("5.5") || lower.contains("5 5")
+}
+
+/// Resolves user-facing model names and reasoning effort settings to backend Code Assist model names.
+///
+/// The Gemini rows share one backend key, `gemini-3.8-flash-tiered`: it is the tiered model the
+/// endpoint publishes and the effort is carried by `thinkingConfig`, not by the key. Claude and
+/// GPT-OSS select a tier-suffixed key instead. Names written by an older Luna (or copied from
+/// `agy models`) still resolve, so a stored session keeps working after the picker is corrected.
 pub fn resolve_antigravity_model(
     raw_model: &str,
-    _reasoning_effort: Option<&ReasoningEffort>,
+    reasoning_effort: Option<&ReasoningEffort>,
 ) -> String {
     let cleaned = raw_model.trim();
     let cleaned = cleaned.strip_prefix("antigravity/").unwrap_or(cleaned);
     let cleaned = cleaned.strip_prefix("agy/").unwrap_or(cleaned);
     let lower = cleaned.to_lowercase();
+    let tier = requested_tier(&lower, reasoning_effort);
 
     if lower.contains("opus") {
-        "claude-opus-4-6-thinking".to_string()
+        if is_claude_55(&lower) {
+            format!("claude-opus-5-5-{tier}")
+        } else {
+            "claude-opus-4-6-thinking".to_string()
+        }
     } else if lower.contains("sonnet") {
-        "claude-sonnet-4-6".to_string()
+        if is_claude_55(&lower) {
+            format!("claude-sonnet-5-5-{tier}")
+        } else {
+            "claude-sonnet-4-6".to_string()
+        }
     } else if lower.contains("gpt-oss") || lower.contains("oss") {
         "gpt-oss-120b-medium".to_string()
-    } else if lower.contains("pro") {
+    } else if lower.starts_with("gemini-")
+        && !lower.starts_with("gemini-3.8-flash")
+        && !lower.starts_with("gemini-4-argon")
+    {
+        // An explicit backend key from an older session (gemini-2.5-flash, gemini-3-flash,
+        // gemini-3.1-flash-lite) is already what the endpoint expects. Mapping it to the tiered
+        // key would silently change which model answers, and would give a Gemini 3 validator a
+        // 2.5 request's signature rules.
+        cleaned.to_string()
+    } else if lower.contains("pro") && !lower.contains("argon") {
         "gemini-2.5-pro".to_string()
-    } else if lower.contains("gemini") || lower.contains("flash") {
+    } else if lower.contains("argon") || lower.contains("gemini") || lower.contains("flash") {
         "gemini-3.8-flash-tiered".to_string()
     } else {
         cleaned.to_string()
     }
 }
 
-/// Fetches supported Antigravity models, returning clean user-facing model names without reasoning effort suffixes.
+/// The CLI switcher row a backend model key belongs to.
+///
+/// The endpoint's `displayName` is the authority when it carries one, but it has gaps and lies:
+/// `gemini-3.8-flash-tiered` has no name, while three retired Gemini keys all claim
+/// "Gemini 3.5 Flash Lite". Only the families in [`ANTIGRAVITY_MODELS`] are recognised, so those
+/// stale keys and the internal `chat_*`/`tab_*` entries never reach the picker.
+fn cli_model_family(key: &str, display_name: Option<&str>) -> Option<&'static str> {
+    let key = key.to_ascii_lowercase();
+    let display = display_name.unwrap_or("").to_ascii_lowercase();
+
+    // The tiered key is the current Gemini model even though its display name is absent. It is
+    // what the CLI presents as Gemini 4 Argon; Gemini 3.8 Flash is the client-side alias beside it.
+    if key.contains("gemini-3.8-flash-tiered") {
+        return Some("Gemini 4 Argon");
+    }
+    if key.contains("gemini-4-argon") || display.starts_with("gemini 4 argon") {
+        return Some("Gemini 4 Argon");
+    }
+    if key.contains("gemini-3.8-flash") || display.starts_with("gemini 3.8 flash") {
+        return Some("Gemini 3.8 Flash");
+    }
+    if key.contains("claude-opus-5-5") || display.starts_with("claude opus 5.5") {
+        return Some("Claude Opus 5.5");
+    }
+    if key.contains("claude-sonnet-5-5") || display.starts_with("claude sonnet 5.5") {
+        return Some("Claude Sonnet 5.5");
+    }
+    if key.contains("gpt-oss-120b") || display.starts_with("gpt-oss 120b") {
+        return Some("GPT-OSS 120B (Medium)");
+    }
+    None
+}
+
+/// The switcher rows present in a `fetchAvailableModels` body.
+///
+/// An empty body, or one with no recognised family, yields an empty list so the caller can fall
+/// back to [`ANTIGRAVITY_MODELS`] rather than showing a partial picker. The two Gemini rows are
+/// client aliases and are always present: the endpoint publishes only the tiered key for them.
+pub(super) fn models_from_listing(value: &serde_json::Value) -> Vec<String> {
+    let Some(models) = value.get("models").and_then(|models| models.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    for (key, entry) in models {
+        let display = entry.get("displayName").and_then(|name| name.as_str());
+        if let Some(family) = cli_model_family(key, display) {
+            seen.insert(family);
+        }
+    }
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    seen.insert("Gemini 4 Argon");
+    seen.insert("Gemini 3.8 Flash");
+
+    ANTIGRAVITY_MODELS
+        .iter()
+        .filter(|name| seen.contains(**name))
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+/// Fetches the model rows the Antigravity CLI shows.
+///
+/// The live `fetchAvailableModels` call decides which families the account can actually spend on;
+/// the result is folded into the CLI's own order and display names. A retired key in the response
+/// is not evidence that the CLI still offers it, and an endpoint outage must not empty the picker,
+/// so an unreachable or unrecognised response falls back to [`ANTIGRAVITY_MODELS`].
 pub async fn fetch_antigravity_models(
-    _http_client: &reqwest::Client,
-    _bearer_token: &str,
+    http_client: &reqwest::Client,
+    bearer_token: &str,
 ) -> Result<Vec<String>, HarnessError> {
+    let mut last_error = None;
+
+    for endpoint in [MODELS_ENDPOINT, FALLBACK_MODELS_ENDPOINT] {
+        match http_client
+            .post(endpoint)
+            .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
+            .header(USER_AGENT, user_agent())
+            .header(CONTENT_TYPE, "application/json")
+            .json(&json!({}))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let models = models_from_listing(&body);
+                        if !models.is_empty() {
+                            return Ok(models);
+                        }
+                        last_error = Some("the response named no known model".to_string());
+                    }
+                    Err(error) => last_error = Some(format!("invalid JSON: {error}")),
+                }
+            }
+            Ok(response) => last_error = Some(format!("HTTP {}", response.status())),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+
+    tracing::debug!(
+        target: "harness_providers::antigravity",
+        "live model discovery unavailable ({}); using the CLI's current model list",
+        last_error.as_deref().unwrap_or("no endpoint answered")
+    );
     Ok(ANTIGRAVITY_MODELS.iter().map(|&m| m.to_string()).collect())
 }

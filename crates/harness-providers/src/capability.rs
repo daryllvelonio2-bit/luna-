@@ -24,6 +24,11 @@ use crate::catalog::get_default_model;
 
 /// Everything the resolver knows about one model, from its leaf name.
 fn from_leaf(leaf: &str) -> ModelCapabilities {
+    // A display name such as "Gemini 4 Argon" writes the version with a space where a model id
+    // writes a hyphen. Normalizing the separator lets one family rule cover both spellings.
+    let leaf = leaf.replace(' ', "-");
+    let leaf = leaf.as_str();
+
     let mut caps = ModelCapabilities {
         tool_use: true,
         ..ModelCapabilities::default()
@@ -79,7 +84,8 @@ fn from_leaf(leaf: &str) -> ModelCapabilities {
         || leaf.contains("qwen3")
         || leaf.contains("glm-z1")
         || leaf.contains("gemini-2.5")
-        || leaf.contains("gemini-3");
+        || leaf.contains("gemini-3")
+        || leaf.contains("gemini-4");
     caps.reasoning = reasoning;
 
     // --- Prompt caching -----------------------------------------------------------------------
@@ -248,6 +254,23 @@ mod tests {
                 "{model} is served by Code Assist, which caches the prefix"
             );
         }
+    }
+
+    /// The switcher now hands over display names ("Gemini 4 Argon") rather than backend ids
+    /// ("gemini-4-argon"). The family rules have to read both, or a reasoning model silently
+    /// loses its reasoning flag when the picker is corrected.
+    #[test]
+    fn a_display_name_keeps_the_capabilities_its_backend_id_had() {
+        for model in ["Gemini 4 Argon", "Gemini 3.8 Flash"] {
+            let caps = resolve("antigravity", model);
+            assert!(caps.vision, "{model} sees images");
+            assert!(caps.reasoning, "{model} is a reasoning model");
+            assert!(caps.tool_use, "{model} calls tools");
+        }
+        // GPT-OSS is text-only but cached; Claude on Code Assist is multimodal.
+        let gpt = resolve("antigravity", "GPT-OSS 120B (Medium)");
+        assert!(gpt.prompt_cache && !gpt.vision);
+        assert!(resolve("antigravity", "Claude Opus 5.5").vision);
     }
 
     #[test]

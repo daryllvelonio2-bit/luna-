@@ -39,9 +39,12 @@ pub struct ModelCacheEntry {
 
 /// Cache file schema. Bumped when a change means entries written by an older build must be
 /// refetched rather than trusted: version 1 is the build that started recording the context
-/// windows providers publish, so a version-0 cache would answer "nothing published" forever and
-/// every model would keep its guessed window until the TTL happened to expire.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+/// windows providers publish, and version 2 is the build that corrected the Antigravity model
+/// list, so a version-1 entry would keep serving the retired `gemini-2.5-pro`-era picker for a
+/// day after the upgrade. Version 0 (written before the field existed) is refetched for the same
+/// reason: it would answer "nothing published" forever and every model would keep its guessed
+/// window until the TTL happened to expire.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelsCache {

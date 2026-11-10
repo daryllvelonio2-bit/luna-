@@ -10,22 +10,57 @@ use serde_json::json;
 
 #[test]
 fn test_resolve_antigravity_model_mappings() {
+    // The two Gemini rows share the one tiered backend key; effort is carried by thinkingConfig.
     assert_eq!(
-        resolve_antigravity_model("gemini-3.8-flash", Some(&ReasoningEffort::High)),
+        resolve_antigravity_model("Gemini 4 Argon", Some(&ReasoningEffort::High)),
+        "gemini-3.8-flash-tiered"
+    );
+    assert_eq!(
+        resolve_antigravity_model("Gemini 4 Argon", None),
+        "gemini-3.8-flash-tiered"
+    );
+    assert_eq!(
+        resolve_antigravity_model("antigravity/Gemini 3.8 Flash", Some(&ReasoningEffort::Low)),
         "gemini-3.8-flash-tiered"
     );
     assert_eq!(
         resolve_antigravity_model("gemini-3.8-flash", None),
         "gemini-3.8-flash-tiered"
     );
+
+    // Claude picks its effort tier from the name, or from the session setting when the name has none.
     assert_eq!(
-        resolve_antigravity_model("antigravity/gemini-3.8-flash", Some(&ReasoningEffort::Low)),
-        "gemini-3.8-flash-tiered"
+        resolve_antigravity_model("Claude Opus 5.5", None),
+        "claude-opus-5-5-medium"
+    );
+    assert_eq!(
+        resolve_antigravity_model("Claude Opus 5.5", Some(&ReasoningEffort::High)),
+        "claude-opus-5-5-high"
+    );
+    assert_eq!(
+        resolve_antigravity_model("Claude Sonnet 5.5", Some(&ReasoningEffort::Low)),
+        "claude-sonnet-5-5-low"
+    );
+    assert_eq!(
+        resolve_antigravity_model("claude-sonnet-5-5-high", Some(&ReasoningEffort::Low)),
+        "claude-sonnet-5-5-high",
+        "a name that already carries a tier keeps it"
+    );
+    assert_eq!(
+        resolve_antigravity_model("claude-opus-5-5-max", None),
+        "claude-opus-5-5-max"
+    );
+
+    assert_eq!(
+        resolve_antigravity_model("GPT-OSS 120B (Medium)", Some(&ReasoningEffort::High)),
+        "gpt-oss-120b-medium"
     );
     assert_eq!(
         resolve_antigravity_model("gpt-oss-120b", None),
         "gpt-oss-120b-medium"
     );
+
+    // Names written by an older Luna still resolve.
     assert_eq!(
         resolve_antigravity_model("claude-sonnet-4-6", None),
         "claude-sonnet-4-6"
@@ -34,6 +69,62 @@ fn test_resolve_antigravity_model_mappings() {
         resolve_antigravity_model("claude-opus-4-6", None),
         "claude-opus-4-6-thinking"
     );
+    assert_eq!(
+        resolve_antigravity_model("gemini-2.5-flash", None),
+        "gemini-2.5-flash",
+        "an explicit backend key is not silently replaced by the tiered model"
+    );
+}
+
+/// The live table is folded into the CLI's switcher: its display names decide membership, stale
+/// families and internal entries are dropped, and the tiered Gemini key becomes the two Gemini
+/// rows the client shows.
+#[test]
+fn the_live_table_is_folded_into_the_cli_switcher() {
+    use super::quota::models_from_listing;
+
+    let listing = json!({
+        "models": {
+            "gemini-3.8-flash-tiered": { "displayName": null },
+            "gemini-3.8-flash-high": { "displayName": "Gemini 3.8 Flash (High)" },
+            "claude-opus-5-5-low": { "displayName": "Claude Opus 5.5 (Low)" },
+            "claude-opus-5-5-high": { "displayName": "Claude Opus 5.5 (High)" },
+            "claude-sonnet-5-5-medium": { "displayName": "Claude Sonnet 5.5 (Medium)" },
+            "gpt-oss-120b-medium": { "displayName": "GPT-OSS 120B (Medium)" },
+            // Retired and internal entries must not reach the picker.
+            "gemini-2.5-pro": { "displayName": "Gemini 2.5 Pro" },
+            "gemini-2.5-flash": { "displayName": "Gemini 3.5 Flash Lite" },
+            "gemini-3-flash": { "displayName": "Gemini 3 Flash" },
+            "chat_20706": { "displayName": null },
+            "tab_flash_lite_preview": { "displayName": null }
+        }
+    });
+
+    assert_eq!(
+        models_from_listing(&listing),
+        vec![
+            "Gemini 4 Argon",
+            "Gemini 3.8 Flash",
+            "Claude Opus 5.5",
+            "Claude Sonnet 5.5",
+            "GPT-OSS 120B (Medium)",
+        ]
+    );
+
+    // An account without the newer Claude/GPT families gets only what it can spend on.
+    let claude_only = json!({
+        "models": {
+            "claude-sonnet-5-5-low": { "displayName": "Claude Sonnet 5.5 (Low)" }
+        }
+    });
+    assert_eq!(
+        models_from_listing(&claude_only),
+        vec!["Gemini 4 Argon", "Gemini 3.8 Flash", "Claude Sonnet 5.5"]
+    );
+
+    // Nothing recognised: the caller falls back rather than showing a partial or empty picker.
+    assert!(models_from_listing(&json!({ "models": { "chat_20706": {} } })).is_empty());
+    assert!(models_from_listing(&json!({})).is_empty());
 }
 
 #[test]

@@ -484,7 +484,14 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             auth_header_format: AuthHeaderFormat::Bearer,
             context_windows: ctx_windows(&[
+                ("Gemini 4 Argon", 1_000_000),
+                ("Gemini 3.8 Flash", 1_000_000),
+                ("Claude Opus 5.5", 200_000),
+                ("Claude Sonnet 5.5", 200_000),
+                ("GPT-OSS 120B (Medium)", 128_000),
+                // Names written by an older Luna, and backend keys a stored session may still hold.
                 ("gemini-3.8-flash", 1_000_000),
+                ("gemini-3.8-flash-tiered", 1_000_000),
                 ("claude-sonnet-4-6", 200_000),
                 ("claude-opus-4-6", 200_000),
                 ("gpt-oss-120b", 128_000),
@@ -719,7 +726,7 @@ pub fn get_default_model(provider: &str) -> &'static str {
         "huggingface" => "meta-llama/Llama-3.1-70B-Instruct",
         "copilot" => "gpt-4o",
         "openai" => "gpt-4o",
-        "antigravity" | "agy" => "gemini-3.8-flash",
+        "antigravity" | "agy" => "Gemini 3.8 Flash",
         "opencode" | "opencode-zen" => "deepseek-v4.1-flash-free",
         "opencode-cli" => "opencode/deepseek-v4.1-flash-free",
         _ => "default",
