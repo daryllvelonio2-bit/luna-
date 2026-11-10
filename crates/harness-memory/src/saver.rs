@@ -2511,14 +2511,13 @@ fn balanced_object(text: &str) -> Option<String> {
             if let Ok(serde_json::Value::Object(map)) =
                 serde_json::from_str::<serde_json::Value>(&attempt)
             {
-                if map.contains_key("operations")
+                if (map.contains_key("operations")
                     || map.contains_key("candidates")
                     || map.contains_key("memories")
-                    || map.contains_key("notes")
+                    || map.contains_key("notes"))
+                    && !has_trailing_unclosed
                 {
-                    if !has_trailing_unclosed {
-                        return Some(attempt);
-                    }
+                    return Some(attempt);
                 }
                 if fallback_valid.is_none() {
                     fallback_valid = Some(attempt);
