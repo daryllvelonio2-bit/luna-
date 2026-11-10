@@ -297,6 +297,31 @@ pub fn new_opencode_request_id() -> String {
     format!("msg_{:012x}{}", current, tail)
 }
 
+/// Permissions handed to the OpenCode session Luna drives.
+///
+/// Luna brings its own tools, so OpenCode's Code Mode must stay off. With `execute` available the
+/// model writes JavaScript to reach the filesystem instead of calling the session's tools and
+/// skills, which is what made every turn look the same. The rule goes last because the last
+/// matching rule wins; denying `execute` also removes the MCP tools reachable only through it.
+fn session_permissions(is_yolo: bool) -> serde_json::Value {
+    let mut rules = if is_yolo {
+        vec![json!({ "action": "*", "resource": "*", "effect": "allow" })]
+    } else {
+        vec![
+            json!({ "action": "*", "resource": "*", "effect": "allow" }),
+            json!({ "action": "edit", "resource": "*", "effect": "ask" }),
+            json!({ "action": "write", "resource": "*", "effect": "ask" }),
+            json!({ "action": "patch", "resource": "*", "effect": "ask" }),
+            json!({ "action": "delete", "resource": "*", "effect": "ask" }),
+            json!({ "action": "shell", "resource": "*", "effect": "ask" }),
+            json!({ "action": "terminal", "resource": "*", "effect": "ask" }),
+            json!({ "action": "bash", "resource": "*", "effect": "ask" }),
+        ]
+    };
+    rules.push(json!({ "action": "execute", "resource": "*", "effect": "deny" }));
+    serde_json::Value::Array(rules)
+}
+
 /// Inject bash and read tools into payload for OpenCode free-tier requests if missing.
 ///
 /// OpenCode Zen's free tier verifies that requests originate from within OpenCode by
@@ -1161,22 +1186,7 @@ pub async fn native_opencode_stream(
         .map(|b| b.allow_all.load(Ordering::SeqCst))
         .unwrap_or(false);
 
-    let permissions_payload = if is_yolo {
-        json!([
-            { "action": "*", "resource": "*", "effect": "allow" }
-        ])
-    } else {
-        json!([
-            { "action": "*", "resource": "*", "effect": "allow" },
-            { "action": "edit", "resource": "*", "effect": "ask" },
-            { "action": "write", "resource": "*", "effect": "ask" },
-            { "action": "patch", "resource": "*", "effect": "ask" },
-            { "action": "delete", "resource": "*", "effect": "ask" },
-            { "action": "shell", "resource": "*", "effect": "ask" },
-            { "action": "terminal", "resource": "*", "effect": "ask" },
-            { "action": "bash", "resource": "*", "effect": "ask" }
-        ])
-    };
+    let permissions_payload = session_permissions(is_yolo);
 
     let create_session_url = format!("{}/api/session", service.url.trim_end_matches('/'));
     let create_payload = json!({
@@ -2558,6 +2568,22 @@ pub async fn fetch_opencode_cli_models() -> Result<Vec<String>, HarnessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Code Mode is never offered to a Luna session: the deny rule must come after the blanket
+    /// allow, because OpenCode applies the last matching rule.
+    #[test]
+    fn code_mode_is_denied_after_the_blanket_allow() {
+        for yolo in [false, true] {
+            let rules = session_permissions(yolo)
+                .as_array()
+                .expect("an array of rules")
+                .clone();
+            let last = rules.last().expect("at least one rule");
+            assert_eq!(last["action"], "execute");
+            assert_eq!(last["effect"], "deny");
+            assert_eq!(rules[0]["effect"], "allow");
+        }
+    }
 
     /// The live wire puts `input` and `cache.read` side by side; the ledger's contract is that the
     /// cache count is part of the prompt. Row 456 of a real ledger had 56 input and 7,680 cached.
