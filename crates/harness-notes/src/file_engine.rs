@@ -15,10 +15,17 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::distiller::PointerDistiller;
+use crate::projects;
 use harness_core::{HarnessError, Note, NotesEngine};
 
 /// Marks the end of the front matter block.
 const FRONT_MATTER_FENCE: &str = "---";
+
+/// Every note file as `(project, path)`, paired with the mtime cache keyed by path.
+type ScannedNotes = (
+    Vec<(String, PathBuf)>,
+    std::collections::HashMap<PathBuf, std::time::SystemTime>,
+);
 
 /// Words too common to identify a note. Without this, a natural-language query would match every
 /// note on its articles and prepositions; the exact-phrase check still uses the whole query.
@@ -102,6 +109,12 @@ impl FileNotesEngine {
                 e
             ))
         })?;
+
+        // The layout is folder-based; the one-time move keeps a flat install working. Both steps
+        // are best-effort in spirit, but a failure here means notes would be invisible, so it is
+        // reported rather than swallowed.
+        projects::migrate_flat(&dir)?;
+        projects::ensure(&dir, projects::DEFAULT_PROJECT)?;
 
         if let Some(db) = legacy_db {
             Self::import_legacy(&dir, &db);
@@ -188,7 +201,10 @@ impl FileNotesEngine {
                             updated_at: parse_timestamp(&updated),
                             ..Default::default()
                         };
-                        match write_note(dir, &note, true) {
+                        let target = projects::ensure(dir, projects::DEFAULT_PROJECT)
+                            .map(|project| project.notes_dir())
+                            .unwrap_or_else(|_| dir.to_path_buf());
+                        match write_note(&target, &note, true) {
                             Ok(_) => imported += 1,
                             Err(error) => warn!("could not import note '{}': {}", note.id, error),
                         }
@@ -219,15 +235,48 @@ impl FileNotesEngine {
         }
     }
 
-    /// Every note on disk, newest update first.
+    /// Every note file in the workspace as `(project, path)`.
+    ///
+    /// Reads `<project>/notes/*.md` for each project, plus any top-level `*.md` left behind by an
+    /// install that has not been migrated yet (or a file the user dropped in on purpose).
+    fn note_paths(&self) -> Result<Vec<(String, PathBuf)>, HarnessError> {
+        let mut paths = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for project in projects::list(&self.dir)? {
+            let Ok(entries) = std::fs::read_dir(project.notes_dir()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md")
+                    && seen.insert(path.clone())
+                {
+                    paths.push((project.slug.clone(), path));
+                }
+            }
+        }
+
+        // Flat leftovers. `migrate_flat` normally moves these on startup, so this only matters for
+        // a read-only folder or a note added after the migration marker was written.
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|e| e.to_str()) == Some("md")
+                    && seen.insert(path.clone())
+                {
+                    paths.push((projects::DEFAULT_PROJECT.to_string(), path));
+                }
+            }
+        }
+
+        Ok(paths)
+    }
+
+    /// Every note on disk, newest update first, each carrying its project tag.
     fn load_all(&self) -> Result<Vec<Note>, HarnessError> {
-        let entries = std::fs::read_dir(&self.dir).map_err(|e| {
-            HarnessError::NotesError(format!(
-                "Failed to read notes directory '{}': {}",
-                self.dir.display(),
-                e
-            ))
-        })?;
+        let (paths, mtimes) = self.scan()?;
 
         let mut current_paths = std::collections::HashSet::new();
         let mut notes = Vec::new();
@@ -235,15 +284,11 @@ impl FileNotesEngine {
 
         {
             let cache = self.cache.read().unwrap();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
+            for (project, path) in paths {
                 current_paths.insert(path.clone());
-                let mtime = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
+                let mtime = mtimes
+                    .get(&path)
+                    .copied()
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
                 if let Some((cached_mtime, cached_note)) = cache.get(&path) {
@@ -254,7 +299,10 @@ impl FileNotesEngine {
                 }
 
                 match parse_note_file(&path) {
-                    Ok(note) => {
+                    Ok(mut note) => {
+                        // The folder is authoritative: a note dropped into `<project>/notes/` by
+                        // hand joins that project even if its front matter predates projects.
+                        projects::tag_for_project(&mut note.tags, &project);
                         notes.push(note.clone());
                         cache_updates.push((path, mtime, note));
                     }
@@ -275,17 +323,72 @@ impl FileNotesEngine {
         Ok(notes)
     }
 
+    /// All note files with their mtime, read once per `load_all`.
+    fn scan(&self) -> Result<ScannedNotes, HarnessError> {
+        let paths = self.note_paths()?;
+        let mut mtimes = std::collections::HashMap::new();
+        for (_, path) in &paths {
+            let mtime = std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            mtimes.insert(path.clone(), mtime);
+        }
+        Ok((paths, mtimes))
+    }
+
     /// Resolves the filesystem path for a note id, ensuring the resulting path is strictly
     /// inside `self.dir`.
+    ///
+    /// An id may be qualified as `<project>/<slug>`; a bare id resolves to the single file that
+    /// holds it, preferring the default project when several projects reuse a slug.
     pub fn note_path(&self, id: &str) -> Result<PathBuf, HarnessError> {
-        let trimmed = id.trim();
-        if !is_safe_note_id(trimmed) {
+        let (project, leaf) = projects::split_qualified(id.trim());
+        if !is_safe_note_id(leaf) {
             return Err(HarnessError::NotesError(format!(
                 "Invalid note id '{}': must not contain path separators, start with '.', or escape notes directory",
                 id
             )));
         }
-        let target = self.dir.join(format!("{}.md", trimmed));
+
+        if let Some(project) = project {
+            return self.checked_path(&self.dir.join(project).join(projects::NOTES_SUBDIR), leaf);
+        }
+
+        let mut matches = self.notes_named(leaf)?;
+        match matches.len() {
+            1 => return Ok(matches.remove(0)),
+            n if n > 1 => {
+                if let Some(found) = matches.into_iter().find(|path| {
+                    projects::project_of_path(&self.dir, path).as_deref()
+                        == Some(projects::DEFAULT_PROJECT)
+                }) {
+                    return Ok(found);
+                }
+            }
+            _ => {}
+        }
+
+        self.checked_path(
+            &self.dir
+                .join(projects::DEFAULT_PROJECT)
+                .join(projects::NOTES_SUBDIR),
+            leaf,
+        )
+    }
+
+    /// Every note file whose stem matches `leaf`, regardless of project.
+    fn notes_named(&self, leaf: &str) -> Result<Vec<PathBuf>, HarnessError> {
+        Ok(self
+            .note_paths()?
+            .into_iter()
+            .map(|(_, path)| path)
+            .filter(|path| path.file_stem().and_then(|stem| stem.to_str()) == Some(leaf))
+            .collect())
+    }
+
+    /// `<dir>/<leaf>.md`, canonicalised and confined to the workspace when it exists.
+    fn checked_path(&self, dir: &Path, leaf: &str) -> Result<PathBuf, HarnessError> {
+        let target = dir.join(format!("{}.md", leaf));
         if target.exists() {
             let canonical = target.canonicalize().map_err(|e| {
                 HarnessError::NotesError(format!(
@@ -309,18 +412,27 @@ impl FileNotesEngine {
 
     /// Resolves a note by file stem (its id) or, failing that, by title.
     fn find(&self, id: &str) -> Result<Note, HarnessError> {
-        if is_safe_note_id(id) {
-            if let Ok(direct) = self.note_path(id) {
+        let (project, leaf) = projects::split_qualified(id.trim());
+        let base = match project {
+            Some(project) => format!("{project}/{leaf}"),
+            None => leaf.to_string(),
+        };
+        if is_safe_note_id(leaf) {
+            if let Ok(direct) = self.note_path(&base) {
                 if direct.is_file() {
-                    return parse_note_file(&direct);
+                    let mut note = parse_note_file(&direct)?;
+                    if let Some(project) = projects::project_of_path(&self.dir, &direct) {
+                        projects::tag_for_project(&mut note.tags, &project);
+                    }
+                    return Ok(note);
                 }
             }
-            let part1_id = format!("{}-part-1", id);
+            let part1_id = format!("{}-part-1", base);
             if let Ok(part1_path) = self.note_path(&part1_id) {
                 if part1_path.is_file() {
                     let mut parts = Vec::new();
                     let mut p = 1;
-                    while let Ok(part_path) = self.note_path(&format!("{}-part-{}", id, p)) {
+                    while let Ok(part_path) = self.note_path(&format!("{}-part-{}", base, p)) {
                         if part_path.is_file() {
                             if let Ok(part_note) = parse_note_file(&part_path) {
                                 parts.push(part_note);
@@ -344,7 +456,7 @@ impl FileNotesEngine {
                             .unwrap_or(&first.title)
                             .to_string();
                         return Ok(Note {
-                            id: id.to_string(),
+                            id: base.clone(),
                             title,
                             content: full_content,
                             summary_pointer: first.summary_pointer.clone(),
@@ -366,7 +478,13 @@ impl FileNotesEngine {
 
         self.load_all()?
             .into_iter()
-            .find(|n| n.id == id || n.title.eq_ignore_ascii_case(id))
+            .find(|n| {
+                n.id == base
+                    || n.id == id
+                    || n.id == leaf
+                    || n.title.eq_ignore_ascii_case(id)
+                    || n.title.eq_ignore_ascii_case(leaf)
+            })
             .ok_or_else(|| {
                 HarnessError::NotesError(format!(
                     "Note '{}' not found in '{}'",
@@ -473,14 +591,21 @@ fn titles_near_match(a: &str, b: &str) -> bool {
 }
 
 /// Whether two sets of tags strongly overlap on a specific domain.
+///
+/// Project tags are stripped first: `project:inbox` is routing metadata, and counting it as a
+/// shared topical tag would make two unrelated notes look related.
 fn tags_near_match(tags_a: &[String], tags_b: &[String]) -> bool {
-    if tags_a.is_empty() || tags_b.is_empty() {
+    let topical = |tags: &[String]| -> std::collections::HashSet<String> {
+        tags.iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.starts_with(projects::PROJECT_TAG_PREFIX) && !t.starts_with("project/"))
+            .collect()
+    };
+    let set_a = topical(tags_a);
+    let set_b = topical(tags_b);
+    if set_a.is_empty() || set_b.is_empty() {
         return false;
     }
-    let set_a: std::collections::HashSet<String> =
-        tags_a.iter().map(|t| t.trim().to_lowercase()).collect();
-    let set_b: std::collections::HashSet<String> =
-        tags_b.iter().map(|t| t.trim().to_lowercase()).collect();
     let shared = set_a.intersection(&set_b).count();
     shared >= 2 || (shared >= 1 && (set_a.len() == 1 || set_b.len() == 1))
 }
@@ -554,19 +679,30 @@ impl NotesEngine for FileNotesEngine {
     ) -> Result<Note, HarnessError> {
         let slug = slugify(title);
 
-        // Near-match title and tag reconciliation:
+        // The `project:<name>` tag decides the folder; a note without one lands in `inbox`.
+        let project_slug = projects::project_from_tags(tags)
+            .unwrap_or_else(|| projects::DEFAULT_PROJECT.to_string());
+        let project = projects::ensure(&self.dir, &project_slug)?;
+        let notes_dir = project.notes_dir();
+
+        // Near-match title and tag reconciliation, confined to the same project: two projects may
+        // legitimately hold a note with the same title, and merging across them would move data
+        // the user never asked to move.
         let all_notes = self.load_all()?;
         let existing = all_notes.into_iter().find(|n| {
             if n.parent_id.is_some() {
                 return false;
             }
-            n.id == slug
-                || n.id == title
-                || n.title.eq_ignore_ascii_case(title)
-                || (titles_near_match(&n.title, title)
-                    && (tags.is_empty()
-                        || tags_near_match(&n.tags, tags)
-                        || title_words(&n.title) == title_words(title)))
+            let same_project = projects::project_from_tags(&n.tags).as_deref()
+                == Some(project.slug.as_str());
+            same_project
+                && (n.id == slug
+                    || n.id == title
+                    || n.title.eq_ignore_ascii_case(title)
+                    || (titles_near_match(&n.title, title)
+                        && (tags.is_empty()
+                            || tags_near_match(&n.tags, tags)
+                            || title_words(&n.title) == title_words(title))))
         });
 
         if let Some(existing) = existing {
@@ -607,7 +743,7 @@ impl NotesEngine for FileNotesEngine {
         let id = {
             let mut candidate = slug.clone();
             let mut attempt = 0u32;
-            while self.dir.join(format!("{}.md", candidate)).exists() {
+            while notes_dir.join(format!("{}.md", candidate)).exists() {
                 attempt += 1;
                 candidate = format!("{}-{}", slug, attempt);
                 if attempt > 128 {
@@ -619,12 +755,14 @@ impl NotesEngine for FileNotesEngine {
         };
 
         let now = Utc::now();
+        let mut note_tags = tags.to_vec();
+        projects::tag_for_project(&mut note_tags, &project.slug);
         let note = Note {
             id,
             title: title.trim().to_string(),
             content: content.to_string(),
             summary_pointer: PointerDistiller::distill(title, content),
-            tags: tags.to_vec(),
+            tags: note_tags,
             created_at: now,
             updated_at: now,
             parent_id: None,
@@ -633,7 +771,7 @@ impl NotesEngine for FileNotesEngine {
             content_hash: Some(compute_content_hash(content)),
         };
 
-        let path = write_note_with_chunks(&self.dir, &note)?;
+        let path = write_note_with_chunks(&notes_dir, &note)?;
         info!(
             "Saved note '{}' to '{}' (Pointer: '{}')",
             note.id,
@@ -710,7 +848,18 @@ impl NotesEngine for FileNotesEngine {
         let new_title = title.map(str::trim).unwrap_or(&current.title).to_string();
         let new_content = content.unwrap_or(&current.content).to_string();
         let new_pointer = PointerDistiller::distill(&new_title, &new_content);
-        let new_tags = tags.map(|t| t.to_vec()).unwrap_or(current.tags);
+        let mut new_tags = tags.map(|t| t.to_vec()).unwrap_or_else(|| current.tags.clone());
+        if let Some(project) = projects::project_from_tags(&current.tags) {
+            projects::tag_for_project(&mut new_tags, &project);
+        }
+
+        // Write back where the note actually lives. A `find` by title can resolve a note in any
+        // project, and rewriting it into the notes root would silently pull it out of its folder.
+        let existing_path = self.note_path(&qualified_id(&current))?;
+        let target_dir = existing_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.dir.clone());
 
         let note = Note {
             id: current.id.clone(),
@@ -725,7 +874,7 @@ impl NotesEngine for FileNotesEngine {
             part_count: current.part_count,
             content_hash: None,
         };
-        let path = write_note_with_chunks(&self.dir, &note)?;
+        let path = write_note_with_chunks(&target_dir, &note)?;
 
         info!("Updated note '{}' ('{}')", note.id, path.display());
         Ok(note)
@@ -737,18 +886,17 @@ impl NotesEngine for FileNotesEngine {
             return Ok(false);
         };
 
-        let path = self.note_path(&note.id)?;
+        let qualified = qualified_id(&note);
+        let path = self.note_path(&qualified)?;
         let mut deleted = false;
-        if path.is_file() {
-            if std::fs::remove_file(&path).is_ok() {
-                deleted = true;
-                if let Ok(mut cache) = self.cache.write() {
-                    cache.remove(&path);
-                }
+        if path.is_file() && std::fs::remove_file(&path).is_ok() {
+            deleted = true;
+            if let Ok(mut cache) = self.cache.write() {
+                cache.remove(&path);
             }
         }
         let mut p = 1;
-        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", note.id, p)) {
+        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", qualified, p)) {
             if part_path.is_file() {
                 let _ = std::fs::remove_file(&part_path);
                 if let Ok(mut cache) = self.cache.write() {
@@ -774,8 +922,15 @@ impl NotesEngine for FileNotesEngine {
             return Ok(false);
         };
 
-        let path = self.note_path(&note.id)?;
+        let qualified = qualified_id(&note);
+        let path = self.note_path(&qualified)?;
         let archive_dir = self.dir.join(ARCHIVE_DIR);
+        // Keep the project folder inside the archive so two projects with the same slug never
+        // overwrite each other and a restore is a plain move back.
+        let archive_dir = match projects::project_from_tags(&note.tags) {
+            Some(project) => archive_dir.join(project),
+            None => archive_dir,
+        };
         std::fs::create_dir_all(&archive_dir).map_err(|e| {
             HarnessError::NotesError(format!(
                 "Failed to create the notes archive '{}': {}",
@@ -795,7 +950,7 @@ impl NotesEngine for FileNotesEngine {
             }
         }
         let mut p = 1;
-        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", note.id, p)) {
+        while let Ok(part_path) = self.note_path(&format!("{}-part-{}", qualified, p)) {
             if part_path.is_file() {
                 let part_target = archive_dir.join(format!("{}-part-{}.md", note.id, p));
                 let _ = harness_core::fsutil::replace_file(&part_path, &part_target);
@@ -815,6 +970,17 @@ impl NotesEngine for FileNotesEngine {
         } else {
             Ok(false)
         }
+    }
+}
+
+/// The id to resolve a note with, including its project when one is recorded in the tags.
+///
+/// A bare slug is ambiguous across projects; the project tag the loader attaches makes the
+/// lookup exact without changing the stored id.
+fn qualified_id(note: &Note) -> String {
+    match projects::project_from_tags(&note.tags) {
+        Some(project) => format!("{project}/{}", note.id),
+        None => note.id.clone(),
     }
 }
 

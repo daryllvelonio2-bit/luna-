@@ -21,7 +21,7 @@ async fn test_stress_chunking_and_reconciliation_benchmark() {
     println!("Saved 135 KB note in: {:?}", save_duration);
 
     // Verify chunks exist on disk
-    let files = std::fs::read_dir(engine.dir()).unwrap();
+    let files = std::fs::read_dir(engine.dir().join("inbox").join("notes")).unwrap();
     let part_files: Vec<_> = files
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().contains("-part-"))

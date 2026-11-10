@@ -50,6 +50,17 @@ impl GraphBuilder {
         for node in extraction.nodes {
             if node.kind == NodeKind::Note && node.metadata.contains_key("placeholder") {
                 let id = node.id.clone();
+                // A note already defined by an earlier extraction must not be
+                // demoted back to a placeholder: links resolve regardless of the
+                // order notes are read in, so a later citation is not evidence
+                // that the target is missing.
+                let resolved = self
+                    .nodes
+                    .get(&id)
+                    .is_some_and(|existing| !existing.metadata.contains_key("placeholder"));
+                if resolved {
+                    continue;
+                }
                 self.placeholders.insert(id.clone());
                 self.nodes.entry(id).or_insert(node);
                 continue;
@@ -230,6 +241,50 @@ mod tests {
             Some(NodeKind::Missing)
         );
         assert_eq!(graph.dangling, vec!["ghost".to_string()]);
+    }
+
+    /// An extraction for `other` that cites `target` without defining it: exactly
+    /// what `extract_note` produces for a `[[target]]` wikilink.
+    fn citation(other: &str, target: &str) -> Extraction {
+        Extraction {
+            nodes: vec![
+                Node::new(note_id(other), other, NodeKind::Note),
+                Node::new(note_id(target), target, NodeKind::Note).with("placeholder", "true"),
+            ],
+            edges: vec![Edge::new(
+                note_id(other),
+                note_id(target),
+                Relation::References,
+                Confidence::Extracted,
+            )],
+            terms: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_later_placeholder_does_not_demote_an_existing_note() {
+        // `release` is read first and defines the real page node. `other` cites
+        // it afterwards, emitting a placeholder for the same id. The citation is
+        // not evidence that the target is missing, so the real node must survive.
+        let graph = build(vec![extraction("release", &[]), citation("other", "release")]);
+        assert_eq!(
+            graph.node(&note_id("release")).map(|n| n.kind),
+            Some(NodeKind::Note)
+        );
+        assert!(graph.dangling.is_empty(), "{:?}", graph.dangling);
+    }
+
+    #[test]
+    fn link_resolution_does_not_depend_on_note_order() {
+        let forward = build(vec![extraction("release", &[]), citation("other", "release")]);
+        let reversed = build(vec![citation("other", "release"), extraction("release", &[])]);
+        for graph in [forward, reversed] {
+            assert_eq!(
+                graph.node(&note_id("release")).map(|n| n.kind),
+                Some(NodeKind::Note)
+            );
+            assert!(graph.dangling.is_empty(), "{:?}", graph.dangling);
+        }
     }
 
     #[test]

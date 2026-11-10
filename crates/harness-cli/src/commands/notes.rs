@@ -1,31 +1,42 @@
-//! `luna notes` — build a knowledge graph over the Markdown notes store.
+//! `luna notes` — per-project notes, system documentation, and a knowledge graph.
 //!
-//! The graph itself lives in `harness-note-graph`; this command reads the notes
-//! through the configured engine, writes the artifacts, and renders the report.
-//! All user-visible prose belongs here, per `agents.md` §1.
+//! The graph itself lives in `harness-note-graph`; the workspace layout lives in
+//! `harness_notes::projects`; this command wires them together, writes the artifacts, and renders
+//! the report. All user-visible prose belongs here, per `agents.md` §1.
+//!
+//! Layout written under `paths.notes_dir`:
+//!
+//! ```text
+//! <project>/notes/*.md      the notes themselves
+//! <project>/docs/           generated system documentation
+//! <project>/graph/          per-project graph artifacts
+//! graph/                    the combined graph across every project
+//! ```
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use harness_core::config::Config;
-use harness_core::{HarnessError, NotesEngine};
+use harness_core::{HarnessError, Note, NotesEngine};
 use harness_note_graph::{
     analyze::{QuestionKind, SurpriseReason},
     export, graph_notes, validate, BuiltGraph,
 };
-use harness_notes::FileNotesEngine;
-
-/// Default folder name under `paths.notes_dir` for generated artifacts.
-const OUTPUT_DIR_NAME: &str = "graph";
+use harness_notes::{projects, FileNotesEngine};
+use serde_json::json;
 
 /// Report file written beside `graph.json`.
 const REPORT_FILE: &str = "GRAPH_REPORT.md";
 
+/// Folder under `paths.notes_dir` for the graph that spans every project.
+const COMBINED_DIR: &str = "graph";
+
 #[derive(Debug, Subcommand)]
 pub enum NotesCommand {
-    /// Build the notes knowledge graph and write graph.json, the wiki and a report
+    /// Build the knowledge graph for one project, or for every project plus the combined view
     Graph {
-        /// Output directory (default: `<notes_dir>/graph`)
+        /// Output directory (default: `<notes_dir>/graph`, or `<notes_dir>/<project>/graph`)
         #[arg(long)]
         out: Option<PathBuf>,
         /// One JSON summary on stdout
@@ -37,6 +48,29 @@ pub enum NotesCommand {
         /// Skip the graph.html and graph.svg visual exports
         #[arg(long)]
         no_visual: bool,
+        /// Restrict to one project (for example `inbox` or `my-app`)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Inspect and create project folders
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// List the projects in the notes workspace
+    List {
+        /// One JSON array on stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a project folder with `notes/`, `docs/` and `graph/`
+    New {
+        /// Display name; the folder is its slug (`My App` -> `my-app`)
+        name: String,
     },
 }
 
@@ -50,7 +84,150 @@ pub async fn handle_notes_command(
             json,
             no_wiki,
             no_visual,
-        } => run_graph(config, out, json, no_wiki, no_visual).await,
+            project,
+        } => run_graph(config, out, json, no_wiki, no_visual, project).await,
+        NotesCommand::Project { command } => run_project(command, config).await,
+    }
+}
+
+fn open_engine(config: &Config) -> Result<FileNotesEngine, HarnessError> {
+    FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )
+}
+
+/// The project a note belongs to; the loader guarantees a tag, this is the fallback.
+fn project_of(note: &Note) -> String {
+    projects::project_from_tags(&note.tags)
+        .unwrap_or_else(|| projects::DEFAULT_PROJECT.to_string())
+}
+
+async fn run_project(command: ProjectCommand, config: &Config) -> Result<(), HarnessError> {
+    let notes_dir = &config.paths.notes_dir;
+    match command {
+        ProjectCommand::New { name } => {
+            let project = projects::ensure(notes_dir, &name)?;
+            println!("project: {}", project.slug);
+            println!("name:    {}", project.name);
+            println!("notes:   {}", project.notes_dir().display());
+            println!("docs:    {}", project.docs_dir().display());
+            println!("graph:   {}", project.graph_dir().display());
+            Ok(())
+        }
+        ProjectCommand::List { json } => {
+            let engine = open_engine(config)?;
+            let notes = engine.list_notes(usize::MAX, 0).await?;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for note in &notes {
+                *counts.entry(project_of(note)).or_default() += 1;
+            }
+            let listed = projects::list(notes_dir)?;
+
+            if json {
+                let value = json!({
+                    "notes_dir": notes_dir,
+                    "projects": listed.iter().map(|project| json!({
+                        "slug": project.slug,
+                        "name": project.name,
+                        "path": project.dir,
+                        "notes": counts.get(&project.slug).copied().unwrap_or(0),
+                    })).collect::<Vec<_>>(),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value)
+                        .map_err(|error| HarnessError::SerializationError(error.to_string()))?
+                );
+                return Ok(());
+            }
+
+            if listed.is_empty() {
+                println!("no projects in '{}'", notes_dir.display());
+                return Ok(());
+            }
+            for project in &listed {
+                println!(
+                    "{:<20} {:>4} notes  {}",
+                    project.slug,
+                    counts.get(&project.slug).copied().unwrap_or(0),
+                    project.dir.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Counts and paths for one graph build, so printing and `--json` share the same source.
+struct GraphSummary {
+    scope: String,
+    output: PathBuf,
+    graph: PathBuf,
+    html: Option<PathBuf>,
+    svg: Option<PathBuf>,
+    wiki: Option<PathBuf>,
+    notes: usize,
+    nodes: usize,
+    edges: usize,
+    communities: usize,
+    dangling: usize,
+    hubs: Vec<(String, String, usize)>,
+    issues: Vec<String>,
+}
+
+impl GraphSummary {
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "scope": self.scope,
+            "output": self.output,
+            "graph": self.graph,
+            "html": self.html,
+            "svg": self.svg,
+            "wiki": self.wiki,
+            "notes": self.notes,
+            "nodes": self.nodes,
+            "edges": self.edges,
+            "communities": self.communities,
+            "dangling": self.dangling,
+            "hubs": self.hubs.iter().map(|(label, kind, degree)| json!({
+                "label": label,
+                "kind": kind,
+                "degree": degree,
+            })).collect::<Vec<_>>(),
+            "issues": self.issues,
+        })
+    }
+
+    fn print(&self) {
+        println!(
+            "{:<18} notes: {}  nodes: {}  edges: {}  communities: {}  dangling: {}",
+            self.scope, self.notes, self.nodes, self.edges, self.communities, self.dangling
+        );
+        if let Some((label, kind, degree)) = self.hubs.first() {
+            println!(
+                "{:<18} top hub: {} ({} connections, {})",
+                "", label, degree, kind
+            );
+        }
+        println!("{:<18} graph: {}", "", self.graph.display());
+        if let Some(path) = &self.html {
+            println!("{:<18} html:  {}", "", path.display());
+        }
+        if let Some(path) = &self.svg {
+            println!("{:<18} svg:   {}", "", path.display());
+        }
+        if let Some(path) = &self.wiki {
+            println!("{:<18} wiki:  {}", "", path.display());
+        }
+        if !self.issues.is_empty() {
+            println!(
+                "{:<18} warnings: {} (see {})",
+                "",
+                self.issues.len(),
+                self.output.join(REPORT_FILE).display()
+            );
+        }
     }
 }
 
@@ -60,28 +237,101 @@ async fn run_graph(
     json: bool,
     no_wiki: bool,
     no_visual: bool,
+    project: Option<String>,
 ) -> Result<(), HarnessError> {
-    let engine = FileNotesEngine::new(
-        config.paths.notes_dir.clone(),
-        Some(config.paths.notes_db.clone()),
-    )?;
+    let notes_dir = &config.paths.notes_dir;
+    let engine = open_engine(config)?;
     let notes = engine.list_notes(usize::MAX, 0).await?;
     if notes.is_empty() {
         return Err(HarnessError::NotesError(format!(
             "no notes found in '{}'",
-            config.paths.notes_dir.display()
+            notes_dir.display()
         )));
     }
 
-    let built = graph_notes(&notes);
-    let issues = validate(&built.graph);
-    let out_dir = out.unwrap_or_else(|| config.paths.notes_dir.join(OUTPUT_DIR_NAME));
-    std::fs::create_dir_all(&out_dir).map_err(|error| {
+    // Group once: the combined graph and every per-project graph come from the same read.
+    let mut groups: BTreeMap<String, Vec<Note>> = BTreeMap::new();
+    for note in notes {
+        groups.entry(project_of(&note)).or_default().push(note);
+    }
+
+    let mut summaries = Vec::new();
+
+    if let Some(slug) = project.as_deref() {
+        let slug = projects::slugify_project(slug);
+        let Some(selected) = groups.remove(&slug) else {
+            let known: Vec<&str> = groups.keys().map(String::as_str).collect();
+            return Err(HarnessError::NotesError(format!(
+                "project '{}' has no notes (known: {})",
+                slug,
+                known.join(", ")
+            )));
+        };
+        let output = out.unwrap_or_else(|| notes_dir.join(&slug).join(projects::GRAPH_SUBDIR));
+        summaries.push(write_graph(
+            &selected,
+            &output,
+            &slug,
+            no_wiki,
+            no_visual,
+        )?);
+    } else {
+        // The combined view keeps cross-project links intact: a note in one project can reference
+        // a note in another, and only this graph can resolve that edge.
+        let all: Vec<Note> = groups.values().flatten().cloned().collect();
+        let combined_dir = out.unwrap_or_else(|| notes_dir.join(COMBINED_DIR));
+        summaries.push(write_graph(
+            &all,
+            &combined_dir,
+            "all projects",
+            no_wiki,
+            no_visual,
+        )?);
+
+        for (slug, subset) in &groups {
+            let output = notes_dir.join(slug).join(projects::GRAPH_SUBDIR);
+            summaries.push(write_graph(subset, &output, slug, no_wiki, no_visual)?);
+        }
+    }
+
+    if json {
+        let value = json!({
+            "notes_dir": notes_dir,
+            "mode": if project.is_some() { "project" } else { "all" },
+            "graphs": summaries.iter().map(GraphSummary::to_json).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value)
+                .map_err(|error| HarnessError::SerializationError(error.to_string()))?
+        );
+        return Ok(());
+    }
+
+    for summary in &summaries {
+        summary.print();
+        println!();
+    }
+    Ok(())
+}
+
+/// Build and write one graph into `out_dir`.
+fn write_graph(
+    notes: &[Note],
+    out_dir: &Path,
+    scope: &str,
+    no_wiki: bool,
+    no_visual: bool,
+) -> Result<GraphSummary, HarnessError> {
+    std::fs::create_dir_all(out_dir).map_err(|error| {
         HarnessError::Io(format!(
             "cannot create output directory '{}': {error}",
             out_dir.display()
         ))
     })?;
+
+    let built = graph_notes(notes);
+    let issues = validate(&built.graph);
 
     let graph_path = out_dir.join("graph.json");
     export::to_json(&built.graph, &built.communities, &built.labels, &graph_path)?;
@@ -94,21 +344,20 @@ async fn run_graph(
     }
 
     let wiki_path = out_dir.join("wiki");
-    let wiki_written = if no_wiki {
-        0
-    } else {
+    if !no_wiki {
         export::to_wiki(
             &built.graph,
             &built.communities,
             &built.labels,
             &built.analysis,
             &wiki_path,
-        )?
-    };
+        )?;
+    }
 
     let report = render_report(
         &built,
         &issues,
+        scope,
         &graph_path,
         &html_path,
         &svg_path,
@@ -124,69 +373,39 @@ async fn run_graph(
         ))
     })?;
 
-    if json {
-        let summary = serde_json::json!({
-            "output": out_dir,
-            "graph": graph_path,
-            "html": if no_visual { serde_json::Value::Null } else { serde_json::json!(html_path) },
-            "svg": if no_visual { serde_json::Value::Null } else { serde_json::json!(svg_path) },
-            "wiki": if no_wiki { serde_json::Value::Null } else { serde_json::json!(wiki_path) },
-            "notes": built.analysis.notes,
-            "nodes": built.graph.nodes.len(),
-            "edges": built.graph.edges.len(),
-            "communities": built.communities.len(),
-            "dangling": built.graph.dangling,
-            "hubs": built.analysis.god_nodes.iter().map(|node| serde_json::json!({
-                "label": node.label,
-                "kind": format!("{:?}", node.kind).to_lowercase(),
-                "degree": node.degree,
-            })).collect::<Vec<_>>(),
-            "issues": issues.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&summary)
-                .map_err(|error| HarnessError::SerializationError(error.to_string()))?
-        );
-        return Ok(());
-    }
-
-    println!(
-        "notes: {}  nodes: {}  edges: {}  communities: {}  dangling: {}",
-        built.analysis.notes,
-        built.graph.nodes.len(),
-        built.graph.edges.len(),
-        built.communities.len(),
-        built.graph.dangling.len()
-    );
-    if let Some(top) = built.analysis.god_nodes.first() {
-        println!(
-            "top hub: {} ({} connections, {:?})",
-            top.label, top.degree, top.kind
-        );
-    }
-    if !issues.is_empty() {
-        println!("warnings: {} (see {})", issues.len(), report_path.display());
-    }
-    println!("graph:  {}", graph_path.display());
-    if !no_visual {
-        println!("html:   {}", html_path.display());
-        println!("svg:    {}", svg_path.display());
-    }
-    if !no_wiki {
-        println!(
-            "wiki:   {} ({} articles)",
-            wiki_path.display(),
-            wiki_written
-        );
-    }
-    println!("report: {}", report_path.display());
-    Ok(())
+    Ok(GraphSummary {
+        scope: scope.to_string(),
+        output: out_dir.to_path_buf(),
+        graph: graph_path,
+        html: if no_visual { None } else { Some(html_path) },
+        svg: if no_visual { None } else { Some(svg_path) },
+        wiki: if no_wiki { None } else { Some(wiki_path) },
+        notes: built.analysis.notes,
+        nodes: built.graph.nodes.len(),
+        edges: built.graph.edges.len(),
+        communities: built.communities.len(),
+        dangling: built.graph.dangling.len(),
+        hubs: built
+            .analysis
+            .god_nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.label.clone(),
+                    format!("{:?}", node.kind).to_lowercase(),
+                    node.degree,
+                )
+            })
+            .collect(),
+        issues: issues.iter().map(ToString::to_string).collect(),
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_report(
     built: &BuiltGraph,
     issues: &[harness_note_graph::validate::Issue],
+    scope: &str,
     graph_path: &Path,
     html_path: &Path,
     svg_path: &Path,
@@ -196,7 +415,7 @@ fn render_report(
 ) -> String {
     let analysis = &built.analysis;
     let mut out = String::new();
-    out.push_str("# Notes graph report\n\n");
+    out.push_str(&format!("# Notes graph report — {scope}\n\n"));
     out.push_str(&format!(
         "{} notes · {} headings · {} tags · {} concepts · {} files · {} symbols\n\n",
         analysis.notes,
@@ -213,6 +432,7 @@ fn render_report(
         analysis.dangling,
         analysis.ambiguous_edges
     ));
+
     let mut artifacts = format!("`{}`", graph_path.display());
     if !no_visual {
         artifacts.push_str(&format!(
@@ -287,20 +507,20 @@ fn render_report(
 
     if !built.graph.dangling.is_empty() {
         out.push_str("## Broken links\n\n");
-        for target in &built.graph.dangling {
-            out.push_str(&format!("- `{}`\n", target));
+        for missing in &built.graph.dangling {
+            out.push_str(&format!("- `{}`\n", missing));
         }
         out.push('\n');
     }
 
-    out.push_str("## Validation\n\n");
-    if issues.is_empty() {
-        out.push_str("- clean\n");
-    } else {
+    if !issues.is_empty() {
+        out.push_str("## Validation\n\n");
         for issue in issues {
             out.push_str(&format!("- {issue}\n"));
         }
+        out.push('\n');
     }
+
     out
 }
 

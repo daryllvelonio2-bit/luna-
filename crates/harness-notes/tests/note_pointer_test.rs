@@ -40,7 +40,7 @@ async fn test_archive_note_hides_it_without_destroying_the_file() {
         )
         .await
         .unwrap();
-    let path = engine.dir().join(format!("{}.md", note.id));
+    let path = engine.note_path(&note.id).unwrap();
     assert!(path.exists());
 
     assert!(engine.archive_note(&note.id).await.unwrap());
@@ -51,6 +51,7 @@ async fn test_archive_note_hides_it_without_destroying_the_file() {
     let archived = engine
         .dir()
         .join(".archive")
+        .join("inbox")
         .join(format!("{}.md", note.id));
     assert!(
         archived.exists(),
@@ -178,7 +179,11 @@ async fn test_legacy_notes_db_import_and_rename() {
     assert_eq!(imported.title, "Legacy Document Title");
     assert_eq!(imported.content, "Content of the legacy doc.");
     assert_eq!(imported.summary_pointer, "Legacy Document");
-    assert_eq!(imported.tags, vec!["legacy".to_string()]);
+    // The loader tags every note with its project so the graph can group by folder.
+    assert_eq!(
+        imported.tags,
+        vec!["legacy".to_string(), "project:inbox".to_string()]
+    );
 
     // Check that legacy db was renamed to notes.db.imported
     assert!(!legacy_db.exists());
@@ -265,8 +270,8 @@ async fn test_long_note_chunking_and_reconstruction_with_hash_dedupe() {
         .unwrap();
 
     // Verify chunk files were created on disk
-    let part1 = engine.dir().join(format!("{}-part-1.md", note.id));
-    let part2 = engine.dir().join(format!("{}-part-2.md", note.id));
+    let part1 = engine.note_path(&format!("{}-part-1", note.id)).unwrap();
+    let part2 = engine.note_path(&format!("{}-part-2", note.id)).unwrap();
     assert!(part1.exists(), "part 1 must exist at {}", part1.display());
     assert!(part2.exists(), "part 2 must exist at {}", part2.display());
 
