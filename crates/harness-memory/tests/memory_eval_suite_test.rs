@@ -13,7 +13,7 @@ use harness_memory::saver::{MemorySaver, SaverPolicy};
 use harness_memory::SqliteMemoryEngine;
 use harness_notes::FileNotesEngine;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// A test provider that returns canned JSON operations for the curation pass.
@@ -354,7 +354,7 @@ async fn test_memory_eval_suite_recall_at_k() {
     ];
 
     for (id, subj, pred, obj) in &records {
-        let mut rec = MemoryRecord {
+        let rec = MemoryRecord {
             id: id.to_string(),
             subject: subj.to_string(),
             predicate: pred.to_string(),

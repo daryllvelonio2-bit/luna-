@@ -62,6 +62,7 @@ impl MarkdownMemoryEngine {
         self.store.context_stack()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn kg_add_triple(
         &self,
         subject: &str,
@@ -99,6 +100,7 @@ impl MarkdownMemoryEngine {
         self.store.kg_invalidate(subject, predicate, object, ended)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn kg_supersede(
         &self,
         subject: &str,
@@ -208,6 +210,7 @@ impl MarkdownMemoryEngine {
         self.store.journal_read(agent, date, limit)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn event_append(
         &self,
         stream: &str,

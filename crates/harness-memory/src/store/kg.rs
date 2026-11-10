@@ -605,6 +605,7 @@ impl KnowledgeGraph {
 
     /// Add a relationship triple: subject → predicate → object.
     /// Deduplicates open triples and identical closed triples (replays).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_triple(
         &self,
         subject: &str,
@@ -742,6 +743,7 @@ impl KnowledgeGraph {
 
     /// Atomically replace one fact with another at a single shared boundary.
     /// Direct port of the reference design's `supersede`.
+    #[allow(clippy::too_many_arguments)]
     pub fn supersede(
         &self,
         subject: &str,

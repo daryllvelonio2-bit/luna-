@@ -774,10 +774,8 @@ pub fn dispatch_mcp_tool(
             let records = store.active_records()?;
             let mut count = 0;
             for r in records {
-                if r.source_file.as_deref() == Some(source_file) {
-                    if store.delete_record(&r.id)? {
-                        count += 1;
-                    }
+                if r.source_file.as_deref() == Some(source_file) && store.delete_record(&r.id)? {
+                    count += 1;
                 }
             }
             Ok(json!({ "success": true, "deleted_count": count }))

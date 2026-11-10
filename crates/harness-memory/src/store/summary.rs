@@ -2,10 +2,10 @@
 //!
 //! Compact summary encoder:
 //! - Grammar:
-//!     Header:  FILE_NUM|DOMAIN/TOPIC|DATE|TITLE
-//!     Entry:   S<id>:ENTITIES|topic_keywords|"key_quote"|WEIGHT|FLAGS
-//!     Cross:   X:S<id><->S<id>|label
-//!     Arc:     ARC:state->state->state
+//!   Header:  FILE_NUM|DOMAIN/TOPIC|DATE|TITLE
+//!   Entry:   S<id>:ENTITIES|topic_keywords|"key_quote"|WEIGHT|FLAGS
+//!   Cross:   X:S<id><->S<id>|label
+//!   Arc:     ARC:state->state->state
 //! - Flags: ORIGIN, CORE, SENSITIVE, PIVOT, DECISION, TECHNICAL
 //! - Lossy: explicitly lossy; preserves pointers to verbatim records.
 

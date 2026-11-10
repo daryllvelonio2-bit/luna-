@@ -874,7 +874,7 @@ impl MemoryStore {
         if memories.len() < limit {
             if let Ok(mut active) = self.active_records() {
                 active.retain(|r| r.category != MemoryCategory::Transcript);
-                active.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+                active.sort_by_key(|r| std::cmp::Reverse(r.filed_at));
                 for r in active {
                     let mem = r.to_memory();
                     if !memories.iter().any(|m| m.id == mem.id) {
@@ -1124,6 +1124,7 @@ impl MemoryStore {
         graph::GraphIndex::new(self.config.root.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn kg_add_triple(
         &self,
         subject: &str,
@@ -1161,6 +1162,7 @@ impl MemoryStore {
         self.kg().invalidate(subject, predicate, object, ended)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn kg_supersede(
         &self,
         subject: &str,
@@ -1388,6 +1390,7 @@ impl MemoryStore {
     }
 
     /// Append a coordination event to a stream.
+    #[allow(clippy::too_many_arguments)]
     pub fn event_append(
         &self,
         stream: &str,

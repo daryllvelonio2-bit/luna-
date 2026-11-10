@@ -355,10 +355,11 @@ impl MemoryStack {
     /// Generate wake-up text: L0 (identity) + L1 (essential story).
     /// Typically ~600-900 tokens. Total is bounded under 900 tokens.
     pub fn wake_up(&self, records: &[Record], domain: Option<&str>) -> String {
-        let mut parts = Vec::new();
-        parts.push(self.l0.render());
-        parts.push("".to_string());
-        parts.push(self.l1.generate(records, domain));
+        let parts = [
+            self.l0.render(),
+            String::new(),
+            self.l1.generate(records, domain),
+        ];
         parts.join("\n")
     }
 

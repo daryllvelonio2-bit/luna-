@@ -63,6 +63,7 @@ impl EventsStore {
     }
 
     /// Append a coordination event to the event stream day file.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_event(
         &self,
         stream: &str,
@@ -432,7 +433,7 @@ fn parse_events_file(stream: &str, text: &str) -> Vec<Event> {
     while i < lines.len() {
         let line = lines[i].trim();
         if line.starts_with("## ") {
-            let id = line[3..].trim().to_string();
+            let id = line.strip_prefix("## ").unwrap_or(line).trim().to_string();
             i += 1;
 
             // Skip empty lines to find ```yaml

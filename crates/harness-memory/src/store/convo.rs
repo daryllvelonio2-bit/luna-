@@ -296,10 +296,8 @@ fn parse_transcript_text(content: &str) -> Vec<String> {
             }
             let user_part = trimmed.trim_start_matches('>').trim().to_string();
             current_user = Some(user_part);
-        } else if current_user.is_some() {
-            if !trimmed.is_empty() || !current_assistant.is_empty() {
-                current_assistant.push(line);
-            }
+        } else if current_user.is_some() && (!trimmed.is_empty() || !current_assistant.is_empty()) {
+            current_assistant.push(line);
         }
     }
 

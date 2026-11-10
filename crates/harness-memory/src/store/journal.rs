@@ -169,7 +169,7 @@ impl JournalStore {
         }
 
         // Stable sort descending by timestamp: later days and later times first
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
 
         if let Some(lim) = limit {
             entries.truncate(lim);
@@ -201,7 +201,11 @@ fn parse_day_body(agent: &str, date_str: &str, body: &str) -> Vec<JournalEntry> 
                 }
                 current_lines.clear();
             }
-            let time_str = trimmed[3..].trim().to_string();
+            let time_str = trimmed
+                .strip_prefix("## ")
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
             current_time = Some(time_str);
         } else if current_time.is_some() {
             current_lines.push(line);

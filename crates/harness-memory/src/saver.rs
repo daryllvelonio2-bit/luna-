@@ -3104,7 +3104,7 @@ mod tests {
             notes.join(",")
         ));
         let (saver, _memory, notes_engine) = saver(provider);
-        let tail: Vec<Message> = note_bodies.iter().map(|body| Message::user(body)).collect();
+        let tail: Vec<Message> = note_bodies.iter().map(Message::user).collect();
 
         let report = saver.distil(&tail).await.expect("distils");
 

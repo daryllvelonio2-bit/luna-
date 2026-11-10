@@ -268,7 +268,7 @@ pub fn chunk_text(
 /// Tokenize a name into lowercased tokens split by '-', '_', '.', '/'.
 /// Matches the reference design `miner.py:_tokens`.
 fn name_tokens(val: &str) -> HashSet<String> {
-    val.split(|c: char| c == '-' || c == '_' || c == '.' || c == '/')
+    val.split(['-', '_', '.', '/'])
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()

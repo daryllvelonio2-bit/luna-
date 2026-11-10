@@ -31,18 +31,13 @@ pub const LOCK_DEFER_BACKOFF_SECS: u64 = 60;
 pub const HOOK_PROBE_TIMEOUT_MS: u64 = 150;
 pub const JOB_RETENTION_DAYS: i64 = 7;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WriteRoutingPolicy {
     Direct,
+    #[default]
     Prefer,
     Require,
-}
-
-impl Default for WriteRoutingPolicy {
-    fn default() -> Self {
-        Self::Prefer
-    }
 }
 
 pub fn parse_write_routing_policy(
@@ -217,7 +212,7 @@ impl QueueStore {
                      FROM jobs WHERE dedupe_key = ?1 AND state IN ('queued', 'running')
                      ORDER BY created_at DESC LIMIT 1",
                     params![key],
-                    |row| Self::row_to_job(row),
+                    Self::row_to_job,
                 )
                 .optional()
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -248,7 +243,7 @@ impl QueueStore {
                              FROM jobs WHERE dedupe_key = ?1 AND state IN ('queued', 'running')
                              ORDER BY created_at DESC LIMIT 1",
                             params![key],
-                            |row| Self::row_to_job(row),
+                            Self::row_to_job,
                         )
                         .optional()
                         .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -361,7 +356,7 @@ impl QueueStore {
             "SELECT id, kind, payload_json, state, priority, dedupe_key, created_at, started_at, finished_at, result_json, error_json, attempts
              FROM jobs WHERE id = ?1",
             params![job_id],
-            |row| Self::row_to_job(row),
+            Self::row_to_job,
         )
         .map_err(|e| HarnessError::MemoryError(format!("job '{job_id}' not found: {e}")))
     }
@@ -376,7 +371,7 @@ impl QueueStore {
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![limit as i64], |row| Self::row_to_job(row))
+            .query_map(params![limit as i64], Self::row_to_job)
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         let mut jobs = Vec::new();
@@ -1256,7 +1251,7 @@ where
     let body = if content_length > 0 {
         // Read body from stream
         let mut body_buf = vec![0u8; content_length];
-        if let Ok(_) = lines.get_mut().read_exact(&mut body_buf).await {
+        if lines.get_mut().read_exact(&mut body_buf).await.is_ok() {
             String::from_utf8_lossy(&body_buf).to_string()
         } else {
             String::new()

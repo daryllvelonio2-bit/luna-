@@ -54,10 +54,8 @@ pub fn mine_sessions(
         .map_err(|e| HarnessError::MemoryError(format!("Failed to query sessions: {e}")))?;
 
     let mut sessions = Vec::new();
-    for r in session_rows {
-        if let Ok(s) = r {
-            sessions.push(s);
-        }
+    for s in session_rows.flatten() {
+        sessions.push(s);
     }
 
     let domain = domain_override.unwrap_or("conversations").to_string();
@@ -100,10 +98,8 @@ pub fn mine_sessions(
             .map_err(|e| HarnessError::MemoryError(format!("Failed to query messages: {e}")))?;
 
         let mut messages = Vec::new();
-        for r in msg_rows {
-            if let Ok(m) = r {
-                messages.push(m);
-            }
+        for m in msg_rows.flatten() {
+            messages.push(m);
         }
 
         if messages.is_empty() {
