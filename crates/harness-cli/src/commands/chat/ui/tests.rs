@@ -970,6 +970,19 @@ fn finishing_a_thought_block_hands_it_to_the_transcript() {
     );
 }
 
+#[test]
+fn handle_resize_redraws_box_at_new_width() {
+    let ui = ChatUi::new(true);
+    let boxed = ui.clone();
+    capture_stdout(move || boxed.draw_box(80, ""));
+
+    let resized = ui.clone();
+    capture_stdout(move || resized.handle_resize());
+
+    assert!(ui.box_drawn.load(Ordering::SeqCst));
+    assert!(ui.drawn_metrics.lock().unwrap().is_some());
+}
+
 fn strip(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
 }

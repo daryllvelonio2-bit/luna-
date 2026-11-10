@@ -2037,7 +2037,7 @@ impl ChatUi {
             .map(|m| m.width)
             .unwrap_or(0);
         if drawn_width != 0 && drawn_width != width {
-            self.handle_resize();
+            self.redraw_box();
             return;
         }
         let buf = self.input_buf.lock().unwrap_or_else(|e| e.into_inner());
@@ -2202,24 +2202,17 @@ impl ChatUi {
                     width,
                 ));
             }
+            live.rows = rows.clone();
             rows
         };
 
-        if self.box_drawn.load(Ordering::SeqCst) {
-            let previous = {
-                let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-                let prev = live.rows.len();
-                live.rows = rows.clone();
-                prev
-            };
-            self.erase_live_and_box(previous);
-            for row in &rows {
-                println!("{}", row);
-            }
-            self.draw_box(width, &buf);
-        } else if !rows.is_empty() {
-            self.set_live(rows);
+        // The screen has already been cleared and the transcript redrawn at the new width.
+        // There is no old box on screen to erase — calling erase_live_and_box here would
+        // move upward from the end of the redrawn transcript and erase the latest conversation lines!
+        for row in &rows {
+            println!("{}", row);
         }
+        self.draw_box(width, &buf);
     }
 
     pub fn redraw_box(&self) {

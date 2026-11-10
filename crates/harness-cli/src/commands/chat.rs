@@ -1750,10 +1750,17 @@ pub async fn run_interactive_chat(
                     let tools = in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     for item in &tools {
                         println!("{}", item.call_formatted);
+                        if !item.result_formatted.is_empty() {
+                            println!("{}", item.result_formatted);
+                        }
                         for diff in &item.diff_lines {
                             println!("{}", diff);
                         }
                     }
+                }
+                if let Some(ref err) = ui.transient_error() {
+                    println!();
+                    println!("{}", err);
                 }
                 ui.handle_resize();
             }
@@ -2667,10 +2674,17 @@ pub async fn run_interactive_chat(
                                 .clone();
                             for item in &tools {
                                 println!("{}", item.call_formatted);
+                                if !item.result_formatted.is_empty() {
+                                    println!("{}", item.result_formatted);
+                                }
                                 for diff in &item.diff_lines {
                                     println!("{}", diff);
                                 }
                             }
+                        }
+                        if let Some(ref err) = ui.transient_error() {
+                            println!();
+                            println!("{}", err);
                         }
                         ui.handle_resize();
                     }
