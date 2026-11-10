@@ -116,7 +116,7 @@ async fn test_memory_eval_suite_fixture_repo_and_expected_facts() {
         Message::assistant("Noted: ./run.sh migrate and composer test for smartlab-web."),
         Message::tool(ToolResult::success(
             "call_1",
-            "Project root: /home/janelle/smartlab-web\nAll 42 tests passed.",
+            "Project root: /home/janelle/smartlab-web\nAll 42 tests passed.\nBuild command: ./run.sh migrate + serve on 0.0.0.0:8082\nTest command: composer test\nDeployment is a single static binary served by the bundled web server.",
         )),
         Message::user("Please remember to keep responses concise with zero filler"),
     ];
@@ -151,7 +151,7 @@ async fn test_memory_eval_suite_fixture_repo_and_expected_facts() {
                 "op": "create_note",
                 "note": {
                     "title": "SmartLab Web Runbook",
-                    "content": "## Verified\n\nProject root: /home/janelle/smartlab-web\nAll 42 tests passed.",
+                    "content": "## Verified\n\nProject root: /home/janelle/smartlab-web\nAll 42 tests passed.\nBuild command: ./run.sh migrate + serve on 0.0.0.0:8082\nTest command: composer test\nDeployment is a single static binary served by the bundled web server.",
                     "tags": ["runbook", "smartlab"]
                 },
                 "evidence": "All 42 tests passed.",
@@ -185,34 +185,37 @@ async fn test_memory_eval_suite_fixture_repo_and_expected_facts() {
 
 #[tokio::test]
 async fn test_memory_eval_suite_verbatim_ratio_audit() {
+    const DEPLOY_LINE: &str = "We deploy the rust agent harness using Helm charts on k8s, and every release is rolled out with the same chart values so staging and production stay perfectly in sync";
     let transcript = vec![
-        Message::user("We deploy the rust agent harness using Helm charts on k8s"),
+        Message::user(DEPLOY_LINE),
         Message::assistant("Noted: deploy with Helm on k8s."),
     ];
 
     // Case A: Verbatim note (100% transcript-grounded)
-    let canned_verbatim = r###"{
+    let canned_verbatim = format!(
+        r###"{{
         "operations": [
-            {
+            {{
                 "op": "create_note",
-                "note": {
+                "note": {{
                     "title": "K8s Helm Deployment",
-                    "content": "## Deployment\n\nWe deploy the rust agent harness using Helm charts on k8s",
+                    "content": "## Deployment\n\n{DEPLOY_LINE}",
                     "tags": ["k8s", "helm"]
-                },
-                "evidence": "We deploy the rust agent harness using Helm charts on k8s",
+                }},
+                "evidence": "{DEPLOY_LINE}",
                 "confidence": 0.9
-            }
+            }}
         ]
-    }"###;
+    }}"###
+    );
 
-    let (saver, _memory, notes) = create_eval_setup(canned_verbatim);
+    let (saver, _memory, notes) = create_eval_setup(&canned_verbatim);
     let report = saver.distil(&transcript).await.unwrap();
     assert_eq!(report.notes, 1);
     let note = notes.read_note("k8s-helm-deployment").await.unwrap();
 
     // Compute verbatim ratio: non-heading characters must appear in source transcript
-    let transcript_text = "We deploy the rust agent harness using Helm charts on k8s";
+    let transcript_text = DEPLOY_LINE;
     let mut total_chars = 0usize;
     let mut matching_chars = 0usize;
     for line in note.content.lines() {
@@ -232,22 +235,24 @@ async fn test_memory_eval_suite_verbatim_ratio_audit() {
     );
 
     // Case B: Paraphrased note (must be refused by saver)
-    let canned_paraphrased = r###"{
+    let canned_paraphrased = format!(
+        r###"{{
         "operations": [
-            {
+            {{
                 "op": "create_note",
-                "note": {
+                "note": {{
                     "title": "K8s Deployment Summary",
-                    "content": "The user told us that they usually use Helm for Kubernetes deployments.",
+                    "content": "The user told us that they usually use Helm for Kubernetes deployments, and that every release is rolled out with the same chart values so staging and production stay in sync.",
                     "tags": ["k8s"]
-                },
-                "evidence": "We deploy the rust agent harness using Helm charts on k8s",
+                }},
+                "evidence": "{DEPLOY_LINE}",
                 "confidence": 0.9
-            }
+            }}
         ]
-    }"###;
+    }}"###
+    );
 
-    let (saver_para, _mem, notes_para) = create_eval_setup(canned_paraphrased);
+    let (saver_para, _mem, notes_para) = create_eval_setup(&canned_paraphrased);
     let report_para = saver_para.distil(&transcript).await.unwrap();
     assert_eq!(report_para.notes, 0, "Paraphrased note must be refused");
     assert_eq!(report_para.skipped, 1);

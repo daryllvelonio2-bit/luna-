@@ -296,7 +296,10 @@ Implemented means there is evidence the change landed:
 
 - The user says it is done.
 - A tool result shows the edit, build, test, or deployment succeeded.
-- The assistant reports verification and the user does not dispute it.
+- The assistant reports verification and the user confirms it in a later message.
+
+An assistant's own report is a claim, not evidence: without a user confirmation or a tool line
+behind it, it cannot create a card or a note.
 
 Do not save every successful command as a new fact. Save the durable outcome: the new command, the
 new architecture, the new constraint, the new status of the plan.
@@ -387,8 +390,10 @@ Good notes:
 | One-off command output | No | No |
 | Transient task state | No | No |
 
-A note always gets a pointer card through `add_note_pointer`. The pointer card is the discovery
-mechanism; the note is the content.
+A verified note gets a pointer card through `add_note_pointer`. The pointer card is the discovery
+mechanism; the note is the content. An unverified note — one whose only support is the assistant's
+own answer, filed because the user asked to keep it — stays searchable as a file but gets no pointer
+card, so a claim never enters the always-loaded prompt.
 
 ### 6.4 Note lifecycle
 
@@ -729,7 +734,8 @@ and rejected approaches. Use them for anything longer than about 5 lines or 500 
 structured, and anything a future session should read in full.
 
 If a note exists on the topic, update it. Create a new note only when the topic is genuinely new.
-Never copy a note body into a memory card. A note always gets a pointer card automatically.
+Never copy a note body into a memory card. A verified note gets a pointer card automatically; an
+unverified one does not.
 
 OPERATIONS
 
@@ -1288,6 +1294,11 @@ Goal: keep it good over time.
 - `a_near_duplicate_is_skipped_or_updated`
 - `a_second_pass_on_the_same_transcript_is_a_noop`
 - `a_note_is_updated_instead_of_duplicated`
+- `an_assistant_only_note_is_refused`
+- `a_requested_assistant_note_is_kept_unverified_and_gets_no_pointer`
+- `a_save_request_must_come_from_the_user_and_not_be_retracted`
+- `a_one_line_note_is_refused_as_too_short`
+- `a_duplicate_note_is_refused_against_the_existing_inventory`
 - `an_obsolete_note_is_deleted_and_its_pointer_removed`
 - `a_note_merge_leaves_one_authoritative_note`
 - `evidence_must_appear_in_the_transcript`

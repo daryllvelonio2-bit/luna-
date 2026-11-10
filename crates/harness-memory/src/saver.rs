@@ -21,8 +21,11 @@
 //! - every write needs an evidence quote that actually appears in the transcript;
 //! - per-pass caps, a confidence floor, a near-duplicate check, and a secret scan run in code, not
 //!   in the prompt;
-//! - memories are lean index cards and notes are authoritative documents; a note always gets a
-//!   pointer card through the same bridge the agent's `save_note` uses.
+//! - memories are lean index cards and notes are authoritative documents; a verified note gets
+//!   a pointer card through the same bridge the agent's `save_note` uses, while an unverified one
+//!   stays out of the always-loaded prompt;
+//! - only user or tool evidence can create a note. The assistant's own answer is a claim, and is
+//!   filed only when the user explicitly asked to keep it.
 //!
 //! Failure is cheap by design — the caller runs this detached from the turn and only logs errors,
 //! so a saver that cannot reach its provider costs a warning, not a reply.
@@ -53,8 +56,9 @@ pub const MAX_OPERATIONS_PER_PASS: usize = 6;
 /// Below this confidence an operation is refused. Explicit user statements clear it easily;
 /// guesses do not.
 pub const MIN_CONFIDENCE: f32 = 0.65;
-/// Non-empty note content.
-pub const MIN_NOTE_CHARS: usize = 1;
+/// Minimum substantive characters a note body must carry. A shorter body is a one-line fact for
+/// a memory card, not a document. Headings and whitespace do not count towards it.
+pub const MIN_NOTE_CHARS: usize = 160;
 /// Per-message character cap while rendering the transcript.
 pub const MESSAGE_CHAR_CAP: usize = 8_000;
 /// Total character budget for the rendered transcript.
@@ -98,7 +102,7 @@ File information that passes all four tests:
 
 HIGH-RECALL SIGNALS (file these when present):
 - A substantive technical session: what the user asked, what was read, what was decided, what was built, and what was verified. File the durable part as a note in the transcript's own words.
-- A repository or codebase brief that the user asked for and the assistant verified from files or tool output. The brief itself is the record. Save it as a note; do not reduce it to a one-line summary and do not decline it as "just a summary".
+- A repository or codebase brief that the user verified from files or tool output, or that the user explicitly asked to keep. The brief itself is the record. Save it as a note; do not reduce it to a one-line summary and do not decline it as "just a summary". A brief the user merely asked to see is a reply, not a note.
 - A completed investigation, diagnosis, audit, or root-cause analysis: the symptom, the cause, the fix, and the evidence.
 - A verified runbook or verification procedure: the exact commands, config files, and order of gates.
 - A preference, want, like, dislike, or boundary: "I want", "I prefer", "I hate", "please always", "never", "don't", "I care about".
@@ -125,7 +129,7 @@ DO NOT SAVE:
 - Anything already stated by an existing memory or note, unless it is a genuine update.
 - Secrets, credentials, API keys, tokens, passwords, private keys, cookies, or sensitive personal attributes. Never write them.
 
-A verified brief, runbook, diagnosis, or decision record is not a "summary of what was discussed". It is new durable content and must be filed verbatim.
+A verified brief, runbook, diagnosis, or decision record is not a "summary of what was discussed". It is new durable content and must be filed verbatim when the user asked to keep it or its source lines come from USER or TOOL.
 
 VERBATIM PROTOCOL
 
@@ -139,15 +143,16 @@ VERBATIM PROTOCOL
 Examples:
 - GOOD: copy `Build: cargo build --release` exactly.
 - BAD: `The project is built in release mode.`
-- GOOD: copy the assistant's full repository brief into the note body.
+- GOOD: copy the full repository brief verbatim when the user asked to keep it.
 - BAD: `The repo is a Rust inference engine with several modules.`
 
-If the transcript contains a complete answer that satisfies the user's request, that answer is the note.
+A complete answer to a question is not automatically a note. File it only when the user asked to save or remember it, or confirmed it; otherwise it is a reply, not memory.
 
 EVIDENCE PROVENANCE
 
-- A line spoken by USER or printed by TOOL can mint a memory card. A line written by LUNA cannot, even when it is correct.
-- If the only support for a fact is the assistant's own answer, file the exact text as a note instead. The note is tagged `unverified` automatically and must not be promoted to a card.
+- A line spoken by USER or printed by TOOL can mint a memory card or a note. A line written by LUNA can mint neither, even when it is correct.
+- The assistant's own answer is a claim, not evidence. Do not file it. The only exception is an explicit request to keep it: "remember this", "save this", "keep this", "write this down", "don't forget". Without one of those, use noop.
+- A repository brief, diagnosis, or runbook written by the assistant is not exempt. If the user only asked a question, the answer is a reply, not a note.
 - Cite the source line itself, not the assistant restating it. A quote the assistant repeats is still the assistant speaking.
 - A verified outcome must be quoted from the tool output or the user's confirmation, not from the assistant's description of it.
 
@@ -173,14 +178,14 @@ CONTRADICTION RULES
 
 STORAGE ROUTING
 
-A note is the verbatim record. Use a note for a repository brief, runbook, decision record, diagnosis, specification, audit, preference profile, or any answer a future session should read in full. Copy the relevant lines exactly from the transcript or tool output. Do not rewrite them into a summary. Short headings are allowed only to label a copied span.
+A note is the verbatim record. Use a note for a repository brief, runbook, decision record, diagnosis, specification, audit, or preference profile that the user asked to keep, or whose source lines come from USER or TOOL. Copy the relevant lines exactly from the transcript or tool output. Do not rewrite them into a summary. Short headings are allowed only to label a copied span. A note must carry a real document, not a single line: a one-line fact belongs in a memory card.
 
 A memory card is a lean index entry: subject, predicate, a 2-5 word object, optional name and path. Use it for:
 - The user's identity, role, language, timezone, and one-line preferences or boundaries.
 - Project roots, stack, canonical build/test/run commands, and hard constraints.
 - A pointer to an authoritative note.
 
-If a note exists on the topic, update it. Create a new note only when the topic is genuinely new. Never copy a note body into a memory card. A note always gets a pointer card automatically.
+If a note exists on the topic, update it. Create a new note only when the topic is genuinely new. Never copy a note body into a memory card. A verified note gets a pointer card automatically; an unverified one does not.
 
 OPERATIONS
 
@@ -190,7 +195,7 @@ Return a JSON object with an "operations" array. Each operation is one of:
 - update_memory: replace an existing card. Fields: target_id, memory.
 - delete_memory: deactivate an existing card. Fields: target_id, reason.
 - merge_memories: consolidate two or more cards. Fields: target_ids (2+), memory.
-- create_note: create a note and its pointer. Fields: note {title, content, tags}.
+- create_note: create a note, plus a pointer card when the note is verified. Fields: note {title, content, tags}.
 - update_note: update an existing note. Fields: target_id, note {mode: "append" or "replace", title?, content?, tags?}.
 - merge_notes: consolidate two or more notes. Fields: target_ids (2+), note.
 - delete_note: archive a note and remove its pointer. Fields: target_id, reason.
@@ -205,7 +210,7 @@ Target ids must come from CURRENT MEMORY or CURRENT NOTES. Never invent an id. I
 
 FINAL CHECK
 
-Before returning, ask: if this session ended now, what would the next session need to read? If the answer is a document, create or update a note and copy it verbatim. If the answer is one canonical fact, add a memory card. If there is nothing durable, use noop.
+Before returning, ask: if this session ended now, what would the next session need to read? If the user asked to keep a document, create or update a note and copy it verbatim. If the answer is one canonical fact, add a memory card. If there is nothing durable, use noop.
 
 File every durable artifact in the slice. A repository brief and its canonical facts are complementary: create the note and the cards. Do not let one category cancel another.
 
@@ -231,7 +236,7 @@ A candidate must pass all three tests:
 3. EVIDENCE - you can quote the exact line that supports it.
 
 Look for:
-- Substantive technical work: a verified repository brief, a runbook, an investigation, a diagnosis, an audit, or a decision record.
+- Substantive technical work: a verified repository brief, a runbook, an investigation, a diagnosis, an audit, or a decision record, when its source is a USER or TOOL line or the user asked to keep it.
 - Explicit preferences, wants, likes, dislikes, boundaries, and feelings that reveal a durable preference.
 - Explicit "remember this" requests.
 - Approved plans and decisions (explicit user acceptance only).
@@ -239,7 +244,7 @@ Look for:
 - Corrections, contradictions, and rejected approaches.
 - Durable technical facts: canonical paths, commands, versions, constraints.
 
-Do not extract greetings, filler, questions, hypotheticals, drafts, assistant proposals the user did not accept, transient task state, or one-off output. A verified brief or runbook is not filler: extract it. Never extract secrets.
+Do not extract greetings, filler, questions, hypotheticals, drafts, assistant proposals the user did not accept, transient task state, or one-off output. An assistant's answer to a question is a reply, not a record: extract it only when the user asked to keep it. A verified brief or runbook is not filler: extract it when the user asked to keep it or its source is a USER or TOOL line. Never extract secrets.
 
 Return JSON only, exactly:
 {"candidates":[{"kind":"preference|boundary|decision|plan|outcome|correction|rejection|fact|brief|runbook|diagnosis","text":"the verbatim span to file, copied exactly","evidence":"verbatim quote","confidence":0.0,"scope":"user|project|environment","storage":"memory|note"}]}
@@ -1208,9 +1213,10 @@ impl MemorySaver {
                 report.skip(storage, display, "evidence not found in the conversation");
                 return None;
             }
-            // A card is an assertion of fact, so it needs a user line or tool output behind it.
-            // The assistant's own answer is a claim, not proof: it may be kept verbatim in a note,
-            // where the `unverified` tag keeps a future session from treating it as established.
+            // A card is an assertion of fact, and a note is an authoritative record. Both need
+            // a user line or tool output behind them. The assistant's own answer is a claim, not
+            // proof: it may only become a note when the user explicitly asked to keep it, and
+            // that note is tagged `unverified` so it stays out of the always-loaded prompt.
             let authoritative = matches!(
                 transcript.provenance_of(&evidence),
                 Some(Provenance::User | Provenance::Tool)
@@ -1224,9 +1230,33 @@ impl MemorySaver {
                     );
                     return None;
                 }
+                if !transcript.user_requested_save() {
+                    report.skip(
+                        storage,
+                        display,
+                        "assistant-only evidence cannot create a note",
+                    );
+                    return None;
+                }
                 if let Some(note) = operation.note.as_mut() {
                     mark_unverified(note);
                 }
+            }
+        } else if let Some(note) = operation.note.as_mut() {
+            // The legacy shape carries no evidence, so check what the note body is made of
+            // instead. A body copied from the assistant still needs an explicit keep request.
+            if !note.content.trim().is_empty()
+                && !note_has_authoritative_source(&note.content, transcript)
+            {
+                if !transcript.user_requested_save() {
+                    report.skip(
+                        storage,
+                        display,
+                        "assistant-only evidence cannot create a note",
+                    );
+                    return None;
+                }
+                mark_unverified(note);
             }
         }
 
@@ -1347,8 +1377,12 @@ impl MemorySaver {
                     report.skip(SaveStorage::Note, display, "empty title or content");
                     return None;
                 }
-                if note.content.chars().count() < MIN_NOTE_CHARS {
+                if note_body_len(&note.content) < MIN_NOTE_CHARS {
                     report.skip(SaveStorage::Note, display, "note too short");
+                    return None;
+                }
+                if note_already_known(&inventory.notes, note.title.trim(), &note.content) {
+                    report.skip(SaveStorage::Note, display, "already known");
                     return None;
                 }
                 if !note_is_verbatim(&note.content, transcript) {
@@ -1375,11 +1409,24 @@ impl MemorySaver {
                     report.skip(SaveStorage::Note, display, "note update changes nothing");
                     return None;
                 }
-                if !update.content.trim().is_empty()
-                    && !note_is_verbatim(&update.content, transcript)
-                {
-                    report.skip(SaveStorage::Note, display, "note is not verbatim");
-                    return None;
+                let append = update
+                    .mode
+                    .as_deref()
+                    .map(|mode| mode.eq_ignore_ascii_case("append"))
+                    .unwrap_or(true);
+                if !update.content.trim().is_empty() {
+                    if !append && note_body_len(&update.content) < MIN_NOTE_CHARS {
+                        report.skip(SaveStorage::Note, display, "note too short");
+                        return None;
+                    }
+                    if append && normalize(&note.content).contains(&normalize(&update.content)) {
+                        report.skip(SaveStorage::Note, display, "already known");
+                        return None;
+                    }
+                    if !note_is_verbatim(&update.content, transcript) {
+                        report.skip(SaveStorage::Note, display, "note is not verbatim");
+                        return None;
+                    }
                 }
                 Some(Planned::UpdateNote {
                     target: note.id.clone(),
@@ -1560,13 +1607,7 @@ impl MemorySaver {
                     .any(|existing| existing.title.eq_ignore_ascii_case(title));
                 match self.notes.save_note(title, content, &note.tags).await {
                     Ok(saved) => {
-                        if let Err(error) = self
-                            .memory
-                            .add_note_pointer(&saved.id, &saved.summary_pointer)
-                            .await
-                        {
-                            tracing::warn!("could not register the note pointer: {}", error);
-                        }
+                        self.refresh_note_pointer(&saved).await;
                         let line_count = content.lines().count();
                         let detail = Some(format!("{} lines", line_count));
                         report.note_written_with_detail(
@@ -1779,13 +1820,7 @@ impl MemorySaver {
             .await
         {
             Ok(saved) => {
-                if let Err(error) = self
-                    .memory
-                    .add_note_pointer(&saved.id, &saved.summary_pointer)
-                    .await
-                {
-                    tracing::warn!("could not refresh the note pointer: {}", error);
-                }
+                self.refresh_note_pointer(&saved).await;
                 let mode_str = if append { "append" } else { "replace" };
                 let lines = update.content.trim().lines().count();
                 let detail = Some(format!("{mode_str}, +{lines} lines"));
@@ -1797,6 +1832,28 @@ impl MemorySaver {
                 report.skip(SaveStorage::Note, existing.title, "store error");
                 None
             }
+        }
+    }
+
+    /// Refresh a note's pointer card, unless the note is unverified. An unverified note is the
+    /// assistant's own claim: it stays searchable as a file but must not enter every prompt.
+    async fn refresh_note_pointer(&self, note: &Note) {
+        if note_is_unverified(&note.tags) {
+            if let Err(error) = self.memory.remove_note_pointer(&note.id).await {
+                tracing::warn!(
+                    "could not remove the pointer for unverified note '{}': {}",
+                    note.id,
+                    error
+                );
+            }
+            return;
+        }
+        if let Err(error) = self
+            .memory
+            .add_note_pointer(&note.id, &note.summary_pointer)
+            .await
+        {
+            tracing::warn!("could not register the note pointer: {}", error);
         }
     }
 
@@ -1883,13 +1940,14 @@ fn is_memory_operation(name: &str) -> bool {
 const UNVERIFIED_TAG: &str = "unverified";
 
 fn mark_unverified(note: &mut NoteItem) {
-    if !note
-        .tags
-        .iter()
-        .any(|tag| tag.eq_ignore_ascii_case(UNVERIFIED_TAG))
-    {
+    if !note_is_unverified(&note.tags) {
         note.tags.push(UNVERIFIED_TAG.to_string());
     }
+}
+
+fn note_is_unverified(tags: &[String]) -> bool {
+    tags.iter()
+        .any(|tag| tag.eq_ignore_ascii_case(UNVERIFIED_TAG))
 }
 
 fn planned_storage(op: &Planned) -> SaveStorage {
@@ -1984,6 +2042,17 @@ fn already_known(records: &[MemoryRecord], subject: &str, predicate: &str, objec
     })
 }
 
+/// Whether the store already holds this note, by title or body. A body seen in a previous pass is
+/// the same note; filing it again would only duplicate the file.
+fn note_already_known(notes: &[Note], title: &str, content: &str) -> bool {
+    let body = normalize(&strip_headings(content));
+    notes.iter().any(|note| {
+        (!title.is_empty()
+            && (note.title.eq_ignore_ascii_case(title) || note.id.eq_ignore_ascii_case(title)))
+            || (!body.is_empty() && normalize(&strip_headings(&note.content)) == body)
+    })
+}
+
 /// Remove decorations a model adds around an otherwise verbatim quote: a leading role label
 /// (`USER:`, `Assistant —`) and one matched pair of surrounding quotes.
 fn strip_evidence_decoration(evidence: &str) -> &str {
@@ -2027,6 +2096,20 @@ fn strip_headings(text: &str) -> String {
         .filter(|line| !line.trim_start().starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether a note body carries substantive text once headings and whitespace are removed.
+fn note_body_len(content: &str) -> usize {
+    normalize(&strip_headings(content)).chars().count()
+}
+
+/// Whether a note body is made of user or tool words. Headings are ignored.
+fn note_has_authoritative_source(content: &str, transcript: &RenderedTranscript) -> bool {
+    let body = strip_headings(content);
+    matches!(
+        transcript.provenance_of(&body),
+        Some(Provenance::User | Provenance::Tool)
+    )
 }
 
 /// Whether a note body is copied from the transcript rather than written from memory.
@@ -2347,6 +2430,40 @@ enum Provenance {
     Assistant,
 }
 
+/// Phrases with which a user asks that content be kept. Assistant text cannot become a note
+/// without one of these, because an answer to a question is a reply, not a record.
+const SAVE_REQUEST_MARKERS: &[&str] = &[
+    "remember this",
+    "remember that",
+    "remember it",
+    "save this",
+    "save that",
+    "save it",
+    "keep this",
+    "keep that",
+    "keep it",
+    "write this down",
+    "write that down",
+    "note this down",
+    "make a note",
+    "store this",
+    "file this",
+    "don't forget",
+    "do not forget",
+];
+
+/// A request to keep something is ignored when the same user message retracts it.
+const SAVE_REFUSAL_MARKERS: &[&str] = &[
+    "don't save",
+    "do not save",
+    "don't remember",
+    "do not remember",
+    "don't keep",
+    "do not keep",
+    "forget this",
+    "forget that",
+];
+
 /// One message that reached the transcript, kept so a quote can be attributed to its speaker.
 struct Segment {
     provenance: Provenance,
@@ -2380,6 +2497,23 @@ impl RenderedTranscript {
             }
         }
         assistant.then_some(Provenance::Assistant)
+    }
+
+    /// Whether the user asked to keep something. The assistant's own answer can only become a
+    /// note after such a request.
+    fn user_requested_save(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            if segment.provenance != Provenance::User {
+                return false;
+            }
+            let body = normalize(&segment.body);
+            !SAVE_REFUSAL_MARKERS
+                .iter()
+                .any(|marker| body.contains(marker))
+                && SAVE_REQUEST_MARKERS
+                    .iter()
+                    .any(|marker| body.contains(marker))
+        })
     }
 }
 
@@ -2596,10 +2730,12 @@ mod tests {
         }
     }
 
+    const LONG_BUILD_LINE: &str = "I always build with cargo and run tests with cargo test, then I install the release binary to ~/.local/bin/luna so the next session uses the same build and never guesses the command";
+
     fn conversation() -> Vec<Message> {
         vec![
             Message::system("system prompt"),
-            Message::user("I always build with cargo and run tests with cargo test"),
+            Message::user(LONG_BUILD_LINE),
             Message::assistant("Noted: cargo, and `cargo test`."),
         ]
     }
@@ -2947,14 +3083,14 @@ mod tests {
             })
             .collect();
         // Note bodies must be copied from the transcript, so each one repeats a phrase that
-        // actually appears in the canned conversation.
-        let note_bodies = [
-            "I always build with cargo",
-            "run tests with cargo test",
-            "Noted: cargo, and `cargo test`.",
-            "I always build with cargo and run tests with cargo test",
-            "cargo test",
-        ];
+        // actually appears in the canned tail.
+        let note_bodies: Vec<String> = (0..5)
+            .map(|index| {
+                format!(
+                    "Release note {index}: I always build with cargo and run tests with cargo test before installing the release binary to the local bin directory so the next session uses the same build and never guesses the command"
+                )
+            })
+            .collect();
         let notes: Vec<String> = note_bodies
             .iter()
             .enumerate()
@@ -2968,8 +3104,9 @@ mod tests {
             notes.join(",")
         ));
         let (saver, _memory, notes_engine) = saver(provider);
+        let tail: Vec<Message> = note_bodies.iter().map(|body| Message::user(body)).collect();
 
-        let report = saver.distil(&conversation()).await.expect("distils");
+        let report = saver.distil(&tail).await.expect("distils");
 
         assert_eq!(report.memories, MAX_MEMORY_WRITES_PER_PASS);
         assert_eq!(report.notes, MAX_NOTE_WRITES_PER_PASS);
@@ -3013,7 +3150,7 @@ mod tests {
     async fn a_note_is_saved_with_its_pointer_bridge() {
         let provider = CannedProvider::new(&format!(
             r#"{{"memories":[],"notes":[{{"title":"Build Recipe","content":"{}","tags":["build"]}}]}}"#,
-            "I always build with cargo and run tests with cargo test"
+            LONG_BUILD_LINE
         ));
         let (saver, memory, notes) = saver(provider);
 
@@ -3112,7 +3249,7 @@ mod tests {
         let provider = CannedProvider::new(&format!(
             r#"{{"memories":[{{"subject":"user","predicate":"p","object":"v","category":"fact"}}],
                  "notes":[{{"title":"Doc","content":"{}","tags":[]}}]}}"#,
-            "y".repeat(MIN_NOTE_CHARS)
+            LONG_BUILD_LINE
         ));
         let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory db"));
         let notes = Arc::new(FileNotesEngine::in_memory().expect("notes dir"));
@@ -3134,7 +3271,7 @@ mod tests {
         let provider = CannedProvider::new(&format!(
             r#"{{"memories":[{{"subject":"user","predicate":"p","object":"v","category":"fact"}}],
                  "notes":[{{"title":"Doc","content":"{}","tags":[]}}]}}"#,
-            "y".repeat(MIN_NOTE_CHARS)
+            LONG_BUILD_LINE
         ));
         let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory db"));
         let notes = Arc::new(FileNotesEngine::in_memory().expect("notes dir"));
@@ -3520,13 +3657,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_assistant_only_note_is_kept_and_tagged_unverified() {
-        let provider = CannedProvider::new(
-            r#"{"operations":[{"op":"create_note","note":{"title":"Build Notes","content":"Noted: cargo, and `cargo test`.","tags":["build"]},"evidence":"Noted: cargo, and `cargo test`.","confidence":0.9,"reason":"assistant brief"}]}"#,
-        );
-        let (saver, _memory, notes) = saver(provider);
+    async fn an_assistant_only_note_is_refused() {
+        let answer = "Noted: cargo, and `cargo test`. The build uses cargo and the tests use cargo test, and the release binary is installed into the local bin directory so the next session reuses it.";
+        let tail = vec![
+            Message::user("How do I build this project?"),
+            Message::assistant(answer),
+        ];
+        let provider = CannedProvider::new(&format!(
+            r#"{{"operations":[{{"op":"create_note","note":{{"title":"Build Notes","content":"{answer}","tags":["build"]}},"evidence":"{answer}","confidence":0.9,"reason":"assistant brief"}}]}}"#
+        ));
+        let (saver, memory, notes) = saver(provider);
 
-        let report = saver.distil(&conversation()).await.expect("distils");
+        let report = saver.distil(&tail).await.expect("distils");
+
+        assert_eq!(report.notes, 0, "{report:?}");
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            report.outcomes[0].reason.as_deref(),
+            Some("assistant-only evidence cannot create a note")
+        );
+        assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
+        assert!(
+            memory
+                .retrieve_cards("mem_ptr", 10)
+                .await
+                .expect("retrieves")
+                .is_empty(),
+            "a refused note must not leave a pointer behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_requested_assistant_note_is_kept_unverified_and_gets_no_pointer() {
+        let answer = "Noted: cargo, and `cargo test`. The build uses cargo and the tests use cargo test, and the release binary is installed into the local bin directory so the next session reuses it.";
+        let tail = vec![
+            Message::user("Please save this build answer"),
+            Message::assistant(answer),
+        ];
+        let provider = CannedProvider::new(&format!(
+            r#"{{"operations":[{{"op":"create_note","note":{{"title":"Build Notes","content":"{answer}","tags":["build"]}},"evidence":"{answer}","confidence":0.9,"reason":"user asked to keep it"}}]}}"#
+        ));
+        let (saver, memory, notes) = saver(provider);
+
+        let report = saver.distil(&tail).await.expect("distils");
 
         assert_eq!(report.notes, 1, "{report:?}");
         let stored = notes.list_notes(10, 0).await.expect("lists");
@@ -3539,6 +3712,61 @@ mod tests {
             "the note was not marked unverified: {:?}",
             stored[0].tags
         );
+        assert!(
+            memory
+                .retrieve_cards("mem_ptr", 10)
+                .await
+                .expect("retrieves")
+                .is_empty(),
+            "an unverified note entered Active Memories"
+        );
+    }
+
+    #[test]
+    fn a_save_request_must_come_from_the_user_and_not_be_retracted() {
+        let assistant_only = vec![
+            Message::user("How do I build this?"),
+            Message::assistant("Remember this: use cargo build"),
+        ];
+        assert!(!render_transcript(&assistant_only).user_requested_save());
+
+        let retracted = vec![Message::user("Don't save this, just explain it")];
+        assert!(!render_transcript(&retracted).user_requested_save());
+
+        let requested = vec![Message::user("Please save this for later")];
+        assert!(render_transcript(&requested).user_requested_save());
+    }
+
+    #[tokio::test]
+    async fn a_one_line_note_is_refused_as_too_short() {
+        let provider = CannedProvider::new(
+            r#"{"operations":[{"op":"create_note","note":{"title":"Build","content":"cargo test","tags":[]},"evidence":"cargo test","confidence":0.9,"reason":"short note"}]}"#,
+        );
+        let (saver, _memory, notes) = saver(provider);
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.notes, 0, "{report:?}");
+        assert_eq!(report.outcomes[0].reason.as_deref(), Some("note too short"));
+        assert!(notes.list_notes(10, 0).await.expect("lists").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_note_is_refused_against_the_existing_inventory() {
+        let provider = CannedProvider::new(&format!(
+            r#"{{"operations":[{{"op":"create_note","note":{{"title":"Build Recipe","content":"{LONG_BUILD_LINE}","tags":["build"]}},"evidence":"{LONG_BUILD_LINE}","confidence":0.9,"reason":"same note"}}]}}"#
+        ));
+        let (saver, _memory, notes) = saver(provider);
+        notes
+            .save_note("Build Recipe", LONG_BUILD_LINE, &["build".to_string()])
+            .await
+            .expect("saves");
+
+        let report = saver.distil(&conversation()).await.expect("distils");
+
+        assert_eq!(report.notes, 0, "{report:?}");
+        assert_eq!(report.outcomes[0].reason.as_deref(), Some("already known"));
+        assert_eq!(notes.list_notes(10, 0).await.expect("lists").len(), 1);
     }
 
     #[tokio::test]
