@@ -2720,10 +2720,8 @@ fn close_and_validate(fragment: &str) -> Option<String> {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.pop() != Some(ch) {
-                    return None;
-                }
+            '}' | ']' if stack.pop() != Some(ch) => {
+                return None;
             }
             _ => {}
         }
