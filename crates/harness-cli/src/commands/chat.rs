@@ -91,6 +91,13 @@ impl IdleMemoryPass {
         }
     }
 
+    /// Record that an interval pass already covered `turns`, so the idle timer does not run a
+    /// duplicate pass for the same transcript slice.
+    fn mark_passed(&mut self, turns: usize) {
+        self.last_pass_turns = turns;
+        self.idle_since = std::time::Instant::now();
+    }
+
     /// Advance one tick. `busy` means a turn, a compaction, or a queued message is in progress.
     /// Returns `true` at most once per new transcript, after it has been quiet for `idle_secs`.
     fn tick(&mut self, turns: usize, busy: bool, idle_secs: u64, now: std::time::Instant) -> bool {
@@ -2745,6 +2752,13 @@ pub async fn run_interactive_chat(
                             current_tools,
                             outcome.reply.clone(),
                         ));
+
+                        if config.memory.mode == harness_core::MemoryMode::Background
+                            && config.memory.background_every_turns > 0
+                            && turns.len().is_multiple_of(config.memory.background_every_turns)
+                        {
+                            idle_pass.mark_passed(turns.len());
+                        }
 
                         if ui.is_attended {
                             todo::refresh_panel(&ui, &todo_scope);

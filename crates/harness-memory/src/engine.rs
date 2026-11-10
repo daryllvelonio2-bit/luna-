@@ -163,17 +163,17 @@ impl SqliteMemoryEngine {
         Ok(())
     }
 
-    /// Guarantee that for each topic subject, only 1 active record remains in persistent memory.
+    /// Guarantee that for each topic `(subject, predicate)` pair, only 1 active record remains in persistent memory.
     fn collapse_duplicate_active_topics(conn: &Connection) -> Result<(), HarnessError> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, subject, updated_at FROM memories
+                "SELECT id, subject, predicate, updated_at FROM memories
                  WHERE is_active = 1 AND category != 'note_pointer'
                  ORDER BY updated_at DESC",
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
-        let mut seen_subjects = std::collections::HashSet::new();
+        let mut seen_keys = std::collections::HashSet::new();
         let mut stale_ids = Vec::new();
 
         let rows = stmt
@@ -182,14 +182,18 @@ impl SqliteMemoryEngine {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
 
         for r in rows.flatten() {
-            let (id, subject, _) = r;
-            let norm_sub = subject.trim().to_ascii_lowercase();
-            if !seen_subjects.insert(norm_sub) {
+            let (id, subject, predicate, _) = r;
+            let norm_key = (
+                subject.trim().to_ascii_lowercase(),
+                predicate.trim().to_ascii_lowercase(),
+            );
+            if !seen_keys.insert(norm_key) {
                 stale_ids.push(id);
             }
         }
@@ -462,8 +466,10 @@ impl MemoryEngine for SqliteMemoryEngine {
                 "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                  FROM memories
                  WHERE is_active = 1
-                   AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
-                 ORDER BY confidence DESC, updated_at DESC
+                   AND (id LIKE ?1 OR raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
+                 ORDER BY CASE WHEN category = 'transcript' THEN 1 ELSE 0 END ASC,
+                          confidence DESC,
+                          updated_at DESC
                  LIMIT ?2",
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -506,7 +512,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                     continue;
                 }
                 let haystack = format!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {}",
+                    m.id,
                     m.subject,
                     m.predicate,
                     m.object,
@@ -524,7 +531,11 @@ impl MemoryEngine for SqliteMemoryEngine {
                 }
             }
             scored.sort_by(|a, b| {
-                b.0.cmp(&a.0)
+                let a_curated = a.1.category != MemoryCategory::Transcript;
+                let b_curated = b.1.category != MemoryCategory::Transcript;
+                b_curated
+                    .cmp(&a_curated)
+                    .then_with(|| b.0.cmp(&a.0))
                     .then_with(|| {
                         b.1.confidence
                             .partial_cmp(&a.1.confidence)
@@ -548,7 +559,8 @@ impl MemoryEngine for SqliteMemoryEngine {
                     "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                      FROM memories
                      WHERE is_active = 1
-                     ORDER BY updated_at DESC
+                     ORDER BY CASE WHEN category = 'transcript' THEN 1 ELSE 0 END ASC,
+                              updated_at DESC
                      LIMIT ?1",
                 )
                 .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
@@ -576,24 +588,37 @@ impl MemoryEngine for SqliteMemoryEngine {
         let conn = self.conn.lock().await;
         let mut memories: Vec<MemoryRecord> = Vec::new();
 
-        // 1. L0/L1 Priority: Top project cards, canonical commands, and user profile
+        // 1. L0/L1 Priority: User profile, preferences, workflow rules, code patterns, and core project commands
         let mut l0_l1_stmt = conn
             .prepare(
                 "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
                  FROM memories
                  WHERE is_active = 1
                    AND category != 'transcript'
+                   AND LOWER(predicate) NOT IN ('status', 'git_status', 'git-status', 'branch')
                    AND (
-                       category = 'user_profile'
-                       OR subject LIKE 'project%'
-                       OR predicate IN ('build-command', 'build_command', 'test-command', 'test_command', 'run-command', 'run_command', 'root', 'stack', 'runbook')
+                       category IN ('user_profile', 'workflow_rule', 'code_pattern')
+                       OR LOWER(subject) LIKE 'user%'
+                       OR LOWER(subject) LIKE 'preference%'
+                       OR LOWER(subject) LIKE 'workflow%'
+                       OR LOWER(subject) LIKE 'project%'
+                       OR LOWER(predicate) IN ('build-command', 'build_command', 'test-command', 'test_command', 'run-command', 'run_command', 'root', 'stack', 'runbook')
                    )
-                 ORDER BY confidence DESC, updated_at DESC
+                 ORDER BY CASE
+                     WHEN category IN ('user_profile', 'workflow_rule', 'code_pattern')
+                          OR LOWER(subject) LIKE 'user%'
+                          OR LOWER(subject) LIKE 'preference%'
+                          OR LOWER(subject) LIKE 'workflow%'
+                     THEN 0
+                     ELSE 1
+                 END ASC,
+                 confidence DESC,
+                 updated_at DESC
                  LIMIT ?1",
             )
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         let l0_l1_rows = l0_l1_stmt
-            .query_map(params![limit.min(6) as i64], memory_from_row)
+            .query_map(params![limit.min(8) as i64], memory_from_row)
             .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
         for record in l0_l1_rows.flatten() {
             if !memories.iter().any(|existing| existing.id == record.id) {
@@ -612,7 +637,7 @@ impl MemoryEngine for SqliteMemoryEngine {
                      FROM memories
                      WHERE is_active = 1
                        AND category != 'transcript'
-                       AND (raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
+                       AND (id LIKE ?1 OR raw_content LIKE ?1 OR subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1 OR name LIKE ?1 OR path LIKE ?1)
                      ORDER BY confidence DESC, updated_at DESC
                      LIMIT ?2",
                 )
@@ -624,6 +649,74 @@ impl MemoryEngine for SqliteMemoryEngine {
             for record in rows.flatten() {
                 if !memories.iter().any(|existing| existing.id == record.id) {
                     memories.push(record);
+                }
+            }
+
+            if memories.len() < limit {
+                let stopwords = [
+                    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+                    "has", "have", "had", "but", "not", "you", "your", "can", "how", "what",
+                    "when", "where", "which", "who", "why", "does", "did", "doing", "into",
+                    "about", "over", "under", "then", "than", "them", "they", "its", "our", "out",
+                    "use", "using", "would", "should", "could", "there", "i", "do", "we", "my",
+                ];
+                let terms: Vec<String> = trimmed_query
+                    .to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 2 && !stopwords.contains(w))
+                    .map(str::to_string)
+                    .collect();
+
+                if !terms.is_empty() {
+                    let mut all_stmt = conn
+                        .prepare(
+                            "SELECT id, subject, predicate, object, raw_content, category, confidence, created_at, updated_at, is_active, superseded_by, name, path
+                             FROM memories
+                             WHERE is_active = 1 AND category != 'transcript'",
+                        )
+                        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+                    let all_rows = all_stmt
+                        .query_map([], memory_from_row)
+                        .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+                    let mut scored: Vec<(usize, MemoryRecord)> = Vec::new();
+                    for m in all_rows.flatten() {
+                        if memories.iter().any(|existing| existing.id == m.id) {
+                            continue;
+                        }
+                        let haystack = format!(
+                            "{} {} {} {} {} {} {}",
+                            m.id,
+                            m.subject,
+                            m.predicate,
+                            m.object,
+                            m.raw_content,
+                            m.name.as_deref().unwrap_or(""),
+                            m.path.as_deref().unwrap_or("")
+                        )
+                        .to_lowercase();
+                        let matches = terms
+                            .iter()
+                            .filter(|t| haystack.contains(t.as_str()))
+                            .count();
+                        if matches > 0 {
+                            scored.push((matches, m));
+                        }
+                    }
+                    scored.sort_by(|a, b| {
+                        b.0.cmp(&a.0)
+                            .then_with(|| {
+                                b.1.confidence
+                                    .partial_cmp(&a.1.confidence)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .then_with(|| b.1.updated_at.cmp(&a.1.updated_at))
+                    });
+                    for (_, m) in scored {
+                        memories.push(m);
+                        if memories.len() >= limit {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1000,11 +1093,12 @@ impl MemoryEngine for SqliteMemoryEngine {
                     parts.join(" · ")
                 };
 
-                let key = if m.predicate == "profile" || m.predicate.is_empty() {
-                    m.subject.clone()
-                } else {
-                    format!("{}.{}", m.subject, m.predicate)
-                };
+                let key =
+                    if m.predicate == "profile" || m.predicate == "=" || m.predicate.is_empty() {
+                        m.subject.clone()
+                    } else {
+                        format!("{}.{}", m.subject, m.predicate)
+                    };
                 lines.push(format!("- [{}] {}: {}", display_cat, key, summary));
             }
         }
@@ -1023,6 +1117,63 @@ mod tests {
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ))
+    }
+
+    #[tokio::test]
+    async fn multiple_predicates_under_same_subject_survive_reopen() {
+        let path = temp_db();
+        {
+            let engine = SqliteMemoryEngine::new(Some(path.clone())).expect("creates db");
+            let editor = MemoryRecord {
+                id: "user.editor".to_string(),
+                subject: "user".to_string(),
+                predicate: "editor".to_string(),
+                object: "neovim".to_string(),
+                name: None,
+                path: None,
+                raw_content: "user editor neovim".to_string(),
+                category: MemoryCategory::UserProfile,
+                confidence: 1.0,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                is_active: true,
+                superseded_by: None,
+            };
+            let voice = MemoryRecord {
+                id: "user.voice".to_string(),
+                subject: "user".to_string(),
+                predicate: "voice".to_string(),
+                object: "am_michael".to_string(),
+                name: None,
+                path: None,
+                raw_content: "user voice am_michael".to_string(),
+                category: MemoryCategory::UserProfile,
+                confidence: 1.0,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                is_active: true,
+                superseded_by: None,
+            };
+            engine.save(&editor).await.expect("saves editor");
+            engine.save(&voice).await.expect("saves voice");
+        }
+
+        let reopened = SqliteMemoryEngine::new(Some(path.clone())).expect("reopens db");
+        let cards = reopened.retrieve_cards("", 10).await.expect("reads cards");
+        assert!(
+            cards
+                .iter()
+                .any(|r| r.id == "user.editor" && r.object == "neovim"),
+            "user.editor must remain active after reopening the database"
+        );
+        assert!(
+            cards
+                .iter()
+                .any(|r| r.id == "user.voice" && r.object == "am_michael"),
+            "user.voice must remain active after reopening the database"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

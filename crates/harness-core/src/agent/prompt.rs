@@ -98,7 +98,16 @@ where
                     format!("{}\n\n", sections.join("\n\n"))
                 }
             }
-            crate::config::MemoryMode::Background => String::new(),
+            crate::config::MemoryMode::Background => {
+                if self.config.memory_enabled || self.config.notes_enabled {
+                    format!(
+                        "{}\n\n",
+                        crate::prompts::section(crate::prompts::MEMORY_BACKGROUND_PROMPT)?
+                    )
+                } else {
+                    String::new()
+                }
+            }
         };
 
         let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?

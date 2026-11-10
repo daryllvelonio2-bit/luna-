@@ -801,6 +801,9 @@ impl NotesEngine for FileNotesEngine {
 
         let mut scored: Vec<(usize, Note)> = Vec::new();
         for note in self.load_all()? {
+            if note.parent_id.is_some() {
+                continue;
+            }
             let haystack =
                 format!("{}\n{}\n{}", note.title, note.content, note.tags.join(" ")).to_lowercase();
             let exact = haystack.matches(&needle).count();
@@ -829,6 +832,7 @@ impl NotesEngine for FileNotesEngine {
         Ok(self
             .load_all()?
             .into_iter()
+            .filter(|note| note.parent_id.is_none())
             .skip(offset)
             .take(limit)
             .collect())

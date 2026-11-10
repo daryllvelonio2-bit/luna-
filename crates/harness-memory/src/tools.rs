@@ -75,17 +75,17 @@ impl Tool for SaveMemoryTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let subject = args
+        let raw_subject = args
             .get("subject")
             .and_then(|s| s.as_str())
             .unwrap_or_default()
             .trim();
-        let predicate = args
+        let raw_predicate = args
             .get("predicate")
             .and_then(|p| p.as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("profile");
+            .unwrap_or_default();
+        let (subject, predicate) = normalize_subject_predicate(raw_subject, raw_predicate);
         let object = args
             .get("object")
             .or_else(|| args.get("content"))
@@ -93,13 +93,8 @@ impl Tool for SaveMemoryTool {
             .and_then(|o| o.as_str())
             .unwrap_or_default()
             .trim();
-        let cat_str = args.get("category").and_then(|c| c.as_str()).unwrap_or(
-            if subject.starts_with("user.") {
-                "user_profile"
-            } else {
-                "fact"
-            },
-        );
+        let cat_opt = args.get("category").and_then(|c| c.as_str());
+        let category = parse_memory_category(cat_opt, &subject, &predicate);
         let confidence = args
             .get("confidence")
             .and_then(|c| c.as_f64())
@@ -116,50 +111,13 @@ impl Tool for SaveMemoryTool {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let category = match cat_str {
-            "user_profile" => MemoryCategory::UserProfile,
-            "code_pattern" => MemoryCategory::CodePattern,
-            "workflow_rule" => MemoryCategory::WorkflowRule,
-            _ => MemoryCategory::Fact,
-        };
-
-        let s_sub = subject
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string();
-        let s_pred = predicate
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string();
-        let id = if !s_sub.is_empty() && !s_pred.is_empty() {
-            format!("{}.{}", s_sub, s_pred)
-        } else if !s_sub.is_empty() {
-            s_sub
-        } else {
-            format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8])
-        };
+        let id = derive_memory_id(&subject, &predicate);
         let raw_content = format!("{} {} {}", subject, predicate, object);
 
         let record = MemoryRecord {
             id: id.clone(),
-            subject: subject.to_string(),
-            predicate: predicate.to_string(),
+            subject: subject.clone(),
+            predicate: predicate.clone(),
             object: object.to_string(),
             name,
             path,
@@ -184,6 +142,101 @@ impl Tool for SaveMemoryTool {
             })
             .to_string(),
         ))
+    }
+}
+
+/// Normalizes `(subject, predicate)` pairs so models that emit `predicate = "="` with a dotted
+/// subject (`subject = "user.preference.voice"`) or repeat the predicate at the end of the subject
+/// produce clean `(subject, predicate)` keys and domain/topic placements.
+fn normalize_subject_predicate(subject: &str, predicate: &str) -> (String, String) {
+    let sub = subject.trim();
+    let pred = predicate.trim();
+    let pred_has_alnum = pred.chars().any(|c| c.is_alphanumeric());
+    let pred_is_placeholder = !pred_has_alnum
+        || matches!(
+            pred.to_ascii_lowercase().as_str(),
+            "=" | "==" | ":" | "-" | "is" | "equals"
+        );
+
+    if pred_is_placeholder {
+        if let Some((prefix, suffix)) = sub.rsplit_once('.') {
+            let prefix_trimmed = prefix.trim();
+            let suffix_trimmed = suffix.trim();
+            if !prefix_trimmed.is_empty()
+                && !suffix_trimmed.is_empty()
+                && suffix_trimmed.chars().any(|c| c.is_alphanumeric())
+            {
+                return (prefix_trimmed.to_string(), suffix_trimmed.to_string());
+            }
+        }
+        return (sub.to_string(), "profile".to_string());
+    }
+
+    let suffix_dot = format!(".{}", pred);
+    if sub.len() > suffix_dot.len()
+        && sub
+            .to_ascii_lowercase()
+            .ends_with(&suffix_dot.to_ascii_lowercase())
+    {
+        let stripped = sub[..sub.len() - suffix_dot.len()].trim();
+        if !stripped.is_empty() {
+            return (stripped.to_string(), pred.to_string());
+        }
+    }
+
+    (sub.to_string(), pred.to_string())
+}
+
+/// Maps category strings and common model aliases (such as `"preference"`, `"habit"`, `"workflow"`,
+/// `"style"`) onto `MemoryCategory`, inferring `UserProfile` / `WorkflowRule` / `CodePattern` when
+/// the category is omitted or left as `"fact"` on a user/preference/workflow subject.
+fn parse_memory_category(cat_str: Option<&str>, subject: &str, predicate: &str) -> MemoryCategory {
+    let norm_cat = cat_str.unwrap_or_default().trim().to_ascii_lowercase();
+    match norm_cat.as_str() {
+        "user_profile" | "user-profile" | "profile" | "preference" | "preferences"
+        | "user_preference" | "user-preference" | "like" | "likes" | "dislike" | "dislikes"
+        | "boundary" | "identity" => return MemoryCategory::UserProfile,
+        "workflow_rule" | "workflow-rule" | "workflow" | "habit" | "habits" | "rule" | "rules"
+        | "command" | "process" | "runbook" => return MemoryCategory::WorkflowRule,
+        "code_pattern" | "code-pattern" | "pattern" | "patterns" | "convention" | "conventions"
+        | "style" | "coding_style" | "architecture" => return MemoryCategory::CodePattern,
+        "note_pointer" | "note-pointer" => return MemoryCategory::NotePointer,
+        "transcript" => return MemoryCategory::Transcript,
+        _ => {}
+    }
+
+    let sub_lower = subject.trim().to_ascii_lowercase();
+    let pred_lower = predicate.trim().to_ascii_lowercase();
+    if sub_lower.starts_with("user")
+        || sub_lower.starts_with("preference")
+        || sub_lower.contains(".preference")
+    {
+        MemoryCategory::UserProfile
+    } else if sub_lower.starts_with("workflow")
+        || sub_lower.contains(".workflow")
+        || sub_lower.contains("habit")
+        || matches!(
+            pred_lower.as_str(),
+            "workflow"
+                | "habit"
+                | "rule"
+                | "build-command"
+                | "build_command"
+                | "test-command"
+                | "test_command"
+                | "run-command"
+                | "run_command"
+                | "runbook"
+        )
+    {
+        MemoryCategory::WorkflowRule
+    } else if sub_lower.contains("pattern")
+        || sub_lower.contains("convention")
+        || matches!(pred_lower.as_str(), "pattern" | "convention" | "style")
+    {
+        MemoryCategory::CodePattern
+    } else {
+        MemoryCategory::Fact
     }
 }
 
@@ -324,7 +377,7 @@ impl Tool for UpdateMemoryTool {
 
         let existing = self.engine.get_record(old_id).await?;
 
-        let subject = args
+        let raw_subject = args
             .get("subject")
             .and_then(|s| s.as_str())
             .map(str::trim)
@@ -337,7 +390,7 @@ impl Tool for UpdateMemoryTool {
                     .unwrap_or_else(|| old_id.to_string())
             });
 
-        let predicate = args
+        let raw_predicate = args
             .get("predicate")
             .and_then(|p| p.as_str())
             .map(str::trim)
@@ -349,6 +402,8 @@ impl Tool for UpdateMemoryTool {
                     .map(|r| r.predicate.clone())
                     .unwrap_or_else(|| "profile".to_string())
             });
+
+        let (subject, predicate) = normalize_subject_predicate(&raw_subject, &raw_predicate);
 
         let object = args
             .get("object")
@@ -382,16 +437,11 @@ impl Tool for UpdateMemoryTool {
             .or_else(|| existing.as_ref().and_then(|r| r.path.clone()));
 
         let category = if let Some(cat_str) = args.get("category").and_then(|c| c.as_str()) {
-            match cat_str {
-                "user_profile" => MemoryCategory::UserProfile,
-                "code_pattern" => MemoryCategory::CodePattern,
-                "workflow_rule" => MemoryCategory::WorkflowRule,
-                _ => MemoryCategory::Fact,
-            }
+            parse_memory_category(Some(cat_str), &subject, &predicate)
         } else if let Some(ref ex) = existing {
             ex.category
         } else {
-            MemoryCategory::Fact
+            parse_memory_category(None, &subject, &predicate)
         };
 
         let new_id = if let Some(ref ex) = existing {
@@ -629,6 +679,7 @@ impl Tool for MemorySearchTool {
 
         // A note body is authoritative and verbatim; return the whole thing so one search can
         // answer "what is the build command?" without a second round trip.
+        const MAX_SEARCH_NOTE_BODY_CHARS: usize = 8_000;
         let notes = match &self.notes {
             Some(engine) => match engine.search_notes(query, limit).await {
                 Ok(notes) => notes,
@@ -641,13 +692,27 @@ impl Tool for MemorySearchTool {
         };
         let note_results: Vec<serde_json::Value> = notes
             .iter()
+            .filter(|note| note.parent_id.is_none())
             .map(|note| {
+                let text = if note.content.chars().count() > MAX_SEARCH_NOTE_BODY_CHARS {
+                    let truncated: String = note
+                        .content
+                        .chars()
+                        .take(MAX_SEARCH_NOTE_BODY_CHARS)
+                        .collect();
+                    format!(
+                        "{}\n\n...(truncated, use read_note with id '{}' for full body)",
+                        truncated, note.id
+                    )
+                } else {
+                    note.content.clone()
+                };
                 json!({
                     "id": note.id,
                     "title": note.title,
                     "summary_pointer": note.summary_pointer,
                     "tags": note.tags,
-                    "text": note.content,
+                    "text": text,
                     "updated_at": note.updated_at,
                 })
             })
@@ -671,6 +736,35 @@ mod tests {
     use super::*;
     use crate::SqliteMemoryEngine;
     use harness_notes::FileNotesEngine;
+
+    #[tokio::test]
+    async fn save_memory_normalizes_equals_predicate_and_preference_category() {
+        let memory = Arc::new(SqliteMemoryEngine::in_memory().expect("memory"));
+        let tool = SaveMemoryTool::new(memory.clone());
+        let output = tool
+            .execute(
+                "call-save-1",
+                &json!({
+                    "subject": "user.preference.stickman_images",
+                    "predicate": "=",
+                    "object": "manual via Firefox Gemini",
+                    "category": "preference"
+                }),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("saves memory");
+        assert!(!output.is_error, "{}", output.content);
+        let cards = memory
+            .retrieve_cards("", 10)
+            .await
+            .expect("retrieves cards");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "user_preference.stickman_images");
+        assert_eq!(cards[0].subject, "user.preference");
+        assert_eq!(cards[0].predicate, "stickman_images");
+        assert_eq!(cards[0].category, MemoryCategory::UserProfile);
+    }
 
     #[tokio::test]
     async fn memory_search_returns_matching_note_bodies_when_notes_are_attached() {

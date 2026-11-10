@@ -140,7 +140,7 @@ impl Tool for SearchNotesTool {
                     "id": n.id,
                     "summary_pointer": n.summary_pointer,
                     "tags": n.tags,
-                    "snippet": n.content.chars().take(200).collect::<String>(),
+                    "snippet": query_centered_snippet(&n.content, query, 200),
                 })
             })
             .collect();
@@ -149,6 +149,44 @@ impl Tool for SearchNotesTool {
             call_id,
             serde_json::to_string_pretty(&summaries).unwrap_or_default(),
         ))
+    }
+}
+
+/// Extracts a snippet up to `max_chars` characters centered around the first match of `query`
+/// (or its first significant word) in `content`, falling back to the leading characters.
+fn query_centered_snippet(content: &str, query: &str, max_chars: usize) -> String {
+    let total_chars = content.chars().count();
+    if total_chars <= max_chars {
+        return content.to_string();
+    }
+
+    let lower_content = content.to_lowercase();
+    let needle = query.trim().to_lowercase();
+    let match_byte_pos = if !needle.is_empty() {
+        lower_content.find(&needle).or_else(|| {
+            needle
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 2)
+                .find_map(|term| lower_content.find(term))
+        })
+    } else {
+        None
+    };
+
+    let Some(byte_pos) = match_byte_pos else {
+        return content.chars().take(max_chars).collect();
+    };
+
+    let match_char_idx = lower_content[..byte_pos].chars().count();
+    let half = max_chars / 2;
+    let start_char = match_char_idx
+        .saturating_sub(half)
+        .min(total_chars.saturating_sub(max_chars));
+    let slice: String = content.chars().skip(start_char).take(max_chars).collect();
+    if start_char > 0 {
+        format!("…{}", slice.trim_start())
+    } else {
+        slice
     }
 }
 

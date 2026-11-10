@@ -455,6 +455,19 @@ where
                 {
                     warn!("Failed to add note pointer to memory: {}", e);
                 }
+                // Compact the tool result stored in conversation history so the full note body
+                // (already present in the assistant's tool call arguments) is not duplicated in
+                // context on every subsequent turn.
+                execution_result.content = serde_json::json!({
+                    "status": if tool_call.name == "save_note" { "saved" } else { "updated" },
+                    "id": note.id,
+                    "title": note.title,
+                    "summary_pointer": note.summary_pointer,
+                    "tags": note.tags,
+                    "content_chars": note.content.chars().count(),
+                    "updated_at": note.updated_at,
+                })
+                .to_string();
             }
         }
 

@@ -315,9 +315,32 @@ fn placement(record: &MemoryRecord) -> (String, String) {
         return ("notes".to_string(), "pointers".to_string());
     }
     if let Some((domain, rest)) = record.id.split_once('.') {
-        if !domain.is_empty() && !rest.is_empty() {
-            return (ids::slugify(domain), ids::slugify(rest));
+        let dom_slug = ids::slugify(domain);
+        let rest_slug = ids::slugify(rest);
+        if !dom_slug.is_empty() && !rest_slug.is_empty() {
+            return (dom_slug, rest_slug);
         }
+    }
+    if let Some((domain, rest)) = record.subject.split_once('.') {
+        let dom_slug = ids::slugify(domain);
+        let topic_raw = if !record.predicate.trim().is_empty() && record.predicate.trim() != "=" {
+            format!("{}-{}", rest, record.predicate)
+        } else {
+            rest.to_string()
+        };
+        let topic_slug = ids::slugify(&topic_raw);
+        if !dom_slug.is_empty() && !topic_slug.is_empty() {
+            return (dom_slug, topic_slug);
+        }
+    }
+    let sub_slug = ids::slugify(&record.subject);
+    let pred_slug = if record.predicate.trim() == "=" {
+        String::new()
+    } else {
+        ids::slugify(&record.predicate)
+    };
+    if !sub_slug.is_empty() && !pred_slug.is_empty() {
+        return (sub_slug, pred_slug);
     }
     (
         "memory".to_string(),
@@ -804,11 +827,30 @@ impl MemoryStore {
     }
 
     pub fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
-        Ok(self
-            .search(query, &SearchFilter::default(), limit)?
+        let non_transcript_filter = SearchFilter {
+            exclude_category: Some(MemoryCategory::Transcript),
+            ..SearchFilter::default()
+        };
+        let mut memories: Vec<MemoryRecord> = self
+            .search(query, &non_transcript_filter, limit)?
             .into_iter()
             .map(|result| result.record.to_memory())
-            .collect())
+            .collect();
+
+        if memories.len() < limit {
+            let all_results = self.search(query, &SearchFilter::default(), limit)?;
+            for result in all_results {
+                let mem = result.record.to_memory();
+                if !memories.iter().any(|existing| existing.id == mem.id) {
+                    memories.push(mem);
+                    if memories.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(memories)
     }
 
     /// Retrieve records for the prompt block, excluding raw transcripts.
@@ -819,13 +861,34 @@ impl MemoryStore {
     ) -> Result<Vec<MemoryRecord>, HarnessError> {
         let mut memories: Vec<MemoryRecord> = Vec::new();
 
-        // 1. L0/L1 Priority: Top project cards, canonical commands, and user profile
+        // 1. L0/L1 Priority: User profile, preferences, workflow rules, code patterns, and canonical project cards
         if let Ok(active) = self.active_records() {
+            let is_user_or_workflow = |r: &Record| -> bool {
+                let sub_lower = r.subject.to_ascii_lowercase();
+                let dom_lower = r.domain.to_ascii_lowercase();
+                matches!(
+                    r.category,
+                    MemoryCategory::UserProfile
+                        | MemoryCategory::WorkflowRule
+                        | MemoryCategory::CodePattern
+                ) || sub_lower.starts_with("user")
+                    || sub_lower.starts_with("preference")
+                    || sub_lower.starts_with("workflow")
+                    || dom_lower.starts_with("user")
+                    || dom_lower.starts_with("preference")
+                    || dom_lower.starts_with("workflow")
+            };
+            let is_transient_status = |r: &Record| -> bool {
+                matches!(
+                    r.predicate.to_ascii_lowercase().as_str(),
+                    "status" | "git_status" | "git-status" | "branch"
+                )
+            };
             let mut l0_l1: Vec<&Record> = active
                 .iter()
-                .filter(|r| r.category != MemoryCategory::Transcript)
+                .filter(|r| r.category != MemoryCategory::Transcript && !is_transient_status(r))
                 .filter(|r| {
-                    r.category == MemoryCategory::UserProfile
+                    is_user_or_workflow(r)
                         || r.domain.eq_ignore_ascii_case("project")
                         || r.topic.eq_ignore_ascii_case("project")
                         || r.subject.starts_with("project.")
@@ -844,12 +907,18 @@ impl MemoryStore {
                 })
                 .collect();
             l0_l1.sort_by(|a, b| {
-                b.confidence
-                    .partial_cmp(&a.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                let a_prio = is_user_or_workflow(a);
+                let b_prio = is_user_or_workflow(b);
+                b_prio
+                    .cmp(&a_prio)
+                    .then_with(|| {
+                        b.confidence
+                            .partial_cmp(&a.confidence)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .then_with(|| b.filed_at.cmp(&a.filed_at))
             });
-            for r in l0_l1.into_iter().take(limit.min(6)) {
+            for r in l0_l1.into_iter().take(limit.min(8)) {
                 memories.push(r.to_memory());
             }
         }
@@ -936,11 +1005,12 @@ impl MemoryStore {
                     parts.join(" · ")
                 };
 
-                let key = if m.predicate == "profile" || m.predicate.is_empty() {
-                    m.subject.clone()
-                } else {
-                    format!("{}.{}", m.subject, m.predicate)
-                };
+                let key =
+                    if m.predicate == "profile" || m.predicate == "=" || m.predicate.is_empty() {
+                        m.subject.clone()
+                    } else {
+                        format!("{}.{}", m.subject, m.predicate)
+                    };
                 lines.push(format!("- [{}] {}: {}", display_cat, key, summary));
             }
         }
