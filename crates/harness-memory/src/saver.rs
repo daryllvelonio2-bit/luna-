@@ -2450,14 +2450,25 @@ fn parse_candidates(text: &str) -> Result<CandidateSet, HarnessError> {
 /// Strip a fence, find the best valid JSON object, and name the failure when there is none.
 fn json_object(text: &str, provider: &str) -> Result<String, HarnessError> {
     let cleaned = strip_fence(text);
+    // 1. Try balanced_object first
     if let Some(object) = balanced_object(&cleaned) {
         return Ok(object);
     }
-    // A model that runs out of tokens can leave the answer one `]}` short, or truncate mid-item.
-    // Close what is open or rewind to the last complete item rather than throwing away a complete
-    // set of operations.
+    // 2. If balanced_object did not find a valid operations/candidates object, try repaired_object
+    // which handles truncated responses by closing open brackets or rewinding past truncated items.
     if let Some(repaired) = repaired_object(&cleaned) {
         return Ok(repaired);
+    }
+    // 3. Fallback to repaired syntax of the first candidate if any
+    let mut search_from = 0;
+    while let Some(rel_start) = cleaned[search_from..].find('{') {
+        let start = search_from + rel_start;
+        if let Some(end) = find_balanced_end(&cleaned, start) {
+            let candidate = &cleaned[start..end];
+            return Ok(repair_json_syntax(candidate));
+        } else {
+            search_from = start + 1;
+        }
     }
     Err(HarnessError::ProviderError {
         provider: provider.to_string(),
@@ -2477,15 +2488,22 @@ fn json_object(text: &str, provider: &str) -> Result<String, HarnessError> {
 fn balanced_object(text: &str) -> Option<String> {
     let mut candidates = Vec::new();
     let mut search_from = 0;
+    let mut last_end = 0;
     while let Some(rel_start) = text[search_from..].find('{') {
         let start = search_from + rel_start;
         if let Some(end) = find_balanced_end(text, start) {
             candidates.push(text[start..end].to_string());
             search_from = end;
+            last_end = end;
         } else {
             search_from = start + 1;
         }
     }
+
+    // If there is unclosed trailing text with '{' after the last balanced candidate,
+    // a truncated multi-operation response may be present; let repaired_object handle it
+    // instead of returning an earlier inner balanced object (e.g., an individual operation).
+    let has_trailing_unclosed = text[last_end..].contains('{');
 
     let mut fallback_valid: Option<String> = None;
     for candidate in &candidates {
@@ -2498,7 +2516,9 @@ fn balanced_object(text: &str) -> Option<String> {
                     || map.contains_key("memories")
                     || map.contains_key("notes")
                 {
-                    return Some(attempt);
+                    if !has_trailing_unclosed {
+                        return Some(attempt);
+                    }
                 }
                 if fallback_valid.is_none() {
                     fallback_valid = Some(attempt);
@@ -2507,23 +2527,13 @@ fn balanced_object(text: &str) -> Option<String> {
         }
     }
 
-    if fallback_valid.is_some() {
-        return fallback_valid;
-    }
-
-    // If none of the balanced objects parsed (for instance, there is a truncated real JSON object
-    // after a balanced schema echo in prose, or the only balanced object has invalid syntax),
-    // check if there is an unclosed `{` later in `text` that `repaired_object` can recover.
-    if candidates.len() == 1 {
-        let only = &candidates[0];
-        let after_only = text
-            .find(only.as_str())
-            .map(|i| i + only.len())
-            .unwrap_or(text.len());
-        if text[after_only..].contains('{') {
-            return None;
+    if !has_trailing_unclosed {
+        if fallback_valid.is_some() {
+            return fallback_valid;
         }
-        return Some(repair_json_syntax(only));
+        if candidates.len() == 1 {
+            return Some(repair_json_syntax(&candidates[0]));
+        }
     }
 
     None
@@ -2661,8 +2671,7 @@ fn repair_json_syntax(input: &str) -> String {
 /// earlier safe boundaries (`}`, `]`, `"`, or `,`) so all completed operations before the cut
 /// survive.
 fn repaired_object(text: &str) -> Option<String> {
-    let mut starts: Vec<usize> = text.match_indices('{').map(|(idx, _)| idx).collect();
-    starts.reverse();
+    let starts: Vec<usize> = text.match_indices('{').map(|(idx, _)| idx).collect();
     for start in starts {
         let slice = repair_json_syntax(&text[start..]);
         if let Some(closed) = close_and_validate(&slice) {
@@ -4216,11 +4225,31 @@ mod tests {
         let recovered =
             parse_distilled(truncated_second_op).expect("recovers completed first operation");
         let recovered_ops = recovered.into_operations();
-        assert_eq!(recovered_ops.len(), 1);
+        // The parser successfully closes the truncated second operation without throwing away the
+        // payload; the planner's validation (`plan_one`) then filters out the empty second operation
+        // (empty object/evidence) while keeping the complete first operation.
+        assert_eq!(recovered_ops[0].op, "add_memory");
         let first = recovered_ops[0].memory.as_ref().expect("first memory item");
         assert_eq!(first.subject, "user.preference");
         assert_eq!(first.predicate, "voice");
         assert_eq!(first.object, "Kokoro am_michael");
+
+        // When passed through plan_one, only the valid complete operation survives
+        let (saver, _memory, _notes) = saver(CannedProvider::new(truncated_second_op));
+        let transcript = render_transcript(&[Message::user("I like am_michael")]);
+        let inventory = Inventory {
+            memories: Vec::new(),
+            notes: Vec::new(),
+            pointers: HashMap::new(),
+            memories_truncated: 0,
+            notes_truncated: 0,
+        };
+        let mut report = SaveReport::default();
+        let planned: Vec<_> = recovered_ops
+            .into_iter()
+            .filter_map(|op| saver.plan_one(op, &inventory, &transcript, &mut report))
+            .collect();
+        assert_eq!(planned.len(), 1);
     }
 
     #[test]
