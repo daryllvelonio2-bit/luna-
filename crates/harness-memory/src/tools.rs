@@ -596,6 +596,7 @@ pub struct MemorySearchTool {
     /// its title, so without this a note is effectively write-only unless the model guesses
     /// `search_notes`; recall should not depend on that guess.
     notes: Option<Arc<dyn NotesEngine>>,
+    notes_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl MemorySearchTool {
@@ -603,11 +604,17 @@ impl MemorySearchTool {
         Self {
             engine,
             notes: None,
+            notes_gate: None,
         }
     }
 
     pub fn with_notes(mut self, notes: Arc<dyn NotesEngine>) -> Self {
         self.notes = Some(notes);
+        self
+    }
+
+    pub fn with_notes_gate(mut self, gate: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.notes_gate = Some(gate);
         self
     }
 }
@@ -680,15 +687,24 @@ impl Tool for MemorySearchTool {
         // A note body is authoritative and verbatim; return the whole thing so one search can
         // answer "what is the build command?" without a second round trip.
         const MAX_SEARCH_NOTE_BODY_CHARS: usize = 8_000;
-        let notes = match &self.notes {
-            Some(engine) => match engine.search_notes(query, limit).await {
-                Ok(notes) => notes,
-                Err(error) => {
-                    tracing::warn!("memory_search could not search notes: {}", error);
-                    Vec::new()
-                }
-            },
-            None => Vec::new(),
+        let notes_allowed = self
+            .notes_gate
+            .as_ref()
+            .map(|g| g.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(true);
+        let notes = if notes_allowed {
+            match &self.notes {
+                Some(engine) => match engine.search_notes(query, limit).await {
+                    Ok(notes) => notes,
+                    Err(error) => {
+                        tracing::warn!("memory_search could not search notes: {}", error);
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
         let note_results: Vec<serde_json::Value> = notes
             .iter()

@@ -109,21 +109,21 @@ impl Feature {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FeatureToggles {
-    memory: AtomicBool,
-    notes: AtomicBool,
-    skills: AtomicBool,
-    mcp: AtomicBool,
+    memory: Arc<AtomicBool>,
+    notes: Arc<AtomicBool>,
+    skills: Arc<AtomicBool>,
+    mcp: Arc<AtomicBool>,
 }
 
 impl Default for FeatureToggles {
     fn default() -> Self {
         Self {
-            memory: AtomicBool::new(true),
-            notes: AtomicBool::new(true),
-            skills: AtomicBool::new(true),
-            mcp: AtomicBool::new(true),
+            memory: Arc::new(AtomicBool::new(true)),
+            notes: Arc::new(AtomicBool::new(true)),
+            skills: Arc::new(AtomicBool::new(true)),
+            mcp: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -145,7 +145,11 @@ impl FeatureToggles {
             Feature::Skills => &self.skills,
             Feature::Mcp => &self.mcp,
         };
-        slot.store(enabled, Ordering::Relaxed);
+        slot.store(enabled, Ordering::SeqCst);
+    }
+
+    pub(crate) fn notes_atomic(&self) -> Arc<AtomicBool> {
+        self.notes.clone()
     }
 }
 
@@ -328,6 +332,27 @@ pub(crate) fn looks_like_path(line: &str) -> bool {
     }
     // `/tmp`, `/etc`: a single component can still be a real path.
     std::path::Path::new(token).exists()
+}
+
+/// Whether a line that does NOT begin with `/` is a bare feature toggle command like `memory off`
+/// or `notes status` or `skills off`.
+pub(crate) fn is_bare_feature_command(line: &str) -> bool {
+    let unquoted = line.trim().trim_matches(['"', '\'', '`']);
+    let mut tokens = unquoted.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let first_lower = first.to_ascii_lowercase();
+    if !matches!(first_lower.as_str(), "memory" | "notes" | "skills" | "mcp") {
+        return false;
+    }
+    match tokens.next() {
+        None | Some("on") | Some("off") | Some("enable") | Some("disable") | Some("enabled")
+        | Some("disabled") | Some("status") | Some("list") | Some("true") | Some("false") => {
+            tokens.next().is_none()
+        }
+        _ => false,
+    }
 }
 
 /// Keep the slash menu and `/help` scannable: skill descriptions are written for the model and can
@@ -3463,5 +3488,22 @@ mod feature_toggle_tests {
         assert!(off.iter().any(|entry| entry.name == "/skills"));
         assert!(off.iter().any(|entry| entry.name == "/memory"));
         assert!(off.iter().any(|entry| entry.name == "/notes"));
+    }
+
+    #[test]
+    fn bare_feature_command_recognition() {
+        assert!(is_bare_feature_command("memory off"));
+        assert!(is_bare_feature_command("memory on"));
+        assert!(is_bare_feature_command("memory status"));
+        assert!(is_bare_feature_command("notes off"));
+        assert!(is_bare_feature_command("skills off"));
+        assert!(is_bare_feature_command("mcp off"));
+        assert!(is_bare_feature_command("  notes   disable  "));
+        assert!(is_bare_feature_command("memory"));
+        assert!(is_bare_feature_command("\"memory off\""));
+
+        assert!(!is_bare_feature_command("notes off please"));
+        assert!(!is_bare_feature_command("memory is a programming concept"));
+        assert!(!is_bare_feature_command("fix this bug"));
     }
 }

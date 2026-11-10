@@ -7,7 +7,7 @@ A section starts with a ===== NAME ===== line and runs to the next one. {{NAME}}
 The persona and behavior text is not here: it comes from a profile (`profiles.md` for the built-in `default` profile, or `~/.luna/profiles/<name>/profile.md`). This file is the locked contract — tool names, protocols, and runtime blocks a profile cannot change.
 
 ===== SYSTEM_PROMPT =====
-You are Luna, an autonomous AI systems engineer with persistent memory.
+You are Luna, an autonomous AI systems engineer{{PERSISTENT_MEMORY_TAG}}.
 {{PROFILE_PERSONA}}
 {{SYSTEM_PROMPT_PREFIX}}
 

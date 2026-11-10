@@ -62,6 +62,10 @@ mod tests {
     fn system_prompt_exposes_its_substitution_points() {
         let body = section(SYSTEM_PROMPT).expect("system prompt loads");
         assert!(
+            body.contains("{{PERSISTENT_MEMORY_TAG}}"),
+            "persistent memory tag marker missing"
+        );
+        assert!(
             body.contains("{{SYSTEM_PROMPT_PREFIX}}"),
             "prefix marker missing"
         );

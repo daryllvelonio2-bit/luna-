@@ -256,7 +256,9 @@ impl AgentConfig {
             return self.mcp_enabled;
         }
         match name {
-            "save_memory" | "update_memory" | "forget_memory" => self.memory_enabled,
+            "save_memory" | "update_memory" | "forget_memory" | "memory_search" => {
+                self.memory_enabled
+            }
             "save_note" | "update_note" | "read_note" | "search_notes" | "list_notes"
             | "delete_note" => self.notes_enabled,
             "skill_view" | "skills_list" => self.skills_enabled,
@@ -890,6 +892,7 @@ mod tests {
             "save_memory",
             "update_memory",
             "forget_memory",
+            "memory_search",
             "save_note",
             "update_note",
             "read_note",
@@ -908,6 +911,7 @@ mod tests {
         assert!(!config.tool_enabled("save_memory"));
         assert!(!config.tool_enabled("update_memory"));
         assert!(!config.tool_enabled("forget_memory"));
+        assert!(!config.tool_enabled("memory_search"));
         assert!(config.tool_enabled("save_note"));
         assert!(config.tool_enabled("read_file"));
 

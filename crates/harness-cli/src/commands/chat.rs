@@ -51,8 +51,8 @@ use commands::{
     handle_diff_command, handle_feature_toggle, handle_fork_command, handle_model_switch,
     handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
     handle_sessions_switch, handle_summarize_and_new_command, handle_thinking_switch,
-    handle_usage_command, looks_like_path, select_slash_command, Feature, FeatureToggles,
-    SlashOutcome,
+    handle_usage_command, is_bare_feature_command, looks_like_path, select_slash_command, Feature,
+    FeatureToggles, SlashOutcome,
 };
 use keys::AppKey;
 use render::{
@@ -427,6 +427,10 @@ pub async fn run_interactive_chat(
         cred_manager.clone(),
         discovery.clone(),
     );
+    // Runtime feature switches (`/memory off`, `/notes off`, `/skills off`, `/mcp off`). The agent
+    // holds the authoritative flags; these atomics let the menu and the piped loop read them
+    // without taking the agent lock.
+    let feature_toggles = FeatureToggles::default();
     let registry = Arc::new(DefaultToolRegistry::new());
 
     // Register native memory tools.
@@ -467,7 +471,9 @@ pub async fn run_interactive_chat(
     // Recall is read-only and available in both writer modes.
     registry
         .register(Arc::new(
-            MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
+            MemorySearchTool::new(memory.clone())
+                .with_notes(notes.clone())
+                .with_notes_gate(feature_toggles.notes_atomic()),
         ))
         .await?;
 
@@ -598,10 +604,6 @@ pub async fn run_interactive_chat(
         config.tools.approval == harness_core::ApprovalMode::Allow,
     ));
     let plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Runtime feature switches (`/memory off`, `/notes off`, `/skills off`, `/mcp off`). The agent
-    // holds the authoritative flags; these atomics let the menu and the piped loop read them
-    // without taking the agent lock.
-    let feature_toggles = FeatureToggles::default();
 
     let approver: Arc<dyn harness_core::Approver> =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
@@ -1175,6 +1177,13 @@ pub async fn run_interactive_chat(
                 }
                 continue;
             }
+            let bare_query_buf;
+            let query = if is_bare_feature_command(query) && !query.starts_with('/') {
+                bare_query_buf = format!("/{}", query.trim());
+                &bare_query_buf
+            } else {
+                query
+            };
             if query == "/" || query.eq_ignore_ascii_case("/help") {
                 for cmd in
                     command_entries(&config, skills, feature_toggles.enabled(Feature::Skills))
@@ -2462,13 +2471,22 @@ pub async fn run_interactive_chat(
                             continue;
                         }
 
+                        let is_bare_feature = is_bare_feature_command(command_query);
                         if (command_query.starts_with('/') && !looks_like_path(command_query))
                             || command_query.eq_ignore_ascii_case("exit")
                             || command_query.eq_ignore_ascii_case("quit")
+                            || is_bare_feature
                         {
+                            let formatted_cmd;
+                            let cmd_str = if is_bare_feature && !command_query.starts_with('/') {
+                                formatted_cmd = format!("/{}", command_query.trim());
+                                &formatted_cmd
+                            } else {
+                                command_query
+                            };
                             ui.begin_command_capture();
                             let outcome = execute_slash_command(
-                                command_query,
+                                cmd_str,
                                 &mut key_rx,
                                 &ui,
                                 &mut config,

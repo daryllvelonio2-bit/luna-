@@ -57,6 +57,11 @@ where
         } else {
             String::new()
         };
+        let persistent_memory_tag = if self.config.memory_enabled {
+            " with persistent memory"
+        } else {
+            ""
+        };
         // A pointer, not an index: the list is discovered on demand with `skills_list`, and the
         // procedure only enters the context when `skill_view` loads it. The instruction is what
         // makes that discovery reliable — without it the model has no reason to look.
@@ -99,18 +104,31 @@ where
                 }
             }
             crate::config::MemoryMode::Background => {
-                if self.config.memory_enabled || self.config.notes_enabled {
-                    format!(
-                        "{}\n\n",
-                        crate::prompts::section(crate::prompts::MEMORY_BACKGROUND_PROMPT)?
-                    )
-                } else {
+                let mut sections = Vec::new();
+                match (self.config.memory_enabled, self.config.notes_enabled) {
+                    (true, true) => {
+                        sections.push(crate::prompts::section(
+                            crate::prompts::MEMORY_BACKGROUND_PROMPT,
+                        )?);
+                    }
+                    (true, false) => {
+                        sections.push("Memory Protocol (Background Saver Mode):\n- Memories are processed asynchronously in the background.\n- Focus 100% of the turn context on solving the technical objective directly.\n- Do not invoke memory creation or mutation tools.\n- Consult active memory index cards in Active Memories.".to_string());
+                    }
+                    (false, true) => {
+                        sections.push("Project Notes Protocol (Background Saver Mode):\n- Long-term notes are processed asynchronously in the background.\n- Focus 100% of the turn context on solving the technical objective directly.\n- Inspect existing documentation using read_note or search_notes.".to_string());
+                    }
+                    (false, false) => {}
+                }
+                if sections.is_empty() {
                     String::new()
+                } else {
+                    format!("{}\n\n", sections.join("\n\n"))
                 }
             }
         };
 
         let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
+            .replace("{{PERSISTENT_MEMORY_TAG}}", persistent_memory_tag)
             .replace("{{ACTIVE_MEMORIES_BLOCK}}", &active_memories_block)
             .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
             .replace("{{MCP_PROTOCOL}}", &mcp_protocol)
