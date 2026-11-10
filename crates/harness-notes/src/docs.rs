@@ -432,9 +432,9 @@ fn render_system(facts: &Facts<'_>) -> String {
     } else {
         out.push_str(
             "No source root is linked to this project, so this document covers the knowledge base\n\
-             rather than a code tree. Link one with\n\
-             `luna notes project new <name> --root <path>` or pass `--source <path>` to\n\
-             `luna notes docs`.\n\n",
+             rather than a code tree. Run `luna notes docs` from inside the tree to pick it up\n\
+             automatically, or point the project at it with `luna notes project link <name>\n\
+             --root <path>`; `--source <path>` does the same for one run.\n\n",
         );
     }
 

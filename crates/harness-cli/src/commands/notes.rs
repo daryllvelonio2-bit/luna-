@@ -66,7 +66,7 @@ pub enum NotesCommand {
         /// Restrict to one project (for example `inbox` or `my-app`)
         #[arg(long)]
         project: Option<String>,
-        /// Source tree to document; overrides the manifest's `root`
+        /// Source tree to document; defaults to the linked root, else the tree the command runs in
         #[arg(long)]
         source: Option<PathBuf>,
     },
@@ -92,6 +92,17 @@ pub enum ProjectCommand {
         /// Source tree to document; stored in the project manifest
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Point a project at the source tree it documents, or clear the link
+    Link {
+        /// Project slug (`luna notes project list` shows them)
+        name: String,
+        /// Source tree; relative paths resolve against the current directory
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Remove the link so the docs cover the notes only
+        #[arg(long, conflicts_with = "root")]
+        clear: bool,
     },
 }
 
@@ -145,6 +156,56 @@ async fn run_project(command: ProjectCommand, config: &Config) -> Result<(), Har
             if let Some(root) = project.source_root() {
                 println!("source:  {}", root.display());
             }
+            Ok(())
+        }
+        ProjectCommand::Link { name, root, clear } => {
+            let slug = projects::slugify_project(&name);
+            let project = projects::list(notes_dir)?
+                .into_iter()
+                .find(|candidate| candidate.slug == slug)
+                .ok_or_else(|| {
+                    HarnessError::NotesError(format!(
+                        "project '{}' does not exist; run `luna notes project new <name>` first",
+                        slug
+                    ))
+                })?;
+
+            if clear {
+                projects::link_source(&project, None)?;
+                println!("project: {}", project.slug);
+                println!("source:  none (cleared)");
+                return Ok(());
+            }
+
+            let target = match root {
+                Some(root) => {
+                    if !root.is_dir() {
+                        return Err(HarnessError::NotesError(format!(
+                            "source root '{}' is not a directory",
+                            root.display()
+                        )));
+                    }
+                    root
+                }
+                None => {
+                    projects::detect_source_root(&config.paths.workspace_root).ok_or_else(|| {
+                        HarnessError::NotesError(format!(
+                            "no source tree found at or above '{}'; pass `--root <path>`",
+                            config.paths.workspace_root.display()
+                        ))
+                    })?
+                }
+            };
+
+            projects::link_source(&project, Some(&target))?;
+            println!("project: {}", project.slug);
+            println!(
+                "source:  {}",
+                project
+                    .source_root()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_else(|| target.display().to_string())
+            );
             Ok(())
         }
         ProjectCommand::List { json } => {
@@ -279,10 +340,22 @@ async fn run_docs(
     let cli = cli_facts();
     let mut summaries = Vec::new();
 
+    // With exactly one project and no link recorded, document the tree the command was run in.
+    // With several projects there is no unambiguous source, so the note-only document is the
+    // honest result instead of attaching one repository to all of them.
+    let auto_source = if source.is_none() && targets.len() == 1 {
+        projects::detect_source_root(&config.paths.workspace_root)
+            .filter(|root| root.as_path() != notes_dir.as_path())
+    } else {
+        None
+    };
+
     for target in targets {
         let subset = groups.get(&target.slug).cloned().unwrap_or_default();
         let built = graph_notes(&subset);
-        let root = source.clone().or_else(|| target.source_root());
+        let linked = source.clone().or_else(|| target.source_root());
+        let auto = linked.is_none() && auto_source.is_some();
+        let root = linked.or_else(|| auto_source.clone());
         let snapshot = match root.as_deref() {
             Some(root) => Some(docs::scan_source(root).map_err(|error| {
                 HarnessError::NotesError(format!(
@@ -317,18 +390,21 @@ async fn run_docs(
                 "nodes": built.graph.nodes.len(),
                 "edges": built.graph.edges.len(),
                 "source": snapshot.as_ref().map(|snapshot| snapshot.root.clone()),
+                "source_auto": auto,
             }));
         } else {
+            let source_label = match snapshot.as_ref() {
+                Some(snapshot) if auto => format!("{} (auto-detected)", snapshot.root),
+                Some(snapshot) => snapshot.root.clone(),
+                None => "not linked".to_string(),
+            };
             println!(
                 "{:<18} docs: {} files  notes: {}  nodes: {}  source: {}",
                 target.slug,
                 rendered.len(),
                 subset.len(),
                 built.graph.nodes.len(),
-                snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.root.as_str())
-                    .unwrap_or("not linked")
+                source_label
             );
             println!("{:<18} path: {}", "", dir.display());
         }

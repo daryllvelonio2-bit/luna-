@@ -53,6 +53,22 @@ const MIGRATION_MARKER: &str = ".projects-v1";
 /// both accepted because frontmatter is comma separated and a user may type either.
 pub const PROJECT_TAG_PREFIX: &str = "project:";
 
+/// Files and folders that mark the root of a source tree, checked nearest-first.
+///
+/// This is what lets `luna notes docs` document the repository it was run in without the user
+/// repeating `--root` or `--source` for every project. Ordered so that a real build manifest is
+/// preferred over a VCS folder when both sit in the same directory.
+const SOURCE_MARKERS: [&str; 8] = [
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "CMakeLists.txt",
+    ".git",
+    ".hg",
+    "Makefile",
+];
+
 /// One project directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -104,6 +120,25 @@ impl Project {
             self.dir.join(path)
         })
     }
+}
+
+/// Whether `dir` looks like the root of a source tree.
+pub fn is_source_root(dir: &Path) -> bool {
+    SOURCE_MARKERS
+        .iter()
+        .any(|marker| dir.join(marker).exists())
+}
+
+/// The nearest source-tree root at or above `start`.
+///
+/// Walks up until a marker from [`SOURCE_MARKERS`] is found, so running the command anywhere
+/// inside a repository links that repository. Returns `None` when nothing above `start` is a
+/// source tree, which keeps a notes-only workspace from documenting a random parent folder.
+pub fn detect_source_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| candidate.is_dir() && is_source_root(candidate))
+        .map(Path::to_path_buf)
 }
 
 /// Manifest written to `<project>/project.json`.
@@ -279,6 +314,11 @@ pub fn ensure(notes_dir: &Path, name: &str) -> Result<Project, HarnessError> {
 ///
 /// The manifest is rewritten rather than replaced, so the creation date and layout version
 /// survive. This is what lets `luna notes docs` document code instead of only notes.
+///
+/// A relative `root` is resolved against the current directory and stored absolute, because the
+/// command runs in the tree the user means; storing `.` would later resolve against the project
+/// folder instead. A path that does not exist is still recorded, so the error surfaces when the
+/// documentation is generated rather than silently dropping the link.
 pub fn link_source(project: &Project, root: Option<&Path>) -> Result<(), HarnessError> {
     let path = project.dir.join(MANIFEST);
     let mut manifest = std::fs::read_to_string(&path)
@@ -291,7 +331,7 @@ pub fn link_source(project: &Project, root: Option<&Path>) -> Result<(), Harness
             layout: current_layout(),
             root: None,
         });
-    manifest.root = root.map(|root| root.display().to_string());
+    manifest.root = root.map(absolute_source);
 
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
@@ -302,6 +342,22 @@ pub fn link_source(project: &Project, root: Option<&Path>) -> Result<(), Harness
             error
         ))
     })
+}
+
+/// Resolves a source root to an absolute, canonical path when the filesystem allows it.
+fn absolute_source(root: &Path) -> String {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(root))
+            .unwrap_or_else(|_| root.to_path_buf())
+    };
+    absolute
+        .canonicalize()
+        .unwrap_or(absolute)
+        .display()
+        .to_string()
 }
 
 /// The documentation a project starts with.
@@ -539,5 +595,40 @@ mod tests {
             Some("app")
         );
         assert_eq!(project_of_path(root, Path::new("/notes/x.md")), None);
+    }
+
+    #[test]
+    fn detect_source_root_walks_up_to_the_nearest_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let nested = repo.join("crates").join("app");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\n").expect("manifest");
+
+        assert_eq!(detect_source_root(&nested), Some(repo.clone()));
+        assert_eq!(
+            detect_source_root(dir.path()),
+            None,
+            "nothing above is a source tree"
+        );
+    }
+
+    #[test]
+    fn link_source_stores_an_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).expect("notes");
+        let project = ensure(&notes, "App").expect("ensure");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("Cargo.toml"), "[package]\n").expect("marker");
+
+        link_source(&project, Some(&source)).expect("link");
+        let stored = project.source_root().expect("root");
+        assert!(stored.is_absolute());
+        assert_eq!(stored, source.canonicalize().expect("canonical"));
+
+        link_source(&project, None).expect("unlink");
+        assert_eq!(project.source_root(), None);
     }
 }
