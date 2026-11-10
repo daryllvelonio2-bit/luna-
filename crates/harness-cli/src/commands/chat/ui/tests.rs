@@ -1181,7 +1181,11 @@ fn a_memory_notice_with_detail_shows_changes_properly() {
     let rows = ui.memory_notice_rows(120);
     assert_eq!(rows.len(), 1);
     assert!(rows[0].contains("memory"), "{}", rows[0]);
-    assert!(rows[0].contains("user.relationship.occasion"), "{}", rows[0]);
+    assert!(
+        rows[0].contains("user.relationship.occasion"),
+        "{}",
+        rows[0]
+    );
     assert!(rows[0].contains("updated"), "{}", rows[0]);
     assert!(
         rows[0].contains("\"girlfriend monthsary today\" → \"December 9 is our anniversary\""),

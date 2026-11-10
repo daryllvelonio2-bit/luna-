@@ -126,8 +126,7 @@ fn open_engine(config: &Config) -> Result<FileNotesEngine, HarnessError> {
 
 /// The project a note belongs to; the loader guarantees a tag, this is the fallback.
 fn project_of(note: &Note) -> String {
-    projects::project_from_tags(&note.tags)
-        .unwrap_or_else(|| projects::DEFAULT_PROJECT.to_string())
+    projects::project_from_tags(&note.tags).unwrap_or_else(|| projects::DEFAULT_PROJECT.to_string())
 }
 
 async fn run_project(command: ProjectCommand, config: &Config) -> Result<(), HarnessError> {
@@ -455,13 +454,7 @@ async fn run_graph(
             )));
         };
         let output = out.unwrap_or_else(|| notes_dir.join(&slug).join(projects::GRAPH_SUBDIR));
-        summaries.push(write_graph(
-            &selected,
-            &output,
-            &slug,
-            no_wiki,
-            no_visual,
-        )?);
+        summaries.push(write_graph(&selected, &output, &slug, no_wiki, no_visual)?);
     } else {
         // The combined view keeps cross-project links intact: a note in one project can reference
         // a note in another, and only this graph can resolve that edge.
@@ -631,7 +624,9 @@ fn render_report(
     if !no_wiki {
         artifacts.push_str(&format!(", wiki `{}`", wiki_path.display()));
     }
-    out.push_str(&format!("Artifacts: {artifacts} and `GRAPH_REPORT.md`.\n\n"));
+    out.push_str(&format!(
+        "Artifacts: {artifacts} and `GRAPH_REPORT.md`.\n\n"
+    ));
 
     out.push_str("## Hubs\n\n");
     if analysis.god_nodes.is_empty() {

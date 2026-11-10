@@ -369,7 +369,8 @@ impl FileNotesEngine {
         }
 
         self.checked_path(
-            &self.dir
+            &self
+                .dir
                 .join(projects::DEFAULT_PROJECT)
                 .join(projects::NOTES_SUBDIR),
             leaf,
@@ -693,8 +694,8 @@ impl NotesEngine for FileNotesEngine {
             if n.parent_id.is_some() {
                 return false;
             }
-            let same_project = projects::project_from_tags(&n.tags).as_deref()
-                == Some(project.slug.as_str());
+            let same_project =
+                projects::project_from_tags(&n.tags).as_deref() == Some(project.slug.as_str());
             same_project
                 && (n.id == slug
                     || n.id == title
@@ -848,7 +849,9 @@ impl NotesEngine for FileNotesEngine {
         let new_title = title.map(str::trim).unwrap_or(&current.title).to_string();
         let new_content = content.unwrap_or(&current.content).to_string();
         let new_pointer = PointerDistiller::distill(&new_title, &new_content);
-        let mut new_tags = tags.map(|t| t.to_vec()).unwrap_or_else(|| current.tags.clone());
+        let mut new_tags = tags
+            .map(|t| t.to_vec())
+            .unwrap_or_else(|| current.tags.clone());
         if let Some(project) = projects::project_from_tags(&current.tags) {
             projects::tag_for_project(&mut new_tags, &project);
         }

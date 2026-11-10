@@ -60,8 +60,9 @@ use render::{
     compaction_report, extract_patch_diff, format_approval_verdict, format_delegate_duration,
     format_delegate_notification, format_delegate_title, format_elapsed_secs,
     format_job_notification, format_job_system_message, format_tool_call, format_tool_result,
-    format_tool_result_for, has_verdict, is_non_tool_event, parse_turns_from_history, render_transcript, reply_for_display,
-    right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
+    format_tool_result_for, has_verdict, is_non_tool_event, parse_turns_from_history,
+    render_transcript, reply_for_display, right_aligned_user_message, OutputBlockKind,
+    TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL, LANDING_FRAME_INTERVAL};
 use viewer::show_background_task_viewer;

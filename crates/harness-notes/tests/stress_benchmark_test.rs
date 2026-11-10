@@ -14,7 +14,11 @@ async fn test_stress_chunking_and_reconciliation_benchmark() {
 
     let start = Instant::now();
     let saved = engine
-        .save_note("Large Specification Document", &large_body, &["benchmark".to_string()])
+        .save_note(
+            "Large Specification Document",
+            &large_body,
+            &["benchmark".to_string()],
+        )
         .await
         .unwrap();
     let save_duration = start.elapsed();
@@ -33,7 +37,10 @@ async fn test_stress_chunking_and_reconciliation_benchmark() {
     let start_read = Instant::now();
     let read_back = engine.read_note(&saved.id).await.unwrap();
     let read_duration = start_read.elapsed();
-    println!("Read back and reconstructed 135 KB note in: {:?}", read_duration);
+    println!(
+        "Read back and reconstructed 135 KB note in: {:?}",
+        read_duration
+    );
     assert_eq!(read_back.content.len(), large_body.trim().len());
     assert_eq!(read_back.content, large_body.trim());
 
@@ -41,7 +48,11 @@ async fn test_stress_chunking_and_reconciliation_benchmark() {
     println!("\n=== BENCHMARK 2: RAPID NEAR-MATCH RECONCILIATION ===");
     let base_title = "Active Deployment Procedures 2026";
     let mut last_note = engine
-        .save_note(base_title, "Initial base procedure.", &["deploy".to_string()])
+        .save_note(
+            base_title,
+            "Initial base procedure.",
+            &["deploy".to_string()],
+        )
         .await
         .unwrap();
 

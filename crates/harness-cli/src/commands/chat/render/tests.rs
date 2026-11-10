@@ -527,9 +527,21 @@ fn errors_report_the_first_line() {
 fn search_results_show_matches_count_and_content_snippet() {
     let output = "Documents/GitHub/smartlab/smartlab-web/tests/Feature/Shell/NavigationTest.php:45:            $this->get('/medtech/medicine-orders')\nDocuments/GitHub/smartlab/smartlab-web/tests/Feature/Shell/NavigationTest.php:78:            $this->post('/medtech/medicine-orders')\nDocuments/GitHub/smartlab/smartlab-web/tests/Feature/Ui/OtherTest.php:12:            $this->get('/medtech/medicine-orders')";
     let rendered = format_tool_result_for(Some("search_files"), false, output);
-    assert!(rendered.contains("3 matches in 2 files"), "got: {}", rendered);
-    assert!(rendered.contains("NavigationTest.php:45"), "got: {}", rendered);
-    assert!(rendered.contains("$this->get('/medtech/medicine-orders')"), "got: {}", rendered);
+    assert!(
+        rendered.contains("3 matches in 2 files"),
+        "got: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains("NavigationTest.php:45"),
+        "got: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains("$this->get('/medtech/medicine-orders')"),
+        "got: {}",
+        rendered
+    );
 }
 
 #[test]
@@ -537,12 +549,24 @@ fn read_results_show_lines_range_and_meaningful_content() {
     let output = "1|<?php\n2|\n3|namespace Tests\\Feature\\Shell;\n4|\n15|class MedicineOrderTest extends TestCase\n16|{\n70|}";
     let rendered = format_tool_result_for(Some("read_file"), false, output);
     assert!(rendered.contains("7 lines (L1-70)"), "got: {}", rendered);
-    assert!(rendered.contains("class MedicineOrderTest extends TestCase"), "got: {}", rendered);
+    assert!(
+        rendered.contains("class MedicineOrderTest extends TestCase"),
+        "got: {}",
+        rendered
+    );
 
     let output2 = "71|            ]);\n72|        });\n73|    }\n74|\n75|    public function test_patient_cannot_prescribe_medicine()\n118|    }";
     let rendered2 = format_tool_result_for(Some("read_file"), false, output2);
-    assert!(rendered2.contains("6 lines (L71-118)"), "got: {}", rendered2);
-    assert!(rendered2.contains("public function test_patient_cannot_prescribe_medicine()"), "got: {}", rendered2);
+    assert!(
+        rendered2.contains("6 lines (L71-118)"),
+        "got: {}",
+        rendered2
+    );
+    assert!(
+        rendered2.contains("public function test_patient_cannot_prescribe_medicine()"),
+        "got: {}",
+        rendered2
+    );
 }
 
 #[test]

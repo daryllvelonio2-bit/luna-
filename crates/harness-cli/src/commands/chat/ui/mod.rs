@@ -411,7 +411,12 @@ fn format_save_notice(
         .saturating_sub(fixed)
         .min(MAX_MEMORY_NOTICE_NAME_CELLS);
     let truncated_name = truncate_to_cells(clean_name, budget);
-    format!("{} {} {}", storage_styled, truncated_name.cyan(), status_styled)
+    format!(
+        "{} {} {}",
+        storage_styled,
+        truncated_name.cyan(),
+        status_styled
+    )
 }
 
 /// A fold of the oldest turns, as far as the animation is concerned.
@@ -927,7 +932,9 @@ impl ChatUi {
             return;
         }
         let status = status.trim().to_string();
-        let detail = detail.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        let detail = detail
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
         let changed = {
             let mut notices = self
                 .memory_notices

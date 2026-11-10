@@ -216,8 +216,7 @@ pub fn list(notes_dir: &Path) -> Result<Vec<Project>, HarnessError> {
         if !is_safe_slug(slug) {
             continue;
         }
-        let looks_like_project =
-            path.join(MANIFEST).is_file() || path.join(NOTES_SUBDIR).is_dir();
+        let looks_like_project = path.join(MANIFEST).is_file() || path.join(NOTES_SUBDIR).is_dir();
         if !looks_like_project {
             continue;
         }
@@ -242,11 +241,7 @@ pub fn ensure(notes_dir: &Path, name: &str) -> Result<Project, HarnessError> {
         dir,
     };
 
-    for path in [
-        project.notes_dir(),
-        project.docs_dir(),
-        project.graph_dir(),
-    ] {
+    for path in [project.notes_dir(), project.docs_dir(), project.graph_dir()] {
         std::fs::create_dir_all(&path).map_err(|error| {
             HarnessError::NotesError(format!(
                 "Failed to create project directory '{}': {}",
@@ -377,8 +372,10 @@ fn write_docs_scaffold(project: &Project) -> Result<(), HarnessError> {
         manifest = MANIFEST,
     );
 
-    for (path, contents) in [(&readme_path, readme), (&project.docs_dir().join("system.md"), system)]
-    {
+    for (path, contents) in [
+        (&readme_path, readme),
+        (&project.docs_dir().join("system.md"), system),
+    ] {
         std::fs::write(path, contents).map_err(|error| {
             HarnessError::NotesError(format!(
                 "Failed to write documentation '{}': {}",
@@ -460,9 +457,7 @@ pub fn tag_for_project(tags: &mut Vec<String>, slug: &str) {
 /// The slug a note id or path refers to: `my-app/build-notes` or a bare id.
 pub fn split_qualified(id: &str) -> (Option<&str>, &str) {
     match id.split_once('/') {
-        Some((project, leaf)) if is_safe_slug(project) && !leaf.is_empty() => {
-            (Some(project), leaf)
-        }
+        Some((project, leaf)) if is_safe_slug(project) && !leaf.is_empty() => (Some(project), leaf),
         _ => (None, id),
     }
 }

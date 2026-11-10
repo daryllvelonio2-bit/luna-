@@ -2484,14 +2484,13 @@ fn parse_search_content_line(line: &str) -> Option<(&str, usize, &str)> {
     if line.starts_with('[') && line.contains("search stopped") {
         return None;
     }
-    let start_idx = if line.len() > 2
-        && line.as_bytes()[1] == b':'
-        && line.as_bytes()[0].is_ascii_alphabetic()
-    {
-        2
-    } else {
-        0
-    };
+    let start_idx =
+        if line.len() > 2 && line.as_bytes()[1] == b':' && line.as_bytes()[0].is_ascii_alphabetic()
+        {
+            2
+        } else {
+            0
+        };
     let colon1 = line[start_idx..].find(':').map(|idx| start_idx + idx)?;
     let rest = &line[colon1 + 1..];
     let digits_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();

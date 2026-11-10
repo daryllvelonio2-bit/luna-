@@ -322,7 +322,10 @@ fn render_system(facts: &Facts<'_>) -> String {
 
     out.push_str("## Document control\n\n");
     out.push_str("| Field | Value |\n| --- | --- |\n");
-    out.push_str(&format!("| Project | {} (`{}`) |\n", facts.name, facts.slug));
+    out.push_str(&format!(
+        "| Project | {} (`{}`) |\n",
+        facts.name, facts.slug
+    ));
     out.push_str(&format!("| Project folder | `{}` |\n", facts.dir));
     out.push_str(&format!("| Created | {} |\n", facts.created_at));
     out.push_str(&format!(
@@ -421,7 +424,9 @@ fn render_system(facts: &Facts<'_>) -> String {
             human_bytes(source.bytes)
         ));
         if let Some(intro) = &source.readme_intro {
-            out.push_str(&format!("\nThe project's own README describes it as:\n\n> {intro}\n"));
+            out.push_str(&format!(
+                "\nThe project's own README describes it as:\n\n> {intro}\n"
+            ));
         }
         out.push('\n');
     } else {
@@ -640,7 +645,10 @@ fn render_system(facts: &Facts<'_>) -> String {
         out.push_str("- none yet\n");
     } else {
         for (label, kind, degree) in &facts.graph.hubs {
-            out.push_str(&format!("- {} — `{kind}` · {} connections\n", label, degree));
+            out.push_str(&format!(
+                "- {} — `{kind}` · {} connections\n",
+                label, degree
+            ));
         }
     }
     out.push('\n');
@@ -707,7 +715,10 @@ fn render_system(facts: &Facts<'_>) -> String {
                     .as_deref()
                     .map(|name| format!(" (`{name}`)"))
                     .unwrap_or_default();
-                out.push_str(&format!("- `{}` — {}{name}\n", manifest.path, manifest.kind));
+                out.push_str(&format!(
+                    "- `{}` — {}{name}\n",
+                    manifest.path, manifest.kind
+                ));
                 for (key, value) in &manifest.details {
                     out.push_str(&format!("  - {key}: {value}\n"));
                 }
@@ -798,7 +809,9 @@ fn render_note_doc(facts: &Facts<'_>) -> String {
 
     out.push_str("## Outlines\n\n");
     if facts.notes.is_empty() {
-        out.push_str("No notes yet. Capture one through the agent, then regenerate this document.\n");
+        out.push_str(
+            "No notes yet. Capture one through the agent, then regenerate this document.\n",
+        );
     } else {
         for note in &facts.notes {
             out.push_str(&format!("### {}\n\n", clean_cell(&note.title)));
@@ -819,12 +832,7 @@ fn render_note_doc(facts: &Facts<'_>) -> String {
 fn abstract_text(facts: &Facts<'_>) -> String {
     let source_phrase = facts
         .source
-        .map(|source| {
-            format!(
-                ", {} files in the linked source tree",
-                source.files
-            )
-        })
+        .map(|source| format!(", {} files in the linked source tree", source.files))
         .unwrap_or_default();
     format!(
         "{} is documented from {} Markdown notes{}, a knowledge graph of {} nodes and {} edges, \
@@ -861,10 +869,7 @@ fn operation_commands(facts: &Facts<'_>) -> Vec<(String, String)> {
                     "cargo build --release".to_string(),
                     "Build the workspace in release mode.".to_string(),
                 ));
-                commands.push((
-                    "cargo test".to_string(),
-                    "Run the test suite.".to_string(),
-                ));
+                commands.push(("cargo test".to_string(), "Run the test suite.".to_string()));
                 commands.push((
                     "cargo clippy --all-targets -- -D warnings".to_string(),
                     "Lint every target, failing on warnings.".to_string(),
@@ -1124,11 +1129,8 @@ pub fn scan_source(root: &Path) -> Result<SourceSnapshot, HarnessError> {
             }
             if depth == 0 && file_name.eq_ignore_ascii_case("readme.md") {
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    snapshot.readme_headings = text
-                        .lines()
-                        .filter_map(atx_title)
-                        .take(12)
-                        .collect();
+                    snapshot.readme_headings =
+                        text.lines().filter_map(atx_title).take(12).collect();
                     snapshot.readme_intro = first_paragraph(&text);
                 }
             }
@@ -1139,7 +1141,9 @@ pub fn scan_source(root: &Path) -> Result<SourceSnapshot, HarnessError> {
     snapshot
         .languages
         .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    snapshot.manifests.sort_by(|left, right| left.path.cmp(&right.path));
+    snapshot
+        .manifests
+        .sort_by(|left, right| left.path.cmp(&right.path));
     snapshot.entry_points.sort();
     snapshot.entry_points.dedup();
     snapshot.entry_points.truncate(MAX_LIST);
@@ -1231,17 +1235,16 @@ fn looks_like_entry_point(relative: &str) -> bool {
 }
 
 fn looks_like_test(relative: &str) -> bool {
-    relative.split('/').any(|part| part == "tests" || part == "test")
-        || relative
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| {
-                name.starts_with("test_")
-                    || name.contains("_test.")
-                    || name.contains(".test.")
-                    || name.contains("_spec.")
-                    || name.contains(".spec.")
-            })
+    relative
+        .split('/')
+        .any(|part| part == "tests" || part == "test")
+        || relative.rsplit('/').next().is_some_and(|name| {
+            name.starts_with("test_")
+                || name.contains("_test.")
+                || name.contains(".test.")
+                || name.contains("_spec.")
+                || name.contains(".spec.")
+        })
 }
 
 fn read_manifest(path: &Path, relative: &str) -> Option<ManifestFact> {
@@ -1476,13 +1479,18 @@ mod tests {
         assert!(first.entry_points.contains(&"src/main.rs".to_string()));
         assert!(first.entry_points.contains(&"src/lib.rs".to_string()));
         assert!(first.tests.contains(&"tests/api_test.rs".to_string()));
-        assert!(first
-            .manifests
-            .iter()
-            .any(|manifest| manifest.kind == "Cargo" && manifest.name.as_deref() == Some("demo-app")));
-        assert_eq!(first.readme_intro.as_deref(), Some("A small demo application."));
+        assert!(first.manifests.iter().any(
+            |manifest| manifest.kind == "Cargo" && manifest.name.as_deref() == Some("demo-app")
+        ));
+        assert_eq!(
+            first.readme_intro.as_deref(),
+            Some("A small demo application.")
+        );
         assert!(first.readme_headings.contains(&"Demo".to_string()));
-        assert!(!first.entry_points.iter().any(|path| path.contains("target/")));
+        assert!(!first
+            .entry_points
+            .iter()
+            .any(|path| path.contains("target/")));
     }
 
     #[test]

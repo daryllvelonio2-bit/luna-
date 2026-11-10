@@ -415,9 +415,7 @@ fn svg_radius(kind: NodeKind) -> f32 {
     }
 }
 
-fn node_community_map(
-    communities: &BTreeMap<usize, Vec<String>>,
-) -> BTreeMap<&str, usize> {
+fn node_community_map(communities: &BTreeMap<usize, Vec<String>>) -> BTreeMap<&str, usize> {
     communities
         .iter()
         .flat_map(|(cid, members)| members.iter().map(move |id| (id.as_str(), *cid)))
@@ -583,10 +581,9 @@ pub fn graph_svg(
     ));
 
     for edge in &graph.edges {
-        let (Some(source), Some(target)) = (
-            positions.get(&edge.source),
-            positions.get(&edge.target),
-        ) else {
+        let (Some(source), Some(target)) =
+            (positions.get(&edge.source), positions.get(&edge.target))
+        else {
             continue;
         };
         let opacity = match edge.confidence {
@@ -636,10 +633,7 @@ pub fn graph_svg(
     let mut legend: Vec<(usize, &str, usize)> = communities
         .iter()
         .map(|(cid, members)| {
-            let name = labels
-                .get(cid)
-                .map(String::as_str)
-                .unwrap_or("community");
+            let name = labels.get(cid).map(String::as_str).unwrap_or("community");
             (*cid, name, members.len())
         })
         .collect();
@@ -1231,10 +1225,22 @@ mod tests {
     fn visual_exports_are_idempotent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (graph, communities, labels) = fixture();
-        to_html(&graph, &communities, &labels, &dir.path().join("graph.html")).expect("html");
+        to_html(
+            &graph,
+            &communities,
+            &labels,
+            &dir.path().join("graph.html"),
+        )
+        .expect("html");
         to_svg(&graph, &communities, &labels, &dir.path().join("graph.svg")).expect("svg");
         let html = std::fs::read_to_string(dir.path().join("graph.html")).expect("html read");
-        to_html(&graph, &communities, &labels, &dir.path().join("graph.html")).expect("html again");
+        to_html(
+            &graph,
+            &communities,
+            &labels,
+            &dir.path().join("graph.html"),
+        )
+        .expect("html again");
         let again = std::fs::read_to_string(dir.path().join("graph.html")).expect("html read");
         assert_eq!(html, again);
     }

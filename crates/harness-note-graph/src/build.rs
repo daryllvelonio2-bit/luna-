@@ -266,7 +266,10 @@ mod tests {
         // `release` is read first and defines the real page node. `other` cites
         // it afterwards, emitting a placeholder for the same id. The citation is
         // not evidence that the target is missing, so the real node must survive.
-        let graph = build(vec![extraction("release", &[]), citation("other", "release")]);
+        let graph = build(vec![
+            extraction("release", &[]),
+            citation("other", "release"),
+        ]);
         assert_eq!(
             graph.node(&note_id("release")).map(|n| n.kind),
             Some(NodeKind::Note)
@@ -276,8 +279,14 @@ mod tests {
 
     #[test]
     fn link_resolution_does_not_depend_on_note_order() {
-        let forward = build(vec![extraction("release", &[]), citation("other", "release")]);
-        let reversed = build(vec![citation("other", "release"), extraction("release", &[])]);
+        let forward = build(vec![
+            extraction("release", &[]),
+            citation("other", "release"),
+        ]);
+        let reversed = build(vec![
+            citation("other", "release"),
+            extraction("release", &[]),
+        ]);
         for graph in [forward, reversed] {
             assert_eq!(
                 graph.node(&note_id("release")).map(|n| n.kind),

@@ -1654,8 +1654,8 @@ impl MemorySaver {
                         .memory(target)
                         .map(|r| format!("{}.{}", r.subject, r.predicate))
                         .unwrap_or_else(|| target.clone());
-                    let detail = (!reason.trim().is_empty())
-                        .then(|| format!("reason: {}", reason.trim()));
+                    let detail =
+                        (!reason.trim().is_empty()).then(|| format!("reason: {}", reason.trim()));
                     report.memory_written_with_detail(display_name, detail, SaveStatus::Deleted);
                 }
                 Err(error) => {
@@ -1670,8 +1670,8 @@ impl MemorySaver {
             },
             Planned::DeleteNote { target, reason } => {
                 if self.remove_note(target).await {
-                    let detail = (!reason.trim().is_empty())
-                        .then(|| format!("reason: {}", reason.trim()));
+                    let detail =
+                        (!reason.trim().is_empty()).then(|| format!("reason: {}", reason.trim()));
                     report.note_written_with_detail(target.clone(), detail, SaveStatus::Deleted);
                 } else {
                     report.skip(
