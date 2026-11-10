@@ -616,7 +616,7 @@ impl Default for MemorySettings {
             background_max_memory_writes: 3,
             background_max_note_writes: 2,
             background_max_operations: 6,
-            background_idle_secs: 90,
+            background_idle_secs: 15,
             store: MemoryStoreSettings::default(),
         }
     }

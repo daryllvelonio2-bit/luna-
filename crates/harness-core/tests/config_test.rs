@@ -223,7 +223,7 @@ fn memory_settings_default_to_the_session_writer() {
     assert_eq!(settings.background_max_memory_writes, 3);
     assert_eq!(settings.background_max_note_writes, 2);
     assert_eq!(settings.background_max_operations, 6);
-    assert_eq!(settings.background_idle_secs, 90);
+    assert_eq!(settings.background_idle_secs, 15);
     assert!(!settings.mode.is_background());
     // A config file written before these keys existed keeps the old behaviour.
     let dir = TempDir::new().unwrap();

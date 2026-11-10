@@ -1096,7 +1096,7 @@ pub struct MemorySettings {
     pub background_inventory_chars: usize,    // default 18_000
     pub background_transcript_chars: usize,   // default 24_000
     pub background_note_body_chars: usize,    // default 1_500
-    pub background_idle_secs: u64,            // default 90; 0 disables idle passes
+    pub background_idle_secs: u64,            // default 15; 0 disables idle passes
     pub background_require_delete_approval: bool, // default true for notes
 }
 ```
@@ -1258,7 +1258,7 @@ Goal: better decisions on larger stores.
 - Include bounded note bodies for the top relevant notes (the saver sees summaries today).
 - Add `SaveContext` with `now`, session id, turn index, and message timestamps (if available).
 - Ground relative dates ("yesterday", "last week") to absolute dates.
-- ✅ Add the idle debounce (`memory.background_idle_secs`, default 90s). The turn watermark is
+- ✅ Add the idle debounce (`memory.background_idle_secs`, default 15s). The turn watermark is
   still the in-memory `last_pass_turns` in the chat loop, not a persisted cursor.
 - Add metrics: prompt chars, tokens, latency, operations by status.
 - Add `last_retrieved_at` / `retrieval_count` for staleness.
@@ -1387,8 +1387,8 @@ The open questions below were decided before implementation; the first choice is
 1. **Memory uniqueness.** ✅ `(subject, predicate)` — one active record per attribute. Two
    different attributes of one entity coexist; saving a new value for the same attribute supersedes
    the old record.
-2. **Default schedule.** ✅ Every 3 turns + idle debounce (90s) + `/remember`. `background_every_turns`
-   defaults to 3; `background_idle_secs` to 90; both runtime-only toggles (`/memory`, `/notes`)
+2. **Default schedule.** ✅ Every 3 turns + idle debounce (15s) + `/remember`. `background_every_turns`
+   defaults to 3; `background_idle_secs` to 15; both runtime-only toggles (`/memory`, `/notes`)
    apply immediately.
 3. **Two-pass default.** ✅ `background_two_pass = true`, and the saver only takes the second
    (reconcile) pass when the combined store exceeds ~20 items. Small stores keep one pass.
