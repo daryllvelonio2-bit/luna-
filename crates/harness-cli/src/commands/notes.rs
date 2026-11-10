@@ -34,6 +34,9 @@ pub enum NotesCommand {
         /// Skip the wiki Markdown export
         #[arg(long)]
         no_wiki: bool,
+        /// Skip the graph.html and graph.svg visual exports
+        #[arg(long)]
+        no_visual: bool,
     },
 }
 
@@ -42,7 +45,12 @@ pub async fn handle_notes_command(
     config: &Config,
 ) -> Result<(), HarnessError> {
     match command {
-        NotesCommand::Graph { out, json, no_wiki } => run_graph(config, out, json, no_wiki).await,
+        NotesCommand::Graph {
+            out,
+            json,
+            no_wiki,
+            no_visual,
+        } => run_graph(config, out, json, no_wiki, no_visual).await,
     }
 }
 
@@ -51,6 +59,7 @@ async fn run_graph(
     out: Option<PathBuf>,
     json: bool,
     no_wiki: bool,
+    no_visual: bool,
 ) -> Result<(), HarnessError> {
     let engine = FileNotesEngine::new(
         config.paths.notes_dir.clone(),
@@ -77,6 +86,13 @@ async fn run_graph(
     let graph_path = out_dir.join("graph.json");
     export::to_json(&built.graph, &built.communities, &built.labels, &graph_path)?;
 
+    let html_path = out_dir.join("graph.html");
+    let svg_path = out_dir.join("graph.svg");
+    if !no_visual {
+        export::to_html(&built.graph, &built.communities, &built.labels, &html_path)?;
+        export::to_svg(&built.graph, &built.communities, &built.labels, &svg_path)?;
+    }
+
     let wiki_path = out_dir.join("wiki");
     let wiki_written = if no_wiki {
         0
@@ -90,7 +106,16 @@ async fn run_graph(
         )?
     };
 
-    let report = render_report(&built, &issues, &graph_path, &wiki_path, no_wiki);
+    let report = render_report(
+        &built,
+        &issues,
+        &graph_path,
+        &html_path,
+        &svg_path,
+        &wiki_path,
+        no_wiki,
+        no_visual,
+    );
     let report_path = out_dir.join(REPORT_FILE);
     std::fs::write(&report_path, report).map_err(|error| {
         HarnessError::Io(format!(
@@ -103,6 +128,8 @@ async fn run_graph(
         let summary = serde_json::json!({
             "output": out_dir,
             "graph": graph_path,
+            "html": if no_visual { serde_json::Value::Null } else { serde_json::json!(html_path) },
+            "svg": if no_visual { serde_json::Value::Null } else { serde_json::json!(svg_path) },
             "wiki": if no_wiki { serde_json::Value::Null } else { serde_json::json!(wiki_path) },
             "notes": built.analysis.notes,
             "nodes": built.graph.nodes.len(),
@@ -142,6 +169,10 @@ async fn run_graph(
         println!("warnings: {} (see {})", issues.len(), report_path.display());
     }
     println!("graph:  {}", graph_path.display());
+    if !no_visual {
+        println!("html:   {}", html_path.display());
+        println!("svg:    {}", svg_path.display());
+    }
     if !no_wiki {
         println!(
             "wiki:   {} ({} articles)",
@@ -157,8 +188,11 @@ fn render_report(
     built: &BuiltGraph,
     issues: &[harness_note_graph::validate::Issue],
     graph_path: &Path,
+    html_path: &Path,
+    svg_path: &Path,
     wiki_path: &Path,
     no_wiki: bool,
+    no_visual: bool,
 ) -> String {
     let analysis = &built.analysis;
     let mut out = String::new();
@@ -179,16 +213,18 @@ fn render_report(
         analysis.dangling,
         analysis.ambiguous_edges
     ));
-    out.push_str(&format!(
-        "Artifacts: `{}`{} and `{}`.\n\n",
-        graph_path.display(),
-        if no_wiki {
-            String::new()
-        } else {
-            format!(", wiki `{}`", wiki_path.display())
-        },
-        "GRAPH_REPORT.md"
-    ));
+    let mut artifacts = format!("`{}`", graph_path.display());
+    if !no_visual {
+        artifacts.push_str(&format!(
+            ", interactive `{}`, image `{}`",
+            html_path.display(),
+            svg_path.display()
+        ));
+    }
+    if !no_wiki {
+        artifacts.push_str(&format!(", wiki `{}`", wiki_path.display()));
+    }
+    out.push_str(&format!("Artifacts: {artifacts} and `GRAPH_REPORT.md`.\n\n"));
 
     out.push_str("## Hubs\n\n");
     if analysis.god_nodes.is_empty() {
