@@ -150,3 +150,28 @@ impl Drop for CallGuard<'_> {
         *self.handle.call.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A line handed over while a turn runs must survive a hard cancel: the turn ends without
+    /// draining, and the caller — not the next turn — owns the message. `begin_turn` clears the
+    /// channel only when a *new* turn starts, so taking the leftover is the only way to keep it.
+    #[test]
+    fn a_hard_cancel_leaves_the_held_line_for_the_caller() {
+        let handle = InterruptHandle::new();
+        let turn = handle.begin_turn();
+        assert_eq!(handle.interrupt("keep this"), InterruptOutcome::Queued);
+
+        // The shape of a hard cancel: the turn returns without the loop's drain.
+        drop(turn);
+
+        assert_eq!(
+            handle.take_leftover(),
+            vec!["keep this".to_string()],
+            "a cancelled turn must not swallow the line the user typed"
+        );
+        assert!(handle.take_leftover().is_empty(), "taking is a move");
+    }
+}

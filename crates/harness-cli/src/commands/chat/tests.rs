@@ -1,7 +1,9 @@
 use super::commands::SlashCommand;
 use super::turn::{
-    can_auto_resume, composer_command, submission, turn_records, ComposerCommand, InterruptNotice,
+    can_auto_resume, composer_command, requeue_held, submission, turn_records, ComposerCommand,
+    InterruptNotice,
 };
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// The commands the composer owns are recognised by their whole name, and their argument is
@@ -949,4 +951,29 @@ fn an_unasked_turn_waits_for_a_quiet_composer() {
              draft={draft:?} images={images} modal={modal} plan={plan}"
         );
     }
+}
+
+/// A hard cancel must not lose a line the user typed mid-turn. The held line goes back to the
+/// queue behind anything already waiting, so the pump sends it as the next turn and an empty
+/// hand-back does not add a spurious queue row.
+#[test]
+fn a_cancelled_turn_requeues_the_line_it_was_holding() {
+    let mut queue = VecDeque::from(["earlier /queue".to_string()]);
+    assert_eq!(
+        requeue_held(vec!["typed while it ran".to_string()], &mut queue),
+        2
+    );
+    assert_eq!(
+        queue,
+        VecDeque::from([
+            "earlier /queue".to_string(),
+            "typed while it ran".to_string()
+        ])
+    );
+
+    assert_eq!(
+        requeue_held(Vec::new(), &mut queue),
+        2,
+        "nothing held, nothing added"
+    );
 }

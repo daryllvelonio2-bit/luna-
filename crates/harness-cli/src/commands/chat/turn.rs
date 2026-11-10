@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::render::{right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord};
 use super::ui::{get_terminal_width, ChatUi};
 use super::{redraw_transcript, ChatAgent};
-use harness_core::{HarnessError, TurnOutcome, TurnToolCall};
+use harness_core::{HarnessError, InterruptHandle, TurnOutcome, TurnToolCall};
 
 /// One mid-turn message the agent took: the line it appended and the partial output it cut short.
 ///
@@ -264,6 +264,17 @@ pub(super) fn can_auto_resume(
         && !plan_mode
 }
 
+/// Hand lines the cancelled turn never got to take back to the queue the pump drains.
+///
+/// A message typed while a turn runs is held by the interrupt channel, and a hard cancel stops the
+/// turn before its loop can drain that channel. The line was never part of the cancelled turn's
+/// answer, so it belongs to the user: keeping it queued means stopping the agent continues with
+/// what they had already asked for instead of swallowing it.
+pub(super) fn requeue_held(held: Vec<String>, queue: &mut VecDeque<String>) -> usize {
+    queue.extend(held);
+    queue.len()
+}
+
 /// Stop the turn in flight and record it as cancelled: the body Ctrl+C, Escape and an interrupting
 /// message all share, so the three cannot drift apart. Reports whether there was a turn to stop.
 ///
@@ -278,6 +289,8 @@ pub(super) async fn cancel_running_turn(
     turns: &mut Vec<TurnRecord>,
     in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
     interruptions: &Arc<Mutex<Vec<InterruptNotice>>>,
+    interrupt_handle: &InterruptHandle,
+    queue: &mut VecDeque<String>,
     turn_start: std::time::Instant,
     current_query: &str,
     process_expanded: bool,
@@ -297,6 +310,13 @@ pub(super) async fn cancel_running_turn(
         .is_err()
     {
         handle.abort();
+    }
+    // The line the user typed mid-turn is still held; the cancel stopped the turn before it could
+    // be taken. Put it back in the queue so the pump sends it as the next turn instead of losing
+    // it when the next `begin_turn` clears the channel.
+    let held = interrupt_handle.take_leftover();
+    if !held.is_empty() {
+        ui.set_queue_depth(requeue_held(held, queue));
     }
     ui.set_turn_active(false);
     ui.stop_activity();
@@ -438,6 +458,7 @@ pub(super) async fn handle_composer_command(
     ui: &ChatUi,
     active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
     current_cancel: &CancellationToken,
+    interrupt_handle: &InterruptHandle,
     turns: &mut Vec<TurnRecord>,
     in_flight_tools: &Arc<Mutex<Vec<TurnProcessItem>>>,
     interruptions: &Arc<Mutex<Vec<InterruptNotice>>>,
@@ -505,6 +526,8 @@ pub(super) async fn handle_composer_command(
                 turns,
                 in_flight_tools,
                 interruptions,
+                interrupt_handle,
+                queue,
                 turn_start,
                 current_query,
                 process_expanded,

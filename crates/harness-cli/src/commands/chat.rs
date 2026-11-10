@@ -2154,6 +2154,7 @@ pub async fn run_interactive_chat(
                                 &ui,
                                 &mut active_turn,
                                 &current_cancel,
+                                &interrupt_handle,
                                 &mut turns,
                                 &in_flight_tools,
                                 &interruptions,
@@ -2322,6 +2323,7 @@ pub async fn run_interactive_chat(
                                     &ui,
                                     &mut active_turn,
                                     &current_cancel,
+                                    &interrupt_handle,
                                     &mut turns,
                                     &in_flight_tools,
                                     &interruptions,
@@ -2421,6 +2423,7 @@ pub async fn run_interactive_chat(
                             &ui,
                             &mut active_turn,
                             &current_cancel,
+                            &interrupt_handle,
                             &mut turns,
                             &in_flight_tools,
                             &interruptions,
@@ -2592,6 +2595,8 @@ pub async fn run_interactive_chat(
                             &mut turns,
                             &in_flight_tools,
                             &interruptions,
+                            &interrupt_handle,
+                            &mut queue,
                             turn_start,
                             &current_query,
                             process_expanded,
@@ -2619,6 +2624,8 @@ pub async fn run_interactive_chat(
                             &mut turns,
                             &in_flight_tools,
                             &interruptions,
+                            &interrupt_handle,
+                            &mut queue,
                             turn_start,
                             &current_query,
                             process_expanded,
@@ -2759,16 +2766,6 @@ pub async fn run_interactive_chat(
                         let context_max =
                             context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
-
-                        // A line that landed in the sliver between the turn's last drain and the
-                        // guard being dropped belongs to the next turn, not to the one that just
-                        // answered. Queue it so the pump below sends it.
-                        for text in interrupt_handle.take_leftover() {
-                            queue.push_back(text);
-                        }
-                        if !queue.is_empty() {
-                            ui.set_queue_depth(queue.len());
-                        }
                     }
                     Ok(Err(HarnessError::Cancelled)) => {
                         ui.stop_activity();
@@ -2849,13 +2846,6 @@ pub async fn run_interactive_chat(
                         let context_max =
                             context_window(&config, &discovery, &current_provider, &current_model);
                         ui.update_status(context_used, context_max);
-
-                        for text in interrupt_handle.take_leftover() {
-                            queue.push_back(text);
-                        }
-                        if !queue.is_empty() {
-                            ui.set_queue_depth(queue.len());
-                        }
                     }
                     Err(join_err) => {
                         ui.stop_activity();
@@ -2909,8 +2899,15 @@ pub async fn run_interactive_chat(
                     }
                 }
 
-                // Whatever the turn did — finish, fail, get cancelled — what the user typed while
-                // it ran is still waiting, and the agent is free now.
+                // Whatever the turn did — finish, fail, get cancelled — a line the user typed
+                // while it ran may still be held by the interrupt channel. It was never part of
+                // the turn's answer, so it goes back in the queue the pump below drains.
+                let held = interrupt_handle.take_leftover();
+                if !held.is_empty() {
+                    queue.extend(held);
+                    ui.set_queue_depth(queue.len());
+                }
+
                 drain_queue(
                     &mut queue,
                     &ui,
