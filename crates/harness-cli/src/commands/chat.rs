@@ -60,7 +60,7 @@ use render::{
     compaction_report, extract_patch_diff, format_approval_verdict, format_delegate_duration,
     format_delegate_notification, format_delegate_title, format_elapsed_secs,
     format_job_notification, format_job_system_message, format_tool_call, format_tool_result,
-    has_verdict, is_non_tool_event, parse_turns_from_history, render_transcript, reply_for_display,
+    format_tool_result_for, has_verdict, is_non_tool_event, parse_turns_from_history, render_transcript, reply_for_display,
     right_aligned_user_message, OutputBlockKind, TurnProcessItem, TurnRecord, LUNA_LABEL, PROMPT,
 };
 use ui::{get_terminal_width, ChatUi, RawTerminal, ANIMATION_INTERVAL, LANDING_FRAME_INTERVAL};
@@ -728,6 +728,7 @@ pub async fn run_interactive_chat(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(TurnProcessItem {
+                            tool_name: name.clone(),
                             call_formatted: call_fmt,
                             result_formatted: String::new(),
                             diff_lines,
@@ -777,7 +778,8 @@ pub async fn run_interactive_chat(
                     });
                     if let Some(item) = target {
                         item.call_formatted.push_str(&status);
-                        item.result_formatted = format_tool_result(is_error, &output);
+                        item.result_formatted =
+                            format_tool_result_for(Some(&name), is_error, &output);
                         let (bounded, dropped) = bounded_tool_output(&output);
                         item.output = bounded;
                         item.output_dropped = dropped;
@@ -794,7 +796,11 @@ pub async fn run_interactive_chat(
                             Some(item.result_formatted.clone()),
                         )
                     } else {
-                        (format_tool_result(is_error, &output), Vec::new(), None)
+                        (
+                            format_tool_result_for(Some(&name), is_error, &output),
+                            Vec::new(),
+                            None,
+                        )
                     }
                 };
                 ui_obs.emit_above(&line);
@@ -852,6 +858,7 @@ pub async fn run_interactive_chat(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(TurnProcessItem {
+                        tool_name: "steer".to_string(),
                         call_formatted: line.clone(),
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
@@ -1884,6 +1891,7 @@ pub async fn run_interactive_chat(
                     let verdict_str = format_approval_verdict(false, &request);
                     ui.emit_above(&verdict_str);
                     in_flight_tools.lock().unwrap_or_else(|e| e.into_inner()).push(TurnProcessItem {
+                        tool_name: "approval".to_string(),
                         call_formatted: verdict_str,
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),

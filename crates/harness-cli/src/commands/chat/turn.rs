@@ -481,6 +481,7 @@ pub(super) async fn handle_composer_command(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(TurnProcessItem {
+                        tool_name: "steer".to_string(),
                         call_formatted: line.clone(),
                         result_formatted: String::new(),
                         diff_lines: Vec::new(),
