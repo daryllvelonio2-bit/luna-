@@ -15,6 +15,7 @@ use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
 use commands::memory::{handle_memory_command, MemoryCommand};
 use commands::models::{handle_models_command, ModelsCommand};
+use commands::notes::{handle_notes_command, NotesCommand};
 use commands::profile::{handle_profile_command, parse_invocation, ProfileCommand};
 use commands::sessions::{handle_sessions_command, SessionSelection, SessionsCommand};
 use commands::skill::{handle_skill_command, SkillCommand};
@@ -246,6 +247,11 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         subcommand: MemoryCommand,
+    },
+    /// Build a knowledge graph over the Markdown notes store
+    Notes {
+        #[command(subcommand)]
+        subcommand: NotesCommand,
     },
     /// Inspect configured Model Context Protocol (MCP) servers and the tools they expose
     Mcp {
@@ -655,6 +661,9 @@ async fn main() -> Result<(), HarnessError> {
         }
         Some(Commands::Memory { subcommand }) => {
             handle_memory_command(subcommand, &config).await?;
+        }
+        Some(Commands::Notes { subcommand }) => {
+            handle_notes_command(subcommand, &config).await?;
         }
         Some(Commands::Mcp { subcommand }) => {
             // Bare `luna mcp` reads the config, the cheap and safe default.

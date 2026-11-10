@@ -14,6 +14,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod memory;
 pub mod models;
+pub mod notes;
 pub mod profile;
 pub mod prompt_images;
 pub mod sessions;

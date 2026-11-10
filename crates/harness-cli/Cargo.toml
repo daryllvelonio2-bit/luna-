@@ -21,6 +21,7 @@ harness-core = { workspace = true }
 harness-providers = { workspace = true }
 harness-memory = { workspace = true }
 harness-notes = { workspace = true }
+harness-note-graph = { workspace = true }
 harness-plugins = { workspace = true }
 harness-mcp = { workspace = true }
 harness-voice = { workspace = true }

@@ -6,6 +6,7 @@ members = [
     "crates/harness-plugins",
     "crates/harness-memory",
     "crates/harness-notes",
+    "crates/harness-note-graph",
     "crates/harness-voice",
     "crates/harness-telemetry",
     "crates/harness-onboarding",
@@ -16,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 authors = ["Luna Harness Team"]
 license = "MIT OR Apache-2.0"
@@ -69,6 +70,7 @@ harness-mcp = { path = "crates/harness-mcp" }
 harness-plugins = { path = "crates/harness-plugins" }
 harness-memory = { path = "crates/harness-memory" }
 harness-notes = { path = "crates/harness-notes" }
+harness-note-graph = { path = "crates/harness-note-graph" }
 harness-voice = { path = "crates/harness-voice" }
 harness-telemetry = { path = "crates/harness-telemetry" }
 harness-onboarding = { path = "crates/harness-onboarding" }
