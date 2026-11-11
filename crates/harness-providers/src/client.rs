@@ -78,93 +78,13 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
 
     let mut events = Vec::new();
 
-    if let Some(err_val) = parsed.get("error") {
-        let msg = if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
-            m.to_string()
-        } else {
-            err_val.to_string()
-        };
-        let code = err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-        if code == 429
-            || msg.to_lowercase().contains("exhausted")
-            || msg.to_lowercase().contains("quota")
-            || msg.to_lowercase().contains("rate limit")
-        {
-            return vec![Err(HarnessError::RateLimited {
-                provider: "model".to_string(),
-                retry_after_secs: Some(10),
-            })];
-        } else if code == 503 || msg.to_lowercase().contains("overloaded") {
-            return vec![Err(HarnessError::ProviderError {
-                provider: "model".to_string(),
-                message: format!("Model is overloaded (503): {}", msg),
-            })];
-        } else {
-            return vec![Err(HarnessError::ProviderError {
-                provider: "model".to_string(),
-                message: msg,
-            })];
-        }
+    if let Some(error_events) = error_delta_events(parsed) {
+        return error_events;
     }
 
     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
-            let Some(delta) = choice.get("delta") else {
-                continue;
-            };
-
-            // `reasoning_content` is the NVIDIA/DeepSeek/wider-compat spelling; `reasoning` is
-            // what some gateways send instead.
-            for key in ["reasoning_content", "reasoning"] {
-                if let Some(text) = delta.get(key).and_then(|r| r.as_str()) {
-                    if !text.is_empty() {
-                        events.push(Ok(E::ReasoningDelta(text.to_string())));
-                    }
-                }
-            }
-
-            if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
-                if !text.is_empty() {
-                    events.push(Ok(E::ContentDelta(text.to_string())));
-                }
-            }
-
-            if let Some(calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                for (position, call) in calls.iter().enumerate() {
-                    let index = call
-                        .get("index")
-                        .and_then(|i| i.as_u64())
-                        .map(|i| i as usize)
-                        .unwrap_or(position);
-                    events.push(Ok(E::ToolCallDelta {
-                        index,
-                        id: call
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .map(|s| s.to_string()),
-                        name: call
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string()),
-                        arguments_delta: call
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|a| a.as_str())
-                            .map(|s| s.to_string()),
-                        // Gemini's OpenAI-compatible route carries the call's thought signature in
-                        // an `extra_content` extension; every other provider simply has none.
-                        signature: thought_signature::signature_from_tool_call(call),
-                    }));
-                }
-            }
-
-            if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
-                events.push(Ok(E::Completed {
-                    finish_reason: Some(reason.to_string()),
-                    usage: None,
-                }));
-            }
+            append_choice_events(choice, &mut events);
         }
     }
 
@@ -178,15 +98,124 @@ fn delta_events(parsed: &serde_json::Value) -> Vec<Result<StreamEvent, HarnessEr
     events
 }
 
+/// The error an SSE chunk carries, if it carries one at all.
+fn error_delta_events(
+    parsed: &serde_json::Value,
+) -> Option<Vec<Result<StreamEvent, HarnessError>>> {
+    let err_val = parsed.get("error")?;
+    let msg = if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+        m.to_string()
+    } else {
+        err_val.to_string()
+    };
+    let code = err_val.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+    if code == 429
+        || msg.to_lowercase().contains("exhausted")
+        || msg.to_lowercase().contains("quota")
+        || msg.to_lowercase().contains("rate limit")
+    {
+        Some(vec![Err(HarnessError::RateLimited {
+            provider: "model".to_string(),
+            retry_after_secs: Some(10),
+        })])
+    } else if code == 503 || msg.to_lowercase().contains("overloaded") {
+        Some(vec![Err(HarnessError::ProviderError {
+            provider: "model".to_string(),
+            message: format!("Model is overloaded (503): {}", msg),
+        })])
+    } else {
+        Some(vec![Err(HarnessError::ProviderError {
+            provider: "model".to_string(),
+            message: msg,
+        })])
+    }
+}
+
+/// Expand one `choices` entry into the events its delta carries.
+fn append_choice_events(
+    choice: &serde_json::Value,
+    events: &mut Vec<Result<StreamEvent, HarnessError>>,
+) {
+    use StreamEvent as E;
+
+    let Some(delta) = choice.get("delta") else {
+        return;
+    };
+
+    // `reasoning_content` is the NVIDIA/DeepSeek/wider-compat spelling; `reasoning` is
+    // what some gateways send instead.
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = delta.get(key).and_then(|r| r.as_str()) {
+            if !text.is_empty() {
+                events.push(Ok(E::ReasoningDelta(text.to_string())));
+            }
+        }
+    }
+
+    if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+        if !text.is_empty() {
+            events.push(Ok(E::ContentDelta(text.to_string())));
+        }
+    }
+
+    if let Some(calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+        for (position, call) in calls.iter().enumerate() {
+            events.push(Ok(tool_call_delta(call, position)));
+        }
+    }
+
+    if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+        events.push(Ok(E::Completed {
+            finish_reason: Some(reason.to_string()),
+            usage: None,
+        }));
+    }
+}
+
+fn tool_call_delta(call: &serde_json::Value, position: usize) -> StreamEvent {
+    let index = call
+        .get("index")
+        .and_then(|i| i.as_u64())
+        .map(|i| i as usize)
+        .unwrap_or(position);
+    StreamEvent::ToolCallDelta {
+        index,
+        id: call
+            .get("id")
+            .and_then(|i| i.as_str())
+            .map(|s| s.to_string()),
+        name: call
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string()),
+        arguments_delta: call
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string()),
+        // Gemini's OpenAI-compatible route carries the call's thought signature in
+        // an `extra_content` extension; every other provider simply has none.
+        signature: thought_signature::signature_from_tool_call(call),
+    }
+}
+
 /// A `reqwest` client for one provider, with the per-provider timeout the config resolved
 /// (`providers.<id>.timeout_secs`, default `catalog::DEFAULT_TIMEOUT_SECS`).
+/// Connection setup is not the model's turn: it must fail long before the request timeout.
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Keep pooled connections warm between the rounds of one turn, but do not hold an idle socket
+/// open for an entire session.
+const HTTP_KEEPALIVE_SECS: u64 = 15;
+const HTTP_POOL_IDLE_SECS: u64 = 15;
+
 pub fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client, HarnessError> {
     reqwest::Client::builder()
         .user_agent("luna-harness/0.1.0")
         .timeout(std::time::Duration::from_secs(timeout_secs.max(600)))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .tcp_keepalive(Some(std::time::Duration::from_secs(15)))
-        .pool_idle_timeout(Some(std::time::Duration::from_secs(15)))
+        .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .tcp_keepalive(Some(std::time::Duration::from_secs(HTTP_KEEPALIVE_SECS)))
+        .pool_idle_timeout(Some(std::time::Duration::from_secs(HTTP_POOL_IDLE_SECS)))
         .build()
         .map_err(|error| {
             HarnessError::ConfigurationError(format!("failed to build the HTTP client: {}", error))
@@ -217,6 +246,90 @@ fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
     match header.and_then(|value| value.trim().parse::<u64>().ok()) {
         Some(seconds) => Some(seconds.clamp(1, 600)),
         None => Some(DEFAULT_RETRY_AFTER_SECS),
+    }
+}
+
+fn request_url(base_url: &str, query_param: Option<String>) -> String {
+    let mut url = format!("{}/chat/completions", base_url);
+    if let Some(q) = query_param {
+        url = format!("{}?{}", url, q);
+    }
+    url
+}
+
+/// If a 400 comes back and `reasoning_effort` was included, retry once without it for models that
+/// do not support it.
+async fn retry_without_reasoning_effort(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HeaderMap,
+    body: &mut serde_json::Value,
+    resp: &mut reqwest::Response,
+) {
+    if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
+        if let Some(map) = body.as_object_mut() {
+            map.remove("reasoning_effort");
+        }
+        if let Ok(retry_resp) = client
+            .post(url)
+            .headers(headers.clone())
+            .json(&*body)
+            .send()
+            .await
+        {
+            *resp = retry_resp;
+        }
+    }
+}
+
+/// The reply's reasoning and visible text, with `<think>` blocks lifted out of the text when the
+/// route does not report reasoning separately.
+fn reasoning_and_content(msg_val: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let mut reasoning = msg_val
+        .get("reasoning_content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut content = msg_val
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+
+    if reasoning.is_none() {
+        if let Some(c) = &content {
+            if let Some(start) = c.find("<think>") {
+                if let Some(end) = c.find("</think>") {
+                    let think_text = c[start + 7..end].trim().to_string();
+                    let rest = format!("{}{}", &c[..start], &c[end + 8..])
+                        .trim()
+                        .to_string();
+                    if !think_text.is_empty() {
+                        reasoning = Some(think_text);
+                    }
+                    content = if rest.is_empty() { None } else { Some(rest) };
+                }
+            }
+        }
+    }
+
+    (reasoning, content)
+}
+
+/// The events one SSE `data:` payload holds.
+fn sse_data_events(data: &str) -> Vec<Result<StreamEvent, HarnessError>> {
+    if data == "[DONE]" {
+        return vec![Ok(StreamEvent::Completed {
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        })];
+    }
+    match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(parsed) => delta_events(&parsed),
+        Err(e) => vec![Err(HarnessError::SerializationError(format!(
+            "Failed to parse SSE JSON: {}",
+            e
+        )))],
     }
 }
 
@@ -370,6 +483,522 @@ impl GenericProviderClient {
         retired
     }
 
+    /// Run the provider-specific credential syncs that must happen before a request.
+    ///
+    /// A failed sync is not fatal: the request itself fails with the real auth error if the sync
+    /// was needed, but it is logged so the underlying cause is not invisible.
+    async fn sync_provider_credentials(&self, phase: &str) {
+        if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
+            if let Err(error) =
+                crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
+            {
+                tracing::warn!("kiro credential sync failed before {phase}: {error}");
+            }
+        }
+
+        if self.provider_id == "supercode" {
+            if let Err(error) =
+                crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await
+            {
+                tracing::warn!("supercode credential sync failed before {phase}: {error}");
+            }
+        }
+    }
+
+    /// Retire the credential that just failed, when the failure says the key itself is bad.
+    async fn retire_if_auth_failure<T>(
+        &self,
+        secret: &SecretString,
+        result: Result<T, HarnessError>,
+    ) -> Result<T, HarnessError> {
+        if let Err(ref err) = result {
+            if matches!(
+                err,
+                HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
+            ) {
+                self.retire_failed_credential(secret).await;
+            }
+        }
+        result
+    }
+
+    fn model_or_default(&self, options: &CompletionOptions) -> String {
+        options
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone())
+    }
+
+    async fn complete_via_supercode(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::supercode::execute_supercode_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn complete_via_kiro(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::kiro::execute_kiro_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn complete_via_antigravity(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::antigravity::execute_antigravity_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn stream_via_supercode(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::supercode::stream_supercode_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn stream_via_kiro(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::kiro::stream_kiro_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn stream_via_antigravity(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::antigravity::stream_antigravity_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            Some(&self.cred_manager),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    /// The `/chat/completions` body for a non-streaming request.
+    fn build_complete_body(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": model,
+            "messages": self.serialize_messages(messages, model),
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = self.serialize_tools(tools);
+        }
+        if let Some(temp) = options.temperature {
+            body["temperature"] = json!(temp);
+        }
+        if let Some(max_tok) = options.max_tokens {
+            body["max_tokens"] = json!(max_tok);
+        }
+        if let Some(effort) = options.reasoning_effort {
+            if let Some(s) = normalize_reasoning_effort(&self.provider_id, model, effort) {
+                body["reasoning_effort"] = json!(s);
+            }
+        }
+        body
+    }
+
+    /// The `/chat/completions` body for a streaming request.
+    fn build_stream_body(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": model,
+            "messages": self.serialize_messages(messages, model),
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = self.serialize_tools(tools);
+        }
+        if let Some(effort) = options.reasoning_effort {
+            if let Some(s) = normalize_reasoning_effort(&self.provider_id, model, effort) {
+                body["reasoning_effort"] = json!(s);
+            }
+        }
+        body
+    }
+
+    /// POST the body, retrying once without `reasoning_effort` on a 400, and failing over to
+    /// another credential when the provider rejects or rate-limits the key.
+    async fn send_complete_request(
+        &self,
+        mut body: serde_json::Value,
+    ) -> Result<reqwest::Response, HarnessError> {
+        // One request may be re-sent with another credential: a rate-limited or revoked key is
+        // a property of the KEY, and the pool can hold a key that still works. Handing the error
+        // back instead makes the caller wait out the provider's `Retry-After` — up to ten
+        // minutes — before it discovers the other key.
+        let mut failover_attempts = 0usize;
+        let resp = loop {
+            let (headers, query_param, secret) = self.build_auth_headers().await?;
+            let url = request_url(&self.base_url, query_param);
+
+            let mut resp = match self
+                .http_client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(HarnessError::ProviderError {
+                        provider: self.provider_id.clone(),
+                        message: format!("HTTP error: {}", e),
+                    })
+                }
+            };
+
+            retry_without_reasoning_effort(&self.http_client, &url, &headers, &mut body, &mut resp)
+                .await;
+
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let retry_after = retry_after_secs(&resp);
+                if self
+                    .fail_over_to_another_credential(&secret, failover_attempts)
+                    .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rate-limited this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                return Err(HarnessError::RateLimited {
+                    provider: self.provider_id.clone(),
+                    retry_after_secs: retry_after,
+                });
+            }
+
+            if !status.is_success() {
+                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
+                // so retire it and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403 | 503)
+                    && self
+                        .fail_over_to_another_credential(&secret, failover_attempts)
+                        .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rejected or overloaded on this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: format!("HTTP {}: {}", status, body_text),
+                });
+            }
+
+            break resp;
+        };
+        Ok(resp)
+    }
+
+    /// Same failover rules as [`Self::send_complete_request`], with the streaming route's
+    /// overloaded-response wording.
+    async fn send_stream_request(
+        &self,
+        mut body: serde_json::Value,
+    ) -> Result<reqwest::Response, HarnessError> {
+        let mut failover_attempts = 0usize;
+        let resp = loop {
+            let (headers, query_param, secret) = self.build_auth_headers().await?;
+            let url = request_url(&self.base_url, query_param);
+
+            let mut resp = self
+                .http_client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: format!("HTTP error: {}", e),
+                })?;
+
+            retry_without_reasoning_effort(&self.http_client, &url, &headers, &mut body, &mut resp)
+                .await;
+
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let retry_after = retry_after_secs(&resp);
+                if self
+                    .fail_over_to_another_credential(&secret, failover_attempts)
+                    .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rate-limited this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                return Err(HarnessError::RateLimited {
+                    provider: self.provider_id.clone(),
+                    retry_after_secs: retry_after,
+                });
+            }
+            if !status.is_success() {
+                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
+                // so retire it and let another key serve the request when the pool holds one.
+                if matches!(status.as_u16(), 401 | 403 | 503)
+                    && self
+                        .fail_over_to_another_credential(&secret, failover_attempts)
+                        .await
+                {
+                    failover_attempts += 1;
+                    warn!(
+                        provider = %self.provider_id,
+                        "Provider rejected or overloaded on this credential; serving the request with another key"
+                    );
+                    continue;
+                }
+                let body_text = resp.text().await.unwrap_or_default();
+                let is_overloaded =
+                    status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
+                return Err(HarnessError::ProviderError {
+                    provider: self.provider_id.clone(),
+                    message: if is_overloaded {
+                        format!("Model is overloaded (HTTP {}): {}", status, body_text)
+                    } else {
+                        format!("HTTP {}: {}", status, body_text)
+                    },
+                });
+            }
+
+            break resp;
+        };
+        Ok(resp)
+    }
+
+    /// Turn a parsed `/chat/completions` response into the crate's [`Message`].
+    fn completion_from_response(
+        &self,
+        resp_json: &serde_json::Value,
+    ) -> Result<Message, HarnessError> {
+        let choice = resp_json
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .ok_or_else(|| HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: "No choices returned by LLM".to_string(),
+            })?;
+
+        let msg_val = choice
+            .get("message")
+            .ok_or_else(|| HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message: "Choice has no message".to_string(),
+            })?;
+
+        let (reasoning, mut content) = reasoning_and_content(msg_val);
+
+        // DeepSeek's DSML scaffolding can also arrive whole (non-streaming, or a gateway that does
+        // not split it), and it is protocol noise rather than the model speaking — so it must never
+        // become the stored message text. `raw_text_present` remembers that the model did emit
+        // *something*, so an all-scaffolding reply is reported as a no-text turn, not an empty one.
+        let raw_text_present = content
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false);
+        if let Some(text) = content.as_deref() {
+            let scrubbed = harness_core::text::strip_dsml_artifacts(text);
+            content = if scrubbed.trim().is_empty() {
+                None
+            } else {
+                Some(scrubbed)
+            };
+        }
+
+        let tool_calls = self.response_tool_calls(msg_val)?;
+
+        // The response's own `usage` object: what the provider billed for this request. The session
+        // store persists it so compaction compares its threshold against a real count instead of a
+        // character guess (`harness_core::session::estimate_tokens`).
+        let usage = resp_json.get("usage").map(token_usage_from);
+
+        if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
+            // A reply whose text was nothing but protocol scaffolding still *happened* — the model
+            // spoke, it just spoke in markup — so it is reported as a no-text turn instead of being
+            // treated as an empty (failed) response.
+            if reasoning.is_some() || raw_text_present {
+                return Ok(Message {
+                    role: Role::Assistant,
+                    content: Some(harness_core::types::NO_TEXT_RESPONSE.to_string()),
+                    reasoning,
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage,
+                });
+            }
+            return Err(HarnessError::ProviderError {
+                provider: self.provider_id.clone(),
+                message:
+                    "Model returned an empty response. The model may be overloaded or unavailable."
+                        .to_string(),
+            });
+        }
+
+        Ok(Message {
+            role: Role::Assistant,
+            content,
+            reasoning,
+            tool_calls,
+            tool_result: None,
+            usage,
+        })
+    }
+
+    fn response_tool_calls(
+        &self,
+        msg_val: &serde_json::Value,
+    ) -> Result<Vec<ToolCall>, HarnessError> {
+        let mut tool_calls = Vec::new();
+        if let Some(tc_array) = msg_val.get("tool_calls").and_then(|tc| tc.as_array()) {
+            for tc in tc_array {
+                let id = tc
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let func = tc.get("function").unwrap_or(&serde_json::Value::Null);
+                let name = func
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_raw = func
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
+                // An empty fragment is "no arguments"; a whole value followed by trailing junk
+                // keeps its first value. Only a value that ends early is a cut-off call.
+                let args: serde_json::Value =
+                    match harness_core::json::parse_tool_arguments(args_raw) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Err(HarnessError::ProviderError {
+                                provider: self.provider_id.clone(),
+                                message: format!(
+                                    "Model returned an incomplete tool call for '{name}': its \
+                                     arguments were not valid JSON ({error}). The call was not run."
+                                ),
+                            });
+                        }
+                    };
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments: args,
+                    // Gemini's OpenAI-compatible route hands the call's thought signature back in
+                    // an `extra_content` extension; without it a replayed call is rejected.
+                    signature: thought_signature::signature_from_tool_call(tc),
+                });
+            }
+        }
+        Ok(tool_calls)
+    }
+
     /// Serialize the transcript for an OpenAI-compatible `/chat/completions` body.
     ///
     /// `model` decides whether a replayed function call must carry Google's thought signature: the
@@ -489,95 +1118,26 @@ impl ModelProvider for GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<Message, HarnessError> {
-        if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            if let Err(error) =
-                crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
-            {
-                // Not fatal here: the request below will fail with the real auth error if the
-                // sync was actually needed, but log it so the cause is not invisible.
-                tracing::warn!("kiro credential sync failed before complete: {error}");
-            }
-        }
+        self.sync_provider_credentials("complete").await;
+
+        let model = self.model_or_default(options);
 
         if self.provider_id == "supercode" {
-            if let Err(error) =
-                crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await
-            {
-                tracing::warn!("supercode credential sync failed before complete: {error}");
-            }
-        }
-        let model = options
-            .model
-            .clone()
-            .unwrap_or_else(|| self.default_model.clone());
-
-        if self.provider_id == "supercode" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::supercode::execute_supercode_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self
+                .complete_via_supercode(&model, messages, tools, options)
+                .await;
         }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::kiro::execute_kiro_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self
+                .complete_via_kiro(&model, messages, tools, options)
+                .await;
         }
 
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::antigravity::execute_antigravity_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self
+                .complete_via_antigravity(&model, messages, tools, options)
+                .await;
         }
 
         if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
@@ -592,117 +1152,8 @@ impl ModelProvider for GenericProviderClient {
                 .await;
         }
 
-        let mut body = json!({
-            "model": model,
-            "messages": self.serialize_messages(messages, model.as_str()),
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = self.serialize_tools(tools);
-        }
-        if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
-        }
-        if let Some(max_tok) = options.max_tokens {
-            body["max_tokens"] = json!(max_tok);
-        }
-        if let Some(effort) = options.reasoning_effort {
-            if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
-                body["reasoning_effort"] = json!(s);
-            }
-        }
-
-        // One request may be re-sent with another credential: a rate-limited or revoked key is
-        // a property of the KEY, and the pool can hold a key that still works. Handing the error
-        // back instead makes the caller wait out the provider's `Retry-After` — up to ten
-        // minutes — before it discovers the other key.
-        let mut failover_attempts = 0usize;
-        let resp = loop {
-            let (headers, query_param, secret) = self.build_auth_headers().await?;
-            let mut url = format!("{}/chat/completions", self.base_url);
-            if let Some(q) = query_param {
-                url = format!("{}?{}", url, q);
-            }
-
-            let mut resp = match self
-                .http_client
-                .post(&url)
-                .headers(headers.clone())
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(HarnessError::ProviderError {
-                        provider: self.provider_id.clone(),
-                        message: format!("HTTP error: {}", e),
-                    })
-                }
-            };
-
-            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
-            // retry once without reasoning_effort for models that do not support it.
-            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("reasoning_effort");
-                }
-                if let Ok(retry_resp) = self
-                    .http_client
-                    .post(&url)
-                    .headers(headers.clone())
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    resp = retry_resp;
-                }
-            }
-
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                let retry_after = retry_after_secs(&resp);
-                if self
-                    .fail_over_to_another_credential(&secret, failover_attempts)
-                    .await
-                {
-                    failover_attempts += 1;
-                    warn!(
-                        provider = %self.provider_id,
-                        "Provider rate-limited this credential; serving the request with another key"
-                    );
-                    continue;
-                }
-                return Err(HarnessError::RateLimited {
-                    provider: self.provider_id.clone(),
-                    retry_after_secs: retry_after,
-                });
-            }
-
-            if !status.is_success() {
-                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
-                // so retire it and let another key serve the request when the pool holds one.
-                if matches!(status.as_u16(), 401 | 403 | 503)
-                    && self
-                        .fail_over_to_another_credential(&secret, failover_attempts)
-                        .await
-                {
-                    failover_attempts += 1;
-                    warn!(
-                        provider = %self.provider_id,
-                        "Provider rejected or overloaded on this credential; serving the request with another key"
-                    );
-                    continue;
-                }
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(HarnessError::ProviderError {
-                    provider: self.provider_id.clone(),
-                    message: format!("HTTP {}: {}", status, body_text),
-                });
-            }
-
-            break resp;
-        };
+        let body = self.build_complete_body(&model, messages, tools, options);
+        let resp = self.send_complete_request(body).await?;
 
         let resp_json: serde_json::Value =
             resp.json().await.map_err(|e| HarnessError::ProviderError {
@@ -710,145 +1161,7 @@ impl ModelProvider for GenericProviderClient {
                 message: format!("Failed to parse response JSON: {}", e),
             })?;
 
-        let choice = resp_json
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .ok_or_else(|| HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: "No choices returned by LLM".to_string(),
-            })?;
-
-        let msg_val = choice
-            .get("message")
-            .ok_or_else(|| HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message: "Choice has no message".to_string(),
-            })?;
-
-        let mut reasoning = msg_val
-            .get("reasoning_content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-
-        let mut content = msg_val
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string());
-
-        if reasoning.is_none() {
-            if let Some(c) = &content {
-                if let Some(start) = c.find("<think>") {
-                    if let Some(end) = c.find("</think>") {
-                        let think_text = c[start + 7..end].trim().to_string();
-                        let rest = format!("{}{}", &c[..start], &c[end + 8..])
-                            .trim()
-                            .to_string();
-                        if !think_text.is_empty() {
-                            reasoning = Some(think_text);
-                        }
-                        content = if rest.is_empty() { None } else { Some(rest) };
-                    }
-                }
-            }
-        }
-
-        // DeepSeek's DSML scaffolding can also arrive whole (non-streaming, or a gateway that does
-        // not split it), and it is protocol noise rather than the model speaking — so it must never
-        // become the stored message text. `raw_text_present` remembers that the model did emit
-        // *something*, so an all-scaffolding reply is reported as a no-text turn, not an empty one.
-        let raw_text_present = content
-            .as_deref()
-            .map(|text| !text.trim().is_empty())
-            .unwrap_or(false);
-        if let Some(text) = content.as_deref() {
-            let scrubbed = harness_core::text::strip_dsml_artifacts(text);
-            content = if scrubbed.trim().is_empty() {
-                None
-            } else {
-                Some(scrubbed)
-            };
-        }
-
-        let mut tool_calls = Vec::new();
-        if let Some(tc_array) = msg_val.get("tool_calls").and_then(|tc| tc.as_array()) {
-            for tc in tc_array {
-                let id = tc
-                    .get("id")
-                    .and_then(|i| i.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let func = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                let name = func
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args_raw = func
-                    .get("arguments")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("{}");
-                // An empty fragment is "no arguments"; a whole value followed by trailing junk
-                // keeps its first value. Only a value that ends early is a cut-off call.
-                let args: serde_json::Value =
-                    match harness_core::json::parse_tool_arguments(args_raw) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Err(HarnessError::ProviderError {
-                                provider: self.provider_id.clone(),
-                                message: format!(
-                                    "Model returned an incomplete tool call for '{name}': its \
-                                     arguments were not valid JSON ({error}). The call was not run."
-                                ),
-                            });
-                        }
-                    };
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments: args,
-                    // Gemini's OpenAI-compatible route hands the call's thought signature back in
-                    // an `extra_content` extension; without it a replayed call is rejected.
-                    signature: thought_signature::signature_from_tool_call(tc),
-                });
-            }
-        }
-
-        // The response's own `usage` object: what the provider billed for this request. The session
-        // store persists it so compaction compares its threshold against a real count instead of a
-        // character guess (`harness_core::session::estimate_tokens`).
-        let usage = resp_json.get("usage").map(token_usage_from);
-
-        if content.as_deref().unwrap_or("").trim().is_empty() && tool_calls.is_empty() {
-            // A reply whose text was nothing but protocol scaffolding still *happened* — the model
-            // spoke, it just spoke in markup — so it is reported as a no-text turn instead of being
-            // treated as an empty (failed) response.
-            if reasoning.is_some() || raw_text_present {
-                return Ok(Message {
-                    role: Role::Assistant,
-                    content: Some(harness_core::types::NO_TEXT_RESPONSE.to_string()),
-                    reasoning,
-                    tool_calls: Vec::new(),
-                    tool_result: None,
-                    usage,
-                });
-            }
-            return Err(HarnessError::ProviderError {
-                provider: self.provider_id.clone(),
-                message:
-                    "Model returned an empty response. The model may be overloaded or unavailable."
-                        .to_string(),
-            });
-        }
-
-        Ok(Message {
-            role: Role::Assistant,
-            content,
-            reasoning,
-            tool_calls,
-            tool_result: None,
-            usage,
-        })
+        self.completion_from_response(&resp_json)
     }
 
     async fn stream(
@@ -857,98 +1170,26 @@ impl ModelProvider for GenericProviderClient {
         tools: &[ToolDefinition],
         options: &CompletionOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-        if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            if let Err(error) =
-                crate::kiro::sync_kiro_credential_if_needed(&self.cred_manager).await
-            {
-                // Not fatal here: the request below fails with the real auth error if the sync
-                // was needed; log it so the underlying cause is not invisible.
-                tracing::warn!("kiro credential sync failed before stream: {error}");
-            }
-        }
+        self.sync_provider_credentials("stream").await;
+
+        let model = self.model_or_default(options);
 
         if self.provider_id == "supercode" {
-            if let Err(error) =
-                crate::supercode::sync_supercode_credential_if_needed(&self.cred_manager).await
-            {
-                tracing::warn!("supercode credential sync failed before stream: {error}");
-            }
-        }
-
-        let model = options
-            .model
-            .clone()
-            .unwrap_or_else(|| self.default_model.clone());
-
-        if self.provider_id == "supercode" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::supercode::stream_supercode_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self
+                .stream_via_supercode(&model, messages, tools, options)
+                .await;
         }
 
         if self.provider_id == "kiro" || self.provider_id == "kiro-cli" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::kiro::stream_kiro_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self.stream_via_kiro(&model, messages, tools, options).await;
         }
 
         // Antigravity speaks the Code Assist protocol, not the OpenAI one, so it has its own
         // SSE reader rather than the `/chat/completions` body below.
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
-            let (_, _, secret) = self.build_auth_headers().await?;
-            let res = crate::antigravity::stream_antigravity_completion(
-                &self.http_client,
-                secret.expose_secret(),
-                Some(&self.cred_manager),
-                &model,
-                messages,
-                tools,
-                options,
-            )
-            .await;
-            if let Err(ref err) = res {
-                if matches!(
-                    err,
-                    HarnessError::AuthenticationFailed { .. } | HarnessError::RateLimited { .. }
-                ) {
-                    self.retire_failed_credential(&secret).await;
-                }
-            }
-            return res;
+            return self
+                .stream_via_antigravity(&model, messages, tools, options)
+                .await;
         }
 
         if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
@@ -963,113 +1204,8 @@ impl ModelProvider for GenericProviderClient {
                 .await;
         }
 
-        let mut body = json!({
-            "model": model,
-            "messages": self.serialize_messages(messages, model.as_str()),
-            "stream": true,
-            "stream_options": { "include_usage": true }
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = self.serialize_tools(tools);
-        }
-        if let Some(effort) = options.reasoning_effort {
-            if let Some(s) = normalize_reasoning_effort(&self.provider_id, &model, effort) {
-                body["reasoning_effort"] = json!(s);
-            }
-        }
-
-        // One request may be re-sent with another credential: a rate-limited or revoked key is
-        // a property of the KEY, and the pool can hold a key that still works. Handing the error
-        // back instead makes the caller wait out the provider's `Retry-After` — up to ten
-        // minutes — before it discovers the other key.
-        let mut failover_attempts = 0usize;
-        let resp = loop {
-            let (headers, query_param, secret) = self.build_auth_headers().await?;
-            let mut url = format!("{}/chat/completions", self.base_url);
-            if let Some(q) = query_param {
-                url = format!("{}?{}", url, q);
-            }
-
-            let mut resp = self
-                .http_client
-                .post(&url)
-                .headers(headers.clone())
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| HarnessError::ProviderError {
-                    provider: self.provider_id.clone(),
-                    message: format!("HTTP error: {}", e),
-                })?;
-
-            // If 400 Bad Request with Invalid request occurs and reasoning_effort was included,
-            // retry once without reasoning_effort for models that do not support it.
-            if resp.status().as_u16() == 400 && body.get("reasoning_effort").is_some() {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("reasoning_effort");
-                }
-                if let Ok(retry_resp) = self
-                    .http_client
-                    .post(&url)
-                    .headers(headers.clone())
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    resp = retry_resp;
-                }
-            }
-
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                let retry_after = retry_after_secs(&resp);
-                if self
-                    .fail_over_to_another_credential(&secret, failover_attempts)
-                    .await
-                {
-                    failover_attempts += 1;
-                    warn!(
-                        provider = %self.provider_id,
-                        "Provider rate-limited this credential; serving the request with another key"
-                    );
-                    continue;
-                }
-                return Err(HarnessError::RateLimited {
-                    provider: self.provider_id.clone(),
-                    retry_after_secs: retry_after,
-                });
-            }
-            if !status.is_success() {
-                // 401/403/503: the key itself is dead (revoked, quota-cancelled account) or overloaded,
-                // so retire it and let another key serve the request when the pool holds one.
-                if matches!(status.as_u16(), 401 | 403 | 503)
-                    && self
-                        .fail_over_to_another_credential(&secret, failover_attempts)
-                        .await
-                {
-                    failover_attempts += 1;
-                    warn!(
-                        provider = %self.provider_id,
-                        "Provider rejected or overloaded on this credential; serving the request with another key"
-                    );
-                    continue;
-                }
-                let body_text = resp.text().await.unwrap_or_default();
-                let is_overloaded =
-                    status.as_u16() == 503 || body_text.to_lowercase().contains("overloaded");
-                return Err(HarnessError::ProviderError {
-                    provider: self.provider_id.clone(),
-                    message: if is_overloaded {
-                        format!("Model is overloaded (HTTP {}): {}", status, body_text)
-                    } else {
-                        format!("HTTP {}: {}", status, body_text)
-                    },
-                });
-            }
-
-            break resp;
-        };
+        let body = self.build_stream_body(&model, messages, tools, options);
+        let resp = self.send_stream_request(body).await?;
 
         let event_source = resp.bytes_stream().eventsource();
         let provider_id = self.provider_id.clone();
@@ -1078,22 +1214,7 @@ impl ModelProvider for GenericProviderClient {
         // chunk is expanded into every event it holds rather than only the first match.
         let mapped = event_source.flat_map(move |event_result| {
             let events: Vec<Result<StreamEvent, HarnessError>> = match event_result {
-                Ok(event) => {
-                    if event.data == "[DONE]" {
-                        vec![Ok(StreamEvent::Completed {
-                            finish_reason: Some("stop".to_string()),
-                            usage: None,
-                        })]
-                    } else {
-                        match serde_json::from_str::<serde_json::Value>(&event.data) {
-                            Ok(parsed) => delta_events(&parsed),
-                            Err(e) => vec![Err(HarnessError::SerializationError(format!(
-                                "Failed to parse SSE JSON: {}",
-                                e
-                            )))],
-                        }
-                    }
-                }
+                Ok(event) => sse_data_events(&event.data),
                 Err(e) => vec![Err(HarnessError::ProviderError {
                     provider: provider_id.clone(),
                     message: format!("SSE stream error: {}", e),

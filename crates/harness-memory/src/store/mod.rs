@@ -36,6 +36,7 @@ use chrono::{DateTime, Utc};
 use harness_core::{HarnessError, MemoryCategory, MemoryRecord};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
+use tracing::warn;
 
 pub use context::{Layer0, Layer1, Layer2, Layer3, MemoryStack};
 pub use convo::mine_convos;
@@ -115,9 +116,7 @@ impl Default for StoreConfig {
 }
 
 pub fn default_root() -> PathBuf {
-    harness_core::config::home_dir()
-        .join(".luna")
-        .join("memory")
+    harness_core::config::PathsSettings::default().memory_dir
 }
 
 /// One canonical record: a verbatim Markdown file with typed front matter.
@@ -531,10 +530,16 @@ impl MemoryStore {
         atomic::cleanup_temp(&path);
         atomic::write_str(&path, &record.to_document()).map_err(io_err)?;
 
-        // If the id moved domains/topics, remove the old file.
+        // If the id moved domains/topics, remove the old file. The new copy is already durable, so
+        // a failed cleanup leaves a stale duplicate to report rather than failing the write.
         if let Some(old) = self.find_path(&record.id) {
             if old != path {
-                let _ = fs::remove_file(&old);
+                if let Err(error) = fs::remove_file(&old) {
+                    warn!(
+                        "could not remove the old record file '{}': {error}",
+                        old.display()
+                    );
+                }
             }
         }
 
@@ -550,7 +555,7 @@ impl MemoryStore {
         cache
             .docs
             .sort_by_key(|a| std::cmp::Reverse(a.record.updated_at));
-        self.write_manifest(cache.docs.len());
+        self.write_manifest(cache.docs.len())?;
         Ok(())
     }
 
@@ -570,14 +575,16 @@ impl MemoryStore {
         let paths = self.all_record_paths()?;
         let mut removed = 0;
         for path in paths {
-            if fs::remove_file(&path).is_ok() {
-                removed += 1;
+            match fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => removed += 1,
+                Err(error) => warn!("could not delete record file '{}': {error}", path.display()),
             }
         }
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
         cache.docs.clear();
         cache.loaded = true;
-        self.write_manifest(0);
+        self.write_manifest(0)?;
         Ok(removed)
     }
 
@@ -696,7 +703,6 @@ impl MemoryStore {
     ) -> Result<Vec<SearchResult>, HarnessError> {
         self.ensure_loaded()?;
         let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        let now = Utc::now();
         let filtered: Vec<&Indexed> = cache
             .docs
             .iter()
@@ -822,7 +828,6 @@ impl MemoryStore {
                 })
                 .collect();
         }
-        let _ = now;
         Ok(results)
     }
 
@@ -1161,19 +1166,15 @@ impl MemoryStore {
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
         cache.docs = docs;
         cache.loaded = true;
-        self.write_manifest(count);
+        self.write_manifest(count)?;
 
-        // Rebuild KG index and Graph adjacency
-        let _ = self.kg().rebuild_index();
+        // Rebuild KG index and Graph adjacency. These are derived indexes: a failure leaves the
+        // canonical Markdown untouched, so report it and keep the reindexed cache usable.
+        if let Err(error) = self.kg().rebuild_index() {
+            warn!("knowledge-graph reindex failed: {error}");
+        }
         let records: Vec<Record> = cache.docs.iter().map(|d| d.record.clone()).collect();
-        let links = self.links_store().list_all_links().unwrap_or_default();
-        let crosslinks = self
-            .crosslinks_store()
-            .list_all_crosslinks()
-            .unwrap_or_default();
-        let _ = self
-            .graph_index()
-            .build_and_save(&records, &links, &crosslinks);
+        self.refresh_graph_index(&records);
 
         Ok(count)
     }
@@ -1295,16 +1296,13 @@ impl MemoryStore {
         start_node: &str,
         max_hops: usize,
     ) -> Result<Vec<graph::TraversalStep>, HarnessError> {
-        // Ensure graph index is current
-        let records = self.active_records().unwrap_or_default();
-        let links = self.links_store().list_all_links().unwrap_or_default();
-        let crosslinks = self
-            .crosslinks_store()
-            .list_all_crosslinks()
-            .unwrap_or_default();
-        let _ = self
-            .graph_index()
-            .build_and_save(&records, &links, &crosslinks);
+        // Ensure graph index is current. The graph is derived; if the records cannot be read the
+        // traversal still runs against the last saved index.
+        let records = self.active_records().unwrap_or_else(|error| {
+            warn!("could not load records for graph traversal: {error}");
+            Vec::new()
+        });
+        self.refresh_graph_index(&records);
         self.graph_index().traverse(start_node, max_hops)
     }
 
@@ -1350,14 +1348,7 @@ impl MemoryStore {
         let count = self.crosslinks_store().apply_crosslinks()?;
         if count > 0 {
             let records = self.active_records()?;
-            let links = self.links_store().list_all_links().unwrap_or_default();
-            let crosslinks = self
-                .crosslinks_store()
-                .list_all_crosslinks()
-                .unwrap_or_default();
-            let _ = self
-                .graph_index()
-                .build_and_save(&records, &links, &crosslinks);
+            self.refresh_graph_index(&records);
         }
         Ok(count)
     }
@@ -1371,14 +1362,7 @@ impl MemoryStore {
         let count = self.crosslinks_store().prune_crosslinks(Some(&endpoints))?;
         if count > 0 {
             let active = self.active_records()?;
-            let links = self.links_store().list_all_links().unwrap_or_default();
-            let crosslinks = self
-                .crosslinks_store()
-                .list_all_crosslinks()
-                .unwrap_or_default();
-            let _ = self
-                .graph_index()
-                .build_and_save(&active, &links, &crosslinks);
+            self.refresh_graph_index(&active);
         }
         Ok(count)
     }
@@ -1387,7 +1371,29 @@ impl MemoryStore {
         self.crosslinks_store().list_all_crosslinks()
     }
 
-    fn write_manifest(&self, count: usize) {
+    /// Rebuild the derived graph adjacency. A failure here is logged, not propagated: the graph
+    /// index can be rebuilt from the canonical records at any time.
+    fn refresh_graph_index(&self, records: &[Record]) {
+        let links = self.links_store().list_all_links().unwrap_or_else(|error| {
+            warn!("could not load domain links for the graph index: {error}");
+            Vec::new()
+        });
+        let crosslinks = self
+            .crosslinks_store()
+            .list_all_crosslinks()
+            .unwrap_or_else(|error| {
+                warn!("could not load cross-links for the graph index: {error}");
+                Vec::new()
+            });
+        if let Err(error) = self
+            .graph_index()
+            .build_and_save(records, &links, &crosslinks)
+        {
+            warn!("graph index rebuild failed: {error}");
+        }
+    }
+
+    fn write_manifest(&self, count: usize) -> Result<(), HarnessError> {
         let manifest = serde_json::json!({
             "schema": MANIFEST_SCHEMA,
             "embedder": { "name": self.config.embedder, "dim": embed::DIM },
@@ -1395,11 +1401,14 @@ impl MemoryStore {
             "built_at": Utc::now().to_rfc3339(),
         });
         let path = self.config.root.join("search_index").join("manifest.json");
-        let _ = fs::create_dir_all(path.parent().unwrap_or(&self.config.root));
-        let _ = atomic::write_str(
-            &path,
-            &serde_json::to_string_pretty(&manifest).unwrap_or_default(),
-        );
+        let parent = path.parent().unwrap_or(&self.config.root);
+        fs::create_dir_all(parent)
+            .map_err(|error| HarnessError::Io(format!("could not create {parent:?}: {error}")))?;
+        let body = serde_json::to_string_pretty(&manifest)
+            .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
+        atomic::write_str(&path, &body)
+            .map_err(|error| HarnessError::Io(format!("could not write {path:?}: {error}")))?;
+        Ok(())
     }
 
     /// Mine a directory tree into records. Returns a report of what changed.

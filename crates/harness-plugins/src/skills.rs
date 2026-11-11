@@ -195,103 +195,113 @@ impl Tool for SkillToolAdapter {
         cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
         if let Some(ref cmd_template) = self.skill.command {
-            let skill_dir = self
-                .skill
-                .file_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_string_lossy();
-
-            let cmd_str = cmd_template.replace("{skill_dir}", &skill_dir);
-            let timeout = self.skill.timeout_secs.unwrap_or(60);
-            let args_json = serde_json::to_string(args).unwrap_or_default();
-
-            #[cfg(windows)]
-            let mut cmd = {
-                let mut cmd = tokio::process::Command::new("cmd");
-                cmd.arg("/C");
-                // `cmd /C` does not follow CommandLineToArgvW quoting; pass the skill command
-                // through exactly as written, pipes and all.
-                cmd.raw_arg(&cmd_str);
-                cmd
-            };
-            #[cfg(not(windows))]
-            let mut cmd = {
-                let mut cmd = tokio::process::Command::new("sh");
-                cmd.arg("-c").arg(&cmd_str);
-                cmd
-            };
-            cmd.kill_on_drop(true)
-                .current_dir(
-                    self.skill
-                        .file_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new(".")),
-                )
-                .env("SKILL_DIR", skill_dir.as_ref())
-                .env("SKILL_NAME", &self.skill.name)
-                .env("SKILL_ARGS", &args_json)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            let mut child = cmd.spawn().map_err(|e| HarnessError::ToolExecutionFailed {
-                tool: self.skill.name.clone(),
-                reason: format!("Failed to spawn skill command: {}", e),
-            })?;
-
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(args_json.as_bytes()).await;
-                let _ = stdin.flush().await;
-            }
-
-            let timeout_duration = std::time::Duration::from_secs(timeout);
-            let output = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Err(HarnessError::Cancelled);
-                }
-                res = tokio::time::timeout(timeout_duration, child.wait_with_output()) => match res {
-                    Ok(Ok(out)) => out,
-                    Ok(Err(e)) => return Ok(ToolResult::error(call_id, format!("Process error: {}", e))),
-                    Err(_) => {
-                        return Ok(ToolResult::error(call_id, format!("Skill timed out after {}s", timeout)));
-                    }
-                }
-            };
-
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-            if output.status.success() {
-                let text = if stdout.trim().is_empty() && !stderr.trim().is_empty() {
-                    stderr
-                } else {
-                    stdout
-                };
-                Ok(ToolResult::success(call_id, text))
-            } else {
-                let err_msg = if !stderr.trim().is_empty() {
-                    stderr
-                } else if !stdout.trim().is_empty() {
-                    stdout
-                } else {
-                    format!("Command exited with status code: {}", output.status)
-                };
-                Ok(ToolResult::error(call_id, err_msg))
-            }
+            run_skill_command(&self.skill, call_id, args, cancel_token, cmd_template).await
         } else {
-            let input = args
-                .get("input")
-                .and_then(|i| i.as_str())
-                .unwrap_or_default();
-            let rendered = format!(
-                "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
-                self.skill.name, self.skill.instructions, input
-            );
-            Ok(ToolResult::success(call_id, rendered))
+            Ok(ToolResult::success(
+                call_id,
+                render_instructions(&self.skill, args),
+            ))
         }
     }
+}
+
+async fn run_skill_command(
+    skill: &Skill,
+    call_id: &str,
+    args: &serde_json::Value,
+    cancel_token: &CancellationToken,
+    cmd_template: &str,
+) -> Result<ToolResult, HarnessError> {
+    let skill_dir = skill
+        .file_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_string_lossy();
+
+    let cmd_str = cmd_template.replace("{skill_dir}", &skill_dir);
+    let timeout = skill.timeout_secs.unwrap_or(60);
+    let args_json = serde_json::to_string(args).unwrap_or_default();
+
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C");
+        // `cmd /C` does not follow CommandLineToArgvW quoting; pass the skill command
+        // through exactly as written, pipes and all.
+        cmd.raw_arg(&cmd_str);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(&cmd_str);
+        cmd
+    };
+    cmd.kill_on_drop(true)
+        .current_dir(skill.file_path.parent().unwrap_or_else(|| Path::new(".")))
+        .env("SKILL_DIR", skill_dir.as_ref())
+        .env("SKILL_NAME", &skill.name)
+        .env("SKILL_ARGS", &args_json)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| HarnessError::ToolExecutionFailed {
+        tool: skill.name.clone(),
+        reason: format!("Failed to spawn skill command: {}", e),
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(args_json.as_bytes()).await;
+        let _ = stdin.flush().await;
+    }
+
+    let timeout_duration = std::time::Duration::from_secs(timeout);
+    let output = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            return Err(HarnessError::Cancelled);
+        }
+        res = tokio::time::timeout(timeout_duration, child.wait_with_output()) => match res {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return Ok(ToolResult::error(call_id, format!("Process error: {}", e))),
+            Err(_) => {
+                return Ok(ToolResult::error(call_id, format!("Skill timed out after {}s", timeout)));
+            }
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        let text = if stdout.trim().is_empty() && !stderr.trim().is_empty() {
+            stderr
+        } else {
+            stdout
+        };
+        Ok(ToolResult::success(call_id, text))
+    } else {
+        let err_msg = if !stderr.trim().is_empty() {
+            stderr
+        } else if !stdout.trim().is_empty() {
+            stdout
+        } else {
+            format!("Command exited with status code: {}", output.status)
+        };
+        Ok(ToolResult::error(call_id, err_msg))
+    }
+}
+
+fn render_instructions(skill: &Skill, args: &serde_json::Value) -> String {
+    let input = args
+        .get("input")
+        .and_then(|i| i.as_str())
+        .unwrap_or_default();
+    format!(
+        "SKILL: {}\nINSTRUCTIONS:\n{}\n\nUSER INPUT:\n{}",
+        skill.name, skill.instructions, input
+    )
 }
 
 pub struct SkillViewTool {

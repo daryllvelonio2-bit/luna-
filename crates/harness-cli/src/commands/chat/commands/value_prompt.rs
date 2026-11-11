@@ -1,10 +1,15 @@
 //! The one-line value prompt the numeric slash commands share.
 //!
-//! `/compact` and `/auto-compact` both ask for a number and redraw the same box while the
-//! user types. The box lives here rather than beside either caller so there is one answer to
-//! how wide it is and how a rejected value reads.
+//! `/auto-compact` asks for a number and redraws the same box while the user types. The box
+//! lives here rather than beside its caller so there is one answer to how wide it is and how a
+//! rejected value reads.
 
-use super::*;
+use colored::Colorize;
+use tokio::sync::mpsc;
+
+use crate::commands::chat::keys::AppKey;
+use crate::commands::chat::modal::{paint_centred, ModalScreen};
+use crate::commands::chat::ui::{get_terminal_width, ChatUi};
 
 /// What one value box of the `/auto-compact` wizard asks for.
 pub(super) struct ValuePrompt {
@@ -128,7 +133,7 @@ where
 /// Pure, and deliberately fixed-height: every row is present whatever the state, because the
 /// callers repaint the whole frame — a box that grew when an error appeared would shift the block
 /// off centre per keystroke.
-pub(super) fn render_value_box(
+fn render_value_box(
     spec: &ValuePrompt,
     input: &str,
     placeholder: &str,

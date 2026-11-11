@@ -230,8 +230,11 @@ fn parse_day_body(agent: &str, date_str: &str, body: &str) -> Vec<JournalEntry> 
 }
 
 fn make_timestamp(date_str: &str, time_str: &str) -> DateTime<Utc> {
-    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+    // A hand-edited journal can carry a header this parser does not understand. Falling back to
+    // today's date and midnight keeps the entry readable and ordered last without inventing a
+    // fixed calendar date for every malformed line.
+    let date =
+        NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap_or_else(|_| Utc::now().date_naive());
 
     let clean_time = time_str.split_whitespace().next().unwrap_or("00:00");
     let time = if clean_time.len() == 5 {
@@ -239,7 +242,7 @@ fn make_timestamp(date_str: &str, time_str: &str) -> DateTime<Utc> {
     } else {
         NaiveTime::parse_from_str(clean_time, "%H:%M:%S")
     }
-    .unwrap_or_else(|_| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    .unwrap_or(NaiveTime::MIN);
 
     let ndt = NaiveDateTime::new(date, time);
     DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)

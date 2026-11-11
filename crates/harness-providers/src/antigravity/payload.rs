@@ -206,6 +206,288 @@ fn gemini_safe_parameters(value: &mut serde_json::Value) {
     }
 }
 
+/// The parts of one user turn: its prose runs and any inlined images.
+fn user_turn_parts(text: &str) -> Vec<serde_json::Value> {
+    let mut parts = Vec::new();
+    // A pasted or inlined image rides in the text as a data URL; on this route it
+    // must become an `inlineData` part, or the model gets megabytes of base64 as
+    // prose and no pixels at all.
+    for chunk in user_text_and_images(text) {
+        match chunk {
+            UserChunk::Text(text) => {
+                if !text.trim().is_empty() {
+                    parts.push(json!({ "text": text }));
+                }
+            }
+            UserChunk::Image(mime, data) => {
+                parts.push(json!({
+                    "inlineData": { "mimeType": mime, "data": data }
+                }));
+            }
+        }
+    }
+    if parts.is_empty() {
+        parts.push(json!({ "text": "" }));
+    }
+    parts
+}
+
+/// The parts of one model turn: its reasoning, its text and its function calls.
+fn assistant_turn_parts(msg: &Message, resolved_model: &str) -> Vec<serde_json::Value> {
+    let mut parts = Vec::new();
+    // Replay the turn's own reasoning first, as the thought part it was on the
+    // wire: Code Assist validates the current turn's history against what the
+    // model actually produced, and dropping the thinking is what makes a replayed
+    // functionCall look like it did not follow a thought.
+    if let Some(ref reasoning) = msg.reasoning {
+        if !reasoning.is_empty() {
+            parts.push(json!({ "text": reasoning, "thought": true }));
+        }
+    }
+    if let Some(ref text) = msg.content {
+        if !text.is_empty() {
+            parts.push(json!({ "text": text }));
+        }
+    }
+    for (idx, c) in msg.tool_calls.iter().enumerate() {
+        let call_id = if c.id.is_empty() {
+            format!("call_{}", idx)
+        } else {
+            c.id.clone()
+        };
+        let mut call_part = json!({
+            "functionCall": {
+                "id": call_id,
+                "name": c.name,
+                "args": c.arguments
+            }
+        });
+        // The signature the model issued with this call is replayed verbatim: Code
+        // Assist validates each functionCall's signature against the model that produced
+        // it. A call we hold none for — another provider wrote the row, or the session
+        // predates the field — carries Google's documented dummy instead, which makes the
+        // validator skip the check. Omitting the field is what 400s the whole request.
+        if let Some(signature) = thought_signature::signature_for_replay(
+            c.signature.as_deref(),
+            thought_signature::model_enforces_thought_signature(resolved_model),
+        ) {
+            call_part["thoughtSignature"] = json!(signature);
+        }
+        parts.push(call_part);
+    }
+    if parts.is_empty() {
+        parts.push(json!({ "text": "" }));
+    }
+    parts
+}
+
+/// The `functionResponse` — or plain-text fallback — for one tool-result turn.
+fn tool_turn_part(messages: &[Message], msg_idx: usize, msg: &Message) -> serde_json::Value {
+    let call_id = msg
+        .tool_result
+        .as_ref()
+        .map(|r| r.call_id.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("call_0");
+    let result_content = msg
+        .tool_result
+        .as_ref()
+        .map(|r| r.content.as_str())
+        .unwrap_or("");
+    // Search backwards from the current message to find the matching tool call:
+    // a tool result answers the most recent preceding assistant message that called
+    // it. Scanning forward from message 0 is prone to ID collisions across turns (or
+    // sequential call_0 defaults), which mismatches the tool name and causes Gemini to
+    // reject the request with HTTP 400 ("Request contains an invalid argument").
+    let tool_name = messages[..msg_idx]
+        .iter()
+        .rev()
+        .find_map(|m| {
+            m.tool_calls
+                .iter()
+                .rev()
+                .find(|tc| tc.id == call_id || (tc.id.is_empty() && call_id == "call_0"))
+                .map(|tc| tc.name.as_str())
+        })
+        .or_else(|| {
+            messages.iter().rev().find_map(|m| {
+                m.tool_calls
+                    .iter()
+                    .rev()
+                    .find(|tc| tc.id == call_id || (tc.id.is_empty() && call_id == "call_0"))
+                    .map(|tc| tc.name.as_str())
+            })
+        });
+
+    if let Some(tool_name) = tool_name {
+        json!({
+            "functionResponse": {
+                "id": call_id,
+                "name": tool_name,
+                "response": { "result": result_content }
+            }
+        })
+    } else {
+        // Do not emit an orphaned functionResponse without a matching functionCall
+        // (which Gemini rejects). Emit as user text instead.
+        json!({ "text": format!("[Tool result]: {}", result_content) })
+    }
+}
+
+/// Push a tool-result turn, merging it into the previous user turn when both carry
+/// `functionResponse`, and making sure it follows a model turn.
+fn push_tool_turn(gemini_contents: &mut Vec<serde_json::Value>, resp_part: serde_json::Value) {
+    let is_func_resp = resp_part.get("functionResponse").is_some();
+
+    // Merge into previous user turn if both contain functionResponse
+    if is_func_resp {
+        if let Some(last_entry) = gemini_contents.last_mut() {
+            if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
+                if let Some(parts_arr) = last_entry.get_mut("parts").and_then(|p| p.as_array_mut())
+                {
+                    let has_func_resp = parts_arr
+                        .iter()
+                        .any(|p| p.get("functionResponse").is_some());
+                    if has_func_resp {
+                        parts_arr.push(resp_part);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Gemini requires functionResponse turns to immediately follow a model turn.
+    let prev_is_model = gemini_contents
+        .last()
+        .and_then(|e| e.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("model");
+
+    if !prev_is_model && !gemini_contents.is_empty() {
+        gemini_contents.push(json!({
+            "role": "model",
+            "parts": [{ "text": "[The previous response was interrupted before it completed.]" }]
+        }));
+    }
+
+    gemini_contents.push(json!({
+        "role": "user",
+        "parts": [resp_part]
+    }));
+}
+
+/// Merge adjacent same-role turns to enforce strict Gemini user/model alternation.
+fn merge_adjacent_turns(gemini_contents: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut merged_contents: Vec<serde_json::Value> = Vec::new();
+    for content in gemini_contents {
+        let same_role =
+            merged_contents.last().and_then(|prev| prev.get("role")) == content.get("role");
+
+        if same_role {
+            if let (Some(prev_parts), Some(curr_parts)) = (
+                merged_contents
+                    .last_mut()
+                    .and_then(|p| p.get_mut("parts"))
+                    .and_then(|p| p.as_array_mut()),
+                content.get("parts").and_then(|p| p.as_array()),
+            ) {
+                prev_parts.extend(curr_parts.iter().cloned());
+            }
+        } else {
+            merged_contents.push(content);
+        }
+    }
+    merged_contents
+}
+
+/// Gemini strictly requires the first content turn to have role: "user".
+///
+/// If compaction, session replay, or callers provide messages starting with a model turn
+/// (especially one containing functionCall), prepend a synthetic user turn so Gemini never
+/// rejects it with HTTP 400 ("Please ensure that function call turn comes immediately after a user turn").
+fn ensure_leading_user_turn(merged_contents: &mut Vec<serde_json::Value>) {
+    if merged_contents
+        .first()
+        .and_then(|c| c.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("model")
+    {
+        merged_contents.insert(
+            0,
+            json!({
+                "role": "user",
+                "parts": [{ "text": "[Conversation continued from previous turn]" }]
+            }),
+        );
+    }
+}
+
+/// No turn may carry an empty `parts` array.
+fn ensure_nonempty_parts(merged_contents: &mut [serde_json::Value]) {
+    for turn in merged_contents {
+        if let Some(parts) = turn.get_mut("parts").and_then(|p| p.as_array_mut()) {
+            if parts.is_empty() {
+                parts.push(json!({ "text": "" }));
+            }
+        }
+    }
+}
+
+/// The tool list as Code Assist function declarations.
+fn build_function_declarations(tools: &[ToolDefinition]) -> serde_json::Value {
+    let func_decls: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            let mut parameters = t.parameters.clone();
+            gemini_safe_parameters(&mut parameters);
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": parameters
+            })
+        })
+        .collect();
+    json!([{ "functionDeclarations": func_decls }])
+}
+
+/// The `generationConfig` block for this request.
+fn build_generation_config(options: &CompletionOptions, resolved_model: &str) -> serde_json::Value {
+    let mut gen_config = json!({});
+    if let Some(temp) = options.temperature {
+        gen_config["temperature"] = json!(temp);
+    }
+    if let Some(top_p) = options.top_p {
+        gen_config["topP"] = json!(top_p);
+    }
+
+    let budget = options.reasoning_effort.map(thinking_budget);
+    if let Some(budget) = budget {
+        gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+    }
+    // Thinking is charged to `maxOutputTokens`, not beside it. A cap meant for the visible answer
+    // therefore has to carry the thinking allowance too, or a hard turn spends the whole budget in
+    // its head and comes back as `finishReason=MAX_TOKENS` with no parts at all — an empty answer
+    // that a retry of the identical request reproduces exactly. Reproduced against Code Assist:
+    // `maxOutputTokens=4096` on a long tool-heavy turn returned one frame with
+    // `thoughtsTokenCount=3932`, `MAX_TOKENS`, and no text.
+    //
+    // With no declared effort Gemini thinks dynamically and publishes no budget to reserve, so the
+    // cap is left off entirely: `max_tokens` bounds the answer, and that bound cannot be expressed
+    // as a bound on thinking-plus-answer without knowing the former.
+    if let Some(max_tok) = options.max_tokens {
+        let cap = match (counts_thinking_against_output(resolved_model), budget) {
+            (true, Some(budget)) => Some(max_tok.saturating_add(budget)),
+            (true, None) => None,
+            (false, _) => Some(max_tok),
+        };
+        if let Some(cap) = cap {
+            gen_config["maxOutputTokens"] = json!(cap);
+        }
+    }
+    gen_config
+}
+
 /// Build the Code Assist payload for one turn: messages translated to `contents`, tools to
 /// function declarations, and the reasoning effort to a thinking budget.
 pub(super) fn build_antigravity_payload(
@@ -237,219 +519,27 @@ pub(super) fn build_antigravity_payload(
             }
             Role::User => {
                 let text = msg.content.as_deref().unwrap_or("");
-                let mut parts = Vec::new();
-                // A pasted or inlined image rides in the text as a data URL; on this route it
-                // must become an `inlineData` part, or the model gets megabytes of base64 as
-                // prose and no pixels at all.
-                for chunk in user_text_and_images(text) {
-                    match chunk {
-                        UserChunk::Text(text) => {
-                            if !text.trim().is_empty() {
-                                parts.push(json!({ "text": text }));
-                            }
-                        }
-                        UserChunk::Image(mime, data) => {
-                            parts.push(json!({
-                                "inlineData": { "mimeType": mime, "data": data }
-                            }));
-                        }
-                    }
-                }
-                if parts.is_empty() {
-                    parts.push(json!({ "text": "" }));
-                }
                 gemini_contents.push(json!({
                     "role": "user",
-                    "parts": parts
+                    "parts": user_turn_parts(text)
                 }));
             }
             Role::Assistant => {
-                let mut parts = Vec::new();
-                // Replay the turn's own reasoning first, as the thought part it was on the
-                // wire: Code Assist validates the current turn's history against what the
-                // model actually produced, and dropping the thinking is what makes a replayed
-                // functionCall look like it did not follow a thought.
-                if let Some(ref reasoning) = msg.reasoning {
-                    if !reasoning.is_empty() {
-                        parts.push(json!({ "text": reasoning, "thought": true }));
-                    }
-                }
-                if let Some(ref text) = msg.content {
-                    if !text.is_empty() {
-                        parts.push(json!({ "text": text }));
-                    }
-                }
-                for (idx, c) in msg.tool_calls.iter().enumerate() {
-                    let call_id = if c.id.is_empty() {
-                        format!("call_{}", idx)
-                    } else {
-                        c.id.clone()
-                    };
-                    let mut call_part = json!({
-                        "functionCall": {
-                            "id": call_id,
-                            "name": c.name,
-                            "args": c.arguments
-                        }
-                    });
-                    // The signature the model issued with this call is replayed verbatim: Code
-                    // Assist validates each functionCall's signature against the model that produced
-                    // it. A call we hold none for — another provider wrote the row, or the session
-                    // predates the field — carries Google's documented dummy instead, which makes the
-                    // validator skip the check. Omitting the field is what 400s the whole request.
-                    if let Some(signature) = thought_signature::signature_for_replay(
-                        c.signature.as_deref(),
-                        thought_signature::model_enforces_thought_signature(&resolved_model),
-                    ) {
-                        call_part["thoughtSignature"] = json!(signature);
-                    }
-                    parts.push(call_part);
-                }
-                if parts.is_empty() {
-                    parts.push(json!({ "text": "" }));
-                }
                 gemini_contents.push(json!({
                     "role": "model",
-                    "parts": parts
+                    "parts": assistant_turn_parts(msg, &resolved_model)
                 }));
             }
             Role::Tool => {
-                let call_id = msg
-                    .tool_result
-                    .as_ref()
-                    .map(|r| r.call_id.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("call_0");
-                let result_content = msg
-                    .tool_result
-                    .as_ref()
-                    .map(|r| r.content.as_str())
-                    .unwrap_or("");
-                // Search backwards from the current message to find the matching tool call:
-                // a tool result answers the most recent preceding assistant message that called
-                // it. Scanning forward from message 0 is prone to ID collisions across turns (or
-                // sequential call_0 defaults), which mismatches the tool name and causes Gemini to
-                // reject the request with HTTP 400 ("Request contains an invalid argument").
-                let tool_name = messages[..msg_idx]
-                    .iter()
-                    .rev()
-                    .find_map(|m| {
-                        m.tool_calls
-                            .iter()
-                            .rev()
-                            .find(|tc| {
-                                tc.id == call_id || (tc.id.is_empty() && call_id == "call_0")
-                            })
-                            .map(|tc| tc.name.as_str())
-                    })
-                    .or_else(|| {
-                        messages.iter().rev().find_map(|m| {
-                            m.tool_calls
-                                .iter()
-                                .rev()
-                                .find(|tc| {
-                                    tc.id == call_id || (tc.id.is_empty() && call_id == "call_0")
-                                })
-                                .map(|tc| tc.name.as_str())
-                        })
-                    });
-
-                let resp_part = if let Some(tool_name) = tool_name {
-                    json!({
-                        "functionResponse": {
-                            "id": call_id,
-                            "name": tool_name,
-                            "response": { "result": result_content }
-                        }
-                    })
-                } else {
-                    // Do not emit an orphaned functionResponse without a matching functionCall
-                    // (which Gemini rejects). Emit as user text instead.
-                    json!({ "text": format!("[Tool result]: {}", result_content) })
-                };
-
-                let is_func_resp = resp_part.get("functionResponse").is_some();
-
-                // Merge into previous user turn if both contain functionResponse
-                if is_func_resp {
-                    if let Some(last_entry) = gemini_contents.last_mut() {
-                        if last_entry.get("role").and_then(|r| r.as_str()) == Some("user") {
-                            if let Some(parts_arr) =
-                                last_entry.get_mut("parts").and_then(|p| p.as_array_mut())
-                            {
-                                let has_func_resp = parts_arr
-                                    .iter()
-                                    .any(|p| p.get("functionResponse").is_some());
-                                if has_func_resp {
-                                    parts_arr.push(resp_part);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Gemini requires functionResponse turns to immediately follow a model turn.
-                let prev_is_model = gemini_contents
-                    .last()
-                    .and_then(|e| e.get("role"))
-                    .and_then(|r| r.as_str())
-                    == Some("model");
-
-                if !prev_is_model && !gemini_contents.is_empty() {
-                    gemini_contents.push(json!({
-                        "role": "model",
-                        "parts": [{ "text": "[The previous response was interrupted before it completed.]" }]
-                    }));
-                }
-
-                gemini_contents.push(json!({
-                    "role": "user",
-                    "parts": [resp_part]
-                }));
+                let resp_part = tool_turn_part(messages, msg_idx, msg);
+                push_tool_turn(&mut gemini_contents, resp_part);
             }
         }
     }
 
-    // Merge adjacent same-role turns to enforce strict Gemini user/model alternation
-    let mut merged_contents: Vec<serde_json::Value> = Vec::new();
-    for content in gemini_contents {
-        let same_role =
-            merged_contents.last().and_then(|prev| prev.get("role")) == content.get("role");
+    let mut merged_contents = merge_adjacent_turns(gemini_contents);
 
-        if same_role {
-            if let (Some(prev_parts), Some(curr_parts)) = (
-                merged_contents
-                    .last_mut()
-                    .and_then(|p| p.get_mut("parts"))
-                    .and_then(|p| p.as_array_mut()),
-                content.get("parts").and_then(|p| p.as_array()),
-            ) {
-                prev_parts.extend(curr_parts.iter().cloned());
-            }
-        } else {
-            merged_contents.push(content);
-        }
-    }
-
-    // Gemini strictly requires the first content turn to have role: "user".
-    // If compaction, session replay, or callers provide messages starting with a model turn
-    // (especially one containing functionCall), prepend a synthetic user turn so Gemini never
-    // rejects it with HTTP 400 ("Please ensure that function call turn comes immediately after a user turn").
-    if merged_contents
-        .first()
-        .and_then(|c| c.get("role"))
-        .and_then(|r| r.as_str())
-        == Some("model")
-    {
-        merged_contents.insert(
-            0,
-            json!({
-                "role": "user",
-                "parts": [{ "text": "[Conversation continued from previous turn]" }]
-            }),
-        );
-    }
+    ensure_leading_user_turn(&mut merged_contents);
 
     if merged_contents.is_empty() {
         merged_contents.push(json!({
@@ -458,13 +548,7 @@ pub(super) fn build_antigravity_payload(
         }));
     }
 
-    for turn in &mut merged_contents {
-        if let Some(parts) = turn.get_mut("parts").and_then(|p| p.as_array_mut()) {
-            if parts.is_empty() {
-                parts.push(json!({ "text": "" }));
-            }
-        }
-    }
+    ensure_nonempty_parts(&mut merged_contents);
 
     let mut req_obj = json!({ "contents": merged_contents });
 
@@ -475,53 +559,10 @@ pub(super) fn build_antigravity_payload(
     }
 
     if !tools.is_empty() {
-        let func_decls: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let mut parameters = t.parameters.clone();
-                gemini_safe_parameters(&mut parameters);
-                json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": parameters
-                })
-            })
-            .collect();
-        req_obj["tools"] = json!([{ "functionDeclarations": func_decls }]);
+        req_obj["tools"] = build_function_declarations(tools);
     }
 
-    let mut gen_config = json!({});
-    if let Some(temp) = options.temperature {
-        gen_config["temperature"] = json!(temp);
-    }
-    if let Some(top_p) = options.top_p {
-        gen_config["topP"] = json!(top_p);
-    }
-
-    let budget = options.reasoning_effort.map(thinking_budget);
-    if let Some(budget) = budget {
-        gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
-    }
-    // Thinking is charged to `maxOutputTokens`, not beside it. A cap meant for the visible answer
-    // therefore has to carry the thinking allowance too, or a hard turn spends the whole budget in
-    // its head and comes back as `finishReason=MAX_TOKENS` with no parts at all — an empty answer
-    // that a retry of the identical request reproduces exactly. Reproduced against Code Assist:
-    // `maxOutputTokens=4096` on a long tool-heavy turn returned one frame with
-    // `thoughtsTokenCount=3932`, `MAX_TOKENS`, and no text.
-    //
-    // With no declared effort Gemini thinks dynamically and publishes no budget to reserve, so the
-    // cap is left off entirely: `max_tokens` bounds the answer, and that bound cannot be expressed
-    // as a bound on thinking-plus-answer without knowing the former.
-    if let Some(max_tok) = options.max_tokens {
-        let cap = match (counts_thinking_against_output(&resolved_model), budget) {
-            (true, Some(budget)) => Some(max_tok.saturating_add(budget)),
-            (true, None) => None,
-            (false, _) => Some(max_tok),
-        };
-        if let Some(cap) = cap {
-            gen_config["maxOutputTokens"] = json!(cap);
-        }
-    }
+    let gen_config = build_generation_config(options, &resolved_model);
     if gen_config
         .as_object()
         .map(|o| !o.is_empty())

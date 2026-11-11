@@ -156,25 +156,24 @@ pub fn serialize_tools_for_supercode(tools: &[ToolDefinition]) -> Option<serde_j
     Some(serde_json::Value::Object(map))
 }
 
-pub async fn stream_supercode_completion(
-    http_client: &reqwest::Client,
-    raw_secret: &str,
-    _cred_manager: Option<&Arc<CredentialManager>>,
-    model: &str,
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    _options: &CompletionOptions,
-) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
-    let resolved_token = if raw_secret.is_empty() {
+/// The token to send: the stored secret, or the one the CLI left on disk.
+fn resolve_supercode_token(raw_secret: &str) -> Result<String, HarnessError> {
+    if raw_secret.is_empty() {
         extract_supercode_token_from_file().ok_or_else(|| HarnessError::AuthenticationFailed {
             provider: "supercode".to_string(),
             message: "No credential found in ~/.better-auth/token.json or credential manager"
                 .to_string(),
-        })?
+        })
     } else {
-        raw_secret.to_string()
-    };
+        Ok(raw_secret.to_string())
+    }
+}
 
+fn build_supercode_stream_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+) -> serde_json::Value {
     let resolved_model = if model.is_empty() { "kimi-k3" } else { model };
     let formatted_messages = format_messages_for_supercode(messages);
 
@@ -187,13 +186,21 @@ pub async fn stream_supercode_completion(
     if let Some(tools_obj) = serialize_tools_for_supercode(tools) {
         body["tools"] = tools_obj;
     }
+    body
+}
 
+/// POST the chat body and turn a non-success status into the route's error.
+async fn send_supercode_request(
+    http_client: &reqwest::Client,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, HarnessError> {
     let resp = http_client
         .post(SUPERCODE_ENDPOINT)
-        .header(AUTHORIZATION, format!("Bearer {}", resolved_token))
+        .header(AUTHORIZATION, format!("Bearer {}", token))
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, SUPERCODE_USER_AGENT)
-        .json(&body)
+        .json(body)
         .send()
         .await
         .map_err(|e| HarnessError::ProviderError {
@@ -210,13 +217,138 @@ pub async fn stream_supercode_completion(
         });
     }
 
+    Ok(resp)
+}
+
+/// The usage object a `finish` frame carries, in this route's own spelling.
+fn supercode_usage(u: &serde_json::Value) -> TokenUsage {
+    let prompt_tokens = u.get("inputTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    let completion_tokens = u.get("outputTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    let total_tokens = u.get("totalTokens").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    // This route names the cache count in camelCase where the
+    // OpenAI shape nests it; absent means the route does not
+    // report one.
+    let cached_tokens = u
+        .get("cachedTokens")
+        .or_else(|| u.get("cached_tokens"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as u32;
+    TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cached_tokens,
+    }
+}
+
+struct SupercodeStreamState {
+    has_received_content: bool,
+    last_error: Option<String>,
+}
+
+impl SupercodeStreamState {
+    fn new() -> Self {
+        Self {
+            has_received_content: false,
+            last_error: None,
+        }
+    }
+}
+
+/// Emit every stream event one SSE line carries.
+async fn handle_supercode_event(
+    event: &serde_json::Value,
+    tx: &tokio::sync::mpsc::Sender<Result<StreamEvent, HarnessError>>,
+    state: &mut SupercodeStreamState,
+) {
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match event_type {
+        "status" => {
+            // Status notifications (accepted, plan_gate, budget, streaming, etc.)
+        }
+        "text" => {
+            if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                if !content.is_empty() {
+                    state.has_received_content = true;
+                    let _ = tx
+                        .send(Ok(StreamEvent::ContentDelta(content.to_string())))
+                        .await;
+                }
+            }
+        }
+        "reasoning" => {
+            if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                if !content.is_empty() {
+                    let _ = tx
+                        .send(Ok(StreamEvent::ReasoningDelta(content.to_string())))
+                        .await;
+                }
+            }
+        }
+        "tool-call" => {
+            let name = event
+                .get("toolName")
+                .and_then(|n| n.as_str())
+                .map(str::to_string);
+            let args = event.get("args").map(|a| a.to_string());
+            let id = event
+                .get("toolCallId")
+                .and_then(|i| i.as_str())
+                .map(str::to_string);
+            let _ = tx
+                .send(Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id,
+                    name,
+                    arguments_delta: args,
+                    signature: None,
+                }))
+                .await;
+        }
+        "error" => {
+            let msg = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Supercode upstream error");
+            state.last_error = Some(msg.to_string());
+        }
+        "finish" => {
+            let reason = event
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(str::to_string);
+            let usage = event.get("usage").map(supercode_usage);
+            let _ = tx
+                .send(Ok(StreamEvent::Completed {
+                    finish_reason: reason.or(Some("stop".to_string())),
+                    usage,
+                }))
+                .await;
+        }
+        _ => {}
+    }
+}
+
+pub async fn stream_supercode_completion(
+    http_client: &reqwest::Client,
+    raw_secret: &str,
+    _cred_manager: Option<&Arc<CredentialManager>>,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    _options: &CompletionOptions,
+) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+    let resolved_token = resolve_supercode_token(raw_secret)?;
+    let body = build_supercode_stream_body(model, messages, tools);
+
+    let resp = send_supercode_request(http_client, &resolved_token, &body).await?;
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, HarnessError>>(100);
 
     tokio::spawn(async move {
         let mut byte_stream = resp.bytes_stream();
         let mut line_buffer = String::new();
-        let mut has_received_content = false;
-        let mut last_error: Option<String> = None;
+        let mut state = SupercodeStreamState::new();
 
         while let Some(chunk_res) = byte_stream.next().await {
             match chunk_res {
@@ -233,112 +365,7 @@ pub async fn stream_supercode_completion(
                         }
 
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let event_type =
-                                event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match event_type {
-                                "status" => {
-                                    // Status notifications (accepted, plan_gate, budget, streaming, etc.)
-                                }
-                                "text" => {
-                                    if let Some(content) =
-                                        event.get("content").and_then(|c| c.as_str())
-                                    {
-                                        if !content.is_empty() {
-                                            has_received_content = true;
-                                            let _ = tx
-                                                .send(Ok(StreamEvent::ContentDelta(
-                                                    content.to_string(),
-                                                )))
-                                                .await;
-                                        }
-                                    }
-                                }
-                                "reasoning" => {
-                                    if let Some(content) =
-                                        event.get("content").and_then(|c| c.as_str())
-                                    {
-                                        if !content.is_empty() {
-                                            let _ = tx
-                                                .send(Ok(StreamEvent::ReasoningDelta(
-                                                    content.to_string(),
-                                                )))
-                                                .await;
-                                        }
-                                    }
-                                }
-                                "tool-call" => {
-                                    let name = event
-                                        .get("toolName")
-                                        .and_then(|n| n.as_str())
-                                        .map(str::to_string);
-                                    let args = event.get("args").map(|a| a.to_string());
-                                    let id = event
-                                        .get("toolCallId")
-                                        .and_then(|i| i.as_str())
-                                        .map(str::to_string);
-                                    let _ = tx
-                                        .send(Ok(StreamEvent::ToolCallDelta {
-                                            index: 0,
-                                            id,
-                                            name,
-                                            arguments_delta: args,
-                                            signature: None,
-                                        }))
-                                        .await;
-                                }
-                                "error" => {
-                                    let msg = event
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Supercode upstream error");
-                                    last_error = Some(msg.to_string());
-                                }
-                                "finish" => {
-                                    let reason = event
-                                        .get("reason")
-                                        .and_then(|r| r.as_str())
-                                        .map(str::to_string);
-                                    let usage = event.get("usage").map(|u| {
-                                        let prompt_tokens = u
-                                            .get("inputTokens")
-                                            .and_then(|n| n.as_u64())
-                                            .unwrap_or(0)
-                                            as u32;
-                                        let completion_tokens = u
-                                            .get("outputTokens")
-                                            .and_then(|n| n.as_u64())
-                                            .unwrap_or(0)
-                                            as u32;
-                                        let total_tokens = u
-                                            .get("totalTokens")
-                                            .and_then(|n| n.as_u64())
-                                            .unwrap_or(0)
-                                            as u32;
-                                        // This route names the cache count in camelCase where the
-                                        // OpenAI shape nests it; absent means the route does not
-                                        // report one.
-                                        let cached_tokens = u
-                                            .get("cachedTokens")
-                                            .or_else(|| u.get("cached_tokens"))
-                                            .and_then(|n| n.as_u64())
-                                            .unwrap_or(0)
-                                            as u32;
-                                        TokenUsage {
-                                            prompt_tokens,
-                                            completion_tokens,
-                                            total_tokens,
-                                            cached_tokens,
-                                        }
-                                    });
-                                    let _ = tx
-                                        .send(Ok(StreamEvent::Completed {
-                                            finish_reason: reason.or(Some("stop".to_string())),
-                                            usage,
-                                        }))
-                                        .await;
-                                }
-                                _ => {}
-                            }
+                            handle_supercode_event(&event, &tx, &mut state).await;
                         }
                     }
                 }
@@ -354,8 +381,8 @@ pub async fn stream_supercode_completion(
             }
         }
 
-        if !has_received_content {
-            if let Some(err_msg) = last_error {
+        if !state.has_received_content {
+            if let Some(err_msg) = state.last_error {
                 let _ = tx
                     .send(Err(HarnessError::ProviderError {
                         provider: "supercode".to_string(),

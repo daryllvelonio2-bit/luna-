@@ -104,7 +104,8 @@ pub const DEFAULT_ID: u8 = 1;
 pub fn parse_selection(answer: &str) -> Result<Choice, String> {
     let trimmed = answer.trim();
     if trimmed.is_empty() {
-        return Ok(choice(DEFAULT_ID).expect("the default is one of the choices"));
+        return choice(DEFAULT_ID)
+            .ok_or_else(|| format!("internal error: default option {DEFAULT_ID} is missing"));
     }
     // Names are accepted as well as numbers: this is a decision people have opinions about, and
     // `brave` is both shorter to type and harder to get wrong than counting menu rows.
@@ -225,6 +226,25 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
     writer.write_block(&hint_lines(size))?;
     writer.blank()?;
 
+    let Some(choice) = prompt_choice(writer, reader, size)? else {
+        return Ok(WebSelection::default());
+    };
+
+    if !choice.enabled {
+        return finish_disabled(writer);
+    }
+    if choice.backend.is_keyless() {
+        return finish_keyless(writer, choice);
+    }
+    finish_keyed(writer, reader, size, choice)
+}
+
+/// Asks for a menu option until one parses. `Ok(None)` means the input hit EOF before answering.
+fn prompt_choice<R: BufRead, W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    reader: &mut R,
+    size: Size,
+) -> Result<Option<Choice>, HarnessError> {
     let mut chosen = None;
     for attempt in 1..=MAX_ATTEMPTS {
         writer.write_prompt_line(&prompt_line(size, PROMPT))?;
@@ -232,7 +252,7 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
         if reader.read_line(&mut answer)? == 0 {
             // EOF before an answer: the shell that piped this in has nothing more to say, and the
             // documented default is a working keyless search rather than no web access at all.
-            return Ok(WebSelection::default());
+            return Ok(None);
         }
         match parse_selection(&answer) {
             Ok(choice) => {
@@ -253,35 +273,49 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
              you are ready"
         )));
     };
+    Ok(Some(choice))
+}
 
-    if !choice.enabled {
-        writer.blank()?;
-        writer.write_centered(
-            &format!("✓ {}", summary(&WebSelection::disabled())),
-            Some(NAME_COLOR),
-        )?;
-        return Ok(WebSelection::disabled());
-    }
-    if choice.backend.is_keyless() {
-        writer.blank()?;
-        writer.write_centered(
-            &format!(
-                "✓ {}",
-                summary(&WebSelection {
-                    enabled: true,
-                    backend: choice.backend,
-                    api_key_env: None,
-                })
-            ),
-            Some(NAME_COLOR),
-        )?;
-        return Ok(WebSelection {
-            enabled: true,
-            backend: choice.backend,
-            api_key_env: None,
-        });
-    }
+fn finish_disabled<W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+) -> Result<WebSelection, HarnessError> {
+    writer.blank()?;
+    writer.write_centered(
+        &format!("✓ {}", summary(&WebSelection::disabled())),
+        Some(NAME_COLOR),
+    )?;
+    Ok(WebSelection::disabled())
+}
 
+fn finish_keyless<W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    choice: Choice,
+) -> Result<WebSelection, HarnessError> {
+    writer.blank()?;
+    writer.write_centered(
+        &format!(
+            "✓ {}",
+            summary(&WebSelection {
+                enabled: true,
+                backend: choice.backend,
+                api_key_env: None,
+            })
+        ),
+        Some(NAME_COLOR),
+    )?;
+    Ok(WebSelection {
+        enabled: true,
+        backend: choice.backend,
+        api_key_env: None,
+    })
+}
+
+fn finish_keyed<R: BufRead, W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    reader: &mut R,
+    size: Size,
+    choice: Choice,
+) -> Result<WebSelection, HarnessError> {
     // A keyed backend: ask which variable holds the key, and name the default so a blank answer is
     // still a usable setup on a machine that already exports the conventional name.
     let fallback = choice.backend.default_api_key_env();

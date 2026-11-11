@@ -444,3 +444,122 @@ fn onboarding_configures_custom_notes_dir() {
     assert!(rendered.contains("Notes directory"));
     assert!(rendered.contains(notes_dir.to_str().unwrap()));
 }
+
+#[test]
+fn targeted_memory_step_only_runs_memory_and_updates_config() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(&file);
+    let mut reader = Cursor::new(b"2\n".to_vec());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (mode, path) =
+        harness_onboarding::run_memory(&layers, &mut reader, &mut out, &mut pacer, &columns)
+            .expect("memory step succeeds");
+
+    assert_eq!(mode, harness_core::MemoryMode::Background);
+    assert_eq!(path, file);
+
+    let config = read_config(&file);
+    assert_eq!(config["memory"]["mode"].as_str(), Some("background"));
+    assert_eq!(config["first_run"].as_bool(), Some(false));
+}
+
+#[test]
+fn targeted_notes_step_only_runs_notes_and_updates_config() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let custom_notes = tmp.path().join("targeted-notes");
+    let layers = layers(&file);
+    let mut reader = Cursor::new(format!("{}\n", custom_notes.display()).into_bytes());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (notes_dir, path) =
+        harness_onboarding::run_notes(&layers, &mut reader, &mut out, &mut pacer, &columns)
+            .expect("notes step succeeds");
+
+    assert_eq!(notes_dir, custom_notes);
+    assert_eq!(path, file);
+
+    let config = read_config(&file);
+    assert_eq!(
+        config["paths"]["notes_dir"].as_str(),
+        Some(custom_notes.to_str().unwrap())
+    );
+    assert_eq!(config["first_run"].as_bool(), Some(false));
+}
+
+#[test]
+fn targeted_compact_step_only_runs_compact_and_updates_config() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(&file);
+    // 2 disables auto compact
+    let mut reader = Cursor::new(b"2\n".to_vec());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (compact, path) =
+        harness_onboarding::run_compact(&layers, &mut reader, &mut out, &mut pacer, &columns)
+            .expect("compact step succeeds");
+
+    assert!(!compact.enabled);
+    assert_eq!(path, file);
+
+    let config = read_config(&file);
+    assert_eq!(config["auto_compact_enabled"].as_bool(), Some(false));
+    assert_eq!(config["first_run"].as_bool(), Some(false));
+}
+
+#[test]
+fn targeted_gateway_step_only_runs_gateway_and_updates_config() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(&file);
+    // 1 selects none/disabled
+    let mut reader = Cursor::new(b"1\n".to_vec());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (gateway, path) =
+        harness_onboarding::run_gateway(&layers, &mut reader, &mut out, &mut pacer, &columns)
+            .expect("gateway step succeeds");
+
+    assert!(!gateway.enabled);
+    assert_eq!(gateway.platform, "none");
+    assert_eq!(path, file);
+
+    let config = read_config(&file);
+    assert_eq!(config["gateway"]["enabled"].as_bool(), Some(false));
+    assert_eq!(config["gateway"]["platform"].as_str(), Some("none"));
+    assert_eq!(config["first_run"].as_bool(), Some(false));
+}
+
+#[test]
+fn targeted_web_step_only_runs_web_and_updates_config() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("config.yaml");
+    let layers = layers(&file);
+    // 1 selects duckduckgo
+    let mut reader = Cursor::new(b"1\n".to_vec());
+    let mut out = Vec::new();
+    let mut pacer = InstantPacer;
+
+    let (web, path) =
+        harness_onboarding::run_web(&layers, &mut reader, &mut out, &mut pacer, &columns)
+            .expect("web step succeeds");
+
+    assert!(web.enabled);
+    assert_eq!(web.backend, harness_core::config::SearchBackend::DuckDuckGo);
+    assert_eq!(path, file);
+
+    let config = read_config(&file);
+    assert_eq!(config["tools"]["web"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        config["tools"]["web"]["search_backend"].as_str(),
+        Some("duckduckgo")
+    );
+    assert_eq!(config["first_run"].as_bool(), Some(false));
+}

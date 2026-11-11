@@ -163,7 +163,9 @@ pub async fn refresh_kiro_token(
         profile_arn,
     };
 
-    let _ = update_kiro_token_in_db(&new_creds);
+    if let Err(error) = update_kiro_token_in_db(&new_creds) {
+        warn!("could not persist the refreshed Kiro token: {error}");
+    }
 
     Ok(new_creds)
 }
@@ -228,15 +230,21 @@ pub async fn sync_kiro_credential_if_needed(
             Ok(existing) => {
                 let existing_str = existing.expose_secret();
                 if existing_str != &serialized {
-                    let _ = cred_manager
+                    if let Err(error) = cred_manager
                         .update_credential_key(prov, existing_str, &serialized)
-                        .await;
+                        .await
+                    {
+                        warn!("could not update the stored Kiro credential: {error}");
+                    }
                 }
             }
             Err(_) => {
-                let _ = cred_manager
+                if let Err(error) = cred_manager
                     .add_credential(prov, "kiro-social", &serialized, true)
-                    .await;
+                    .await
+                {
+                    warn!("could not store the Kiro credential: {error}");
+                }
             }
         }
     }
@@ -423,6 +431,165 @@ pub fn build_kiro_payload(
     })
 }
 
+/// POST one `GenerateAssistantResponse` request.
+async fn send_kiro_stream_request(
+    http_client: &reqwest::Client,
+    creds: &KiroCredentials,
+    payload: &serde_json::Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    http_client
+        .post(RUNTIME_ENDPOINT)
+        .header("Authorization", format!("Bearer {}", creds.access_token))
+        .header(CONTENT_TYPE, "application/x-amz-json-1.0")
+        .header(
+            "x-amz-target",
+            "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+        )
+        .header(USER_AGENT, KIRO_USER_AGENT)
+        .json(payload)
+        .send()
+        .await
+}
+
+/// Refresh the credentials after a rejected request, persisting the new pair when a manager is
+/// available. Returns whether a refresh actually happened.
+async fn try_refresh_kiro_credentials(
+    http_client: &reqwest::Client,
+    creds: &mut KiroCredentials,
+    cred_manager: Option<&Arc<CredentialManager>>,
+    raw_secret: &str,
+    resp: &reqwest::Response,
+) -> bool {
+    if !matches!(resp.status().as_u16(), 401 | 400 | 403) {
+        return false;
+    }
+    let Some(rt) = creds.refresh_token.clone() else {
+        return false;
+    };
+    let Ok(new_creds) = refresh_kiro_token(http_client, &rt).await else {
+        return false;
+    };
+    *creds = new_creds;
+    if let Some(cm) = cred_manager {
+        let serialized = json!({
+            "access_token": creds.access_token,
+            "refresh_token": creds.refresh_token,
+            "profile_arn": creds.profile_arn,
+        })
+        .to_string();
+        for prov in ["kiro", "kiro-cli"] {
+            if let Err(error) = cm
+                .update_credential_key(prov, raw_secret, &serialized)
+                .await
+            {
+                warn!("could not update the refreshed Kiro credential: {error}");
+            }
+        }
+    }
+    true
+}
+
+/// Pull one complete event frame out of the buffer, or `None` when more bytes are needed.
+///
+/// A frame too short to hold its own header is skipped; a payload that does not parse is still
+/// consumed and reported as `Some(None)`.
+fn next_kiro_frame(buffer: &mut Vec<u8>) -> Option<Option<serde_json::Value>> {
+    loop {
+        if buffer.len() < 16 {
+            return None;
+        }
+        let total_len = u32::from_be_bytes(buffer[0..4].try_into().ok()?) as usize;
+        let headers_len = u32::from_be_bytes(buffer[4..8].try_into().ok()?) as usize;
+
+        if total_len < headers_len + 16 {
+            buffer.drain(..total_len.min(buffer.len()));
+            continue;
+        }
+
+        if buffer.len() < total_len {
+            return None;
+        }
+
+        let payload_len = total_len - headers_len - 16;
+        let payload_start = 12 + headers_len;
+        let payload_end = payload_start + payload_len;
+
+        let payload = if payload_end <= buffer.len() {
+            serde_json::from_slice::<serde_json::Value>(&buffer[payload_start..payload_end]).ok()
+        } else {
+            None
+        };
+
+        buffer.drain(..total_len);
+        return Some(payload);
+    }
+}
+
+/// Emit every stream event one decoded Kiro frame carries.
+async fn emit_kiro_frame(
+    data: &serde_json::Value,
+    tx: &tokio::sync::mpsc::Sender<Result<StreamEvent, HarnessError>>,
+    last_usage: &mut Option<TokenUsage>,
+) {
+    // A metadata frame carries the account's own counts. Recording them
+    // keeps this provider's rows in the ledger comparable with every
+    // other route's; without it the turn is written from a character
+    // estimate and the cost column is a guess. Absent means the route
+    // said nothing, and the caller keeps its estimate.
+    if let Some(usage) = metadata_token_usage(data) {
+        *last_usage = Some(usage);
+    }
+
+    if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
+        if !content.is_empty() {
+            let _ = tx
+                .send(Ok(StreamEvent::ContentDelta(content.to_string())))
+                .await;
+        }
+    }
+
+    if let Some(reasoning) = data.get("reasoningContent").and_then(|r| {
+        r.get("text")
+            .and_then(|t| t.as_str())
+            .or_else(|| r.as_str())
+    }) {
+        if !reasoning.is_empty() {
+            let _ = tx
+                .send(Ok(StreamEvent::ReasoningDelta(reasoning.to_string())))
+                .await;
+        }
+    }
+
+    if let Some(tool_uses) = data.get("toolUses").and_then(|t| t.as_array()) {
+        for (idx, tu) in tool_uses.iter().enumerate() {
+            let id = tu
+                .get("toolUseId")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+            let name = tu.get("name").and_then(|s| s.as_str()).map(str::to_string);
+            let args = tu.get("input").map(|v| v.to_string());
+            let _ = tx
+                .send(Ok(StreamEvent::ToolCallDelta {
+                    index: idx,
+                    id,
+                    name,
+                    arguments_delta: args,
+                    signature: None,
+                }))
+                .await;
+        }
+    }
+
+    if let Some(stop_reason) = data.get("stopReason").and_then(|s| s.as_str()) {
+        let _ = tx
+            .send(Ok(StreamEvent::Completed {
+                finish_reason: Some(stop_reason.to_string()),
+                usage: last_usage.take(),
+            }))
+            .await;
+    }
+}
+
 pub async fn stream_kiro_completion(
     http_client: &reqwest::Client,
     raw_secret: &str,
@@ -435,61 +602,20 @@ pub async fn stream_kiro_completion(
     let mut creds = resolve_kiro_credentials(raw_secret);
     let payload = build_kiro_payload(messages, tools, options, model, &creds.profile_arn);
 
-    let send = |c: &KiroCredentials, p: &serde_json::Value| {
-        let client = http_client.clone();
-        let token = c.access_token.clone();
-        let body = p.clone();
-        async move {
-            client
-                .post(RUNTIME_ENDPOINT)
-                .header("Authorization", format!("Bearer {}", token))
-                .header(CONTENT_TYPE, "application/x-amz-json-1.0")
-                .header(
-                    "x-amz-target",
-                    "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-                )
-                .header(USER_AGENT, KIRO_USER_AGENT)
-                .json(&body)
-                .send()
-                .await
-        }
-    };
-
-    let mut resp = send(&creds, &payload)
+    let mut resp = send_kiro_stream_request(http_client, &creds, &payload)
         .await
         .map_err(|e| HarnessError::ProviderError {
             provider: "kiro".to_string(),
             message: format!("HTTP error: {}", e),
         })?;
 
-    if (resp.status().as_u16() == 401
-        || resp.status().as_u16() == 400
-        || resp.status().as_u16() == 403)
-        && creds.refresh_token.is_some()
+    if try_refresh_kiro_credentials(http_client, &mut creds, cred_manager, raw_secret, &resp).await
     {
-        if let Some(ref rt) = creds.refresh_token.clone() {
-            if let Ok(new_creds) = refresh_kiro_token(http_client, rt).await {
-                creds = new_creds;
-                if let Some(cm) = cred_manager {
-                    let serialized = json!({
-                        "access_token": creds.access_token,
-                        "refresh_token": creds.refresh_token,
-                        "profile_arn": creds.profile_arn,
-                    })
-                    .to_string();
-                    for prov in ["kiro", "kiro-cli"] {
-                        let _ = cm
-                            .update_credential_key(prov, raw_secret, &serialized)
-                            .await;
-                    }
-                }
-                let retry_payload =
-                    build_kiro_payload(messages, tools, options, model, &creds.profile_arn);
-                if let Ok(retry_resp) = send(&creds, &retry_payload).await {
-                    if retry_resp.status().is_success() {
-                        resp = retry_resp;
-                    }
-                }
+        let retry_payload = build_kiro_payload(messages, tools, options, model, &creds.profile_arn);
+        if let Ok(retry_resp) = send_kiro_stream_request(http_client, &creds, &retry_payload).await
+        {
+            if retry_resp.status().is_success() {
+                resp = retry_resp;
             }
         }
     }
@@ -516,109 +642,10 @@ pub async fn stream_kiro_completion(
             match chunk_res {
                 Ok(bytes) => {
                     buffer.extend_from_slice(&bytes);
-                    while buffer.len() >= 16 {
-                        let total_len = match buffer[0..4].try_into() {
-                            Ok(b) => u32::from_be_bytes(b) as usize,
-                            Err(_) => break,
-                        };
-                        let headers_len = match buffer[4..8].try_into() {
-                            Ok(b) => u32::from_be_bytes(b) as usize,
-                            Err(_) => break,
-                        };
-
-                        if total_len < headers_len + 16 {
-                            buffer.drain(..total_len.min(buffer.len()));
-                            continue;
+                    while let Some(data) = next_kiro_frame(&mut buffer) {
+                        if let Some(data) = data {
+                            emit_kiro_frame(&data, &tx, &mut last_usage).await;
                         }
-
-                        if buffer.len() < total_len {
-                            break;
-                        }
-
-                        let payload_len = total_len - headers_len - 16;
-                        let payload_start = 12 + headers_len;
-                        let payload_end = payload_start + payload_len;
-
-                        if payload_end <= buffer.len() {
-                            let payload_bytes = &buffer[payload_start..payload_end];
-                            if let Ok(data) =
-                                serde_json::from_slice::<serde_json::Value>(payload_bytes)
-                            {
-                                // A metadata frame carries the account's own counts. Recording them
-                                // keeps this provider's rows in the ledger comparable with every
-                                // other route's; without it the turn is written from a character
-                                // estimate and the cost column is a guess. Absent means the route
-                                // said nothing, and the caller keeps its estimate.
-                                if let Some(usage) = metadata_token_usage(&data) {
-                                    last_usage = Some(usage);
-                                }
-
-                                if let Some(content) = data.get("content").and_then(|c| c.as_str())
-                                {
-                                    if !content.is_empty() {
-                                        let _ = tx
-                                            .send(Ok(StreamEvent::ContentDelta(
-                                                content.to_string(),
-                                            )))
-                                            .await;
-                                    }
-                                }
-
-                                if let Some(reasoning) =
-                                    data.get("reasoningContent").and_then(|r| {
-                                        r.get("text")
-                                            .and_then(|t| t.as_str())
-                                            .or_else(|| r.as_str())
-                                    })
-                                {
-                                    if !reasoning.is_empty() {
-                                        let _ = tx
-                                            .send(Ok(StreamEvent::ReasoningDelta(
-                                                reasoning.to_string(),
-                                            )))
-                                            .await;
-                                    }
-                                }
-
-                                if let Some(tool_uses) =
-                                    data.get("toolUses").and_then(|t| t.as_array())
-                                {
-                                    for (idx, tu) in tool_uses.iter().enumerate() {
-                                        let id = tu
-                                            .get("toolUseId")
-                                            .and_then(|s| s.as_str())
-                                            .map(str::to_string);
-                                        let name = tu
-                                            .get("name")
-                                            .and_then(|s| s.as_str())
-                                            .map(str::to_string);
-                                        let args = tu.get("input").map(|v| v.to_string());
-                                        let _ = tx
-                                            .send(Ok(StreamEvent::ToolCallDelta {
-                                                index: idx,
-                                                id,
-                                                name,
-                                                arguments_delta: args,
-                                                signature: None,
-                                            }))
-                                            .await;
-                                    }
-                                }
-
-                                if let Some(stop_reason) =
-                                    data.get("stopReason").and_then(|s| s.as_str())
-                                {
-                                    let _ = tx
-                                        .send(Ok(StreamEvent::Completed {
-                                            finish_reason: Some(stop_reason.to_string()),
-                                            usage: last_usage.take(),
-                                        }))
-                                        .await;
-                                }
-                            }
-                        }
-
-                        buffer.drain(..total_len);
                     }
                 }
                 Err(e) => {

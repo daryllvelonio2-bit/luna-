@@ -8,6 +8,10 @@ use tracing::{debug, info, warn};
 use crate::traits::{SpeechToText, TextToSpeech, WakeWordDetector};
 use harness_core::{Agent, HarnessError, MemoryEngine, ModelProvider, NotesEngine, ToolRegistry};
 
+/// Pause before reopening the microphone after a detector error, so a broken device does not spin
+/// the listening loop.
+const WAKE_WORD_ERROR_BACKOFF: Duration = Duration::from_millis(500);
+
 pub struct VoicePipelineConfig {
     pub wake_word: String,
     pub silence_threshold_ms: u64,
@@ -87,7 +91,7 @@ where
                 res = self.detector.wait_for_wake_word(&cancel) => {
                     if let Err(e) = res {
                         warn!("Wake word detection encountered error: {}", e);
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(WAKE_WORD_ERROR_BACKOFF).await;
                         continue;
                     }
                 }

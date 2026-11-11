@@ -30,10 +30,17 @@ pub mod style;
 pub mod typewriter;
 pub mod web_step;
 
-pub use flow::{needs_onboarding, run, run_interactive, Outcome};
+pub use flow::{
+    needs_onboarding, run, run_compact, run_compact_interactive, run_gateway,
+    run_gateway_interactive, run_interactive, run_memory, run_memory_interactive, run_notes,
+    run_notes_interactive, run_web, run_web_interactive, Outcome,
+};
 pub use gateway_step::Choice as GatewayChoice;
 pub use memory_step::Choice as MemoryChoice;
 pub use screen::Size;
-pub use store::{persist, GatewaySelection, WebSelection};
+pub use store::{
+    persist, persist_auto_compact, persist_gateway, persist_memory, persist_notes, persist_web,
+    AutoCompactSelection, GatewaySelection, WebSelection,
+};
 pub use style::Line;
 pub use typewriter::{InstantPacer, Pacer, RealPacer};

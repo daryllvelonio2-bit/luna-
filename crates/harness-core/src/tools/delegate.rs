@@ -43,6 +43,9 @@ const SUBAGENT_IDLE_CHECK_INTERVAL_SECS: u64 = 1;
 /// Floor for the idle-check ticker. A test (or caller) that passes a sub-second timeout must not
 /// turn the watchdog into a busy loop on the runtime.
 const SUBAGENT_IDLE_CHECK_FLOOR_MS: u64 = 10;
+/// How often an explicit `wait` re-checks the task table. Fast enough to feel synchronous, slow
+/// enough that a five-minute wait does not spin.
+const SUBAGENT_WAIT_POLL_MS: u64 = 150;
 
 /// How much of a subagent's final reply is copied into the parent's transcript.
 ///
@@ -787,21 +790,7 @@ async fn run_single_subagent(
     reasoning_effort: Option<ReasoningEffort>,
 ) -> (String, String, Result<String, String>) {
     let child_registry = Arc::new(DefaultToolRegistry::new());
-    let read_cache = crate::tools::ReadCache::new();
-    let sudo_cache = Arc::new(std::sync::Mutex::new(None));
-    let reg_dyn: Arc<dyn ToolRegistry> = child_registry.clone();
-    let todo_scope =
-        crate::tools::TodoScope::new(config.paths.todos_dir.clone(), &child_session_id);
-    if let Err(e) = crate::tools::register_core_tools_with_sudo(
-        &reg_dyn,
-        &config,
-        read_cache,
-        Some(sudo_cache),
-        None,
-        todo_scope,
-    )
-    .await
-    {
+    if let Err(e) = register_child_tools(&config, &child_session_id, &child_registry).await {
         warn!(
             "Failed to register tools for subagent {}: {}",
             child_session_id, e
@@ -822,16 +811,7 @@ async fn run_single_subagent(
         .jobs_dir
         .join(format!("{}.log", child_session_id));
     let logger = SubagentLogger::new(log_path);
-
-    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    logger.append_line(&format!(
-        "=== Subagent Started: {child_session_id} [{now_str}] ==="
-    ));
-    logger.append_line(&format!("Goal: {}", task.goal));
-    if let Some(ctx) = &task.context {
-        logger.append_line(&format!("Context: {ctx}"));
-    }
-    logger.append_line("──────────────────────────────────────────────────");
+    log_subagent_start(&logger, &child_session_id, &task);
 
     let tracker =
         SubagentActivityTracker::new(child_session_id.clone(), task.goal.clone(), event_notifier);
@@ -845,50 +825,29 @@ async fn run_single_subagent(
     let memory = Arc::new(DynMemory(memory));
     let notes = Arc::new(DynNotes(notes));
 
-    let observer_tracker = tracker.clone();
-    let log_obs = logger.clone();
     let approver: Arc<dyn Approver> = subagent_approver(config.tools.approval, approver);
-    let mut agent = Agent::new(provider, memory, notes, child_registry, child_cfg)
-        .with_permissions(
-            crate::permission::PermissionEngine::validate(config.tools.permissions.clone())
-                .unwrap_or_default(),
-        )
-        .with_approval(approver, ApprovalSettings::default())
-        .with_observer(Arc::new(move |event| match event {
-            AgentEvent::ReasoningDelta(delta) => {
-                log_obs.append(&delta);
-                observer_tracker.touch();
-            }
-            AgentEvent::ToolExecuting { name, arguments } => {
-                let args_str = serde_json::to_string(&arguments).unwrap_or_default();
-                log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
-                observer_tracker.record(SubagentActivity::ToolStarted { name });
-            }
-            AgentEvent::ToolOutput { name, chunk } => {
-                // The parent's delegate row is one line: forward the chunk and let it pick the
-                // newest line. The child's full log keeps every byte.
-                observer_tracker.record(SubagentActivity::ToolOutput { name, chunk });
-            }
-            AgentEvent::ToolExecuted {
-                name,
-                output,
-                is_error,
-            } => {
-                let status = if is_error { "FAILED" } else { "SUCCESS" };
-                log_obs.append_line(&format!("✔ Tool Result [{name}] ({status}):\n{output}\n"));
-                observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
-            }
-            _ => {
-                observer_tracker.touch();
-            }
-        }));
+    let mut agent = build_child_agent(
+        provider,
+        memory,
+        notes,
+        child_registry,
+        child_cfg,
+        config.tools.permissions.clone(),
+        approver,
+        subagent_observer(tracker.clone(), logger.clone()),
+    );
 
     if let Some(effort) = reasoning_effort {
         agent.set_reasoning_effort(Some(effort));
     }
 
     if let Some(s) = store {
-        let _ = s.ensure_session(&child_session_id).await;
+        if let Err(error) = s.ensure_session(&child_session_id).await {
+            warn!(
+                "could not persist the delegated child session {}: {error}",
+                child_session_id
+            );
+        }
         agent = agent.with_session(SessionBinding {
             store: s,
             session_id: child_session_id.clone(),
@@ -896,13 +855,7 @@ async fn run_single_subagent(
         });
     }
 
-    let prompt = match &task.prompt {
-        Some(prompt) => prompt.clone(),
-        None => match &task.context {
-            Some(ctx) => format!("GOAL: {}\n\nCONTEXT:\n{}", task.goal, ctx),
-            None => format!("GOAL: {}", task.goal),
-        },
-    };
+    let prompt = subagent_prompt(&task);
 
     let run_future = agent.run_turn(&prompt, sub_cancel.clone());
     let outcome = match await_subagent_with_inactivity_timeout(
@@ -918,8 +871,120 @@ async fn run_single_subagent(
         Err(e) => Err(e),
     };
 
+    log_subagent_outcome(&logger, &outcome);
+
+    // The log above holds the whole reply; what travels back to the parent is bounded.
+    let outcome = outcome.map(|reply| clip_subagent_reply(&reply, &logger.path));
+
+    (child_session_id, task.goal, outcome)
+}
+
+/// Register the child's tool surface, scoped to its own session so its todos and jobs do not mix
+/// with the parent's.
+async fn register_child_tools(
+    config: &Config,
+    child_session_id: &str,
+    child_registry: &Arc<DefaultToolRegistry>,
+) -> Result<(), HarnessError> {
+    let read_cache = crate::tools::ReadCache::new();
+    let sudo_cache = Arc::new(std::sync::Mutex::new(None));
+    let reg_dyn: Arc<dyn ToolRegistry> = child_registry.clone();
+    let todo_scope = crate::tools::TodoScope::new(config.paths.todos_dir.clone(), child_session_id);
+    crate::tools::register_core_tools_with_sudo(
+        &reg_dyn,
+        config,
+        read_cache,
+        Some(sudo_cache),
+        None,
+        todo_scope,
+    )
+    .await
+    .map(|_queue| ())
+}
+
+/// Write the child's opening lines to its job log.
+fn log_subagent_start(logger: &SubagentLogger, child_session_id: &str, task: &SubagentTaskSpec) {
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    match &outcome {
+    logger.append_line(&format!(
+        "=== Subagent Started: {child_session_id} [{now_str}] ==="
+    ));
+    logger.append_line(&format!("Goal: {}", task.goal));
+    if let Some(ctx) = &task.context {
+        logger.append_line(&format!("Context: {ctx}"));
+    }
+    logger.append_line("──────────────────────────────────────────────────");
+}
+
+/// The observer that mirrors a child's activity into its log and the parent's task record.
+fn subagent_observer(
+    observer_tracker: SubagentActivityTracker,
+    log_obs: SubagentLogger,
+) -> crate::agent::AgentObserver {
+    Arc::new(move |event| match event {
+        AgentEvent::ReasoningDelta(delta) => {
+            log_obs.append(&delta);
+            observer_tracker.touch();
+        }
+        AgentEvent::ToolExecuting { name, arguments } => {
+            let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+            log_obs.append_line(&format!("\n▶ Tool Call: {name} {args_str}"));
+            observer_tracker.record(SubagentActivity::ToolStarted { name });
+        }
+        AgentEvent::ToolOutput { name, chunk } => {
+            // The parent's delegate row is one line: forward the chunk and let it pick the newest
+            // line. The child's full log keeps every byte.
+            observer_tracker.record(SubagentActivity::ToolOutput { name, chunk });
+        }
+        AgentEvent::ToolExecuted {
+            name,
+            output,
+            is_error,
+        } => {
+            let status = if is_error { "FAILED" } else { "SUCCESS" };
+            log_obs.append_line(&format!("✔ Tool Result [{name}] ({status}):\n{output}\n"));
+            observer_tracker.record(SubagentActivity::ToolFinished { name, is_error });
+        }
+        _ => {
+            observer_tracker.touch();
+        }
+    })
+}
+
+/// Assemble the child agent from its provider, engines, tool registry, and the session's policy.
+#[allow(clippy::too_many_arguments)]
+fn build_child_agent(
+    provider: Arc<DynProvider>,
+    memory: Arc<DynMemory>,
+    notes: Arc<DynNotes>,
+    child_registry: Arc<DefaultToolRegistry>,
+    child_cfg: crate::agent::AgentConfig,
+    permissions: Vec<crate::permission::PermissionRule>,
+    approver: Arc<dyn Approver>,
+    observer: crate::agent::AgentObserver,
+) -> Agent<DynProvider, DynMemory, DynNotes, DefaultToolRegistry> {
+    Agent::new(provider, memory, notes, child_registry, child_cfg)
+        .with_permissions(
+            crate::permission::PermissionEngine::validate(permissions).unwrap_or_default(),
+        )
+        .with_approval(approver, ApprovalSettings::default())
+        .with_observer(observer)
+}
+
+/// The prompt a child is sent: its explicit prompt, else its goal with any context attached.
+fn subagent_prompt(task: &SubagentTaskSpec) -> String {
+    match &task.prompt {
+        Some(prompt) => prompt.clone(),
+        None => match &task.context {
+            Some(ctx) => format!("GOAL: {}\n\nCONTEXT:\n{}", task.goal, ctx),
+            None => format!("GOAL: {}", task.goal),
+        },
+    }
+}
+
+/// Write the child's closing lines to its job log.
+fn log_subagent_outcome(logger: &SubagentLogger, outcome: &Result<String, String>) {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    match outcome {
         Ok(reply) => {
             logger.append_line(&format!("\n=== Subagent Completed [{now_str}] ==="));
             logger.append_line(&format!("Reply:\n{reply}"));
@@ -929,11 +994,536 @@ async fn run_single_subagent(
             logger.append_line(&format!("Error: {e}"));
         }
     }
+}
 
-    // The log above holds the whole reply; what travels back to the parent is bounded.
-    let outcome = outcome.map(|reply| clip_subagent_reply(&reply, &logger.path));
+/// The delegate tool's actions, one method each.
+impl DelegateTaskTool {
+    /// `action: list` — every delegated task this session knows about, oldest first.
+    async fn list_action(&self, call_id: &str) -> ToolResult {
+        let state = self.tasks_state.read().await;
+        if state.is_empty() {
+            return ToolResult::success(call_id, "No delegated subagent tasks in this session.");
+        }
+        let mut list: Vec<&SubagentTaskRecord> = state.values().collect();
+        list.sort_by_key(|r| r.started_at);
+        let mut out = format!("### Delegated Subagent Tasks ({} total)\n\n", list.len());
+        for item in list {
+            let (status_str, extra) = match &item.status {
+                SubagentStatus::Running => {
+                    let elapsed = Utc::now()
+                        .signed_duration_since(item.started_at)
+                        .num_seconds()
+                        .max(0);
+                    ("Running", format!("(running for {}s)", elapsed))
+                }
+                SubagentStatus::Completed { finished_at, .. } => {
+                    let dur = finished_at
+                        .signed_duration_since(item.started_at)
+                        .num_seconds()
+                        .max(0);
+                    ("Completed", format!("(completed in {}s)", dur))
+                }
+                SubagentStatus::Failed { error, finished_at } => {
+                    let dur = finished_at
+                        .signed_duration_since(item.started_at)
+                        .num_seconds()
+                        .max(0);
+                    ("Failed", format!("(failed in {}s: {})", dur, error))
+                }
+            };
+            out.push_str(&format!(
+                "- **[{}]** Goal: {}\n  Status: {} {}\n",
+                item.id, item.goal, status_str, extra
+            ));
+        }
+        ToolResult::success(call_id, out.trim())
+    }
 
-    (child_session_id, task.goal, outcome)
+    /// `action: poll` — one task by id, or every finished task when no id is given.
+    async fn poll_action(&self, call_id: &str, arguments: &serde_json::Value) -> ToolResult {
+        let state = self.tasks_state.read().await;
+        if let Some(target_id) = arguments.get("task_id").and_then(|t| t.as_str()) {
+            if let Some(task) = state.get(target_id) {
+                let msg = match &task.status {
+                    SubagentStatus::Running => {
+                        let elapsed = Utc::now()
+                            .signed_duration_since(task.started_at)
+                            .num_seconds()
+                            .max(0);
+                        format!(
+                            "Subagent [{}] is still running (Goal: {}). Elapsed: {}s.",
+                            task.id, task.goal, elapsed
+                        )
+                    }
+                    SubagentStatus::Completed { reply, finished_at } => {
+                        let dur = finished_at
+                            .signed_duration_since(task.started_at)
+                            .num_seconds()
+                            .max(0);
+                        format!(
+                            "Subagent [{}] completed in {}s (Goal: {}).\n\n### Output:\n{}",
+                            task.id, dur, task.goal, reply
+                        )
+                    }
+                    SubagentStatus::Failed { error, finished_at } => {
+                        let dur = finished_at
+                            .signed_duration_since(task.started_at)
+                            .num_seconds()
+                            .max(0);
+                        format!(
+                            "Subagent [{}] failed in {}s (Goal: {}).\n\n### Error:\n{}",
+                            task.id, dur, task.goal, error
+                        )
+                    }
+                };
+                ToolResult::success(call_id, msg)
+            } else {
+                ToolResult::error(
+                    call_id,
+                    format!("No subagent task found with ID '{}'", target_id),
+                )
+            }
+        } else {
+            let finished: Vec<&SubagentTaskRecord> = state
+                .values()
+                .filter(|r| !matches!(r.status, SubagentStatus::Running))
+                .collect();
+            if finished.is_empty() {
+                return ToolResult::success(call_id, "No subagent tasks have completed yet.");
+            }
+            let mut out = String::from("### Completed Subagent Results\n\n");
+            for task in finished {
+                match &task.status {
+                    SubagentStatus::Completed { reply, .. } => {
+                        out.push_str(&format!(
+                            "#### [{}] Goal: {}\n**Status:** Completed\n**Output:**\n{}\n\n",
+                            task.id,
+                            task.goal,
+                            reply.trim()
+                        ));
+                    }
+                    SubagentStatus::Failed { error, .. } => {
+                        out.push_str(&format!(
+                            "#### [{}] Goal: {}\n**Status:** Failed\n**Error:** {}\n\n",
+                            task.id, task.goal, error
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            ToolResult::success(call_id, out.trim())
+        }
+    }
+
+    /// `action: wait` — poll until the named task (or every task) is no longer running.
+    async fn wait_action(
+        &self,
+        call_id: &str,
+        arguments: &serde_json::Value,
+        cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let target_id = arguments
+            .get("task_id")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
+        let timeout_secs = arguments
+            .get("timeout_secs")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(SUBAGENT_WAIT_TIMEOUT_SECS);
+        let start_wait = std::time::Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_millis(SUBAGENT_WAIT_POLL_MS));
+
+        loop {
+            if cancel_token.is_cancelled() {
+                return Err(HarnessError::Cancelled);
+            }
+            if start_wait.elapsed().as_secs() > timeout_secs {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Timed out waiting for subagents after {}s", timeout_secs),
+                ));
+            }
+
+            let all_done = {
+                let state = self.tasks_state.read().await;
+                if let Some(ref tid) = target_id {
+                    match state.get(tid) {
+                        Some(task) => !matches!(task.status, SubagentStatus::Running),
+                        None => {
+                            return Ok(ToolResult::error(
+                                call_id,
+                                format!("No subagent task with ID '{}'", tid),
+                            ))
+                        }
+                    }
+                } else {
+                    !state.is_empty()
+                        && state
+                            .values()
+                            .all(|task| !matches!(task.status, SubagentStatus::Running))
+                }
+            };
+
+            if all_done {
+                break;
+            }
+            interval.tick().await;
+        }
+
+        let state = self.tasks_state.read().await;
+        let mut out = String::from("### Subagent Task Results\n\n");
+        let mut items: Vec<&SubagentTaskRecord> = if let Some(ref tid) = target_id {
+            state.get(tid).into_iter().collect()
+        } else {
+            state.values().collect()
+        };
+        items.sort_by_key(|r| r.started_at);
+        for task in items {
+            out.push_str(&format!("#### [{}] Goal: {}\n", task.id, task.goal));
+            match &task.status {
+                SubagentStatus::Completed { reply, .. } => {
+                    out.push_str(&format!(
+                        "**Status:** Completed\n**Output:**\n{}\n\n",
+                        reply.trim()
+                    ));
+                }
+                SubagentStatus::Failed { error, .. } => {
+                    out.push_str(&format!("**Status:** Failed\n**Error:** {}\n\n", error));
+                }
+                SubagentStatus::Running => {
+                    out.push_str("**Status:** Running\n\n");
+                }
+            }
+        }
+        Ok(ToolResult::success(call_id, out.trim()))
+    }
+
+    /// `action: spawn` — parse the task list and hand it to the blocking or background path.
+    async fn spawn_action(
+        &self,
+        call_id: &str,
+        arguments: &serde_json::Value,
+        cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let tasks: Vec<SubagentTaskSpec> = match arguments.get("tasks") {
+            Some(t) => match serde_json::from_value(t.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(ToolResult::error(
+                        call_id,
+                        format!("invalid tasks array: {e}"),
+                    ));
+                }
+            },
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "missing required 'tasks' argument for spawn",
+                ));
+            }
+        };
+
+        if tasks.is_empty() {
+            return Ok(ToolResult::error(
+                call_id,
+                "'tasks' list must contain at least 1 task",
+            ));
+        }
+
+        let background = arguments
+            .get("background")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true);
+        let event_notifier = current_event_notifier(&self.event_notifier);
+
+        let tasks_to_run: Vec<SubagentTaskSpec> =
+            tasks.into_iter().take(self.max_concurrent).collect();
+        let total = tasks_to_run.len();
+        info!(
+            "Spawning {} subagent task(s) via delegate_task (background={})",
+            total, background
+        );
+
+        if !background {
+            return self
+                .spawn_blocking(call_id, tasks_to_run, event_notifier, cancel_token)
+                .await;
+        }
+        self.spawn_background(call_id, tasks_to_run, event_notifier)
+            .await
+    }
+
+    /// Synchronous blocking mode: run each child on a join set and wait for all of them.
+    async fn spawn_blocking(
+        &self,
+        call_id: &str,
+        tasks_to_run: Vec<SubagentTaskSpec>,
+        event_notifier: Option<SubagentTaskEventNotifier>,
+        cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let mut join_set = JoinSet::new();
+        let current_cfg = self.config.read().await.clone();
+        for (idx, task) in tasks_to_run.into_iter().enumerate() {
+            let provider = self.provider.clone();
+            let memory = self.memory.clone();
+            let notes = self.notes.clone();
+            let store = self.store.clone();
+            let config = current_cfg.clone();
+            let sub_cancel = cancel_token.child_token();
+            let sub_idx = idx + 1;
+            let started_at = Utc::now();
+            let child_session_id =
+                format!("sub_{}_{}", started_at.format("%Y%m%d_%H%M%S"), sub_idx);
+            let goal = task.goal.clone();
+            let context = task.context.clone();
+            let child_event_notifier = event_notifier.clone();
+
+            notify_subagent_event(
+                child_event_notifier.as_ref(),
+                SubagentTaskEvent::Started {
+                    id: child_session_id.clone(),
+                    goal: goal.clone(),
+                },
+            );
+
+            join_set.spawn(async move {
+                let (id, goal, res) = run_single_subagent(
+                    provider,
+                    memory,
+                    notes,
+                    store,
+                    config,
+                    child_session_id,
+                    task,
+                    sub_cancel,
+                    child_event_notifier,
+                    None,
+                    None,
+                )
+                .await;
+                (sub_idx, id, goal, res, started_at, context)
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok((idx, id, goal, outcome, started_at, context)) => {
+                    let finished_at = Utc::now();
+                    let status = match &outcome {
+                        Ok(reply) => SubagentStatus::Completed {
+                            reply: reply.clone(),
+                            finished_at,
+                        },
+                        Err(error) => SubagentStatus::Failed {
+                            error: error.clone(),
+                            finished_at,
+                        },
+                    };
+                    let log_path_str = current_cfg
+                        .paths
+                        .jobs_dir
+                        .join(format!("{}.log", id))
+                        .to_string_lossy()
+                        .to_string();
+                    let record = SubagentTaskRecord {
+                        id: id.clone(),
+                        goal: goal.clone(),
+                        context,
+                        status,
+                        started_at,
+                        log_path: Some(log_path_str),
+                    };
+                    self.tasks_state
+                        .write()
+                        .await
+                        .insert(id.clone(), record.clone());
+                    notify_subagent_event(
+                        event_notifier.as_ref(),
+                        SubagentTaskEvent::Finished { record },
+                    );
+                    results.push((idx, goal, outcome));
+                }
+                Err(e) => {
+                    results.push((
+                        0,
+                        "unknown".to_string(),
+                        Err(format!("task panicked or failed: {e}")),
+                    ));
+                }
+            }
+        }
+
+        Ok(ToolResult::success(
+            call_id,
+            Self::render_sync_results(results).trim(),
+        ))
+    }
+
+    /// The blocking path's report, in the order the model asked for the tasks.
+    fn render_sync_results(results: Vec<(usize, String, Result<String, String>)>) -> String {
+        let mut results = results;
+        results.sort_by_key(|(idx, _, _)| *idx);
+        let mut output = String::from("### Subagent Task Results\n\n");
+        for (idx, goal, res) in results {
+            output.push_str(&format!("#### [Subagent {}] Goal: {}\n", idx, goal));
+            match res {
+                Ok(reply) => {
+                    output.push_str(&format!(
+                        "**Status:** Completed\n**Output:**\n{}\n\n",
+                        reply.trim()
+                    ));
+                }
+                Err(err) => {
+                    output.push_str(&format!("**Status:** Failed\n**Error:** {}\n\n", err));
+                }
+            }
+        }
+        output
+    }
+
+    /// Asynchronous background mode: spawn detached Tokio tasks and return immediately.
+    async fn spawn_background(
+        &self,
+        call_id: &str,
+        tasks_to_run: Vec<SubagentTaskSpec>,
+        event_notifier: Option<SubagentTaskEventNotifier>,
+    ) -> Result<ToolResult, HarnessError> {
+        let mut dispatched = Vec::new();
+        let now = Utc::now();
+        let current_cfg = self.config.read().await.clone();
+
+        for (idx, task) in tasks_to_run.into_iter().enumerate() {
+            let dispatched_task = self
+                .dispatch_background_task(task, idx + 1, now, &current_cfg, event_notifier.as_ref())
+                .await;
+            dispatched.push(dispatched_task);
+        }
+
+        let mut out = format!(
+            "### Subagent Task(s) Dispatched in Background ({} tasks)\n\n",
+            dispatched.len()
+        );
+        for (id, goal) in &dispatched {
+            out.push_str(&format!(
+                "- **[{}]** Goal: {}\n  Status: running\n",
+                id, goal
+            ));
+        }
+        out.push_str("\nSubagents are running concurrently in the background. Luna can now reply to the user or proceed with other tasks without waiting.\nWhen subagents complete, their results will be notified automatically into the conversation, or you can query them at any time with `delegate_task(action: \"list\")` or `delegate_task(action: \"poll\", task_id: \"...\")`.");
+
+        Ok(ToolResult::success(call_id, out.trim()))
+    }
+
+    /// Register one background task and spawn the child that runs it.
+    async fn dispatch_background_task(
+        &self,
+        task: SubagentTaskSpec,
+        sub_idx: usize,
+        now: DateTime<Utc>,
+        current_cfg: &Config,
+        event_notifier: Option<&SubagentTaskEventNotifier>,
+    ) -> (String, String) {
+        let child_session_id = format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
+        let log_path_str = current_cfg
+            .paths
+            .jobs_dir
+            .join(format!("{}.log", child_session_id))
+            .to_string_lossy()
+            .to_string();
+
+        let record = SubagentTaskRecord {
+            id: child_session_id.clone(),
+            goal: task.goal.clone(),
+            context: task.context.clone(),
+            status: SubagentStatus::Running,
+            started_at: now,
+            log_path: Some(log_path_str.clone()),
+        };
+
+        self.tasks_state
+            .write()
+            .await
+            .insert(child_session_id.clone(), record);
+
+        notify_subagent_event(
+            event_notifier,
+            SubagentTaskEvent::Started {
+                id: child_session_id.clone(),
+                goal: task.goal.clone(),
+            },
+        );
+
+        let provider = self.provider.clone();
+        let memory = self.memory.clone();
+        let notes = self.notes.clone();
+        let store = self.store.clone();
+        let config = current_cfg.clone();
+        let sub_cancel = CancellationToken::new();
+        self.cancels
+            .write()
+            .await
+            .insert(child_session_id.clone(), sub_cancel.clone());
+        let tasks_state = self.tasks_state.clone();
+        let cancels = self.cancels.clone();
+        let notifier = self.notifier.clone();
+        let steer_handle = self.steer_handle.clone();
+        let cid = child_session_id.clone();
+        let log_path_task = log_path_str;
+        let goal_str = task.goal.clone();
+        let ctx_opt = task.context.clone();
+        let child_event_notifier = event_notifier.cloned();
+        let finish_event_notifier = child_event_notifier.clone();
+
+        tokio::spawn(async move {
+            let (id, goal, res) = run_single_subagent(
+                provider,
+                memory,
+                notes,
+                store,
+                config,
+                cid.clone(),
+                SubagentTaskSpec {
+                    goal: goal_str,
+                    context: ctx_opt.clone(),
+                    prompt: None,
+                },
+                sub_cancel,
+                child_event_notifier,
+                None,
+                None,
+            )
+            .await;
+
+            cancels.write().await.remove(&cid);
+
+            let finished_at = Utc::now();
+            let status = match res {
+                Ok(reply) => SubagentStatus::Completed { reply, finished_at },
+                Err(error) => SubagentStatus::Failed { error, finished_at },
+            };
+
+            let finished_record = SubagentTaskRecord {
+                id: id.clone(),
+                goal: goal.clone(),
+                context: ctx_opt,
+                status,
+                started_at: now,
+                log_path: Some(log_path_task),
+            };
+
+            record_subagent_finish(
+                &tasks_state,
+                &notifier,
+                finish_event_notifier.as_ref(),
+                &steer_handle,
+                finished_record,
+            )
+            .await;
+        });
+
+        (child_session_id, task.goal)
+    }
 }
 
 #[async_trait]
@@ -1028,480 +1618,10 @@ impl Tool for DelegateTaskTool {
             });
 
         match action {
-            "list" => {
-                let state = self.tasks_state.read().await;
-                if state.is_empty() {
-                    return Ok(ToolResult::success(
-                        call_id,
-                        "No delegated subagent tasks in this session.",
-                    ));
-                }
-                let mut list: Vec<&SubagentTaskRecord> = state.values().collect();
-                list.sort_by_key(|r| r.started_at);
-                let mut out = format!("### Delegated Subagent Tasks ({} total)\n\n", list.len());
-                for item in list {
-                    let (status_str, extra) = match &item.status {
-                        SubagentStatus::Running => {
-                            let elapsed = Utc::now()
-                                .signed_duration_since(item.started_at)
-                                .num_seconds()
-                                .max(0);
-                            ("Running", format!("(running for {}s)", elapsed))
-                        }
-                        SubagentStatus::Completed { finished_at, .. } => {
-                            let dur = finished_at
-                                .signed_duration_since(item.started_at)
-                                .num_seconds()
-                                .max(0);
-                            ("Completed", format!("(completed in {}s)", dur))
-                        }
-                        SubagentStatus::Failed { error, finished_at } => {
-                            let dur = finished_at
-                                .signed_duration_since(item.started_at)
-                                .num_seconds()
-                                .max(0);
-                            ("Failed", format!("(failed in {}s: {})", dur, error))
-                        }
-                    };
-                    out.push_str(&format!(
-                        "- **[{}]** Goal: {}\n  Status: {} {}\n",
-                        item.id, item.goal, status_str, extra
-                    ));
-                }
-                Ok(ToolResult::success(call_id, out.trim()))
-            }
-            "poll" => {
-                let state = self.tasks_state.read().await;
-                if let Some(target_id) = arguments.get("task_id").and_then(|t| t.as_str()) {
-                    if let Some(task) = state.get(target_id) {
-                        let msg = match &task.status {
-                            SubagentStatus::Running => {
-                                let elapsed = Utc::now()
-                                    .signed_duration_since(task.started_at)
-                                    .num_seconds()
-                                    .max(0);
-                                format!(
-                                    "Subagent [{}] is still running (Goal: {}). Elapsed: {}s.",
-                                    task.id, task.goal, elapsed
-                                )
-                            }
-                            SubagentStatus::Completed { reply, finished_at } => {
-                                let dur = finished_at
-                                    .signed_duration_since(task.started_at)
-                                    .num_seconds()
-                                    .max(0);
-                                format!(
-                                    "Subagent [{}] completed in {}s (Goal: {}).\n\n### Output:\n{}",
-                                    task.id, dur, task.goal, reply
-                                )
-                            }
-                            SubagentStatus::Failed { error, finished_at } => {
-                                let dur = finished_at
-                                    .signed_duration_since(task.started_at)
-                                    .num_seconds()
-                                    .max(0);
-                                format!(
-                                    "Subagent [{}] failed in {}s (Goal: {}).\n\n### Error:\n{}",
-                                    task.id, dur, task.goal, error
-                                )
-                            }
-                        };
-                        Ok(ToolResult::success(call_id, msg))
-                    } else {
-                        Ok(ToolResult::error(
-                            call_id,
-                            format!("No subagent task found with ID '{}'", target_id),
-                        ))
-                    }
-                } else {
-                    let finished: Vec<&SubagentTaskRecord> = state
-                        .values()
-                        .filter(|r| !matches!(r.status, SubagentStatus::Running))
-                        .collect();
-                    if finished.is_empty() {
-                        return Ok(ToolResult::success(
-                            call_id,
-                            "No subagent tasks have completed yet.",
-                        ));
-                    }
-                    let mut out = String::from("### Completed Subagent Results\n\n");
-                    for task in finished {
-                        match &task.status {
-                            SubagentStatus::Completed { reply, .. } => {
-                                out.push_str(&format!(
-                                    "#### [{}] Goal: {}\n**Status:** Completed\n**Output:**\n{}\n\n",
-                                    task.id,
-                                    task.goal,
-                                    reply.trim()
-                                ));
-                            }
-                            SubagentStatus::Failed { error, .. } => {
-                                out.push_str(&format!(
-                                    "#### [{}] Goal: {}\n**Status:** Failed\n**Error:** {}\n\n",
-                                    task.id, task.goal, error
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(ToolResult::success(call_id, out.trim()))
-                }
-            }
-            "wait" => {
-                let target_id = arguments
-                    .get("task_id")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string());
-                let timeout_secs = arguments
-                    .get("timeout_secs")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(SUBAGENT_WAIT_TIMEOUT_SECS);
-                let start_wait = std::time::Instant::now();
-                let mut interval = tokio::time::interval(Duration::from_millis(150));
-
-                loop {
-                    if cancel_token.is_cancelled() {
-                        return Err(HarnessError::Cancelled);
-                    }
-                    if start_wait.elapsed().as_secs() > timeout_secs {
-                        return Ok(ToolResult::error(
-                            call_id,
-                            format!("Timed out waiting for subagents after {}s", timeout_secs),
-                        ));
-                    }
-
-                    let all_done = {
-                        let state = self.tasks_state.read().await;
-                        if let Some(ref tid) = target_id {
-                            match state.get(tid) {
-                                Some(task) => !matches!(task.status, SubagentStatus::Running),
-                                None => {
-                                    return Ok(ToolResult::error(
-                                        call_id,
-                                        format!("No subagent task with ID '{}'", tid),
-                                    ))
-                                }
-                            }
-                        } else {
-                            !state.is_empty()
-                                && state
-                                    .values()
-                                    .all(|task| !matches!(task.status, SubagentStatus::Running))
-                        }
-                    };
-
-                    if all_done {
-                        break;
-                    }
-                    interval.tick().await;
-                }
-
-                let state = self.tasks_state.read().await;
-                let mut out = String::from("### Subagent Task Results\n\n");
-                let mut items: Vec<&SubagentTaskRecord> = if let Some(ref tid) = target_id {
-                    state.get(tid).into_iter().collect()
-                } else {
-                    state.values().collect()
-                };
-                items.sort_by_key(|r| r.started_at);
-                for task in items {
-                    out.push_str(&format!("#### [{}] Goal: {}\n", task.id, task.goal));
-                    match &task.status {
-                        SubagentStatus::Completed { reply, .. } => {
-                            out.push_str(&format!(
-                                "**Status:** Completed\n**Output:**\n{}\n\n",
-                                reply.trim()
-                            ));
-                        }
-                        SubagentStatus::Failed { error, .. } => {
-                            out.push_str(&format!("**Status:** Failed\n**Error:** {}\n\n", error));
-                        }
-                        SubagentStatus::Running => {
-                            out.push_str("**Status:** Running\n\n");
-                        }
-                    }
-                }
-                Ok(ToolResult::success(call_id, out.trim()))
-            }
-            "spawn" => {
-                let tasks: Vec<SubagentTaskSpec> = match arguments.get("tasks") {
-                    Some(t) => match serde_json::from_value(t.clone()) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Ok(ToolResult::error(
-                                call_id,
-                                format!("invalid tasks array: {e}"),
-                            ));
-                        }
-                    },
-                    None => {
-                        return Ok(ToolResult::error(
-                            call_id,
-                            "missing required 'tasks' argument for spawn",
-                        ));
-                    }
-                };
-
-                if tasks.is_empty() {
-                    return Ok(ToolResult::error(
-                        call_id,
-                        "'tasks' list must contain at least 1 task",
-                    ));
-                }
-
-                let background = arguments
-                    .get("background")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                let event_notifier = current_event_notifier(&self.event_notifier);
-
-                let tasks_to_run: Vec<SubagentTaskSpec> =
-                    tasks.into_iter().take(self.max_concurrent).collect();
-                let total = tasks_to_run.len();
-                info!(
-                    "Spawning {} subagent task(s) via delegate_task (background={})",
-                    total, background
-                );
-
-                if !background {
-                    // Synchronous blocking mode
-                    let mut join_set = JoinSet::new();
-                    let current_cfg = self.config.read().await.clone();
-                    for (idx, task) in tasks_to_run.into_iter().enumerate() {
-                        let provider = self.provider.clone();
-                        let memory = self.memory.clone();
-                        let notes = self.notes.clone();
-                        let store = self.store.clone();
-                        let config = current_cfg.clone();
-                        let sub_cancel = cancel_token.child_token();
-                        let sub_idx = idx + 1;
-                        let started_at = Utc::now();
-                        let child_session_id =
-                            format!("sub_{}_{}", started_at.format("%Y%m%d_%H%M%S"), sub_idx);
-                        let goal = task.goal.clone();
-                        let context = task.context.clone();
-                        let child_event_notifier = event_notifier.clone();
-
-                        notify_subagent_event(
-                            child_event_notifier.as_ref(),
-                            SubagentTaskEvent::Started {
-                                id: child_session_id.clone(),
-                                goal: goal.clone(),
-                            },
-                        );
-
-                        join_set.spawn(async move {
-                            let (id, goal, res) = run_single_subagent(
-                                provider,
-                                memory,
-                                notes,
-                                store,
-                                config,
-                                child_session_id,
-                                task,
-                                sub_cancel,
-                                child_event_notifier,
-                                None,
-                                None,
-                            )
-                            .await;
-                            (sub_idx, id, goal, res, started_at, context)
-                        });
-                    }
-
-                    let mut results = Vec::new();
-                    while let Some(res) = join_set.join_next().await {
-                        match res {
-                            Ok((idx, id, goal, outcome, started_at, context)) => {
-                                let finished_at = Utc::now();
-                                let status = match &outcome {
-                                    Ok(reply) => SubagentStatus::Completed {
-                                        reply: reply.clone(),
-                                        finished_at,
-                                    },
-                                    Err(error) => SubagentStatus::Failed {
-                                        error: error.clone(),
-                                        finished_at,
-                                    },
-                                };
-                                let log_path_str = current_cfg
-                                    .paths
-                                    .jobs_dir
-                                    .join(format!("{}.log", id))
-                                    .to_string_lossy()
-                                    .to_string();
-                                let record = SubagentTaskRecord {
-                                    id: id.clone(),
-                                    goal: goal.clone(),
-                                    context,
-                                    status,
-                                    started_at,
-                                    log_path: Some(log_path_str),
-                                };
-                                self.tasks_state
-                                    .write()
-                                    .await
-                                    .insert(id.clone(), record.clone());
-                                notify_subagent_event(
-                                    event_notifier.as_ref(),
-                                    SubagentTaskEvent::Finished { record },
-                                );
-                                results.push((idx, goal, outcome));
-                            }
-                            Err(e) => {
-                                results.push((
-                                    0,
-                                    "unknown".to_string(),
-                                    Err(format!("task panicked or failed: {e}")),
-                                ));
-                            }
-                        }
-                    }
-
-                    results.sort_by_key(|(idx, _, _)| *idx);
-                    let mut output = String::from("### Subagent Task Results\n\n");
-                    for (idx, goal, res) in results {
-                        output.push_str(&format!("#### [Subagent {}] Goal: {}\n", idx, goal));
-                        match res {
-                            Ok(reply) => {
-                                output.push_str(&format!(
-                                    "**Status:** Completed\n**Output:**\n{}\n\n",
-                                    reply.trim()
-                                ));
-                            }
-                            Err(err) => {
-                                output.push_str(&format!(
-                                    "**Status:** Failed\n**Error:** {}\n\n",
-                                    err
-                                ));
-                            }
-                        }
-                    }
-                    return Ok(ToolResult::success(call_id, output.trim()));
-                }
-
-                // Asynchronous background mode: spawn detached Tokio tasks and return immediately
-                let mut dispatched = Vec::new();
-                let now = Utc::now();
-                let current_cfg = self.config.read().await.clone();
-
-                for (idx, task) in tasks_to_run.into_iter().enumerate() {
-                    let sub_idx = idx + 1;
-                    let child_session_id =
-                        format!("sub_{}_{}", now.format("%Y%m%d_%H%M%S"), sub_idx);
-                    let log_path_str = current_cfg
-                        .paths
-                        .jobs_dir
-                        .join(format!("{}.log", child_session_id))
-                        .to_string_lossy()
-                        .to_string();
-
-                    let record = SubagentTaskRecord {
-                        id: child_session_id.clone(),
-                        goal: task.goal.clone(),
-                        context: task.context.clone(),
-                        status: SubagentStatus::Running,
-                        started_at: now,
-                        log_path: Some(log_path_str.clone()),
-                    };
-
-                    self.tasks_state
-                        .write()
-                        .await
-                        .insert(child_session_id.clone(), record);
-
-                    notify_subagent_event(
-                        event_notifier.as_ref(),
-                        SubagentTaskEvent::Started {
-                            id: child_session_id.clone(),
-                            goal: task.goal.clone(),
-                        },
-                    );
-                    dispatched.push((child_session_id.clone(), task.goal.clone()));
-
-                    let provider = self.provider.clone();
-                    let memory = self.memory.clone();
-                    let notes = self.notes.clone();
-                    let store = self.store.clone();
-                    let config = current_cfg.clone();
-                    let sub_cancel = CancellationToken::new();
-                    self.cancels
-                        .write()
-                        .await
-                        .insert(child_session_id.clone(), sub_cancel.clone());
-                    let tasks_state = self.tasks_state.clone();
-                    let cancels = self.cancels.clone();
-                    let notifier = self.notifier.clone();
-                    let steer_handle = self.steer_handle.clone();
-                    let cid = child_session_id.clone();
-                    let log_path_task = log_path_str;
-                    let goal_str = task.goal.clone();
-                    let ctx_opt = task.context.clone();
-                    let child_event_notifier = event_notifier.clone();
-                    let finish_event_notifier = child_event_notifier.clone();
-
-                    tokio::spawn(async move {
-                        let (id, goal, res) = run_single_subagent(
-                            provider,
-                            memory,
-                            notes,
-                            store,
-                            config,
-                            cid.clone(),
-                            SubagentTaskSpec {
-                                goal: goal_str,
-                                context: ctx_opt.clone(),
-                                prompt: None,
-                            },
-                            sub_cancel,
-                            child_event_notifier,
-                            None,
-                            None,
-                        )
-                        .await;
-
-                        cancels.write().await.remove(&cid);
-
-                        let finished_at = Utc::now();
-                        let status = match res {
-                            Ok(reply) => SubagentStatus::Completed { reply, finished_at },
-                            Err(error) => SubagentStatus::Failed { error, finished_at },
-                        };
-
-                        let finished_record = SubagentTaskRecord {
-                            id: id.clone(),
-                            goal: goal.clone(),
-                            context: ctx_opt,
-                            status,
-                            started_at: now,
-                            log_path: Some(log_path_task),
-                        };
-
-                        record_subagent_finish(
-                            &tasks_state,
-                            &notifier,
-                            finish_event_notifier.as_ref(),
-                            &steer_handle,
-                            finished_record,
-                        )
-                        .await;
-                    });
-                }
-
-                let mut out = format!(
-                    "### Subagent Task(s) Dispatched in Background ({} tasks)\n\n",
-                    dispatched.len()
-                );
-                for (id, goal) in &dispatched {
-                    out.push_str(&format!(
-                        "- **[{}]** Goal: {}\n  Status: running\n",
-                        id, goal
-                    ));
-                }
-                out.push_str("\nSubagents are running concurrently in the background. Luna can now reply to the user or proceed with other tasks without waiting.\nWhen subagents complete, their results will be notified automatically into the conversation, or you can query them at any time with `delegate_task(action: \"list\")` or `delegate_task(action: \"poll\", task_id: \"...\")`.");
-
-                Ok(ToolResult::success(call_id, out.trim()))
-            }
+            "list" => Ok(self.list_action(call_id).await),
+            "poll" => Ok(self.poll_action(call_id, arguments).await),
+            "wait" => self.wait_action(call_id, arguments, cancel_token).await,
+            "spawn" => self.spawn_action(call_id, arguments, cancel_token).await,
             other => Ok(ToolResult::error(
                 call_id,
                 format!("unknown action '{}': use spawn, list, poll, or wait", other),

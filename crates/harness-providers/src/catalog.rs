@@ -60,567 +60,708 @@ fn ctx_windows(map: &[(&str, u32)]) -> std::collections::HashMap<String, u32> {
 
 pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
     vec![
-        ProviderDescriptor {
-            id: "openai".to_string(),
-            display_name: "OpenAI".to_string(),
-            default_base_url: "https://api.openai.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("gpt-4o", 128_000),
-                ("gpt-4o-mini", 128_000),
-                ("gpt-4-turbo", 128_000),
-                ("gpt-4", 8_192),
-                ("gpt-4-32k", 32_768),
-                ("gpt-3.5-turbo", 16_385),
-                ("gpt-3.5-turbo-16k", 16_385),
-                ("o1-preview", 128_000),
-                ("o1-mini", 128_000),
-                ("o3-mini", 200_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "anthropic".to_string(),
-            display_name: "Anthropic".to_string(),
-            default_base_url: "https://api.anthropic.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::AnthropicApiKey,
-            context_windows: ctx_windows(&[
-                ("claude-3-5-sonnet-20241022", 200_000),
-                ("claude-3-5-haiku-20241022", 200_000),
-                ("claude-3-opus-20240229", 200_000),
-                ("claude-3-sonnet-20240229", 200_000),
-                ("claude-3-haiku-20240307", 200_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "gemini".to_string(),
-            display_name: "Google Gemini".to_string(),
-            // The generic provider client speaks the OpenAI-compatible protocol. Gemini's native
-            // `/models/{model}:generateContent` route uses a different body and URL shape, while
-            // the `/openai` route accepts the same chat-completions body as every other provider.
-            // Pointing the base at the native namespace produced
-            // `POST /v1beta/chat/completions?key=...`, which Google rejects with
-            // "Missing or invalid Authorization header".
-            default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            // The OpenAI-compatible Gemini endpoint authenticates with `Authorization: Bearer …`.
-            auth_header_format: AuthHeaderFormat::Bearer,
-            // Only the models this harness offers by default are pinned here, both measured from
-            // the provider's own catalog; every other Gemini is covered by the family rule, so
-            // there is no dead table to rot when Google retires a model.
-            context_windows: ctx_windows(&[
-                ("gemini-3.5-flash-lite", GEMINI_INPUT_TOKENS),
-                ("gemini-3.8-flash", GEMINI_INPUT_TOKENS),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "deepseek".to_string(),
-            display_name: "DeepSeek".to_string(),
-            default_base_url: "https://api.deepseek.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-chat", 1_000_000),
-                ("deepseek-reasoner", 1_000_000),
-                ("deepseek-v4.1-flash", 1_000_000),
-                ("deepseek-v4-flash", 1_000_000),
-                ("deepseek-coder", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "groq".to_string(),
-            display_name: "Groq".to_string(),
-            default_base_url: "https://api.groq.com/openai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("llama-3.3-70b-versatile", 128_000),
-                ("llama-3.1-70b-versatile", 128_000),
-                ("llama-3.1-8b-instant", 128_000),
-                ("mixtral-8x7b-32768", 32_768),
-                ("gemma2-9b-it", 8_192),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "ollama".to_string(),
-            display_name: "Ollama (Local)".to_string(),
-            default_base_url: "http://localhost:11434/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::None,
-            context_windows: ctx_windows(&[
-                ("llama3.2", 128_000),
-                ("llama3.1", 128_000),
-                ("llama3", 8_192),
-                ("mistral", 32_768),
-                ("codellama", 16_384),
-                ("qwen2.5", 128_000),
-                ("phi3", 16_384),
-                ("gemma2", 8_192),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "opencode".to_string(),
-            display_name: "OpenCode (Native)".to_string(),
-            default_base_url: "http://127.0.0.1:49374".to_string(),
-            models_endpoint: "/api/model".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::None,
-            context_windows: ctx_windows(&[
-                ("deepseek-v4.1-flash-free", 1_000_000),
-                ("opencode/deepseek-v4.1-flash-free", 1_000_000),
-                ("glm-5.3-flash-free", 1_000_000),
-                ("opencode/glm-5.3-flash-free", 1_000_000),
-                ("nemotron-3-ultra-free", 1_000_000),
-                ("opencode/nemotron-3-ultra-free", 1_000_000),
-                ("nemotron-3.5-lightning-free", 1_000_000),
-                ("opencode/nemotron-3.5-lightning-free", 1_000_000),
-                ("nemotron-3.5-super-vl-free", 1_000_000),
-                ("opencode/nemotron-3.5-super-vl-free", 1_000_000),
-                ("mimo-v2.6-flash-free", 1_048_576),
-                ("opencode/mimo-v2.6-flash-free", 1_048_576),
-                ("minimax-m3.1-flash-free", 1_000_000),
-                ("opencode/minimax-m3.1-flash-free", 1_000_000),
-                ("muse-spark-1.3-contributor-free", 1_048_576),
-                ("opencode/muse-spark-1.3-contributor-free", 1_048_576),
-                ("muse-spark-1.2-contributor-free", 1_048_576),
-                ("opencode/muse-spark-1.2-contributor-free", 1_048_576),
-                ("beam-free", 128_000),
-                ("opencode/beam-free", 128_000),
-                ("big-pickle", 128_000),
-                ("opencode/big-pickle", 128_000),
-                ("longcat-2.5-preview-free", 128_000),
-                ("opencode/longcat-2.5-preview-free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "opencode-cli".to_string(),
-            display_name: "OpenCode (Headless CLI)".to_string(),
-            default_base_url: "https://opencode.ai/zen/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-v4.1-flash-free", 1_000_000),
-                ("opencode/deepseek-v4.1-flash-free", 1_000_000),
-                ("glm-5.3-flash-free", 1_000_000),
-                ("opencode/glm-5.3-flash-free", 1_000_000),
-                ("nemotron-3-ultra-free", 1_000_000),
-                ("opencode/nemotron-3-ultra-free", 1_000_000),
-                ("nemotron-3.5-lightning-free", 1_000_000),
-                ("opencode/nemotron-3.5-lightning-free", 1_000_000),
-                ("nemotron-3.5-super-vl-free", 1_000_000),
-                ("opencode/nemotron-3.5-super-vl-free", 1_000_000),
-                ("mimo-v2.6-flash-free", 1_048_576),
-                ("opencode/mimo-v2.6-flash-free", 1_048_576),
-                ("minimax-m3.1-flash-free", 1_000_000),
-                ("opencode/minimax-m3.1-flash-free", 1_000_000),
-                ("muse-spark-1.3-contributor-free", 1_048_576),
-                ("opencode/muse-spark-1.3-contributor-free", 1_048_576),
-                ("muse-spark-1.2-contributor-free", 1_048_576),
-                ("opencode/muse-spark-1.2-contributor-free", 1_048_576),
-                ("beam-free", 128_000),
-                ("opencode/beam-free", 128_000),
-                ("big-pickle", 128_000),
-                ("opencode/big-pickle", 128_000),
-                ("longcat-2.5-preview-free", 128_000),
-                ("opencode/longcat-2.5-preview-free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "openrouter".to_string(),
-            display_name: "OpenRouter".to_string(),
-            default_base_url: "https://openrouter.ai/api/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek/deepseek-v4.1-flash", 1_000_000),
-                ("deepseek/deepseek-v4-flash", 1_000_000),
-                ("deepseek/deepseek-v4-pro", 1_000_000),
-                ("anthropic/claude-3.5-sonnet", 200_000),
-                ("openai/gpt-4o", 128_000),
-                ("google/gemini-pro-1.5", 2_000_000),
-                ("meta-llama/llama-3.3-70b-instruct", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "together".to_string(),
-            display_name: "Together AI".to_string(),
-            default_base_url: "https://api.together.xyz/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("meta-llama/Llama-3.3-70B-Instruct-Turbo", 128_000),
-                ("meta-llama/Llama-3.1-70B-Instruct-Turbo", 128_000),
-                ("Qwen/Qwen2.5-72B-Instruct", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "mistral".to_string(),
-            display_name: "Mistral AI".to_string(),
-            default_base_url: "https://api.mistral.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("mistral-large-latest", 128_000),
-                ("pixtral-large-latest", 128_000),
-                ("codestral-latest", 32_768),
-                ("ministral-8b-latest", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "codestral".to_string(),
-            display_name: "Mistral Codestral".to_string(),
-            default_base_url: "https://codestral.mistral.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("codestral-latest", 256_000),
-                ("codestral-2501", 256_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "nvidia".to_string(),
-            display_name: "NVIDIA NIM".to_string(),
-            default_base_url: "https://integrate.api.nvidia.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
-                ("deepseek-ai/deepseek-v4-flash", 1_000_000),
-                ("deepseek-ai/deepseek-v4-pro", 1_000_000),
-                ("minimaxai/minimax-m3.1-flash", 1_000_000),
-                ("z-ai/glm-5.3-flash", 1_000_000),
-                ("z-ai/glm-4-9b-chat", 1_000_000),
-                ("stepfun-ai/step-5-preview", 1_000_000),
-                ("nvidia/nemotron-3-ultra", 1_000_000),
-                ("nvidia/nemotron-3-ultra-550b-a55b", 1_000_000),
-                ("nvidia/nemotron-3.5-lightning-30b-a3b", 1_000_000),
-                ("nvidia/nemotron-3.5-super-vl-120b-a12b", 1_000_000),
-                ("moonshotai/kimi-k2.6", 262_144),
-                ("poolside/laguna-xs-2.1", 262_144),
-                ("google/gemma-4-31b-it", 262_144),
-                ("meta/llama-guard-4-12b", 163_840),
-                ("meta/muse-glimmer-30b", 131_072),
-                ("openai/gpt-oss-20b", 131_072),
-                ("google/gemma-3-12b-it", 131_072),
-                ("google/gemma-3-4b-it", 131_072),
-                ("ibm/granite-3.0-8b-instruct", 131_072),
-                ("ibm/granite-3.0-3b-a800m-instruct", 131_072),
-                ("writer/palmyra-creative-122b", 131_072),
-                ("meta/llama-3.1-70b-instruct", 128_000),
-                ("meta/llama-3.1-8b-instruct", 128_000),
-                ("meta/llama-3.2-11b-vision-instruct", 128_000),
-                ("meta/llama-3.2-90b-vision-instruct", 128_000),
-                ("microsoft/phi-3-vision-128k-instruct", 128_000),
-                ("microsoft/phi-3.5-moe-instruct", 128_000),
-                ("mistralai/mistral-large", 128_000),
-                ("mistralai/mistral-large-2-instruct", 128_000),
-                ("mistralai/mixtral-8x22b-v0.1", 128_000),
-                ("nv-mistralai/mistral-nemo-12b-instruct", 128_000),
-                ("writer/palmyra-fin-70b-32k", 32_768),
-                ("writer/palmyra-med-70b-32k", 32_768),
-                ("01-ai/yi-large", 32_768),
-                ("databricks/dbrx-instruct", 32_768),
-                ("bigcode/starcoder2-15b", 16_384),
-                ("deepseek-ai/deepseek-coder-6.7b-instruct", 16_384),
-                ("meta/codellama-70b", 16_384),
-                ("meta/llama2-70b", 4_096),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "xai".to_string(),
-            display_name: "xAI (Grok)".to_string(),
-            default_base_url: "https://api.x.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("grok-2-latest", 131_072), ("grok-beta", 131_072)]),
-        },
-        ProviderDescriptor {
-            id: "zai".to_string(),
-            display_name: "Z.AI / GLM".to_string(),
-            default_base_url: "https://api.z.ai/api/paas/v4".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("glm-4-plus", 1_000_000),
-                ("glm-4-long", 1_000_000),
-                ("glm-5.3-flash", 1_000_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "alibaba".to_string(),
-            display_name: "Alibaba Cloud / Qwen".to_string(),
-            default_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("qwen-plus", 128_000)]),
-        },
-        ProviderDescriptor {
-            id: "moonshot".to_string(),
-            display_name: "Moonshot / Kimi".to_string(),
-            default_base_url: "https://api.moonshot.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("moonshot-v1-8k", 8_192)]),
-        },
-        ProviderDescriptor {
-            id: "minimax".to_string(),
-            display_name: "MiniMax".to_string(),
-            default_base_url: "https://api.minimax.io/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("abab6.5s-chat", 245_760),
-                // The M2 line is a 200k model family; the M3 line is 1M.
-                ("minimax-m2.5", 204_800),
-                ("minimax-m2.7", 204_800),
-                ("minimax-m3", 1_000_000),
-                ("minimax-m3.1-flash", 1_000_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "huggingface".to_string(),
-            display_name: "Hugging Face".to_string(),
-            default_base_url: "https://router.huggingface.co/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("meta-llama/Llama-3.1-70B-Instruct", 128_000)]),
-        },
-        ProviderDescriptor {
-            id: "copilot".to_string(),
-            display_name: "GitHub Models".to_string(),
-            default_base_url: "https://models.inference.ai.azure.com".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[("gpt-4o", 128_000)]),
-        },
-        ProviderDescriptor {
-            id: "lmstudio".to_string(),
-            display_name: "LM Studio (Local)".to_string(),
-            default_base_url: "http://127.0.0.1:1234/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "stepfun".to_string(),
-            display_name: "StepFun".to_string(),
-            default_base_url: "https://api.stepfun.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "arcee".to_string(),
-            display_name: "Arcee AI".to_string(),
-            default_base_url: "https://api.arcee.ai/api/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "gmi".to_string(),
-            display_name: "GMI Cloud".to_string(),
-            default_base_url: "https://api.gmi-serving.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "kilocode".to_string(),
-            display_name: "Kilo Code".to_string(),
-            default_base_url: "https://api.kilo.ai/api/gateway".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "ai-gateway".to_string(),
-            display_name: "Vercel AI Gateway".to_string(),
-            default_base_url: "https://ai-gateway.vercel.sh/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "custom".to_string(),
-            display_name: "Custom (OpenAI-compatible)".to_string(),
-            default_base_url: "http://localhost:8000/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: std::collections::HashMap::new(),
-        },
-        ProviderDescriptor {
-            id: "antigravity".to_string(),
-            display_name: "Google Antigravity".to_string(),
-            default_base_url: "https://daily-cloudcode-pa.googleapis.com/v1internal".to_string(),
-            models_endpoint: "/fetchAvailableModels".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("Gemini 4 Argon", 1_000_000),
-                ("Gemini 3.8 Flash", 1_000_000),
-                ("Claude Opus 5.5", 200_000),
-                ("Claude Sonnet 5.5", 200_000),
-                ("GPT-OSS 120B (Medium)", 128_000),
-                // Names written by an older Luna, and backend keys a stored session may still hold.
-                ("gemini-3.8-flash", 1_000_000),
-                ("gemini-3.8-flash-tiered", 1_000_000),
-                ("claude-sonnet-4-6", 200_000),
-                ("claude-opus-4-6", 200_000),
-                ("gpt-oss-120b", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "xkiro".to_string(),
-            display_name: "xKiro".to_string(),
-            default_base_url: "https://api.xkiro.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("qwen/qwen3.7-flash:free", 128_000),
-                ("qwen/qwen3-coder-plus:free", 128_000),
-                ("qwen/qwen3.8-max:free", 128_000),
-                ("minimax/minimax-m2.5:free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "tokenharbor".to_string(),
-            display_name: "TokenHarbor".to_string(),
-            default_base_url: "https://tokenharbor.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-v4.1-flash:free", 128_000),
-                ("deepseek-v4-flash:free", 128_000),
-                ("mimo-v2.5:free", 128_000),
-                ("qwen3.8-flash:free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "cline".to_string(),
-            display_name: "Cline".to_string(),
-            default_base_url: "https://api.cline.bot/api/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("stealth/pixel-canary", 128_000),
-                ("stealth/space-bunny-alpha", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "unorouter".to_string(),
-            display_name: "UnoRouter".to_string(),
-            default_base_url: "https://api.unorouter.com/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-v4-flash:free", 128_000),
-                ("qwen3.8-flash-next:free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "apmix".to_string(),
-            display_name: "Apmix".to_string(),
-            default_base_url: "https://api.apmix.ai/v1".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("deepseek-v4-flash-free", 128_000),
-                ("gpt6-luna-free", 128_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "kiro-cli".to_string(),
-            display_name: "Kiro CLI (Local)".to_string(),
-            default_base_url: "kiro://local".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::None,
-            context_windows: ctx_windows(&[
-                ("auto", 1_000_000),
-                ("claude-sonnet-4.5", 200_000),
-                ("claude-haiku-4.5", 200_000),
-                ("deepseek-3.2", 164_000),
-                ("minimax-m2.5", 196_000),
-                ("minimax-m2.1", 196_000),
-                ("glm-5", 200_000),
-                ("qwen3-coder-next", 256_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "kiro".to_string(),
-            display_name: "Kiro CLI (Local)".to_string(),
-            default_base_url: "kiro://local".to_string(),
-            models_endpoint: "/models".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::None,
-            context_windows: ctx_windows(&[
-                ("auto", 1_000_000),
-                ("claude-sonnet-4.5", 200_000),
-                ("claude-haiku-4.5", 200_000),
-                ("deepseek-3.2", 164_000),
-                ("minimax-m2.5", 196_000),
-                ("minimax-m2.1", 196_000),
-                ("glm-5", 200_000),
-                ("qwen3-coder-next", 256_000),
-            ]),
-        },
-        ProviderDescriptor {
-            id: "supercode".to_string(),
-            display_name: "Supercode Cloud".to_string(),
-            default_base_url: "https://supercode-8w7e.onrender.com".to_string(),
-            models_endpoint: "/api/ai/chat".to_string(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
-            auth_header_format: AuthHeaderFormat::Bearer,
-            context_windows: ctx_windows(&[
-                ("kimi-k3", 256_000),
-                ("deepseek-v4-flash", 128_000),
-                ("kimi-k2-7-code", 256_000),
-                ("kimi-k2-6", 256_000),
-                ("minimax-m3", 196_000),
-                ("glm-5.2", 200_000),
-                ("glm-5.1", 200_000),
-                ("mimo-v2.5", 128_000),
-                ("hy3", 128_000),
-                ("gemini-2.5-flash", 1_000_000),
-                ("meta/llama-3.3-70b-instruct", 128_000),
-                ("orcarouter/auto", 128_000),
-                ("stealth/ox-alpha", 128_000),
-            ]),
-        },
+        openai_descriptor(),
+        anthropic_descriptor(),
+        gemini_descriptor(),
+        deepseek_descriptor(),
+        groq_descriptor(),
+        ollama_descriptor(),
+        opencode_descriptor(),
+        opencode_cli_descriptor(),
+        openrouter_descriptor(),
+        together_descriptor(),
+        mistral_descriptor(),
+        codestral_descriptor(),
+        nvidia_descriptor(),
+        xai_descriptor(),
+        zai_descriptor(),
+        alibaba_descriptor(),
+        moonshot_descriptor(),
+        minimax_descriptor(),
+        huggingface_descriptor(),
+        copilot_descriptor(),
+        lmstudio_descriptor(),
+        stepfun_descriptor(),
+        arcee_descriptor(),
+        gmi_descriptor(),
+        kilocode_descriptor(),
+        ai_gateway_descriptor(),
+        custom_descriptor(),
+        antigravity_descriptor(),
+        xkiro_descriptor(),
+        tokenharbor_descriptor(),
+        cline_descriptor(),
+        unorouter_descriptor(),
+        apmix_descriptor(),
+        kiro_cli_descriptor(),
+        kiro_descriptor(),
+        supercode_descriptor(),
     ]
+}
+
+fn openai_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        default_base_url: "https://api.openai.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("gpt-4o", 128_000),
+            ("gpt-4o-mini", 128_000),
+            ("gpt-4-turbo", 128_000),
+            ("gpt-4", 8_192),
+            ("gpt-4-32k", 32_768),
+            ("gpt-3.5-turbo", 16_385),
+            ("gpt-3.5-turbo-16k", 16_385),
+            ("o1-preview", 128_000),
+            ("o1-mini", 128_000),
+            ("o3-mini", 200_000),
+        ]),
+    }
+}
+
+fn anthropic_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "anthropic".to_string(),
+        display_name: "Anthropic".to_string(),
+        default_base_url: "https://api.anthropic.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::AnthropicApiKey,
+        context_windows: ctx_windows(&[
+            ("claude-3-5-sonnet-20241022", 200_000),
+            ("claude-3-5-haiku-20241022", 200_000),
+            ("claude-3-opus-20240229", 200_000),
+            ("claude-3-sonnet-20240229", 200_000),
+            ("claude-3-haiku-20240307", 200_000),
+        ]),
+    }
+}
+
+fn gemini_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "gemini".to_string(),
+        display_name: "Google Gemini".to_string(),
+        // The generic provider client speaks the OpenAI-compatible protocol. Gemini's native
+        // `/models/{model}:generateContent` route uses a different body and URL shape, while
+        // the `/openai` route accepts the same chat-completions body as every other provider.
+        // Pointing the base at the native namespace produced
+        // `POST /v1beta/chat/completions?key=...`, which Google rejects with
+        // "Missing or invalid Authorization header".
+        default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        // The OpenAI-compatible Gemini endpoint authenticates with `Authorization: Bearer …`.
+        auth_header_format: AuthHeaderFormat::Bearer,
+        // Only the models this harness offers by default are pinned here, both measured from
+        // the provider's own catalog; every other Gemini is covered by the family rule, so
+        // there is no dead table to rot when Google retires a model.
+        context_windows: ctx_windows(&[
+            ("gemini-3.5-flash-lite", GEMINI_INPUT_TOKENS),
+            ("gemini-3.8-flash", GEMINI_INPUT_TOKENS),
+        ]),
+    }
+}
+
+fn deepseek_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "deepseek".to_string(),
+        display_name: "DeepSeek".to_string(),
+        default_base_url: "https://api.deepseek.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-chat", 1_000_000),
+            ("deepseek-reasoner", 1_000_000),
+            ("deepseek-v4.1-flash", 1_000_000),
+            ("deepseek-v4-flash", 1_000_000),
+            ("deepseek-coder", 128_000),
+        ]),
+    }
+}
+
+fn groq_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "groq".to_string(),
+        display_name: "Groq".to_string(),
+        default_base_url: "https://api.groq.com/openai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("llama-3.3-70b-versatile", 128_000),
+            ("llama-3.1-70b-versatile", 128_000),
+            ("llama-3.1-8b-instant", 128_000),
+            ("mixtral-8x7b-32768", 32_768),
+            ("gemma2-9b-it", 8_192),
+        ]),
+    }
+}
+
+fn ollama_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "ollama".to_string(),
+        display_name: "Ollama (Local)".to_string(),
+        default_base_url: "http://localhost:11434/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::None,
+        context_windows: ctx_windows(&[
+            ("llama3.2", 128_000),
+            ("llama3.1", 128_000),
+            ("llama3", 8_192),
+            ("mistral", 32_768),
+            ("codellama", 16_384),
+            ("qwen2.5", 128_000),
+            ("phi3", 16_384),
+            ("gemma2", 8_192),
+        ]),
+    }
+}
+
+fn opencode_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "opencode".to_string(),
+        display_name: "OpenCode (Native)".to_string(),
+        default_base_url: "http://127.0.0.1:49374".to_string(),
+        models_endpoint: "/api/model".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::None,
+        context_windows: ctx_windows(&[
+            ("deepseek-v4.1-flash-free", 1_000_000),
+            ("opencode/deepseek-v4.1-flash-free", 1_000_000),
+            ("glm-5.3-flash-free", 1_000_000),
+            ("opencode/glm-5.3-flash-free", 1_000_000),
+            ("nemotron-3-ultra-free", 1_000_000),
+            ("opencode/nemotron-3-ultra-free", 1_000_000),
+            ("nemotron-3.5-lightning-free", 1_000_000),
+            ("opencode/nemotron-3.5-lightning-free", 1_000_000),
+            ("nemotron-3.5-super-vl-free", 1_000_000),
+            ("opencode/nemotron-3.5-super-vl-free", 1_000_000),
+            ("mimo-v2.6-flash-free", 1_048_576),
+            ("opencode/mimo-v2.6-flash-free", 1_048_576),
+            ("minimax-m3.1-flash-free", 1_000_000),
+            ("opencode/minimax-m3.1-flash-free", 1_000_000),
+            ("muse-spark-1.3-contributor-free", 1_048_576),
+            ("opencode/muse-spark-1.3-contributor-free", 1_048_576),
+            ("muse-spark-1.2-contributor-free", 1_048_576),
+            ("opencode/muse-spark-1.2-contributor-free", 1_048_576),
+            ("beam-free", 128_000),
+            ("opencode/beam-free", 128_000),
+            ("big-pickle", 128_000),
+            ("opencode/big-pickle", 128_000),
+            ("longcat-2.5-preview-free", 128_000),
+            ("opencode/longcat-2.5-preview-free", 128_000),
+        ]),
+    }
+}
+
+fn opencode_cli_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "opencode-cli".to_string(),
+        display_name: "OpenCode (Headless CLI)".to_string(),
+        default_base_url: "https://opencode.ai/zen/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-v4.1-flash-free", 1_000_000),
+            ("opencode/deepseek-v4.1-flash-free", 1_000_000),
+            ("glm-5.3-flash-free", 1_000_000),
+            ("opencode/glm-5.3-flash-free", 1_000_000),
+            ("nemotron-3-ultra-free", 1_000_000),
+            ("opencode/nemotron-3-ultra-free", 1_000_000),
+            ("nemotron-3.5-lightning-free", 1_000_000),
+            ("opencode/nemotron-3.5-lightning-free", 1_000_000),
+            ("nemotron-3.5-super-vl-free", 1_000_000),
+            ("opencode/nemotron-3.5-super-vl-free", 1_000_000),
+            ("mimo-v2.6-flash-free", 1_048_576),
+            ("opencode/mimo-v2.6-flash-free", 1_048_576),
+            ("minimax-m3.1-flash-free", 1_000_000),
+            ("opencode/minimax-m3.1-flash-free", 1_000_000),
+            ("muse-spark-1.3-contributor-free", 1_048_576),
+            ("opencode/muse-spark-1.3-contributor-free", 1_048_576),
+            ("muse-spark-1.2-contributor-free", 1_048_576),
+            ("opencode/muse-spark-1.2-contributor-free", 1_048_576),
+            ("beam-free", 128_000),
+            ("opencode/beam-free", 128_000),
+            ("big-pickle", 128_000),
+            ("opencode/big-pickle", 128_000),
+            ("longcat-2.5-preview-free", 128_000),
+            ("opencode/longcat-2.5-preview-free", 128_000),
+        ]),
+    }
+}
+
+fn openrouter_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "openrouter".to_string(),
+        display_name: "OpenRouter".to_string(),
+        default_base_url: "https://openrouter.ai/api/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek/deepseek-v4.1-flash", 1_000_000),
+            ("deepseek/deepseek-v4-flash", 1_000_000),
+            ("deepseek/deepseek-v4-pro", 1_000_000),
+            ("anthropic/claude-3.5-sonnet", 200_000),
+            ("openai/gpt-4o", 128_000),
+            ("google/gemini-pro-1.5", 2_000_000),
+            ("meta-llama/llama-3.3-70b-instruct", 128_000),
+        ]),
+    }
+}
+
+fn together_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "together".to_string(),
+        display_name: "Together AI".to_string(),
+        default_base_url: "https://api.together.xyz/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("meta-llama/Llama-3.3-70B-Instruct-Turbo", 128_000),
+            ("meta-llama/Llama-3.1-70B-Instruct-Turbo", 128_000),
+            ("Qwen/Qwen2.5-72B-Instruct", 128_000),
+        ]),
+    }
+}
+
+fn mistral_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "mistral".to_string(),
+        display_name: "Mistral AI".to_string(),
+        default_base_url: "https://api.mistral.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("mistral-large-latest", 128_000),
+            ("pixtral-large-latest", 128_000),
+            ("codestral-latest", 32_768),
+            ("ministral-8b-latest", 128_000),
+        ]),
+    }
+}
+
+fn codestral_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "codestral".to_string(),
+        display_name: "Mistral Codestral".to_string(),
+        default_base_url: "https://codestral.mistral.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("codestral-latest", 256_000), ("codestral-2501", 256_000)]),
+    }
+}
+
+fn nvidia_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "nvidia".to_string(),
+        display_name: "NVIDIA NIM".to_string(),
+        default_base_url: "https://integrate.api.nvidia.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-ai/deepseek-v4.1-flash", 1_000_000),
+            ("deepseek-ai/deepseek-v4-flash", 1_000_000),
+            ("deepseek-ai/deepseek-v4-pro", 1_000_000),
+            ("minimaxai/minimax-m3.1-flash", 1_000_000),
+            ("z-ai/glm-5.3-flash", 1_000_000),
+            ("z-ai/glm-4-9b-chat", 1_000_000),
+            ("stepfun-ai/step-5-preview", 1_000_000),
+            ("nvidia/nemotron-3-ultra", 1_000_000),
+            ("nvidia/nemotron-3-ultra-550b-a55b", 1_000_000),
+            ("nvidia/nemotron-3.5-lightning-30b-a3b", 1_000_000),
+            ("nvidia/nemotron-3.5-super-vl-120b-a12b", 1_000_000),
+            ("moonshotai/kimi-k2.6", 262_144),
+            ("poolside/laguna-xs-2.1", 262_144),
+            ("google/gemma-4-31b-it", 262_144),
+            ("meta/llama-guard-4-12b", 163_840),
+            ("meta/muse-glimmer-30b", 131_072),
+            ("openai/gpt-oss-20b", 131_072),
+            ("google/gemma-3-12b-it", 131_072),
+            ("google/gemma-3-4b-it", 131_072),
+            ("ibm/granite-3.0-8b-instruct", 131_072),
+            ("ibm/granite-3.0-3b-a800m-instruct", 131_072),
+            ("writer/palmyra-creative-122b", 131_072),
+            ("meta/llama-3.1-70b-instruct", 128_000),
+            ("meta/llama-3.1-8b-instruct", 128_000),
+            ("meta/llama-3.2-11b-vision-instruct", 128_000),
+            ("meta/llama-3.2-90b-vision-instruct", 128_000),
+            ("microsoft/phi-3-vision-128k-instruct", 128_000),
+            ("microsoft/phi-3.5-moe-instruct", 128_000),
+            ("mistralai/mistral-large", 128_000),
+            ("mistralai/mistral-large-2-instruct", 128_000),
+            ("mistralai/mixtral-8x22b-v0.1", 128_000),
+            ("nv-mistralai/mistral-nemo-12b-instruct", 128_000),
+            ("writer/palmyra-fin-70b-32k", 32_768),
+            ("writer/palmyra-med-70b-32k", 32_768),
+            ("01-ai/yi-large", 32_768),
+            ("databricks/dbrx-instruct", 32_768),
+            ("bigcode/starcoder2-15b", 16_384),
+            ("deepseek-ai/deepseek-coder-6.7b-instruct", 16_384),
+            ("meta/codellama-70b", 16_384),
+            ("meta/llama2-70b", 4_096),
+        ]),
+    }
+}
+
+fn xai_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "xai".to_string(),
+        display_name: "xAI (Grok)".to_string(),
+        default_base_url: "https://api.x.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("grok-2-latest", 131_072), ("grok-beta", 131_072)]),
+    }
+}
+
+fn zai_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "zai".to_string(),
+        display_name: "Z.AI / GLM".to_string(),
+        default_base_url: "https://api.z.ai/api/paas/v4".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("glm-4-plus", 1_000_000),
+            ("glm-4-long", 1_000_000),
+            ("glm-5.3-flash", 1_000_000),
+        ]),
+    }
+}
+
+fn alibaba_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "alibaba".to_string(),
+        display_name: "Alibaba Cloud / Qwen".to_string(),
+        default_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("qwen-plus", 128_000)]),
+    }
+}
+
+fn moonshot_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "moonshot".to_string(),
+        display_name: "Moonshot / Kimi".to_string(),
+        default_base_url: "https://api.moonshot.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("moonshot-v1-8k", 8_192)]),
+    }
+}
+
+fn minimax_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "minimax".to_string(),
+        display_name: "MiniMax".to_string(),
+        default_base_url: "https://api.minimax.io/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("abab6.5s-chat", 245_760),
+            // The M2 line is a 200k model family; the M3 line is 1M.
+            ("minimax-m2.5", 204_800),
+            ("minimax-m2.7", 204_800),
+            ("minimax-m3", 1_000_000),
+            ("minimax-m3.1-flash", 1_000_000),
+        ]),
+    }
+}
+
+fn huggingface_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "huggingface".to_string(),
+        display_name: "Hugging Face".to_string(),
+        default_base_url: "https://router.huggingface.co/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("meta-llama/Llama-3.1-70B-Instruct", 128_000)]),
+    }
+}
+
+fn copilot_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "copilot".to_string(),
+        display_name: "GitHub Models".to_string(),
+        default_base_url: "https://models.inference.ai.azure.com".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[("gpt-4o", 128_000)]),
+    }
+}
+
+fn lmstudio_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "lmstudio".to_string(),
+        display_name: "LM Studio (Local)".to_string(),
+        default_base_url: "http://127.0.0.1:1234/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn stepfun_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "stepfun".to_string(),
+        display_name: "StepFun".to_string(),
+        default_base_url: "https://api.stepfun.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn arcee_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "arcee".to_string(),
+        display_name: "Arcee AI".to_string(),
+        default_base_url: "https://api.arcee.ai/api/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn gmi_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "gmi".to_string(),
+        display_name: "GMI Cloud".to_string(),
+        default_base_url: "https://api.gmi-serving.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn kilocode_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "kilocode".to_string(),
+        display_name: "Kilo Code".to_string(),
+        default_base_url: "https://api.kilo.ai/api/gateway".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn ai_gateway_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "ai-gateway".to_string(),
+        display_name: "Vercel AI Gateway".to_string(),
+        default_base_url: "https://ai-gateway.vercel.sh/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn custom_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "custom".to_string(),
+        display_name: "Custom (OpenAI-compatible)".to_string(),
+        default_base_url: "http://localhost:8000/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
+fn antigravity_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "antigravity".to_string(),
+        display_name: "Google Antigravity".to_string(),
+        default_base_url: "https://daily-cloudcode-pa.googleapis.com/v1internal".to_string(),
+        models_endpoint: "/fetchAvailableModels".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("Gemini 4 Argon", 1_000_000),
+            ("Gemini 3.8 Flash", 1_000_000),
+            ("Claude Opus 5.5", 200_000),
+            ("Claude Sonnet 5.5", 200_000),
+            ("GPT-OSS 120B (Medium)", 128_000),
+            // Names written by an older Luna, and backend keys a stored session may still hold.
+            ("gemini-3.8-flash", 1_000_000),
+            ("gemini-3.8-flash-tiered", 1_000_000),
+            ("claude-sonnet-4-6", 200_000),
+            ("claude-opus-4-6", 200_000),
+            ("gpt-oss-120b", 128_000),
+        ]),
+    }
+}
+
+fn xkiro_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "xkiro".to_string(),
+        display_name: "xKiro".to_string(),
+        default_base_url: "https://api.xkiro.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("qwen/qwen3.7-flash:free", 128_000),
+            ("qwen/qwen3-coder-plus:free", 128_000),
+            ("qwen/qwen3.8-max:free", 128_000),
+            ("minimax/minimax-m2.5:free", 128_000),
+        ]),
+    }
+}
+
+fn tokenharbor_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "tokenharbor".to_string(),
+        display_name: "TokenHarbor".to_string(),
+        default_base_url: "https://tokenharbor.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-v4.1-flash:free", 128_000),
+            ("deepseek-v4-flash:free", 128_000),
+            ("mimo-v2.5:free", 128_000),
+            ("qwen3.8-flash:free", 128_000),
+        ]),
+    }
+}
+
+fn cline_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "cline".to_string(),
+        display_name: "Cline".to_string(),
+        default_base_url: "https://api.cline.bot/api/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("stealth/pixel-canary", 128_000),
+            ("stealth/space-bunny-alpha", 128_000),
+        ]),
+    }
+}
+
+fn unorouter_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "unorouter".to_string(),
+        display_name: "UnoRouter".to_string(),
+        default_base_url: "https://api.unorouter.com/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-v4-flash:free", 128_000),
+            ("qwen3.8-flash-next:free", 128_000),
+        ]),
+    }
+}
+
+fn apmix_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "apmix".to_string(),
+        display_name: "Apmix".to_string(),
+        default_base_url: "https://api.apmix.ai/v1".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("deepseek-v4-flash-free", 128_000),
+            ("gpt6-luna-free", 128_000),
+        ]),
+    }
+}
+
+fn kiro_cli_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "kiro-cli".to_string(),
+        display_name: "Kiro CLI (Local)".to_string(),
+        default_base_url: "kiro://local".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::None,
+        context_windows: ctx_windows(&[
+            ("auto", 1_000_000),
+            ("claude-sonnet-4.5", 200_000),
+            ("claude-haiku-4.5", 200_000),
+            ("deepseek-3.2", 164_000),
+            ("minimax-m2.5", 196_000),
+            ("minimax-m2.1", 196_000),
+            ("glm-5", 200_000),
+            ("qwen3-coder-next", 256_000),
+        ]),
+    }
+}
+
+fn kiro_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "kiro".to_string(),
+        display_name: "Kiro CLI (Local)".to_string(),
+        default_base_url: "kiro://local".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::None,
+        context_windows: ctx_windows(&[
+            ("auto", 1_000_000),
+            ("claude-sonnet-4.5", 200_000),
+            ("claude-haiku-4.5", 200_000),
+            ("deepseek-3.2", 164_000),
+            ("minimax-m2.5", 196_000),
+            ("minimax-m2.1", 196_000),
+            ("glm-5", 200_000),
+            ("qwen3-coder-next", 256_000),
+        ]),
+    }
+}
+
+fn supercode_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "supercode".to_string(),
+        display_name: "Supercode Cloud".to_string(),
+        default_base_url: "https://supercode-8w7e.onrender.com".to_string(),
+        models_endpoint: "/api/ai/chat".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("kimi-k3", 256_000),
+            ("deepseek-v4-flash", 128_000),
+            ("kimi-k2-7-code", 256_000),
+            ("kimi-k2-6", 256_000),
+            ("minimax-m3", 196_000),
+            ("glm-5.2", 200_000),
+            ("glm-5.1", 200_000),
+            ("mimo-v2.5", 128_000),
+            ("hy3", 128_000),
+            ("gemini-2.5-flash", 1_000_000),
+            ("meta/llama-3.3-70b-instruct", 128_000),
+            ("orcarouter/auto", 128_000),
+            ("stealth/ox-alpha", 128_000),
+        ]),
+    }
 }
 
 pub fn canonicalize_provider_id(id: &str) -> &str {
@@ -743,19 +884,8 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
     let model_trimmed = model_lower.trim();
 
     // 1. Direct match or leaf match in the chosen provider descriptor
-    if let Some(desc) = find_provider(provider) {
-        for (k, v) in &desc.context_windows {
-            if k.eq_ignore_ascii_case(model_trimmed) {
-                return Some(*v);
-            }
-        }
-        let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
-        for (k, v) in &desc.context_windows {
-            let k_leaf = k.rsplit('/').next().unwrap_or(k);
-            if k.eq_ignore_ascii_case(leaf) || k_leaf.eq_ignore_ascii_case(leaf) {
-                return Some(*v);
-            }
-        }
+    if let Some(window) = declared_context_window(provider, model_trimmed) {
+        return Some(window);
     }
 
     // 2. Cross-provider catalog lookup.
@@ -765,6 +895,34 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
     // takes the LARGEST window any provider publishes for this model: that is the model's own
     // capability, and the chosen provider's own cap still wins in step 1 above.
     let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+    if let Some(window) = cross_provider_context_window(model_trimmed, leaf) {
+        return Some(window);
+    }
+
+    // 3. Known architectural model families & token heuristics (matching Shiina model_metadata)
+    family_context_window(leaf)
+}
+
+/// Step 1: an exact or leaf match in `provider`'s declared context windows.
+fn declared_context_window(provider: &str, model_trimmed: &str) -> Option<u32> {
+    let desc = find_provider(provider)?;
+    for (k, v) in &desc.context_windows {
+        if k.eq_ignore_ascii_case(model_trimmed) {
+            return Some(*v);
+        }
+    }
+    let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
+    for (k, v) in &desc.context_windows {
+        let k_leaf = k.rsplit('/').next().unwrap_or(k);
+        if k.eq_ignore_ascii_case(leaf) || k_leaf.eq_ignore_ascii_case(leaf) {
+            return Some(*v);
+        }
+    }
+    None
+}
+
+/// Step 2: the largest window any provider publishes for this model.
+fn cross_provider_context_window(model_trimmed: &str, leaf: &str) -> Option<u32> {
     let mut cross_provider: Option<u32> = None;
     for desc in get_provider_catalog() {
         for (k, v) in &desc.context_windows {
@@ -774,13 +932,11 @@ pub fn get_context_window(provider: &str, model: &str) -> Option<u32> {
             }
         }
     }
-    if let Some(window) = cross_provider {
-        return Some(window);
-    }
+    cross_provider
+}
 
-    // 3. Known architectural model families & token heuristics (matching Shiina model_metadata)
-    let leaf = model_trimmed.rsplit('/').next().unwrap_or(model_trimmed);
-
+/// Step 3: model-family architecture heuristics, and the 128k fallback.
+fn family_context_window(leaf: &str) -> Option<u32> {
     // DeepSeek family (V4 = 1M, V3/R1 = 128k)
     if leaf.contains("deepseek") {
         if leaf.contains("v4") || leaf.contains("flash") || leaf.contains("chat") {

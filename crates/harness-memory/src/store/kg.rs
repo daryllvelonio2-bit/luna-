@@ -658,7 +658,7 @@ impl KnowledgeGraph {
                     && entity_id_for_name(&existing.object) == obj_id
                     && existing.valid_from.as_deref() == valid_from
                     && existing.valid_to.as_deref() == valid_to
-                    && (confidence.is_none() || existing.confidence == confidence.unwrap())
+                    && confidence.is_none_or(|value| existing.confidence == value)
                     && existing.source_record.as_deref() == source_record
                     && existing.source_file.as_deref() == source_file
                 {

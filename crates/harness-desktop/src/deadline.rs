@@ -1,5 +1,9 @@
 use std::time::{Duration, Instant};
 
+/// `Deadline::none` means "the caller owns the budget", so it must be far beyond any real command
+/// rather than a second copy of the tool timeout.
+const NO_DEADLINE_HORIZON: Duration = Duration::from_secs(60 * 60);
+
 /// The budget a single desktop command runs under.
 ///
 /// Every platform call takes a deadline rather than sleeping for a fixed
@@ -20,7 +24,7 @@ impl Deadline {
     /// A deadline that never expires. For callers that manage their own budget.
     pub fn none() -> Self {
         Self {
-            expires_at: Instant::now() + Duration::from_secs(60 * 60),
+            expires_at: Instant::now() + NO_DEADLINE_HORIZON,
         }
     }
 

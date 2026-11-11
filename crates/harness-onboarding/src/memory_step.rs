@@ -77,7 +77,8 @@ pub const DEFAULT_ID: u8 = 1;
 pub fn parse_selection(answer: &str) -> Result<Choice, String> {
     let trimmed = answer.trim();
     if trimmed.is_empty() {
-        return Ok(choice(DEFAULT_ID).expect("the default is one of the choices"));
+        return choice(DEFAULT_ID)
+            .ok_or_else(|| format!("internal error: default option {DEFAULT_ID} is missing"));
     }
     let id: u8 = trimmed
         .parse()

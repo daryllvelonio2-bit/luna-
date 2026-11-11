@@ -8,10 +8,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::dispatch::DispatchState;
-use super::{retry_delay_with_jitter, Agent, AgentEvent, TurnOutcome, TurnToolCall};
+use super::{
+    retry_delay_with_jitter, Agent, AgentEvent, FoldPolicy, ReplayNotice, TurnOutcome, TurnToolCall,
+};
 use crate::error::HarnessError;
 use crate::hooks::HookEvent;
-use crate::session::{estimate_tokens, last_fold_seq};
+use crate::session::{estimate_tokens, last_fold_seq, StoredMessage};
 use crate::traits::*;
 use crate::types::*;
 
@@ -73,6 +75,293 @@ impl Streamed {
     }
 }
 
+/// How a streamed model call stopped.
+enum StreamEnd {
+    /// The stream ended on its own.
+    Ended,
+    /// A soft interrupt stopped it; the accumulator holds whatever arrived.
+    Interrupted,
+    /// The stream errored before producing anything usable; the buffered call can retry.
+    Fallback,
+    /// The turn itself was cancelled.
+    Cancelled,
+}
+
+/// One model call's stream, assembled as it arrives: prose, reasoning, usage, finish reason, and
+/// the tool-call fragments keyed by the index the provider assigned them.
+#[derive(Default)]
+struct StreamAccumulator {
+    content: String,
+    reasoning: String,
+    usage: Option<TokenUsage>,
+    /// The newest per-step usage. OpenCode's cumulative `Completed` usage must not overwrite it,
+    /// or the post-call gauge update jumps past the window.
+    context_usage: Option<TokenUsage>,
+    finish_reason: Option<String>,
+    calls: Vec<(usize, ToolCall)>,
+}
+
+impl StreamAccumulator {
+    /// Fold one stream event into the accumulator, forwarding it to the observer as it arrives.
+    fn apply(
+        &mut self,
+        observer: Option<&super::AgentObserver>,
+        event: StreamEvent,
+        executed_tools: &mut Vec<TurnToolCall>,
+    ) {
+        match event {
+            StreamEvent::ReasoningDelta(text) => {
+                if let Some(observer) = observer {
+                    observer(AgentEvent::ReasoningDelta(text.clone()));
+                }
+                self.reasoning.push_str(&text);
+            }
+            StreamEvent::ContentDelta(text) => self.content.push_str(&text),
+            StreamEvent::ToolExecuting { name, arguments } => {
+                if let Some(observer) = observer {
+                    observer(AgentEvent::ToolExecuting {
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    });
+                }
+                executed_tools.push(TurnToolCall {
+                    name,
+                    arguments,
+                    output: String::new(),
+                    is_error: false,
+                    denied: false,
+                });
+            }
+            StreamEvent::ToolExecuted {
+                name,
+                output,
+                is_error,
+            } => {
+                if let Some(observer) = observer {
+                    observer(AgentEvent::ToolExecuted {
+                        name: name.clone(),
+                        output: output.clone(),
+                        is_error,
+                    });
+                }
+                if let Some(call) = executed_tools
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.name == name && c.output.is_empty())
+                {
+                    call.output = output;
+                    call.is_error = is_error;
+                } else {
+                    executed_tools.push(TurnToolCall {
+                        name,
+                        arguments: serde_json::Value::Null,
+                        output,
+                        is_error,
+                        denied: false,
+                    });
+                }
+            }
+            StreamEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+                signature,
+            } => self.merge_call_delta(index, id, name, arguments_delta, signature),
+            StreamEvent::Usage(token_usage) => {
+                let actual_tokens = token_usage
+                    .prompt_tokens
+                    .saturating_add(token_usage.completion_tokens);
+                self.context_usage = Some(token_usage.clone());
+                self.usage = Some(token_usage);
+                if let Some(observer) = observer {
+                    observer(AgentEvent::ContextTokensUpdated {
+                        tokens_used: actual_tokens,
+                        reset: false,
+                    });
+                }
+            }
+            StreamEvent::Completed {
+                usage: event_usage,
+                finish_reason: event_finish,
+            } => {
+                if event_usage.is_some() {
+                    self.usage = event_usage;
+                }
+                // Keep the last reason that names one: the usage frame that closes a Code Assist
+                // stream carries none and must not erase `MAX_TOKENS`.
+                if event_finish.is_some() {
+                    self.finish_reason = event_finish;
+                }
+            }
+        }
+    }
+
+    /// Stitch one `ToolCallDelta` onto the fragment slot its index names.
+    fn merge_call_delta(
+        &mut self,
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_delta: Option<String>,
+        signature: Option<String>,
+    ) {
+        let slot = match self.calls.iter_mut().find(|(i, _)| *i == index) {
+            Some((_, call)) => call,
+            None => {
+                self.calls.push((
+                    index,
+                    ToolCall {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: serde_json::Value::Null,
+                        signature: None,
+                    },
+                ));
+                let last_idx = self.calls.len() - 1;
+                &mut self.calls[last_idx].1
+            }
+        };
+        if let Some(id) = id {
+            slot.id = id;
+        }
+        if let Some(name) = name {
+            slot.name = name;
+        }
+        if let Some(signature) = signature {
+            slot.signature = Some(signature);
+        }
+        if let Some(fragment) = arguments_delta {
+            // Arguments stream as JSON text, so each fragment is stitched onto the raw string and
+            // parsed once at the end.
+            let mut raw = match slot.arguments.take() {
+                serde_json::Value::String(raw) => raw,
+                _ => String::new(),
+            };
+            raw.push_str(&fragment);
+            slot.arguments = serde_json::Value::String(raw);
+        }
+    }
+
+    /// Finish the collected call fragments into usable calls, in the order the model issued them.
+    ///
+    /// A tool call whose arguments are not valid JSON was never finished by the provider — the
+    /// stream was cut, or the output cap landed mid-object. It must not be run with `{}`: a
+    /// truncated `read_file` then reports a misleading missing argument, and a truncated
+    /// `write_file`/`patch` would apply the wrong edit. The call is failed so the turn loop's
+    /// retry asks again.
+    fn assemble_tool_calls(&mut self, provider: &str) -> Result<Vec<ToolCall>, HarnessError> {
+        self.calls.sort_by_key(|(index, _)| *index);
+        let mut incomplete: Option<(String, String)> = None;
+        let tool_calls: Vec<ToolCall> = self
+            .calls
+            .drain(..)
+            .enumerate()
+            .map(|(position, (_, mut call))| {
+                call.arguments = match call.arguments {
+                    // An empty fragment means "no arguments". Trailing junk after a whole value is
+                    // ignored rather than treated as truncation; only a value that ends early is
+                    // an incomplete call. See `crate::json::parse_tool_arguments`.
+                    serde_json::Value::String(raw) => {
+                        match crate::json::parse_tool_arguments(&raw) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                incomplete = Some((call.name.clone(), error.to_string()));
+                                json!({})
+                            }
+                        }
+                    }
+                    value => value,
+                };
+                if call.id.is_empty() {
+                    call.id = format!("call_{}", position);
+                }
+                call
+            })
+            .collect();
+
+        if let Some((name, error)) = incomplete {
+            warn!(
+                tool = %name,
+                "dropping incomplete tool call: arguments were not valid JSON ({error})"
+            );
+            return Err(HarnessError::ProviderError {
+                provider: provider.to_string(),
+                message: format!(
+                    "Model returned an incomplete tool call for '{name}': its arguments were not \
+                     valid JSON ({error}). The call was not run."
+                ),
+            });
+        }
+        Ok(tool_calls)
+    }
+
+    /// The reply for a call a soft interrupt stopped: prose only, never a half-received call.
+    fn into_interrupted(self) -> Streamed {
+        let content = crate::text::strip_dsml_artifacts(&self.content);
+        let message = Message {
+            role: Role::Assistant,
+            content: (!content.trim().is_empty()).then_some(content),
+            reasoning: (!self.reasoning.trim().is_empty()).then_some(self.reasoning),
+            tool_calls: Vec::new(),
+            tool_result: None,
+            usage: self.usage,
+        };
+        Streamed {
+            message,
+            interrupted: true,
+            context_usage: self.context_usage,
+        }
+    }
+
+    /// The reply for a completed stream with at least some text or at least one tool call.
+    fn into_streamed(mut self, tool_calls: Vec<ToolCall>) -> Streamed {
+        let mut reasoning = std::mem::take(&mut self.reasoning);
+        if reasoning.is_empty() {
+            for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
+                if let Some(start) = self.content.find(open_tag) {
+                    if let Some(end) = self.content.find(close_tag) {
+                        let think_text =
+                            self.content[start + open_tag.len()..end].trim().to_string();
+                        let rest = format!(
+                            "{}{}",
+                            &self.content[..start],
+                            &self.content[end + close_tag.len()..]
+                        )
+                        .trim()
+                        .to_string();
+                        if !think_text.is_empty() {
+                            reasoning = think_text;
+                        }
+                        self.content = rest;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // A gateway can echo DeepSeek's DSML scaffolding into the text channel *next to* a perfectly
+        // good tool call. That is protocol noise rather than the model speaking, so it must not be
+        // stored: otherwise a resumed session replays pages of `…DSML… calls>` that never showed
+        // up during the live turn.
+        let content = crate::text::strip_dsml_artifacts(&self.content);
+
+        let mut response = Message::assistant(content);
+        if response.content.as_deref().unwrap_or("").trim().is_empty() {
+            // Nothing but scaffolding (or nothing at all): the turn has no text, only calls.
+            response.content = None;
+        }
+        response.reasoning = if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        };
+        response.tool_calls = tool_calls;
+        response.usage = self.usage;
+        Streamed::done_with_context(response, self.context_usage)
+    }
+}
+
 /// Whether a finish reason means the model ran out of output budget rather than finished.
 ///
 /// Gemini spells it `max_tokens` and the OpenAI-compatible routes spell it `length`. Either way
@@ -90,6 +379,53 @@ fn empty_answer_error(provider: &str) -> HarnessError {
         message: "Model returned an empty response. The model may be overloaded or unavailable."
             .to_string(),
     }
+}
+
+/// What replaying the session produced for the first request of a turn.
+struct OpenedTurn {
+    system_text: String,
+    history: Vec<StoredMessage>,
+    messages: Vec<Message>,
+    replay_notice: Option<ReplayNotice>,
+}
+
+/// The transcript and tallies a turn's loop carries from round to round.
+struct TurnState {
+    messages: Vec<Message>,
+    user_message: Message,
+    user_appended: bool,
+    executed_tools: Vec<TurnToolCall>,
+    consecutive_failures: usize,
+    last_reasoning: Option<String>,
+    /// A turn can be several model calls (tool loop, retries); the ledger wants the turn's total,
+    /// so every reported usage is folded in here rather than kept per call.
+    turn_usage: Option<TokenUsage>,
+    loop_rounds: usize,
+    /// The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
+    /// stored transcript, and the checks use this to tell "still over the bar" from "over the bar
+    /// a fold has already answered".
+    fold_watermark: Option<i64>,
+    fold_policy: FoldPolicy,
+}
+
+/// One model call's reply and how much of `executed_tools` that call is responsible for.
+struct ModelCall {
+    response: Message,
+    interrupted: bool,
+    context_usage: Option<TokenUsage>,
+    tools_before_call: usize,
+}
+
+/// Everything a turn needs once its opening work is done.
+struct TurnSetup<'a> {
+    system_text: String,
+    state: TurnState,
+    fold_spawned_at_start: bool,
+    turn_started: std::time::Instant,
+    replay_notice: Option<ReplayNotice>,
+    tools: Vec<ToolDefinition>,
+    /// Closes the turn's checkpoint however the turn ends.
+    checkpoint: super::CheckpointGuard<'a>,
 }
 
 impl<P, M, N, R> Agent<P, M, N, R>
@@ -128,41 +464,59 @@ where
         // lock. Set before the first `await` so a message typed into a just-started turn is
         // queued for it rather than reported as idle.
         let _interrupt_guard = self.interrupt.begin_turn();
-        let system_text = self.system_prompt(user_input).await?;
+        // 1. Replay, bound the context, open the checkpoint and collect the turn's tools.
+        let setup = self.begin_turn(user_input).await?;
+        let system_text = setup.system_text;
+        let mut state = setup.state;
+        let fold_spawned_at_start = setup.fold_spawned_at_start;
+        let turn_started = setup.turn_started;
+        let replay_notice = setup.replay_notice;
+        let tools = setup.tools;
+        let _checkpoint_guard = setup.checkpoint;
 
-        // 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`.
-        //    Size reports a fold has retired are dropped here: they measure a prompt that is no
-        //    longer sent, and every estimate taken from this vector — the gauge, the compaction
-        //    threshold — would otherwise be the size of the folded transcript.
-        let (history, replay_notice) = self.load_history().await?;
-        let mut messages = Vec::with_capacity(history.len() + 3);
-        messages.push(Message::system(system_text.clone()));
-        messages.extend(self.replay_messages(&history));
-        messages.push(Message::user(user_input));
+        // Unbounded task loop: runs as long as productive progress is made
+        loop {
+            if let Some(outcome) = self
+                .run_round(
+                    &mut state,
+                    &tools,
+                    &system_text,
+                    fold_spawned_at_start,
+                    turn_started,
+                    &replay_notice,
+                    &cancel_token,
+                )
+                .await?
+            {
+                return Ok(outcome);
+            }
+        }
+    }
 
-        // 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
-        self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
-            .await?;
+    /// The turn's opening: replay the session, bound the context, open the checkpoint, and collect
+    /// the tools the first request may send.
+    ///
+    /// The fold is started here and waited for by nobody: this turn runs on the transcript it has,
+    /// and the folded transcript is what the next turn replays. The fold is a bound on the *next*
+    /// request, so making the user wait out a summariser before their own prompt is even sent buys
+    /// nothing. `fold_policy` is the only place the bar is decided (the auto-compact settings when
+    /// they are on, else `compact_at_tokens`), and `run_fold` is the only place a fold is written —
+    /// a fold that marked rows without writing a summary would replace the turns it removed with
+    /// nothing, which reads as the agent losing the conversation.
+    async fn begin_turn(&self, user_input: &str) -> Result<TurnSetup<'_>, HarnessError> {
+        let opened = self.open_turn(user_input).await?;
+        let system_text = opened.system_text;
+        let history = opened.history;
+        let replay_notice = opened.replay_notice;
+        let mut messages = opened.messages;
 
-        // 2. Bound the context — without holding the turn. An automatic fold is started here and
-        //    waited for by nobody: this turn runs on the transcript it has, and the folded
-        //    transcript is what the next turn replays. The fold is a bound on the *next* request,
-        //    so making the user wait out a summariser before their own prompt is even sent buys
-        //    nothing.
-        //
-        // `fold_policy` is the only place the bar is decided (the auto-compact settings when they
-        // are on, else `compact_at_tokens`), and `run_fold` is the only place a fold is written —
-        // a fold that marked rows without writing a summary would replace the turns it removed
-        // with nothing, which reads as the agent losing the conversation.
         let fold_policy = self.fold_policy();
         // The newest fold this turn starts from. A fold that lands while the turn runs rewrites the
-        // stored transcript, and the checks below use this to tell "still over the bar" from "over
-        // the bar a fold has already answered".
+        // stored transcript, and the checks use this to tell "still over the bar" from "over the
+        // bar a fold has already answered".
         let mut fold_watermark = last_fold_seq(&history);
-        // Past the hard ceiling the request may be refused, so the fold is not left behind: wait
-        // for it and continue on the bounded vector. Below it the ordinary background path runs.
-        let preflight_folded = self
-            .preflight_fold_if_needed(
+        let fold_spawned_at_start = self
+            .begin_fold(
                 &mut messages,
                 &history,
                 &system_text,
@@ -170,14 +524,242 @@ where
                 &mut fold_watermark,
             )
             .await;
-        let fold_spawned_at_start = if preflight_folded {
-            false
+
+        // Open this turn's file snapshot after the fold: every return path closes it, including
+        // the error ones, so a later turn cannot silently capture into the wrong checkpoint.
+        let checkpoint = self.begin_checkpoint_guard(user_input);
+
+        let user_message = Message::user(user_input);
+        // A turn can be several model calls (tool loop, retries); the ledger wants the turn's
+        // total, so every reported usage is folded in later rather than kept per call.
+        let turn_started = std::time::Instant::now();
+        // A model that cannot call tools is not sent their schemas: every provider that accepts a
+        // `tools` array for a model without tool use charges for the tokens, and some reject the
+        // request outright.
+        let tools = self.turn_tools().await?;
+
+        debug!("Starting agent task loop for query: '{}'", user_input);
+
+        Ok(TurnSetup {
+            system_text,
+            state: TurnState {
+                messages,
+                user_message,
+                user_appended: false,
+                executed_tools: Vec::new(),
+                consecutive_failures: 0,
+                last_reasoning: None,
+                turn_usage: None,
+                loop_rounds: 0,
+                fold_watermark,
+                fold_policy,
+            },
+            fold_spawned_at_start,
+            turn_started,
+            replay_notice,
+            tools,
+            checkpoint,
+        })
+    }
+
+    /// One pass of the task loop: adopt a landed fold, re-ask the model, and either act on its tool
+    /// calls or conclude the turn. `Ok(None)` means the loop goes round again.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_round(
+        &self,
+        state: &mut TurnState,
+        tools: &[ToolDefinition],
+        system_text: &str,
+        fold_spawned_at_start: bool,
+        turn_started: std::time::Instant,
+        replay_notice: &Option<ReplayNotice>,
+        cancel_token: &CancellationToken,
+    ) -> Result<Option<TurnOutcome>, HarnessError> {
+        if cancel_token.is_cancelled() {
+            warn!("Task loop cancelled cooperatively");
+            return Err(HarnessError::Cancelled);
+        }
+
+        // A message that arrived while the previous batch of tools was running is taken here,
+        // after the tools have finished and before the model is asked again. This is the one place
+        // that deliberately waits: killing a tool the user did not ask to cancel would lose work,
+        // and the next model call is the first moment the message can be used.
+        self.deliver_queued_interrupts(state).await?;
+
+        let rebound = if state.loop_rounds > 0 {
+            self.try_rebind_completed_fold(
+                &mut state.messages,
+                &mut state.fold_watermark,
+                system_text,
+            )
+            .await
         } else {
-            self.spawn_fold_if_needed(&messages, &history, fold_policy)
+            false
         };
 
-        // 2.5 Open this turn's file snapshot. Every return path closes it, including the error
-        //    ones, so a later turn cannot silently capture into the wrong checkpoint.
+        let current_tokens = estimate_tokens(&state.messages).tokens;
+        // A fold that landed while this turn ran has just been adopted: the messages below are the
+        // folded transcript, so the smaller figure is a measurement of what will be sent, not a
+        // stale report the turn will contradict. Without the reset the gauge held its pre-fold
+        // high-water mark until the turn boundary, which read as "compaction did nothing".
+        self.report_context_tokens(current_tokens, rebound);
+
+        self.fold_if_over_threshold(state, system_text, current_tokens)
+            .await;
+
+        debug!(
+            "Invoking model completion with {} messages and {} tools",
+            state.messages.len(),
+            tools.len()
+        );
+        let options = CompletionOptions {
+            reasoning_effort: self.reasoning_effort,
+            ..Default::default()
+        };
+
+        // Retrying on transient / overloaded errors with backoff
+        let call = self
+            .complete_with_retry(state, tools, &options, cancel_token)
+            .await?;
+        let ModelCall {
+            mut response,
+            interrupted,
+            context_usage,
+            tools_before_call,
+        } = call;
+
+        // A rebound replaced `messages` with the folded transcript and dropped the usage of the
+        // prompt that was sent before the fold, so the gauge takes the honest size of what the turn
+        // will send next instead of holding the pre-fold high-water mark.
+        self.settle_model_call(
+            state,
+            &mut response,
+            context_usage,
+            tools_before_call,
+            system_text,
+        )
+        .await?;
+
+        if interrupted {
+            self.deliver_interrupted_reply(state, response).await?;
+            return Ok(None);
+        }
+
+        if let Some(ref r) = response.reasoning {
+            state.last_reasoning = Some(r.clone());
+        }
+
+        // If no tools requested, assistant concluded task
+        if response.tool_calls.is_empty() {
+            return self
+                .conclude_turn(
+                    state,
+                    &response,
+                    fold_spawned_at_start,
+                    turn_started,
+                    replay_notice.clone(),
+                )
+                .await;
+        }
+
+        self.dispatch_round_tools(state, response, system_text, cancel_token)
+            .await?;
+        Ok(None)
+    }
+
+    /// Append an assistant row that asked for tools, run them through the gate, then take any
+    /// steering queued while they ran.
+    async fn dispatch_round_tools(
+        &self,
+        state: &mut TurnState,
+        response: Message,
+        system_text: &str,
+        cancel_token: &CancellationToken,
+    ) -> Result<(), HarnessError> {
+        self.ensure_user_prompt(
+            &mut state.messages,
+            &state.user_message,
+            &mut state.user_appended,
+        )
+        .await?;
+
+        // Append assistant response with tool calls to conversation history
+        self.append(&response, false).await?;
+        state.messages.push(response.clone());
+
+        // Execute each requested tool call, in the order the model asked for them: consecutive
+        // read-only calls run together, and anything the human gate may touch stays serial (see
+        // `dispatch.rs` for what that costs and why the boundary is where it is).
+        {
+            let mut dispatch_state = DispatchState {
+                messages: &mut state.messages,
+                fold_watermark: &mut state.fold_watermark,
+                system_text,
+                executed_tools: &mut state.executed_tools,
+                consecutive_failures: &mut state.consecutive_failures,
+                cancel_token,
+            };
+            self.dispatch_tool_calls(response.tool_calls, &mut dispatch_state)
+                .await?;
+        }
+
+        // Check for mid-turn steering queued while tools were executing
+        self.deliver_pending_steers(state).await?;
+        state.loop_rounds = state.loop_rounds.saturating_add(1);
+        Ok(())
+    }
+
+    /// Replay the session's recent transcript and assemble the first request's vector.
+    ///
+    /// 1. Replay the session's recent transcript, bounded by `session.resume_max_messages`. Size
+    ///    reports a fold has retired are dropped here: they measure a prompt that is no longer
+    ///    sent, and every estimate taken from this vector — the gauge, the compaction threshold —
+    ///    would otherwise be the size of the folded transcript.
+    ///
+    /// 1.5 Hooks see the prompt before the model does; a refusal ends the turn unspent.
+    async fn open_turn(&self, user_input: &str) -> Result<OpenedTurn, HarnessError> {
+        let system_text = self.system_prompt(user_input).await?;
+        let (history, replay_notice) = self.load_history().await?;
+        let mut messages = Vec::with_capacity(history.len() + 3);
+        messages.push(Message::system(system_text.clone()));
+        messages.extend(self.replay_messages(&history));
+        messages.push(Message::user(user_input));
+        self.emit_hook_event(HookEvent::UserPromptSubmit, Some(user_input))
+            .await?;
+        Ok(OpenedTurn {
+            system_text,
+            history,
+            messages,
+            replay_notice,
+        })
+    }
+
+    /// Bound the context before the first request: preflight fold at the hard ceiling, otherwise
+    /// start the ordinary background fold. Returns whether a fold was spawned at turn start.
+    ///
+    /// Past the hard ceiling the request may be refused, so the fold is not left behind: wait for
+    /// it and continue on the bounded vector. Below it the ordinary background path runs.
+    async fn begin_fold(
+        &self,
+        messages: &mut Vec<Message>,
+        history: &[StoredMessage],
+        system_text: &str,
+        fold_policy: FoldPolicy,
+        fold_watermark: &mut Option<i64>,
+    ) -> bool {
+        let preflight_folded = self
+            .preflight_fold_if_needed(messages, history, system_text, fold_policy, fold_watermark)
+            .await;
+        if preflight_folded {
+            false
+        } else {
+            self.spawn_fold_if_needed(messages, history, fold_policy)
+        }
+    }
+
+    /// Open this turn's file snapshot. Every return path closes it, including the error ones, so a
+    /// later turn cannot silently capture into the wrong checkpoint.
+    fn begin_checkpoint_guard(&self, user_input: &str) -> super::CheckpointGuard<'_> {
         if let Some(controller) = self.checkpoints.as_ref() {
             controller.begin(
                 self.session
@@ -187,24 +769,18 @@ where
                 Some(user_input),
             );
         }
-        let _checkpoint_guard = super::CheckpointGuard {
+        super::CheckpointGuard {
             controller: self.checkpoints.as_deref(),
-        };
+        }
+    }
 
-        let user_message = Message::user(user_input);
-        let mut user_appended = false;
-
-        let mut consecutive_failures = 0;
-        let mut executed_tools = Vec::new();
-        let mut last_reasoning = None;
-        // A turn can be several model calls (tool loop, retries); the ledger wants the turn's
-        // total, so every reported usage is folded in here rather than kept per call.
-        let turn_started = std::time::Instant::now();
-        let mut turn_usage: Option<TokenUsage> = None;
-        // A model that cannot call tools is not sent their schemas: every provider that accepts a
-        // `tools` array for a model without tool use charges for the tokens, and some reject the
-        // request outright. The capability is resolved from the provider's own model, so this is
-        // the model the loop is about to ask.
+    /// The tools this turn may send: the registry surface minus the runtime toggles, and none at
+    /// all for a model that cannot call tools.
+    ///
+    /// Every provider that accepts a `tools` array for a model without tool use charges for the
+    /// tokens, and some reject the request outright. The capability is resolved from the
+    /// provider's own model, so this is the model the loop is about to ask.
+    async fn turn_tools(&self) -> Result<Vec<ToolDefinition>, HarnessError> {
         let capabilities = self.provider.capabilities();
         let mut tools = self.registry.list_tools().await?;
         // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) remove
@@ -220,426 +796,449 @@ where
             }
             tools.clear();
         }
+        Ok(tools)
+    }
 
-        debug!("Starting agent task loop for query: '{}'", user_input);
+    /// Publish the context gauge; `reset` says the transcript it measures was rebuilt mid-turn.
+    pub(super) fn report_context_tokens(&self, tokens_used: u32, reset: bool) {
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::ContextTokensUpdated { tokens_used, reset });
+        }
+    }
 
-        let mut loop_rounds: usize = 0;
-        // Unbounded task loop: runs as long as productive progress is made
-        loop {
-            if cancel_token.is_cancelled() {
-                warn!("Task loop cancelled cooperatively");
-                return Err(HarnessError::Cancelled);
-            }
-
-            // A message that arrived while the previous batch of tools was running is taken here,
-            // after the tools have finished and before the model is asked again. This is the one
-            // place that deliberately waits: killing a tool the user did not ask to cancel would
-            // lose work, and the next model call is the first moment the message can be used.
-            let pending_interrupts = self.interrupt.drain();
-            if !pending_interrupts.is_empty() {
-                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                    .await?;
-                let joined = pending_interrupts.join("\n\n");
-                let follow_up = Message::user(joined.clone());
-                self.append(&follow_up, false).await?;
-                messages.push(follow_up);
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::Interrupted {
-                        text: joined,
-                        reasoning: String::new(),
-                        partial: String::new(),
-                    });
-                }
-            }
-
-            let rebound = if loop_rounds > 0 {
-                self.try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
-                    .await
+    /// Fold the transcript when it is over the policy's bar, waiting for the fold at the ceiling.
+    async fn fold_if_over_threshold(
+        &self,
+        state: &mut TurnState,
+        system_text: &str,
+        current_tokens: u32,
+    ) {
+        if current_tokens as usize > state.fold_policy.threshold {
+            let urgent = state
+                .fold_policy
+                .ceiling
+                .is_some_and(|ceiling| current_tokens as usize > ceiling);
+            if urgent {
+                self.fold_now_from_stored(
+                    &mut state.messages,
+                    system_text,
+                    state.fold_policy,
+                    &mut state.fold_watermark,
+                )
+                .await;
             } else {
-                false
-            };
-
-            let current_tokens = estimate_tokens(&messages).tokens;
-            if let Some(ref observer) = self.observer {
-                observer(AgentEvent::ContextTokensUpdated {
-                    tokens_used: current_tokens,
-                    // A fold that landed while this turn ran has just been adopted: the messages
-                    // above are the folded transcript, so the smaller figure is a measurement of
-                    // what will be sent, not a stale report the turn will contradict. Without the
-                    // reset the gauge held its pre-fold high-water mark until the turn boundary,
-                    // which read as "compaction did nothing".
-                    reset: rebound,
-                });
-            }
-
-            if current_tokens as usize > fold_policy.threshold {
-                let urgent = fold_policy
-                    .ceiling
-                    .is_some_and(|ceiling| current_tokens as usize > ceiling);
-                if urgent {
-                    self.fold_now_from_stored(
-                        &mut messages,
-                        &system_text,
-                        fold_policy,
-                        &mut fold_watermark,
-                    )
+                self.spawn_fold_from_stored(state.fold_policy, &mut state.fold_watermark)
                     .await;
-                } else {
-                    self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
-                        .await;
-                }
             }
+        }
+    }
 
-            debug!(
-                "Invoking model completion with {} messages and {} tools",
-                messages.len(),
-                tools.len()
-            );
-            let options = CompletionOptions {
-                reasoning_effort: self.reasoning_effort,
-                ..Default::default()
-            };
+    /// Take a message that arrived while tools were running, at the one point the loop
+    /// deliberately waits for it: after the tools finished, before the model is asked again.
+    async fn deliver_queued_interrupts(&self, state: &mut TurnState) -> Result<(), HarnessError> {
+        let pending_interrupts = self.interrupt.drain();
+        if pending_interrupts.is_empty() {
+            return Ok(());
+        }
+        self.ensure_user_prompt(
+            &mut state.messages,
+            &state.user_message,
+            &mut state.user_appended,
+        )
+        .await?;
+        let joined = pending_interrupts.join("\n\n");
+        let follow_up = Message::user(joined.clone());
+        self.append(&follow_up, false).await?;
+        state.messages.push(follow_up);
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::Interrupted {
+                text: joined,
+                reasoning: String::new(),
+                partial: String::new(),
+            });
+        }
+        Ok(())
+    }
 
-            // Retrying on transient / overloaded errors with backoff
-            let max_retries = MODEL_RETRY_LIMIT;
-            let tools_before_call = executed_tools.len();
-            let mut response = None;
-            let mut interrupted = false;
-            let mut context_usage = None;
-            for attempt in 0..=max_retries {
-                match self
-                    .stream_completion(
-                        &messages,
-                        &tools,
-                        &options,
-                        &mut executed_tools,
-                        &cancel_token,
-                    )
-                    .await
+    /// Take the steering queue, if anything is waiting, and render it as the out-of-band message
+    /// that is appended at this position.
+    fn drain_steers(&self) -> Option<(String, Message)> {
+        let pending_steers: Vec<String> = {
+            let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
+            sq.drain(..).collect()
+        };
+        if pending_steers.is_empty() {
+            return None;
+        }
+        let joined_steer = pending_steers.join("\n\n");
+        let steer_prompt = format!(
+            "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
+            joined_steer
+        );
+        Some((joined_steer, Message::user(steer_prompt)))
+    }
+
+    /// Deliver steering that was queued while the batch of tools was executing.
+    async fn deliver_pending_steers(&self, state: &mut TurnState) -> Result<(), HarnessError> {
+        let Some((joined_steer, steer_msg)) = self.drain_steers() else {
+            return Ok(());
+        };
+        self.append(&steer_msg, false).await?;
+        state.messages.push(steer_msg);
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::Steered { text: joined_steer });
+        }
+        Ok(())
+    }
+
+    /// Keep the prose a soft interrupt cut short, then deliver the message that stopped the call.
+    async fn deliver_interrupted_reply(
+        &self,
+        state: &mut TurnState,
+        mut response: Message,
+    ) -> Result<(), HarnessError> {
+        // The prompt has to precede the answer it produced, even though the normal path appends it
+        // only after the first response.
+        let partial_content = response.content.clone().unwrap_or_default();
+        let partial_reasoning = response.reasoning.clone().unwrap_or_default();
+        self.ensure_user_prompt(
+            &mut state.messages,
+            &state.user_message,
+            &mut state.user_appended,
+        )
+        .await?;
+        // Incomplete tool-call deltas were never assembled into a `Message`, so nothing invalid is
+        // stored. A call the provider had already executed is kept on `executed_tools` and
+        // reported as usual.
+        if response.content.is_some() || response.reasoning.is_some() {
+            if response.content.is_some() {
+                response.content = Some(format!("{partial_content}{INTERRUPTED_MARKER}"));
+            }
+            self.append(&response, false).await?;
+            state.messages.push(response.clone());
+        }
+        let pending = self.interrupt.drain();
+        if pending.is_empty() {
+            // The token was cancelled just as the call ended and the message raced ahead to the
+            // post-call drain. Nothing to deliver here.
+            return Ok(());
+        }
+        let joined = pending.join("\n\n");
+        let follow_up = Message::user(joined.clone());
+        self.append(&follow_up, false).await?;
+        state.messages.push(follow_up);
+        if let Some(ref observer) = self.observer {
+            observer(AgentEvent::Interrupted {
+                text: joined,
+                reasoning: partial_reasoning,
+                partial: response.content.clone().unwrap_or_default(),
+            });
+        }
+        state.loop_rounds = state.loop_rounds.saturating_add(1);
+        Ok(())
+    }
+
+    /// One model call with retries on transient / overloaded errors, backing off between attempts.
+    ///
+    /// The retry conditions are deliberately narrow: a call is only re-sent when nothing in the
+    /// turn's tool history changed, so a provider that had already executed a call is never asked
+    /// to repeat work this loop cannot account for.
+    async fn complete_with_retry(
+        &self,
+        state: &mut TurnState,
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+        cancel_token: &CancellationToken,
+    ) -> Result<ModelCall, HarnessError> {
+        let max_retries = MODEL_RETRY_LIMIT;
+        let tools_before_call = state.executed_tools.len();
+        let mut response = None;
+        let mut interrupted = false;
+        let mut context_usage = None;
+        for attempt in 0..=max_retries {
+            match self
+                .stream_completion(
+                    &state.messages,
+                    tools,
+                    options,
+                    &mut state.executed_tools,
+                    cancel_token,
+                )
+                .await
+            {
+                Ok(streamed) => {
+                    interrupted = streamed.interrupted;
+                    context_usage = streamed.context_usage;
+                    response = Some(streamed.message);
+                    break;
+                }
+                Err(e)
+                    if e.is_retryable()
+                        && attempt < max_retries
+                        && state.executed_tools.len() == tools_before_call =>
                 {
-                    Ok(streamed) => {
-                        interrupted = streamed.interrupted;
-                        context_usage = streamed.context_usage;
-                        response = Some(streamed.message);
-                        break;
-                    }
-                    Err(e)
-                        if e.is_retryable()
-                            && attempt < max_retries
-                            && executed_tools.len() == tools_before_call =>
-                    {
-                        let delay = retry_delay_with_jitter(&e, attempt);
-                        let delay_secs = (delay.as_secs_f64()).ceil() as u64;
-                        warn!(
-                            "Model request failed ({}), retrying attempt {}/{} in {:.2}s...",
+                    let delay = retry_delay_with_jitter(&e, attempt);
+                    let delay_secs = (delay.as_secs_f64()).ceil() as u64;
+                    warn!(
+                        "Model request failed ({}), retrying attempt {}/{} in {:.2}s...",
+                        e,
+                        attempt + 1,
+                        max_retries,
+                        delay.as_secs_f64()
+                    );
+                    if let Some(ref observer) = self.observer {
+                        observer(AgentEvent::ReasoningDelta(format!(
+                            "\n[Model busy/overloaded: {}. Retrying in {}s (attempt {}/{})]…\n",
                             e,
+                            delay_secs,
                             attempt + 1,
-                            max_retries,
-                            delay.as_secs_f64()
-                        );
-                        if let Some(ref observer) = self.observer {
-                            observer(AgentEvent::ReasoningDelta(format!(
-                                "\n[Model busy/overloaded: {}. Retrying in {}s (attempt {}/{})]…\n",
-                                e,
-                                delay_secs,
-                                attempt + 1,
-                                max_retries
-                            )));
-                        }
-                        tokio::select! {
-                            _ = tokio::time::sleep(delay) => {},
-                            _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
-                        }
+                            max_retries
+                        )));
                     }
-                    Err(e) => {
-                        // A call the provider had already executed is still real work: write its
-                        // calls and results before the error unwinds the turn, so a stop/continue
-                        // does not lose the steps that did run.
-                        if !executed_tools[tools_before_call..].is_empty() {
-                            self.ensure_user_prompt(
-                                &mut messages,
-                                &user_message,
-                                &mut user_appended,
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {},
+                        _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
+                    }
+                }
+                Err(e) => {
+                    // A call the provider had already executed is still real work: write its
+                    // calls and results before the error unwinds the turn, so a stop/continue
+                    // does not lose the steps that did run.
+                    if !state.executed_tools[tools_before_call..].is_empty() {
+                        self.ensure_user_prompt(
+                            &mut state.messages,
+                            &state.user_message,
+                            &mut state.user_appended,
+                        )
+                        .await
+                        .ok();
+                        if let Err(persist_error) = self
+                            .persist_provider_tools(
+                                &mut state.messages,
+                                &state.executed_tools[tools_before_call..],
                             )
                             .await
-                            .ok();
-                            if let Err(persist_error) = self
-                                .persist_provider_tools(
-                                    &mut messages,
-                                    &executed_tools[tools_before_call..],
-                                )
-                                .await
-                            {
-                                warn!("Failed to persist provider-executed tools: {persist_error}");
-                            }
+                        {
+                            warn!("Failed to persist provider-executed tools: {persist_error}");
                         }
-                        return Err(e);
                     }
+                    return Err(e);
                 }
             }
-
-            let mut response = response.ok_or_else(|| HarnessError::ProviderError {
-                provider: self.provider.provider_id().to_string(),
-                message: "Model request failed after retries".to_string(),
-            })?;
-
-            let rebound = self
-                .try_rebind_completed_fold(&mut messages, &mut fold_watermark, &system_text)
-                .await;
-
-            if let Some(ref usage) = response.usage {
-                let accumulated = turn_usage.get_or_insert_with(TokenUsage::default);
-                accumulated.prompt_tokens = accumulated
-                    .prompt_tokens
-                    .saturating_add(usage.prompt_tokens);
-                accumulated.completion_tokens = accumulated
-                    .completion_tokens
-                    .saturating_add(usage.completion_tokens);
-                accumulated.total_tokens = accumulated
-                    .prompt_tokens
-                    .saturating_add(accumulated.completion_tokens);
-                // Cache reads are summed like the rest: the ledger prices a turn's cache hits, and
-                // a turn is several model calls.
-                accumulated.cached_tokens = accumulated
-                    .cached_tokens
-                    .saturating_add(usage.cached_tokens);
-            }
-
-            if rebound {
-                response.usage = None;
-                context_usage = None;
-            } else if let Some(context) = context_usage.as_ref() {
-                // The ledger already took the call's cumulative total above. The row keeps the
-                // newest per-step usage: replay and compaction measure a prompt with it, and a
-                // session-cumulative figure there would inflate every later estimate.
-                response.usage = Some(context.clone());
-            }
-
-            // The provider ran these tools inside its own loop (OpenCode). They are not on
-            // `response.tool_calls`, so the dispatch below will never see them; persist the calls
-            // and results now. Otherwise the next request, and a resumed session, replay only the
-            // final prose and the model cannot tell what it already ran.
-            if response.tool_calls.is_empty() && !executed_tools[tools_before_call..].is_empty() {
-                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                    .await?;
-                self.persist_provider_tools(&mut messages, &executed_tools[tools_before_call..])
-                    .await?;
-            }
-
-            let actual_tokens = match context_usage {
-                Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
-                None => match &response.usage {
-                    Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
-                    None => estimate_tokens(&messages).tokens,
-                },
-            };
-            if let Some(ref observer) = self.observer {
-                observer(AgentEvent::ContextTokensUpdated {
-                    tokens_used: actual_tokens,
-                    // A rebound replaced `messages` with the folded transcript and dropped the
-                    // usage of the prompt that was sent before the fold, so the figure above is
-                    // the honest size of what the turn will send next. Let the gauge take it now
-                    // instead of holding the pre-fold high-water mark to the end of the turn.
-                    reset: rebound,
-                });
-            }
-
-            if interrupted {
-                // The prompt has to precede the answer it produced, even though the normal path
-                // appends it only after the first response.
-                let partial_content = response.content.clone().unwrap_or_default();
-                let partial_reasoning = response.reasoning.clone().unwrap_or_default();
-                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                    .await?;
-                // Incomplete tool-call deltas were never assembled into a `Message`, so nothing
-                // invalid is stored. A call the provider had already executed is kept on
-                // `executed_tools` and reported as usual.
-                if response.content.is_some() || response.reasoning.is_some() {
-                    if response.content.is_some() {
-                        response.content = Some(format!("{partial_content}{INTERRUPTED_MARKER}"));
-                    }
-                    self.append(&response, false).await?;
-                    messages.push(response.clone());
-                }
-                let pending = self.interrupt.drain();
-                if pending.is_empty() {
-                    // The token was cancelled just as the call ended and the message raced ahead
-                    // to the post-call drain. Nothing to deliver here.
-                    continue;
-                }
-                let joined = pending.join("\n\n");
-                let follow_up = Message::user(joined.clone());
-                self.append(&follow_up, false).await?;
-                messages.push(follow_up);
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::Interrupted {
-                        text: joined,
-                        reasoning: partial_reasoning,
-                        partial: response.content.clone().unwrap_or_default(),
-                    });
-                }
-                loop_rounds = loop_rounds.saturating_add(1);
-                continue;
-            }
-
-            if let Some(ref r) = response.reasoning {
-                last_reasoning = Some(r.clone());
-            }
-
-            // If no tools requested, assistant concluded task
-            if response.tool_calls.is_empty() {
-                // A message can land in the instant between the last chunk and this branch. The
-                // answer is complete, but the user has moved on: treat the answer as an interim
-                // one and ask again with their message, exactly as an interrupted call does.
-                let pending_interrupts = self.interrupt.drain();
-                if !pending_interrupts.is_empty() {
-                    let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
-                    if !reply_text.is_empty() {
-                        let mut interim = response.clone();
-                        interim.content = Some(reply_text.clone());
-                        self.append(&interim, false).await?;
-                        messages.push(interim);
-                    }
-                    self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                        .await?;
-                    let joined = pending_interrupts.join("\n\n");
-                    let follow_up = Message::user(joined.clone());
-                    self.append(&follow_up, false).await?;
-                    messages.push(follow_up);
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::Interrupted {
-                            text: joined,
-                            reasoning: response.reasoning.clone().unwrap_or_default(),
-                            partial: reply_text,
-                        });
-                    }
-                    loop_rounds = loop_rounds.saturating_add(1);
-                    continue;
-                }
-
-                let pending_steers: Vec<String> = {
-                    let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
-                    sq.drain(..).collect()
-                };
-                if !pending_steers.is_empty() {
-                    let joined_steer = pending_steers.join("\n\n");
-                    let steer_prompt = format!(
-                        "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
-                        joined_steer
-                    );
-                    let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
-                    if !reply_text.is_empty() {
-                        let mut interim_resp = response.clone();
-                        interim_resp.content = Some(reply_text);
-                        self.append(&interim_resp, false).await?;
-                        messages.push(interim_resp);
-                    }
-                    self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                        .await?;
-                    let steer_msg = Message::user(steer_prompt);
-                    self.append(&steer_msg, false).await?;
-                    messages.push(steer_msg);
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::Steered { text: joined_steer });
-                    }
-                    continue;
-                }
-
-                debug!("Task successfully completed without further tool calls");
-                let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
-                if reply_text.is_empty() && last_reasoning.is_none() && executed_tools.is_empty() {
-                    return Err(HarnessError::ProviderError {
-                        provider: self.provider.provider_id().to_string(),
-                        message: "Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string(),
-                    });
-                }
-                let final_reply = if reply_text.is_empty() {
-                    if !executed_tools.is_empty() {
-                        String::new()
-                    } else {
-                        // A neutral placeholder: `Ctrl+O` is a CLI binding the core cannot know
-                        // about, and this string is appended to the transcript. The CLI adds its
-                        // own hint when it renders the reply.
-                        crate::types::NO_TEXT_RESPONSE.to_string()
-                    }
-                } else {
-                    reply_text
-                };
-
-                self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                    .await?;
-
-                let mut final_response = response.clone();
-                final_response.content = Some(final_reply.clone());
-                self.append(&final_response, false).await?;
-                self.emit_hook_event(HookEvent::Stop, Some(&final_reply))
-                    .await?;
-                // The saver reads the turn as the user saw it, reply included. The transcript is
-                // dropped when this function returns, so appending the final message here changes
-                // nothing for the next turn (which replays from the session store).
-                messages.push(final_response);
-                // The reply is final: anything the saver does now is off the critical path.
-                self.spawn_background_saver(&messages);
-                // The turn just grew the transcript, so look at the fold bar before returning: a
-                // session that only folded on the *next* prompt reported compaction as something
-                // the user had to come back for.
-                if !fold_spawned_at_start
-                    && estimate_tokens(&messages).tokens as usize > fold_policy.threshold
-                {
-                    self.spawn_fold_from_stored(fold_policy, &mut fold_watermark)
-                        .await;
-                }
-                return Ok(TurnOutcome {
-                    reply: final_reply,
-                    reasoning: last_reasoning,
-                    tool_calls: executed_tools,
-                    replayed: replay_notice,
-                    usage: turn_usage,
-                    duration_ms: turn_started.elapsed().as_millis() as u64,
-                });
-            }
-
-            self.ensure_user_prompt(&mut messages, &user_message, &mut user_appended)
-                .await?;
-
-            // Append assistant response with tool calls to conversation history
-            self.append(&response, false).await?;
-            messages.push(response.clone());
-
-            // Execute each requested tool call, in the order the model asked for them: consecutive
-            // read-only calls run together, and anything the human gate may touch stays serial
-            // (see `dispatch.rs` for what that costs and why the boundary is where it is).
-            let mut dispatch_state = DispatchState {
-                messages: &mut messages,
-                fold_watermark: &mut fold_watermark,
-                system_text: &system_text,
-                executed_tools: &mut executed_tools,
-                consecutive_failures: &mut consecutive_failures,
-                cancel_token: &cancel_token,
-            };
-            self.dispatch_tool_calls(response.tool_calls, &mut dispatch_state)
-                .await?;
-
-            // Check for mid-turn steering queued while tools were executing
-            let pending_steers: Vec<String> = {
-                let mut sq = self.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
-                sq.drain(..).collect()
-            };
-            if !pending_steers.is_empty() {
-                let joined_steer = pending_steers.join("\n\n");
-                let steer_prompt = format!(
-                    "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]\n{}\n[/OUT-OF-BAND USER MESSAGE]",
-                    joined_steer
-                );
-                let steer_msg = Message::user(steer_prompt);
-                self.append(&steer_msg, false).await?;
-                messages.push(steer_msg);
-                if let Some(ref observer) = self.observer {
-                    observer(AgentEvent::Steered { text: joined_steer });
-                }
-            }
-            loop_rounds = loop_rounds.saturating_add(1);
         }
+
+        let response = response.ok_or_else(|| HarnessError::ProviderError {
+            provider: self.provider.provider_id().to_string(),
+            message: "Model request failed after retries".to_string(),
+        })?;
+        Ok(ModelCall {
+            response,
+            interrupted,
+            context_usage,
+            tools_before_call,
+        })
+    }
+
+    /// Book-keep a model call's result before the turn acts on it: adopt a fold that landed
+    /// mid-call, fold the call's usage into the turn's ledger, keep the newest per-step usage on
+    /// the row, persist provider-executed tools, and update the gauge.
+    async fn settle_model_call(
+        &self,
+        state: &mut TurnState,
+        response: &mut Message,
+        mut context_usage: Option<TokenUsage>,
+        tools_before_call: usize,
+        system_text: &str,
+    ) -> Result<(), HarnessError> {
+        let rebound = self
+            .try_rebind_completed_fold(&mut state.messages, &mut state.fold_watermark, system_text)
+            .await;
+
+        if let Some(ref usage) = response.usage {
+            let accumulated = state.turn_usage.get_or_insert_with(TokenUsage::default);
+            accumulated.prompt_tokens = accumulated
+                .prompt_tokens
+                .saturating_add(usage.prompt_tokens);
+            accumulated.completion_tokens = accumulated
+                .completion_tokens
+                .saturating_add(usage.completion_tokens);
+            accumulated.total_tokens = accumulated
+                .prompt_tokens
+                .saturating_add(accumulated.completion_tokens);
+            // Cache reads are summed like the rest: the ledger prices a turn's cache hits, and a
+            // turn is several model calls.
+            accumulated.cached_tokens = accumulated
+                .cached_tokens
+                .saturating_add(usage.cached_tokens);
+        }
+
+        if rebound {
+            response.usage = None;
+            context_usage = None;
+        } else if let Some(context) = context_usage.as_ref() {
+            // The ledger already took the call's cumulative total above. The row keeps the newest
+            // per-step usage: replay and compaction measure a prompt with it, and a
+            // session-cumulative figure there would inflate every later estimate.
+            response.usage = Some(context.clone());
+        }
+
+        // The provider ran these tools inside its own loop (OpenCode). They are not on
+        // `response.tool_calls`, so the dispatch will never see them; persist the calls and
+        // results now. Otherwise the next request, and a resumed session, replay only the final
+        // prose and the model cannot tell what it already ran.
+        if response.tool_calls.is_empty() && !state.executed_tools[tools_before_call..].is_empty() {
+            self.ensure_user_prompt(
+                &mut state.messages,
+                &state.user_message,
+                &mut state.user_appended,
+            )
+            .await?;
+            self.persist_provider_tools(
+                &mut state.messages,
+                &state.executed_tools[tools_before_call..],
+            )
+            .await?;
+        }
+
+        let actual_tokens = match context_usage {
+            Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
+            None => match &response.usage {
+                Some(usage) => usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                None => estimate_tokens(&state.messages).tokens,
+            },
+        };
+        // A rebound replaced `messages` with the folded transcript and dropped the usage of the
+        // prompt that was sent before the fold, so the figure above is the honest size of what the
+        // turn will send next. Let the gauge take it now instead of holding the pre-fold
+        // high-water mark to the end of the turn.
+        self.report_context_tokens(actual_tokens, rebound);
+        Ok(())
+    }
+
+    /// The reply-side of the loop: a tool-free answer concludes the turn unless a message or a
+    /// steer arrived first. `Ok(None)` asks the loop to go round again.
+    async fn conclude_turn(
+        &self,
+        state: &mut TurnState,
+        response: &Message,
+        fold_spawned_at_start: bool,
+        turn_started: std::time::Instant,
+        replay_notice: Option<ReplayNotice>,
+    ) -> Result<Option<TurnOutcome>, HarnessError> {
+        // A message can land in the instant between the last chunk and this branch. The answer is
+        // complete, but the user has moved on: treat the answer as an interim one and ask again
+        // with their message, exactly as an interrupted call does.
+        let pending_interrupts = self.interrupt.drain();
+        if !pending_interrupts.is_empty() {
+            let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+            if !reply_text.is_empty() {
+                let mut interim = response.clone();
+                interim.content = Some(reply_text.clone());
+                self.append(&interim, false).await?;
+                state.messages.push(interim);
+            }
+            self.ensure_user_prompt(
+                &mut state.messages,
+                &state.user_message,
+                &mut state.user_appended,
+            )
+            .await?;
+            let joined = pending_interrupts.join("\n\n");
+            let follow_up = Message::user(joined.clone());
+            self.append(&follow_up, false).await?;
+            state.messages.push(follow_up);
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::Interrupted {
+                    text: joined,
+                    reasoning: response.reasoning.clone().unwrap_or_default(),
+                    partial: reply_text,
+                });
+            }
+            state.loop_rounds = state.loop_rounds.saturating_add(1);
+            return Ok(None);
+        }
+
+        if let Some((joined_steer, steer_msg)) = self.drain_steers() {
+            let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+            if !reply_text.is_empty() {
+                let mut interim_resp = response.clone();
+                interim_resp.content = Some(reply_text);
+                self.append(&interim_resp, false).await?;
+                state.messages.push(interim_resp);
+            }
+            self.ensure_user_prompt(
+                &mut state.messages,
+                &state.user_message,
+                &mut state.user_appended,
+            )
+            .await?;
+            self.append(&steer_msg, false).await?;
+            state.messages.push(steer_msg);
+            if let Some(ref observer) = self.observer {
+                observer(AgentEvent::Steered { text: joined_steer });
+            }
+            return Ok(None);
+        }
+
+        debug!("Task successfully completed without further tool calls");
+        let reply_text = response.content.as_deref().unwrap_or("").trim().to_string();
+        if reply_text.is_empty()
+            && state.last_reasoning.is_none()
+            && state.executed_tools.is_empty()
+        {
+            return Err(HarnessError::ProviderError {
+                provider: self.provider.provider_id().to_string(),
+                message: "Model returned an empty response. The model may be temporarily overloaded or unavailable.".to_string(),
+            });
+        }
+        let final_reply = if reply_text.is_empty() {
+            if !state.executed_tools.is_empty() {
+                String::new()
+            } else {
+                // A neutral placeholder: `Ctrl+O` is a CLI binding the core cannot know about, and
+                // this string is appended to the transcript. The CLI adds its own hint when it
+                // renders the reply.
+                crate::types::NO_TEXT_RESPONSE.to_string()
+            }
+        } else {
+            reply_text
+        };
+
+        self.ensure_user_prompt(
+            &mut state.messages,
+            &state.user_message,
+            &mut state.user_appended,
+        )
+        .await?;
+
+        let mut final_response = response.clone();
+        final_response.content = Some(final_reply.clone());
+        self.append(&final_response, false).await?;
+        self.emit_hook_event(HookEvent::Stop, Some(&final_reply))
+            .await?;
+        // The saver reads the turn as the user saw it, reply included. The transcript is dropped
+        // when this function returns, so appending the final message here changes nothing for the
+        // next turn (which replays from the session store).
+        state.messages.push(final_response);
+        // The reply is final: anything the saver does now is off the critical path.
+        self.spawn_background_saver(&state.messages);
+        // The turn just grew the transcript, so look at the fold bar before returning: a session
+        // that only folded on the *next* prompt reported compaction as something the user had to
+        // come back for.
+        if !fold_spawned_at_start
+            && estimate_tokens(&state.messages).tokens as usize > state.fold_policy.threshold
+        {
+            self.spawn_fold_from_stored(state.fold_policy, &mut state.fold_watermark)
+                .await;
+        }
+        Ok(Some(TurnOutcome {
+            reply: final_reply,
+            reasoning: state.last_reasoning.clone(),
+            tool_calls: state.executed_tools.clone(),
+            replayed: replay_notice,
+            usage: state.turn_usage.clone(),
+            duration_ms: turn_started.elapsed().as_millis() as u64,
+        }))
     }
 
     /// Persist the original prompt, and make sure the in-memory request still carries it.
@@ -747,28 +1346,65 @@ where
             }
         };
 
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut usage = None;
-        // The newest per-step usage. OpenCode's cumulative `Completed` usage must not overwrite
-        // it, or the post-call gauge update jumps past the window.
-        let mut context_usage = None;
-        let mut finish_reason: Option<String> = None;
-        // Tool-call fragments arrive keyed by the index the provider assigned them.
-        let mut calls: Vec<(usize, ToolCall)> = Vec::new();
-        let mut interrupted = false;
+        let mut acc = StreamAccumulator::default();
+        match self
+            .consume_stream(
+                &mut stream,
+                &mut acc,
+                executed_tools,
+                tools_before,
+                cancel_token,
+                &call_token,
+            )
+            .await?
+        {
+            StreamEnd::Ended => {}
+            // A tool call is only usable once its arguments are complete; fragments collected so
+            // far describe a request the provider never finished. Drop them and keep the prose.
+            StreamEnd::Interrupted => return Ok(acc.into_interrupted()),
+            StreamEnd::Fallback => {
+                return self
+                    .buffered_completion(messages, tools, options, cancel_token, &call_token)
+                    .await;
+            }
+            StreamEnd::Cancelled => return Err(HarnessError::Cancelled),
+        }
 
+        let tool_calls = acc.assemble_tool_calls(self.provider.provider_id())?;
+
+        if acc.content.trim().is_empty()
+            && tool_calls.is_empty()
+            && executed_tools.len() == tools_before
+        {
+            return self
+                .empty_stream_reply(acc, messages, tools, options, cancel_token, &call_token)
+                .await;
+        }
+
+        Ok(acc.into_streamed(tool_calls))
+    }
+
+    /// Drain one model stream into `acc`, forwarding every event to the observer as it arrives.
+    ///
+    /// A stream that errors before producing anything is not the turn's failure: the caller gets
+    /// `Fallback` and asks the buffered path instead.
+    async fn consume_stream(
+        &self,
+        stream: &mut futures_util::stream::BoxStream<'static, Result<StreamEvent, HarnessError>>,
+        acc: &mut StreamAccumulator,
+        executed_tools: &mut Vec<TurnToolCall>,
+        tools_before: usize,
+        cancel_token: &CancellationToken,
+        call_token: &CancellationToken,
+    ) -> Result<StreamEnd, HarnessError> {
         loop {
             let event = tokio::select! {
                 biased;
-                _ = cancel_token.cancelled() => return Err(HarnessError::Cancelled),
-                _ = call_token.cancelled() => {
-                    interrupted = true;
-                    break;
-                }
+                _ = cancel_token.cancelled() => return Ok(StreamEnd::Cancelled),
+                _ = call_token.cancelled() => return Ok(StreamEnd::Interrupted),
                 ev = stream.next() => match ev {
                     Some(event) => event,
-                    None => break,
+                    None => return Ok(StreamEnd::Ended),
                 }
             };
 
@@ -777,246 +1413,97 @@ where
                 Err(error) => {
                     // Nothing arrived, or only reasoning arrived without content/tools:
                     // the buffered path or a clean retry can recover without failing the turn.
-                    if content.is_empty()
-                        && calls.is_empty()
+                    if acc.content.is_empty()
+                        && acc.calls.is_empty()
                         && executed_tools.len() == tools_before
                     {
                         debug!(
                             "Stream failed before any content/tool output ({}), retrying buffered",
                             error
                         );
-                        return self
-                            .buffered_completion(
-                                messages,
-                                tools,
-                                options,
-                                cancel_token,
-                                &call_token,
-                            )
-                            .await;
+                        return Ok(StreamEnd::Fallback);
                     }
                     return Err(error);
                 }
             };
 
-            match event {
-                StreamEvent::ReasoningDelta(text) => {
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::ReasoningDelta(text.clone()));
-                    }
-                    reasoning.push_str(&text);
-                }
-                StreamEvent::ContentDelta(text) => content.push_str(&text),
-                StreamEvent::ToolExecuting { name, arguments } => {
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::ToolExecuting {
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        });
-                    }
-                    executed_tools.push(TurnToolCall {
-                        name,
-                        arguments,
-                        output: String::new(),
-                        is_error: false,
-                        denied: false,
-                    });
-                }
-                StreamEvent::ToolExecuted {
-                    name,
-                    output,
-                    is_error,
-                } => {
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::ToolExecuted {
-                            name: name.clone(),
-                            output: output.clone(),
-                            is_error,
-                        });
-                    }
-                    if let Some(call) = executed_tools
-                        .iter_mut()
-                        .rev()
-                        .find(|c| c.name == name && c.output.is_empty())
-                    {
-                        call.output = output;
-                        call.is_error = is_error;
-                    } else {
-                        executed_tools.push(TurnToolCall {
-                            name,
-                            arguments: serde_json::Value::Null,
-                            output,
-                            is_error,
-                            denied: false,
-                        });
-                    }
-                }
-                StreamEvent::ToolCallDelta {
-                    index,
-                    id,
-                    name,
-                    arguments_delta,
-                    signature,
-                } => {
-                    let slot = match calls.iter_mut().find(|(i, _)| *i == index) {
-                        Some((_, call)) => call,
-                        None => {
-                            calls.push((
-                                index,
-                                ToolCall {
-                                    id: String::new(),
-                                    name: String::new(),
-                                    arguments: serde_json::Value::Null,
-                                    signature: None,
-                                },
-                            ));
-                            let last_idx = calls.len() - 1;
-                            &mut calls[last_idx].1
-                        }
-                    };
-                    if let Some(id) = id {
-                        slot.id = id;
-                    }
-                    if let Some(name) = name {
-                        slot.name = name;
-                    }
-                    if let Some(signature) = signature {
-                        slot.signature = Some(signature);
-                    }
-                    if let Some(fragment) = arguments_delta {
-                        // Arguments stream as JSON text, so each fragment is stitched onto the raw
-                        // string and parsed once at the end.
-                        let mut raw = match slot.arguments.take() {
-                            serde_json::Value::String(raw) => raw,
-                            _ => String::new(),
-                        };
-                        raw.push_str(&fragment);
-                        slot.arguments = serde_json::Value::String(raw);
-                    }
-                }
-                StreamEvent::Usage(token_usage) => {
-                    let actual_tokens = token_usage
-                        .prompt_tokens
-                        .saturating_add(token_usage.completion_tokens);
-                    context_usage = Some(token_usage.clone());
-                    usage = Some(token_usage);
-                    if let Some(ref observer) = self.observer {
-                        observer(AgentEvent::ContextTokensUpdated {
-                            tokens_used: actual_tokens,
-                            reset: false,
-                        });
-                    }
-                }
-                StreamEvent::Completed {
-                    usage: event_usage,
-                    finish_reason: event_finish,
-                } => {
-                    if event_usage.is_some() {
-                        usage = event_usage;
-                    }
-                    // Keep the last reason that names one: the usage frame that closes a Code
-                    // Assist stream carries none and must not erase `MAX_TOKENS`.
-                    if event_finish.is_some() {
-                        finish_reason = event_finish;
-                    }
-                }
-            }
+            acc.apply(self.observer.as_ref(), event, executed_tools);
         }
+    }
 
-        if interrupted {
-            // A tool call is only usable once its arguments are complete; fragments collected so
-            // far describe a request the provider never finished. Drop them and keep the prose.
-            let content = crate::text::strip_dsml_artifacts(&content);
-            let message = Message {
-                role: Role::Assistant,
-                content: (!content.trim().is_empty()).then_some(content),
-                reasoning: (!reasoning.trim().is_empty()).then_some(reasoning),
-                tool_calls: Vec::new(),
-                tool_result: None,
-                usage,
-            };
-            return Ok(Streamed {
-                message,
-                interrupted: true,
+    /// The reply for a stream that produced no content and no calls of its own.
+    ///
+    /// A usage or finish frame means the stream ran to the end and the model answered with
+    /// nothing; an output-cap finish is diagnosed rather than retried. Only a stream with neither
+    /// frame is worth re-asking through the buffered path.
+    async fn empty_stream_reply(
+        &self,
+        acc: StreamAccumulator,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+        cancel_token: &CancellationToken,
+        call_token: &CancellationToken,
+    ) -> Result<Streamed, HarnessError> {
+        let StreamAccumulator {
+            reasoning,
+            usage,
+            finish_reason,
+            context_usage,
+            ..
+        } = acc;
+
+        // A reply cut off by the output cap is not the transient empty shape the buffered retry
+        // exists for: the identical request with the identical cap returns the identical nothing,
+        // and re-sending it doubles the wait for a diagnosis. Reproduced against Code Assist:
+        // `maxOutputTokens=4096` on a long tool-heavy turn spent 3,932 tokens thinking and
+        // returned one `MAX_TOKENS` frame with no text.
+        if is_output_limit(finish_reason.as_deref()) {
+            return Err(HarnessError::output_limit_exhausted(
+                self.provider.provider_id(),
+                options.max_tokens,
+            ));
+        }
+        // A usage or finish frame means the stream ran to the end and the model answered with
+        // nothing. Posting the identical request again through the buffered path asks the same
+        // question at the same moment; the turn loop's backed-off retry is the attempt that can
+        // actually differ, and it no longer has to wait out a duplicate first.
+        if usage.is_some() || finish_reason.is_some() {
+            if reasoning.is_empty() {
+                return Err(empty_answer_error(self.provider.provider_id()));
+            }
+            return Ok(Streamed::done_with_context(
+                Message {
+                    role: Role::Assistant,
+                    content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
+                    reasoning: Some(reasoning),
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    usage,
+                },
                 context_usage,
-            });
+            ));
         }
-
-        calls.sort_by_key(|(index, _)| *index);
-        // A tool call whose arguments are not valid JSON was never finished by the provider — the
-        // stream was cut, or the output cap landed mid-object. It must not be run with `{}`: a
-        // truncated `read_file` then reports a misleading missing argument, and a truncated
-        // `write_file`/`patch` would apply the wrong edit. Remember it, finish assembling, and
-        // fail the call so the turn loop's retry asks again.
-        let mut incomplete: Option<(String, String)> = None;
-        let tool_calls: Vec<ToolCall> = calls
-            .into_iter()
-            .enumerate()
-            .map(|(position, (_, mut call))| {
-                call.arguments = match call.arguments {
-                    // An empty fragment means "no arguments". Trailing junk after a whole value is
-                    // ignored rather than treated as truncation; only a value that ends early is
-                    // an incomplete call. See `crate::json::parse_tool_arguments`.
-                    serde_json::Value::String(raw) => {
-                        match crate::json::parse_tool_arguments(&raw) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                incomplete = Some((call.name.clone(), error.to_string()));
-                                json!({})
-                            }
-                        }
-                    }
-                    value => value,
-                };
-                if call.id.is_empty() {
-                    call.id = format!("call_{}", position);
-                }
-                call
-            })
-            .collect();
-
-        if let Some((name, error)) = incomplete {
-            warn!(
-                tool = %name,
-                "dropping incomplete tool call: arguments were not valid JSON ({error})"
-            );
-            return Err(HarnessError::ProviderError {
-                provider: self.provider.provider_id().to_string(),
-                message: format!(
-                    "Model returned an incomplete tool call for '{name}': its arguments were not \
-                     valid JSON ({error}). The call was not run."
-                ),
-            });
-        }
-
-        if content.trim().is_empty()
-            && tool_calls.is_empty()
-            && executed_tools.len() == tools_before
+        debug!(
+            "Stream produced empty content and no tool calls, falling back to buffered completion"
+        );
+        let buffered = self
+            .buffered_completion(messages, tools, options, cancel_token, call_token)
+            .await?;
+        let buffered = buffered.message;
+        if buffered.content.as_deref().unwrap_or("").trim().is_empty()
+            && buffered.tool_calls.is_empty()
         {
-            // A reply cut off by the output cap is not the transient empty shape the buffered
-            // retry exists for: the identical request with the identical cap returns the identical
-            // nothing, and re-sending it doubles the wait for a diagnosis. Reproduced against Code
-            // Assist: `maxOutputTokens=4096` on a long tool-heavy turn spent 3,932 tokens thinking
-            // and returned one `MAX_TOKENS` frame with no text.
-            if is_output_limit(finish_reason.as_deref()) {
-                return Err(HarnessError::output_limit_exhausted(
-                    self.provider.provider_id(),
-                    options.max_tokens,
-                ));
-            }
-            // A usage or finish frame means the stream ran to the end and the model answered with
-            // nothing. Posting the identical request again through the buffered path asks the same
-            // question at the same moment; the turn loop's backed-off retry is the attempt that can
-            // actually differ, and it no longer has to wait out a duplicate first.
-            if usage.is_some() || finish_reason.is_some() {
-                if reasoning.is_empty() {
-                    return Err(empty_answer_error(self.provider.provider_id()));
-                }
+            if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            }) {
                 return Ok(Streamed::done_with_context(
                     Message {
                         role: Role::Assistant,
                         content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
-                        reasoning: Some(reasoning),
+                        reasoning: Some(r),
                         tool_calls: Vec::new(),
                         tool_result: None,
                         usage,
@@ -1024,74 +1511,9 @@ where
                     context_usage,
                 ));
             }
-            debug!("Stream produced empty content and no tool calls, falling back to buffered completion");
-            let buffered = self
-                .buffered_completion(messages, tools, options, cancel_token, &call_token)
-                .await?;
-            let buffered = buffered.message;
-            if buffered.content.as_deref().unwrap_or("").trim().is_empty()
-                && buffered.tool_calls.is_empty()
-            {
-                if let Some(r) = buffered.reasoning.or(if reasoning.is_empty() {
-                    None
-                } else {
-                    Some(reasoning)
-                }) {
-                    return Ok(Streamed::done_with_context(
-                        Message {
-                            role: Role::Assistant,
-                            content: Some(crate::types::NO_TEXT_RESPONSE.to_string()),
-                            reasoning: Some(r),
-                            tool_calls: Vec::new(),
-                            tool_result: None,
-                            usage,
-                        },
-                        context_usage,
-                    ));
-                }
-                return Err(empty_answer_error(self.provider.provider_id()));
-            }
-            return Ok(Streamed::done(buffered));
+            return Err(empty_answer_error(self.provider.provider_id()));
         }
-
-        if reasoning.is_empty() {
-            for (open_tag, close_tag) in &[("<think>", "</think>"), ("<thought>", "</thought>")] {
-                if let Some(start) = content.find(open_tag) {
-                    if let Some(end) = content.find(close_tag) {
-                        let think_text = content[start + open_tag.len()..end].trim().to_string();
-                        let rest =
-                            format!("{}{}", &content[..start], &content[end + close_tag.len()..])
-                                .trim()
-                                .to_string();
-                        if !think_text.is_empty() {
-                            reasoning = think_text;
-                        }
-                        content = rest;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // A gateway can echo DeepSeek's DSML scaffolding into the text channel *next to* a perfectly
-        // good tool call. That is protocol noise rather than the model speaking, so it must not be
-        // stored: otherwise a resumed session replays pages of `…DSML… calls>` that never showed
-        // up during the live turn.
-        content = crate::text::strip_dsml_artifacts(&content);
-
-        let mut response = Message::assistant(content);
-        if response.content.as_deref().unwrap_or("").trim().is_empty() {
-            // Nothing but scaffolding (or nothing at all): the turn has no text, only calls.
-            response.content = None;
-        }
-        response.reasoning = if reasoning.is_empty() {
-            None
-        } else {
-            Some(reasoning)
-        };
-        response.tool_calls = tool_calls;
-        response.usage = usage;
-        Ok(Streamed::done_with_context(response, context_usage))
+        Ok(Streamed::done(buffered))
     }
 
     /// The buffered call, under the same two stop signals as the streamed one.

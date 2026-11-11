@@ -1,0 +1,125 @@
+use super::super::render::{
+    needs_separator, reasoning_rows, tool_activity_detail, OutputBlockKind,
+};
+use super::metrics::finished_reasoning_text;
+use super::panels::Compaction;
+use super::tail::Activity;
+use super::terminal::get_terminal_width;
+use super::view::ChatUi;
+
+impl ChatUi {
+    pub fn begin_block(&self, kind: OutputBlockKind) {
+        let mut last = self.last_block.lock().unwrap_or_else(|e| e.into_inner());
+        if needs_separator(*last, kind) {
+            self.emit_above("");
+        }
+        *last = kind;
+    }
+    pub fn push_reasoning(&self, text: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reasoning
+            .push_str(text);
+    }
+    pub fn finish_reasoning(&self) {
+        let rows = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if live.reasoning.is_empty() {
+                return;
+            }
+            let text = std::mem::take(&mut live.reasoning);
+            reasoning_rows(&text, get_terminal_width())
+        };
+        if !rows.is_empty() {
+            self.begin_block(OutputBlockKind::Thinking);
+            self.emit_above(&finished_reasoning_text(&rows));
+        }
+    }
+    pub fn start_activity(&self, call: &str, name: &str, arguments: &serde_json::Value) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.tool_output.clear();
+        live.tool_output_expanded = false;
+        live.activity = Some(Activity {
+            call: call.to_string(),
+            detail: tool_activity_detail(name, arguments),
+            started: std::time::Instant::now(),
+            frame: 0,
+        });
+    }
+    pub fn stop_activity(&self) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.activity = None;
+        live.tool_output.clear();
+        live.tool_output_expanded = false;
+    }
+    /// Whether a tool is running and therefore whether Ctrl+O should expand the live tail rather
+    /// than the transcript.
+    pub fn has_live_activity(&self) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .is_some()
+    }
+    /// Toggle the live tail between its default height and the whole buffered output.
+    ///
+    /// Returns whether the tail is now expanded. Only meaningful while a tool is running; the
+    /// caller checks [`Self::has_live_activity`] first so the same key still folds the transcript
+    /// when Luna is idle.
+    pub fn toggle_live_expanded(&self) -> bool {
+        let expanded = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.tool_output_expanded = !live.tool_output_expanded;
+            live.tool_output_expanded
+        };
+        self.animate_tick();
+        expanded
+    }
+    /// Add a chunk of a running tool's output to the tail under its activity row.
+    ///
+    /// Called from the agent's observer, which fires on the tool's reader task: this only buffers
+    /// text and takes a short lock. The animation tick is what draws it, so a fast stream cannot
+    /// turn every chunk into a repaint.
+    pub fn push_tool_output(&self, chunk: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_output
+            .push(chunk);
+    }
+    /// A fold of the oldest turns has started: animate it until [`Self::finish_compaction`].
+    ///
+    /// Nothing is printed here in either mode. In the TUI the row is drawn by the animation tick,
+    /// and an unattended run says what is happening with the summary line that follows — a static
+    /// "compacting…" line with no way to ever update it would be worse than silence.
+    pub fn start_compaction(&self, forced: bool) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.compaction = Some(Compaction {
+            forced,
+            started: std::time::Instant::now(),
+            frame: 0,
+        });
+    }
+    /// The fold is over, whatever it produced: stop animating it. Reporting what was folded is the
+    /// caller's job, because the same event carries the failure to report.
+    pub fn finish_compaction(&self) {
+        let had = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.compaction.take().is_some()
+        };
+        if had {
+            // One final draw without the row, so the sweep does not stay frozen on screen while the
+            // transcript below it is rewritten.
+            self.animate_tick();
+        }
+    }
+    #[allow(dead_code)]
+    pub fn is_compacting(&self) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .compaction
+            .is_some()
+    }
+}

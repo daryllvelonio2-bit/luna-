@@ -17,10 +17,11 @@ use harness_core::{HarnessError, MemoryEngine, NotesEngine};
 use harness_providers::{CredentialManager, ModelDiscovery};
 
 use super::picker::pick_provider_and_model;
-use super::{ChatAgent, Feature, FeatureToggles};
+use super::{Feature, FeatureToggles};
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::memory_writer::build_saver_for;
 use crate::commands::chat::ui::ChatUi;
+use crate::commands::chat::ChatAgent;
 
 const PROVIDER_KEY: &str = "memory.background_provider";
 const MODEL_KEY: &str = "memory.background_model";

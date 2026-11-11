@@ -75,11 +75,8 @@ impl ModelDiscovery {
         ttl_hours: i64,
         overrides: BTreeMap<String, ProviderOverride>,
     ) -> Self {
-        let path = cache_path.unwrap_or_else(|| {
-            harness_core::config::home_dir()
-                .join(".luna")
-                .join("models_cache.json")
-        });
+        let path = cache_path
+            .unwrap_or_else(|| harness_core::config::PathsSettings::default().models_cache);
 
         Self {
             cache_path: path,
@@ -270,12 +267,19 @@ impl ModelDiscovery {
         futures_util::stream::iter(targets)
             .map(|provider| async move {
                 if provider == "kiro" || provider == "kiro-cli" {
-                    let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
+                    if let Err(error) =
+                        crate::kiro::sync_kiro_credential_if_needed(cred_manager).await
+                    {
+                        warn!("could not sync the Kiro credential before discovery: {error}");
+                    }
                 }
 
                 if provider == "supercode" {
-                    let _ =
-                        crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
+                    if let Err(error) =
+                        crate::supercode::sync_supercode_credential_if_needed(cred_manager).await
+                    {
+                        warn!("could not sync the Supercode credential before discovery: {error}");
+                    }
                 }
 
                 let has_creds = cred_manager.acquire_credential(&provider).await.is_ok();
@@ -314,14 +318,20 @@ impl ModelDiscovery {
         let http_client = build_http_client(descriptor.timeout_secs)?;
 
         if provider_id == "supercode" {
-            let _ = crate::supercode::sync_supercode_credential_if_needed(cred_manager).await;
+            if let Err(error) =
+                crate::supercode::sync_supercode_credential_if_needed(cred_manager).await
+            {
+                warn!("could not sync the Supercode credential before discovery: {error}");
+            }
             return crate::supercode::fetch_supercode_models()
                 .await
                 .map(names_only);
         }
 
         if provider_id == "kiro" || provider_id == "kiro-cli" {
-            let _ = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await;
+            if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await {
+                warn!("could not sync the Kiro credential before discovery: {error}");
+            }
             let secret = cred_manager.acquire_credential(provider_id).await?;
             return crate::kiro::fetch_kiro_models(&http_client, secret.expose_secret())
                 .await

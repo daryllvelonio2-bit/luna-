@@ -21,208 +21,268 @@ const COUNT: &str = "integer";
 pub fn schema(command: &DesktopCommand) -> Value {
     match command {
         DesktopCommand::Status | DesktopCommand::ListApps => object(&[], &[]),
-        DesktopCommand::ListWindows => object(
-            &[(
+        DesktopCommand::ListWindows => list_windows_schema(),
+        DesktopCommand::Snapshot => snapshot_schema(),
+        DesktopCommand::Find => find_schema(),
+        DesktopCommand::Get => get_schema(),
+        DesktopCommand::Is => is_schema(),
+        DesktopCommand::Click => click_schema(),
+        DesktopCommand::Type => type_schema(),
+        DesktopCommand::SetValue => set_value_schema(),
+        DesktopCommand::Toggle => toggle_schema(),
+        DesktopCommand::Focus => focus_schema(),
+        DesktopCommand::Key => key_schema(),
+        DesktopCommand::Paste => paste_schema(),
+        DesktopCommand::ClickAt => click_at_schema(),
+        DesktopCommand::Screenshot => screenshot_schema(),
+    }
+}
+
+fn list_windows_schema() -> Value {
+    object(
+        &[(
+            "app",
+            TEXT,
+            "The application to list the windows of. Omit for every window.",
+        )],
+        &[],
+    )
+}
+
+fn snapshot_schema() -> Value {
+    object(
+        &[
+            (
                 "app",
                 TEXT,
-                "The application to list the windows of. Omit for every window.",
-            )],
-            &[],
-        ),
-        DesktopCommand::Snapshot => object(
-            &[
-                (
-                    "app",
-                    TEXT,
-                    "The application to read, named as desktop_list_apps prints it.",
-                ),
-                (
-                    "interactive",
-                    FLAG,
-                    "Keep only the elements that can be acted on.",
-                ),
-                (
-                    "skeleton",
-                    FLAG,
-                    "Map the tree shallowly: keep the shape, cut the branches.",
-                ),
-                ("compact", FLAG, "Print the tree compactly."),
-                ("max_depth", COUNT, "Stop descending at this depth."),
-                (
-                    "root",
-                    TEXT,
-                    "A ref to drill into instead of reading the whole window.",
-                ),
-            ],
-            &["app"],
-        ),
-        DesktopCommand::Find => object(
-            &[
-                (
-                    "app",
-                    TEXT,
-                    "The application to look in, named as desktop_list_apps prints it.",
-                ),
-                (
-                    "role",
-                    TEXT,
-                    "The role to look for, for example 'push button'.",
-                ),
-                ("name", TEXT, "The name to look for."),
-                (
-                    "exact",
-                    FLAG,
-                    "Match the name exactly instead of as a substring.",
-                ),
-            ],
-            &["app"],
-        ),
-        DesktopCommand::Get => object(
-            &[
-                (
-                    "ref",
-                    TEXT,
-                    "The element to read, for example '@s8f3k2p9:e12'.",
-                ),
-                ("property", TEXT, "What to read: 'value', 'state' or 'actions'."),
-            ],
-            &["ref", "property"],
-        ),
-        DesktopCommand::Is => object(
-            &[
-                (
-                    "ref",
-                    TEXT,
-                    "The element to ask about, for example '@s8f3k2p9:e12'.",
-                ),
-                (
-                    "predicate",
-                    TEXT,
-                    "The state to ask about: 'enabled', 'focused', 'selected' or 'checked'.",
-                ),
-            ],
-            &["ref", "predicate"],
-        ),
-        DesktopCommand::Click => object(
-            &[(
+                "The application to read, named as desktop_list_apps prints it.",
+            ),
+            (
+                "interactive",
+                FLAG,
+                "Keep only the elements that can be acted on.",
+            ),
+            (
+                "skeleton",
+                FLAG,
+                "Map the tree shallowly: keep the shape, cut the branches.",
+            ),
+            ("compact", FLAG, "Print the tree compactly."),
+            ("max_depth", COUNT, "Stop descending at this depth."),
+            (
+                "root",
+                TEXT,
+                "A ref to drill into instead of reading the whole window.",
+            ),
+        ],
+        &["app"],
+    )
+}
+
+fn find_schema() -> Value {
+    object(
+        &[
+            (
+                "app",
+                TEXT,
+                "The application to look in, named as desktop_list_apps prints it.",
+            ),
+            (
+                "role",
+                TEXT,
+                "The role to look for, for example 'push button'.",
+            ),
+            ("name", TEXT, "The name to look for."),
+            (
+                "exact",
+                FLAG,
+                "Match the name exactly instead of as a substring.",
+            ),
+        ],
+        &["app"],
+    )
+}
+
+fn get_schema() -> Value {
+    object(
+        &[
+            (
                 "ref",
                 TEXT,
-                "The element to activate, for example '@s8f3k2p9:e12'.",
-            )],
-            &["ref"],
-        ),
-        DesktopCommand::Type => json!({
-            "type": "object",
-            "properties": {
-                "ref": {
-                    "type": "string",
-                    "description": "The text field to write to, for example '@s8f3k2p9:e12'.",
-                },
-                "text": {
-                    "type": "string",
-                    "description": "The text to put in the field. This replaces what it holds.",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["auto", "value", "paste"],
-                    "description": "How to write: 'auto' tries the accessibility interface then falls back to a clipboard paste, 'value' only uses the accessibility interface, 'paste' clicks the field and pastes.",
-                },
+                "The element to read, for example '@s8f3k2p9:e12'.",
+            ),
+            (
+                "property",
+                TEXT,
+                "What to read: 'value', 'state' or 'actions'.",
+            ),
+        ],
+        &["ref", "property"],
+    )
+}
+
+fn is_schema() -> Value {
+    object(
+        &[
+            (
+                "ref",
+                TEXT,
+                "The element to ask about, for example '@s8f3k2p9:e12'.",
+            ),
+            (
+                "predicate",
+                TEXT,
+                "The state to ask about: 'enabled', 'focused', 'selected' or 'checked'.",
+            ),
+        ],
+        &["ref", "predicate"],
+    )
+}
+
+fn click_schema() -> Value {
+    object(
+        &[(
+            "ref",
+            TEXT,
+            "The element to activate, for example '@s8f3k2p9:e12'.",
+        )],
+        &["ref"],
+    )
+}
+
+fn type_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "string",
+                "description": "The text field to write to, for example '@s8f3k2p9:e12'.",
             },
-            "required": ["ref", "text"],
-        }),
-        DesktopCommand::SetValue => object(
-            &[
-                (
-                    "ref",
-                    TEXT,
-                    "The control to set, for example '@s8f3k2p9:e12'.",
-                ),
-                (
-                    "value",
-                    TEXT,
-                    "The value to set. A number goes to a slider or a spinner; anything else goes to a text field.",
-                ),
-            ],
-            &["ref", "value"],
-        ),
-        DesktopCommand::Toggle => object(
-            &[
-                (
-                    "ref",
-                    TEXT,
-                    "The check box or radio button to flip, for example '@s8f3k2p9:e12'.",
-                ),
-                (
-                    "checked",
-                    FLAG,
-                    "Set the control to this state instead of flipping it.",
-                ),
-            ],
-            &["ref"],
-        ),
-        DesktopCommand::Focus => object(
-            &[(
+            "text": {
+                "type": "string",
+                "description": "The text to put in the field. This replaces what it holds.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["auto", "value", "paste"],
+                "description": "How to write: 'auto' tries the accessibility interface then falls back to a clipboard paste, 'value' only uses the accessibility interface, 'paste' clicks the field and pastes.",
+            },
+        },
+        "required": ["ref", "text"],
+    })
+}
+
+fn set_value_schema() -> Value {
+    object(
+        &[
+            (
+                "ref",
+                TEXT,
+                "The control to set, for example '@s8f3k2p9:e12'.",
+            ),
+            (
+                "value",
+                TEXT,
+                "The value to set. A number goes to a slider or a spinner; anything else goes to a text field.",
+            ),
+        ],
+        &["ref", "value"],
+    )
+}
+
+fn toggle_schema() -> Value {
+    object(
+        &[
+            (
+                "ref",
+                TEXT,
+                "The check box or radio button to flip, for example '@s8f3k2p9:e12'.",
+            ),
+            (
+                "checked",
+                FLAG,
+                "Set the control to this state instead of flipping it.",
+            ),
+        ],
+        &["ref"],
+    )
+}
+
+fn focus_schema() -> Value {
+    object(
+        &[(
+            "app",
+            TEXT,
+            "The application whose window to focus, named as desktop_list_apps prints it. Omit to report the window that is focused now.",
+        )],
+        &[],
+    )
+}
+
+fn key_schema() -> Value {
+    object(
+        &[(
+            "keys",
+            TEXT,
+            "The key chords to send, for example 'ctrl+v' or 'ctrl+a ctrl+v'. A chord joins keys with '+' and chords are separated by spaces.",
+        )],
+        &["keys"],
+    )
+}
+
+fn paste_schema() -> Value {
+    object(
+        &[(
+            "text",
+            TEXT,
+            "The text to put on the clipboard and paste into the focused window.",
+        )],
+        &["text"],
+    )
+}
+
+fn click_at_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "string",
+                "description": "A ref whose on-screen center to click, for example '@s8f3k2p9:e12'.",
+            },
+            "x": {
+                "type": "integer",
+                "description": "The screen x coordinate, when no ref is given.",
+            },
+            "y": {
+                "type": "integer",
+                "description": "The screen y coordinate, when no ref is given.",
+            },
+            "button": {
+                "type": "integer",
+                "enum": [0, 1, 2],
+                "description": "0 for left, 1 for right, 2 for middle. Defaults to left.",
+            },
+        },
+        "required": [],
+    })
+}
+
+fn screenshot_schema() -> Value {
+    object(
+        &[
+            (
                 "app",
                 TEXT,
-                "The application whose window to focus, named as desktop_list_apps prints it. Omit to report the window that is focused now.",
-            )],
-            &[],
-        ),
-        DesktopCommand::Key => object(
-            &[(
-                "keys",
+                "The application whose window to capture. Omit to capture the whole screen.",
+            ),
+            (
+                "path",
                 TEXT,
-                "The key chords to send, for example 'ctrl+v' or 'ctrl+a ctrl+v'. A chord joins keys with '+' and chords are separated by spaces.",
-            )],
-            &["keys"],
-        ),
-        DesktopCommand::Paste => object(
-            &[(
-                "text",
-                TEXT,
-                "The text to put on the clipboard and paste into the focused window.",
-            )],
-            &["text"],
-        ),
-        DesktopCommand::ClickAt => json!({
-            "type": "object",
-            "properties": {
-                "ref": {
-                    "type": "string",
-                    "description": "A ref whose on-screen center to click, for example '@s8f3k2p9:e12'.",
-                },
-                "x": {
-                    "type": "integer",
-                    "description": "The screen x coordinate, when no ref is given.",
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "The screen y coordinate, when no ref is given.",
-                },
-                "button": {
-                    "type": "integer",
-                    "enum": [0, 1, 2],
-                    "description": "0 for left, 1 for right, 2 for middle. Defaults to left.",
-                },
-            },
-            "required": [],
-        }),
-        DesktopCommand::Screenshot => object(
-            &[
-                (
-                    "app",
-                    TEXT,
-                    "The application whose window to capture. Omit to capture the whole screen.",
-                ),
-                (
-                    "path",
-                    TEXT,
-                    "Where to write the PNG. Defaults to a file in the system temp directory.",
-                ),
-            ],
-            &[],
-        ),
-    }
+                "Where to write the PNG. Defaults to a file in the system temp directory.",
+            ),
+        ],
+        &[],
+    )
 }
 
 fn object(properties: &[(&str, &str, &str)], required: &[&str]) -> Value {

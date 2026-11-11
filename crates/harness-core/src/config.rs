@@ -1059,7 +1059,45 @@ pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
     let from_env = flatten(&env);
     let from_flag = flatten(&flag);
 
-    // Sync auto-compact config between top-level and agent section
+    sync_auto_compact(&mut config, &from_file, &from_env, &from_flag);
+
+    config.validate()?;
+
+    let values: BTreeMap<String, String> = flatten(&to_value(&config)?)
+        .into_iter()
+        .map(|(key, value)| (key, scalar_to_string(&value)))
+        .collect();
+
+    let mut sources = BTreeMap::new();
+    for key in values.keys() {
+        let source = if from_flag.contains_key(key) {
+            Source::Flag
+        } else if from_env.contains_key(key) {
+            Source::Env
+        } else if from_file.contains_key(key) {
+            Source::File
+        } else {
+            Source::Default
+        };
+        sources.insert(key.clone(), source);
+    }
+
+    Ok(Resolved {
+        config,
+        values,
+        sources,
+        known,
+    })
+}
+
+/// Sync auto-compact config between the top-level and `agent` sections. Whichever side the user
+/// explicitly set wins; when neither is set the top-level value seeds the agent section.
+fn sync_auto_compact(
+    config: &mut Config,
+    from_file: &BTreeMap<String, Value>,
+    from_env: &BTreeMap<String, Value>,
+    from_flag: &BTreeMap<String, Value>,
+) {
     if from_flag.contains_key("auto_compact_enabled")
         || from_env.contains_key("auto_compact_enabled")
         || from_file.contains_key("auto_compact_enabled")
@@ -1115,34 +1153,6 @@ pub fn resolve(layers: &Layers) -> Result<Resolved, HarnessError> {
     } else {
         config.agent.auto_compact_turns = config.auto_compact_turns;
     }
-
-    config.validate()?;
-
-    let values: BTreeMap<String, String> = flatten(&to_value(&config)?)
-        .into_iter()
-        .map(|(key, value)| (key, scalar_to_string(&value)))
-        .collect();
-
-    let mut sources = BTreeMap::new();
-    for key in values.keys() {
-        let source = if from_flag.contains_key(key) {
-            Source::Flag
-        } else if from_env.contains_key(key) {
-            Source::Env
-        } else if from_file.contains_key(key) {
-            Source::File
-        } else {
-            Source::Default
-        };
-        sources.insert(key.clone(), source);
-    }
-
-    Ok(Resolved {
-        config,
-        values,
-        sources,
-        known,
-    })
 }
 
 /// Effective configuration plus provenance.

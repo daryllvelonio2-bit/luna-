@@ -183,107 +183,130 @@ impl ActionOps for LinuxDesktopAdapter {
         let element = Self::element_of(node)?;
 
         match request {
-            ActionRequest::Click => {
-                let names = element_actions(&connection, &element)?;
-                let done = do_action(&connection, &element, &names, CLICK_VERBS)?;
-                if !done {
-                    return Err(DesktopError::new(
-                        ErrorCode::ActionFailed,
-                        "The application refused the action",
-                    )
-                    .with_suggestion("Read the element's state before trying again")
-                    .not_delivered());
-                }
-                Ok(ActionOutcome::unverified(vec![
-                    "Action.DoAction".to_string()
-                ]))
-            }
-            ActionRequest::Type { text } => {
-                let done = set_text_contents(&connection, &element, text)?;
-                if !done {
-                    return Err(DesktopError::new(
-                        ErrorCode::ActionFailed,
-                        "The field did not accept the text",
-                    )
-                    .with_suggestion("The field may be read-only; check its states")
-                    .not_delivered());
-                }
-                let written = read_text(&connection, &element).ok().flatten();
-                if written.as_deref() == Some(text.as_str()) {
-                    Ok(ActionOutcome::verified(vec![
-                        "EditableText.SetTextContents".to_string(),
-                    ]))
-                } else {
-                    Ok(ActionOutcome::unverified(vec![
-                        "EditableText.SetTextContents".to_string(),
-                    ]))
-                }
-            }
-            ActionRequest::SetValue { value } => {
-                let parsed = value.trim().parse::<f64>().ok();
-                let steps = match parsed {
-                    Some(number) => {
-                        let done = set_value(&connection, &element, number)?;
-                        if !done {
-                            return Err(DesktopError::new(
-                                ErrorCode::ActionFailed,
-                                "The control did not accept the value",
-                            )
-                            .with_suggestion("Use desktop_type for a text field")
-                            .not_delivered());
-                        }
-                        vec!["Value.SetCurrentValue".to_string()]
-                    }
-                    None => {
-                        let done = set_text_contents(&connection, &element, value)?;
-                        if !done {
-                            return Err(DesktopError::new(
-                                ErrorCode::ActionFailed,
-                                "The control did not accept the value",
-                            )
-                            .not_delivered());
-                        }
-                        vec!["EditableText.SetTextContents".to_string()]
-                    }
-                };
-                Ok(ActionOutcome::unverified(steps))
-            }
-            ActionRequest::Toggle { checked } => {
-                let names = element_actions(&connection, &element)?;
-                let Some(index) = action_index_any(&names, TOGGLE_VERBS) else {
-                    return Err(DesktopError::new(
-                        ErrorCode::ActionNotSupported,
-                        "The element has no action that toggles it",
-                    )
-                    .with_details(serde_json::json!({ "available_actions": names }))
-                    .not_delivered());
-                };
-                let _ = index;
-                let before = crate::tree::node::read_states(&connection, &element)?;
-                let was_checked = before.iter().any(|state| state == "checked");
-                let done = do_action(&connection, &element, &names, TOGGLE_VERBS)?;
-                if !done {
-                    return Err(DesktopError::new(
-                        ErrorCode::ActionFailed,
-                        "The application refused the toggle",
-                    )
-                    .not_delivered());
-                }
-                let after = crate::tree::node::read_states(&connection, &element)?;
-                let is_checked = after.iter().any(|state| state == "checked");
-                let matches = match checked {
-                    Some(wanted) => is_checked == *wanted,
-                    None => is_checked != was_checked,
-                };
-                let outcome = if matches {
-                    ActionOutcome::verified(vec!["Action.DoAction".to_string()])
-                } else {
-                    ActionOutcome::unverified(vec!["Action.DoAction".to_string()])
-                };
-                Ok(outcome)
-            }
+            ActionRequest::Click => click_element(&connection, &element),
+            ActionRequest::Type { text } => type_into_element(&connection, &element, text),
+            ActionRequest::SetValue { value } => set_element_value(&connection, &element, value),
+            ActionRequest::Toggle { checked } => toggle_element(&connection, &element, checked),
         }
     }
+}
+
+fn click_element(
+    connection: &Connection,
+    element: &AtspiElement,
+) -> Result<ActionOutcome, DesktopError> {
+    let names = element_actions(connection, element)?;
+    let done = do_action(connection, element, &names, CLICK_VERBS)?;
+    if !done {
+        return Err(DesktopError::new(
+            ErrorCode::ActionFailed,
+            "The application refused the action",
+        )
+        .with_suggestion("Read the element's state before trying again")
+        .not_delivered());
+    }
+    Ok(ActionOutcome::unverified(vec![
+        "Action.DoAction".to_string()
+    ]))
+}
+
+fn type_into_element(
+    connection: &Connection,
+    element: &AtspiElement,
+    text: &str,
+) -> Result<ActionOutcome, DesktopError> {
+    let done = set_text_contents(connection, element, text)?;
+    if !done {
+        return Err(DesktopError::new(
+            ErrorCode::ActionFailed,
+            "The field did not accept the text",
+        )
+        .with_suggestion("The field may be read-only; check its states")
+        .not_delivered());
+    }
+    let written = read_text(connection, element).ok().flatten();
+    if written.as_deref() == Some(text) {
+        Ok(ActionOutcome::verified(vec![
+            "EditableText.SetTextContents".to_string(),
+        ]))
+    } else {
+        Ok(ActionOutcome::unverified(vec![
+            "EditableText.SetTextContents".to_string(),
+        ]))
+    }
+}
+
+fn set_element_value(
+    connection: &Connection,
+    element: &AtspiElement,
+    value: &str,
+) -> Result<ActionOutcome, DesktopError> {
+    let parsed = value.trim().parse::<f64>().ok();
+    let steps = match parsed {
+        Some(number) => {
+            let done = set_value(connection, element, number)?;
+            if !done {
+                return Err(DesktopError::new(
+                    ErrorCode::ActionFailed,
+                    "The control did not accept the value",
+                )
+                .with_suggestion("Use desktop_type for a text field")
+                .not_delivered());
+            }
+            vec!["Value.SetCurrentValue".to_string()]
+        }
+        None => {
+            let done = set_text_contents(connection, element, value)?;
+            if !done {
+                return Err(DesktopError::new(
+                    ErrorCode::ActionFailed,
+                    "The control did not accept the value",
+                )
+                .not_delivered());
+            }
+            vec!["EditableText.SetTextContents".to_string()]
+        }
+    };
+    Ok(ActionOutcome::unverified(steps))
+}
+
+fn toggle_element(
+    connection: &Connection,
+    element: &AtspiElement,
+    checked: &Option<bool>,
+) -> Result<ActionOutcome, DesktopError> {
+    let names = element_actions(connection, element)?;
+    let Some(index) = action_index_any(&names, TOGGLE_VERBS) else {
+        return Err(DesktopError::new(
+            ErrorCode::ActionNotSupported,
+            "The element has no action that toggles it",
+        )
+        .with_details(serde_json::json!({ "available_actions": names }))
+        .not_delivered());
+    };
+    let _ = index;
+    let before = crate::tree::node::read_states(connection, element)?;
+    let was_checked = before.iter().any(|state| state == "checked");
+    let done = do_action(connection, element, &names, TOGGLE_VERBS)?;
+    if !done {
+        return Err(DesktopError::new(
+            ErrorCode::ActionFailed,
+            "The application refused the toggle",
+        )
+        .not_delivered());
+    }
+    let after = crate::tree::node::read_states(connection, element)?;
+    let is_checked = after.iter().any(|state| state == "checked");
+    let matches = match checked {
+        Some(wanted) => is_checked == *wanted,
+        None => is_checked != was_checked,
+    };
+    let outcome = if matches {
+        ActionOutcome::verified(vec!["Action.DoAction".to_string()])
+    } else {
+        ActionOutcome::unverified(vec!["Action.DoAction".to_string()])
+    };
+    Ok(outcome)
 }
 
 impl InputOps for LinuxDesktopAdapter {

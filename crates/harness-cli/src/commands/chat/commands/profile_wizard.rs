@@ -19,7 +19,7 @@ use harness_core::HarnessError;
 use super::super::keys::AppKey;
 use super::super::modal::{paint_centred, ModalScreen};
 use super::super::ui::{get_terminal_width, ChatUi};
-use super::wrap_words;
+use super::value_prompt::wrap_words;
 use crate::commands::chat::keys;
 use crate::commands::profile as profile_cmd;
 use crate::commands::profile::ProfileCommand;
@@ -75,6 +75,76 @@ async fn create(
         ))
     })?;
 
+    let Some(name) = ask_profile_name(name, key_rx, ui).await? else {
+        return cancelled(ui);
+    };
+    ensure_profile_absent(&profiles_dir, &name)?;
+
+    let Some(summary) = ask_summary(key_rx, ui).await? else {
+        return cancelled(ui);
+    };
+
+    let seed = profiles::default_profile()?;
+    let text = ProfileText {
+        summary: Some(summary.clone()),
+        persona: Some(seed.persona.clone()),
+        behavior: Some(seed.behavior.clone()),
+    };
+
+    let text = edit_seeded_prompts(ui, key_rx, &name, text);
+
+    let persona = text.persona.unwrap_or(seed.persona.clone());
+    let behavior = text.behavior.unwrap_or(seed.behavior.clone());
+    let summary = text.summary.unwrap_or(summary);
+
+    let Some(copy_providers) = ask_copy_providers(key_rx, ui).await else {
+        return cancelled(ui);
+    };
+
+    let Some(notes) = pick_notes(source, key_rx, ui).await else {
+        return cancelled(ui);
+    };
+    let Some(memories) = pick_memories(source, key_rx, ui).await else {
+        return cancelled(ui);
+    };
+
+    let review = build_profile_review(&name, &summary, copy_providers, notes.len(), memories.len());
+    let Some(proceed) = choice_step_with_body(
+        ui,
+        key_rx,
+        "Create Profile — Review",
+        review,
+        &["Create profile", "Cancel"],
+        0,
+    )
+    .await
+    else {
+        return cancelled(ui);
+    };
+    if proceed != 0 {
+        return cancelled(ui);
+    }
+
+    finish_profile_creation(
+        ui,
+        &profiles_dir,
+        source,
+        &name,
+        summary,
+        persona,
+        behavior,
+        copy_providers,
+        &notes,
+        &memories,
+    )
+}
+
+/// Ask for (or accept) the profile name, validating it.
+async fn ask_profile_name(
+    name: Option<String>,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+) -> Result<Option<String>, HarnessError> {
     let name = match name {
         Some(name) => name,
         None => {
@@ -92,20 +162,32 @@ async fn create(
             )
             .await
             else {
-                return cancelled(ui);
+                return Ok(None);
             };
             name
         }
     };
     profiles::validate_name(&name)?;
-    if profiles::profile_dir(&profiles_dir, &name).exists() {
+    Ok(Some(name))
+}
+
+/// Refuse a name that already has a profile directory.
+fn ensure_profile_absent(profiles_dir: &std::path::Path, name: &str) -> Result<(), HarnessError> {
+    if profiles::profile_dir(profiles_dir, name).exists() {
         return Err(HarnessError::ConfigurationError(format!(
             "profile '{}' already exists at {}",
             name,
-            profiles::profile_dir(&profiles_dir, &name).display()
+            profiles::profile_dir(profiles_dir, name).display()
         )));
     }
+    Ok(())
+}
 
+/// Ask for the one-line summary, defaulting to "Custom profile".
+async fn ask_summary(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+) -> Result<Option<String>, HarnessError> {
     let Some(summary) = input_step(
         ui,
         key_rx,
@@ -117,21 +199,22 @@ async fn create(
     )
     .await
     else {
-        return cancelled(ui);
+        return Ok(None);
     };
-    let summary = if summary.trim().is_empty() {
+    Ok(Some(if summary.trim().is_empty() {
         "Custom profile".to_string()
     } else {
         summary.trim().to_string()
-    };
+    }))
+}
 
-    let seed = profiles::default_profile()?;
-    let text = ProfileText {
-        summary: Some(summary.clone()),
-        persona: Some(seed.persona.clone()),
-        behavior: Some(seed.behavior.clone()),
-    };
-
+/// Step out of raw mode to edit the seeded persona and behavior, then restore the composer.
+fn edit_seeded_prompts(
+    ui: &ChatUi,
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    name: &str,
+    text: ProfileText,
+) -> ProfileText {
     // The editor is a real terminal program, not a chat frame: step out of raw mode, lend it
     // stdin for the duration, then hand both back. The prompt text is seeded, so an absent or
     // failed editor leaves the defaults in place.
@@ -139,15 +222,17 @@ async fn create(
         "{} Opening $EDITOR to edit the persona and behavior (seeded from the default profile).",
         "•".cyan()
     ));
-    let edited = edit_prompts(&name, &text, key_rx);
+    let edited = edit_prompts(name, &text, key_rx);
     ui.redraw_box();
-    let text = edited.unwrap_or(text);
+    edited.unwrap_or(text)
+}
 
-    let persona = text.persona.unwrap_or(seed.persona.clone());
-    let behavior = text.behavior.unwrap_or(seed.behavior.clone());
-    let summary = text.summary.unwrap_or(summary);
-
-    let Some(copy_providers) = choice_step(
+/// Ask whether to copy the default profile's provider credentials.
+async fn ask_copy_providers(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+) -> Option<bool> {
+    let choice = choice_step(
         ui,
         key_rx,
         "Create Profile — Providers",
@@ -155,54 +240,51 @@ async fn create(
         &["Yes, copy them", "No, start with none"],
         0,
     )
-    .await
-    else {
-        return cancelled(ui);
-    };
-    let copy_providers = copy_providers == 0;
+    .await?;
+    Some(choice == 0)
+}
 
-    let notes = match pick_notes(source, key_rx, ui).await {
-        Some(notes) => notes,
-        None => return cancelled(ui),
-    };
-    let memories = match pick_memories(source, key_rx, ui).await {
-        Some(memories) => memories,
-        None => return cancelled(ui),
-    };
-
-    let review = vec![
-        review_row("name", &name),
-        review_row("summary", &summary),
+/// Build the rows shown on the review screen.
+fn build_profile_review(
+    name: &str,
+    summary: &str,
+    copy_providers: bool,
+    notes: usize,
+    memories: usize,
+) -> Vec<String> {
+    vec![
+        review_row("name", name),
+        review_row("summary", summary),
         review_row("providers", if copy_providers { "same" } else { "fresh" }),
-        review_row("notes", &profile_cmd::count_or_fresh(notes.len())),
-        review_row("memories", &profile_cmd::count_or_fresh(memories.len())),
-    ];
-    let Some(proceed) = choice_step_with_body(
-        ui,
-        key_rx,
-        "Create Profile — Review",
-        review,
-        &["Create profile", "Cancel"],
-        0,
-    )
-    .await
-    else {
-        return cancelled(ui);
-    };
-    if proceed != 0 {
-        return cancelled(ui);
-    }
+        review_row("notes", &profile_cmd::count_or_fresh(notes)),
+        review_row("memories", &profile_cmd::count_or_fresh(memories)),
+    ]
+}
 
+/// Write the profile and report where it landed.
+#[allow(clippy::too_many_arguments)]
+fn finish_profile_creation(
+    ui: &ChatUi,
+    profiles_dir: &std::path::Path,
+    source: &Config,
+    name: &str,
+    summary: String,
+    persona: String,
+    behavior: String,
+    copy_providers: bool,
+    notes: &[std::path::PathBuf],
+    memories: &[String],
+) -> Result<(), HarnessError> {
     let dest = profile_cmd::create_profile_with(
-        &profiles_dir,
+        profiles_dir,
         source,
-        &name,
+        name,
         summary,
         persona,
         behavior,
         copy_providers,
-        &notes,
-        &memories,
+        notes,
+        memories,
     )?;
     ui.emit_above(&format!(
         "{} Created {}",

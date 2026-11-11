@@ -42,256 +42,14 @@ pub async fn show_background_task_viewer(
 
     let _ = execute!(io::stdout(), EnterAlternateScreen, Hide);
 
-    let mut selected_idx: usize = 0;
-    // Prefer selecting an actively running task if available
-    if let Some(pos) = tasks.iter().position(|t| t.status == "running") {
-        selected_idx = pos;
-    }
-
-    let mut scroll_offset: usize = 0;
-    let mut auto_scroll = true;
-    let mut refresh_interval = tokio::time::interval(Duration::from_millis(500));
-
-    let mut width = super::ui::get_terminal_width().max(40);
-    let mut body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-
-    // Initial render
-    let (eff, mut max_offset) = render_viewer_frame(
-        &tasks[selected_idx],
-        &tasks,
-        selected_idx,
-        if auto_scroll {
-            usize::MAX
-        } else {
-            scroll_offset
-        },
-        &body,
-        width,
-    );
-    scroll_offset = eff;
-
-    loop {
-        tokio::select! {
-            _ = refresh_interval.tick() => {
-                // Periodically refresh job statuses and transcripts. A child still writing gets a
-                // new stored row, so the CLI transcript below the header follows it live.
-                tasks = collect_tasks(bg_queue, delegate_tool).await;
-                if tasks.is_empty() {
-                    break;
-                }
-                if selected_idx >= tasks.len() {
-                    selected_idx = tasks.len().saturating_sub(1);
-                }
-                width = super::ui::get_terminal_width().max(40);
-                body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-                let target_offset = if auto_scroll { usize::MAX } else { scroll_offset };
-                let (eff, max) = render_viewer_frame(
-                    &tasks[selected_idx],
-                    &tasks,
-                    selected_idx,
-                    target_offset,
-                    &body,
-                    width,
-                );
-                scroll_offset = eff;
-                max_offset = max;
-            }
-            maybe_key = key_rx.recv() => {
-                let key = match maybe_key {
-                    Some(k) => k,
-                    None => break,
-                };
-                match key {
-                    AppKey::Up | AppKey::Char('k') | AppKey::Char('K') => {
-                        auto_scroll = false;
-                        if scroll_offset > 0 {
-                            scroll_offset = scroll_offset.saturating_sub(1);
-                            let (eff, _) = render_viewer_frame(
-                                &tasks[selected_idx],
-                                &tasks,
-                                selected_idx,
-                                scroll_offset,
-                                &body,
-                                width,
-                            );
-                            scroll_offset = eff;
-                        }
-                    }
-                    AppKey::Down | AppKey::Char('j') | AppKey::Char('J') => {
-                        if scroll_offset < max_offset {
-                            scroll_offset = scroll_offset.saturating_add(1);
-                            if scroll_offset >= max_offset {
-                                auto_scroll = true;
-                            }
-                            let (eff, _) = render_viewer_frame(
-                                &tasks[selected_idx],
-                                &tasks,
-                                selected_idx,
-                                scroll_offset,
-                                &body,
-                                width,
-                            );
-                            scroll_offset = eff;
-                        }
-                    }
-                    AppKey::PageUp | AppKey::Char('b') => {
-                        auto_scroll = false;
-                        scroll_offset = scroll_offset.saturating_sub(10);
-                        let (eff, _) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                    }
-                    AppKey::PageDown | AppKey::Char('f') | AppKey::Char(' ') => {
-                        scroll_offset = (scroll_offset + 10).min(max_offset);
-                        if scroll_offset >= max_offset {
-                            auto_scroll = true;
-                        }
-                        let (eff, _) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                    }
-                    AppKey::Home | AppKey::Char('g') => {
-                        auto_scroll = false;
-                        scroll_offset = 0;
-                        let (eff, _) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                    }
-                    AppKey::End | AppKey::Char('G') => {
-                        auto_scroll = true;
-                        scroll_offset = max_offset;
-                        let (eff, _) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                    }
-                    AppKey::Tab | AppKey::Right | AppKey::Char('l') | AppKey::Char('L') => {
-                        selected_idx = (selected_idx + 1) % tasks.len();
-                        auto_scroll = true;
-                        scroll_offset = usize::MAX;
-                        width = super::ui::get_terminal_width().max(40);
-                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-                        let (eff, max) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                        max_offset = max;
-                    }
-                    AppKey::BackTab | AppKey::Left | AppKey::Char('h') | AppKey::Char('H') => {
-                        selected_idx = if selected_idx == 0 {
-                            tasks.len() - 1
-                        } else {
-                            selected_idx - 1
-                        };
-                        auto_scroll = true;
-                        scroll_offset = usize::MAX;
-                        width = super::ui::get_terminal_width().max(40);
-                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-                        let (eff, max) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                        max_offset = max;
-                    }
-                    AppKey::Char(c @ '1'..='9') => {
-                        let idx = (c as usize) - ('1' as usize);
-                        if idx < tasks.len() {
-                            selected_idx = idx;
-                            auto_scroll = true;
-                            scroll_offset = usize::MAX;
-                            width = super::ui::get_terminal_width().max(40);
-                            body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-                            let (eff, max) = render_viewer_frame(
-                                &tasks[selected_idx],
-                                &tasks,
-                                selected_idx,
-                                scroll_offset,
-                                &body,
-                                width,
-                            );
-                            scroll_offset = eff;
-                            max_offset = max;
-                        }
-                    }
-                    AppKey::Char('x') | AppKey::Char('X') => {
-                        // Kill / cancel active job or subagent
-                        let task = tasks.get(selected_idx);
-                        if let Some(task) = task {
-                            if let Some(q) = bg_queue {
-                                let _ = q.kill(&task.id);
-                            }
-                            if let Some(dt) = delegate_tool {
-                                let _ = dt.kill(&task.id).await;
-                            }
-                        }
-                        tasks = collect_tasks(bg_queue, delegate_tool).await;
-                        if tasks.is_empty() {
-                            break;
-                        }
-                        if selected_idx >= tasks.len() {
-                            selected_idx = tasks.len().saturating_sub(1);
-                        }
-                        width = super::ui::get_terminal_width().max(40);
-                        body = task_body(&tasks[selected_idx], store, process_expanded, width).await;
-                        let (eff, max) = render_viewer_frame(
-                            &tasks[selected_idx],
-                            &tasks,
-                            selected_idx,
-                            scroll_offset,
-                            &body,
-                            width,
-                        );
-                        scroll_offset = eff;
-                        max_offset = max;
-                    }
-                    AppKey::Escape
-                    | AppKey::Char('q')
-                    | AppKey::Char('Q')
-                    | AppKey::CtrlC
-                    | AppKey::Ctrl('c')
-                    | AppKey::CtrlShiftB
-                    | AppKey::Ctrl('b')
-                    | AppKey::Char('\x02') => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    let ctx = ViewerContext {
+        bg_queue,
+        delegate_tool,
+        store,
+        process_expanded,
+    };
+    let mut state = ViewerState::new(&tasks, &ctx).await;
+    run_viewer_loop(key_rx, &ctx, &mut tasks, &mut state).await;
 
     let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
     render_all_turns(turns, process_expanded, super::ui::get_terminal_width());
@@ -300,6 +58,300 @@ pub async fn show_background_task_viewer(
         println!("{}", err);
     }
     ui.draw_initial_box();
+}
+
+/// The handles the viewer needs on every refresh and key event.
+struct ViewerContext<'a> {
+    bg_queue: Option<&'a BackgroundTaskQueue>,
+    delegate_tool: Option<&'a harness_core::tools::DelegateTaskTool>,
+    store: &'a dyn SessionStore,
+    process_expanded: bool,
+}
+
+/// Everything the viewer remembers between frames.
+struct ViewerState {
+    selected_idx: usize,
+    scroll_offset: usize,
+    auto_scroll: bool,
+    width: usize,
+    max_offset: usize,
+    body: TaskBody,
+}
+
+impl ViewerState {
+    /// Pick the initial task (a running one when possible) and paint the first frame.
+    async fn new(tasks: &[JobSummary], ctx: &ViewerContext<'_>) -> Self {
+        let mut selected_idx: usize = 0;
+        // Prefer selecting an actively running task if available
+        if let Some(pos) = tasks.iter().position(|t| t.status == "running") {
+            selected_idx = pos;
+        }
+
+        let width = super::ui::get_terminal_width().max(40);
+        let body = task_body(&tasks[selected_idx], ctx.store, ctx.process_expanded, width).await;
+
+        let mut state = Self {
+            selected_idx,
+            scroll_offset: 0,
+            auto_scroll: true,
+            width,
+            max_offset: 0,
+            body,
+        };
+        let target_offset = if state.auto_scroll {
+            usize::MAX
+        } else {
+            state.scroll_offset
+        };
+        let (eff, max) = render_viewer_frame(
+            &tasks[state.selected_idx],
+            tasks,
+            state.selected_idx,
+            target_offset,
+            &state.body,
+            state.width,
+        );
+        state.scroll_offset = eff;
+        state.max_offset = max;
+        state
+    }
+}
+
+/// Run the viewer until the user closes it or every task disappears.
+async fn run_viewer_loop(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ctx: &ViewerContext<'_>,
+    tasks: &mut Vec<JobSummary>,
+    state: &mut ViewerState,
+) {
+    let mut refresh_interval = tokio::time::interval(Duration::from_millis(500));
+
+    loop {
+        tokio::select! {
+            _ = refresh_interval.tick() => {
+                if !refresh_viewer(ctx, tasks, state).await {
+                    break;
+                }
+            }
+            maybe_key = key_rx.recv() => {
+                let key = match maybe_key {
+                    Some(k) => k,
+                    None => break,
+                };
+                if !handle_viewer_key(key, ctx, tasks, state).await {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Reload the task list and the selected task's body, repainting when anything changed.
+async fn refresh_viewer(
+    ctx: &ViewerContext<'_>,
+    tasks: &mut Vec<JobSummary>,
+    state: &mut ViewerState,
+) -> bool {
+    // Periodically refresh job statuses and transcripts. A child still writing gets a
+    // new stored row, so the CLI transcript below the header follows it live.
+    *tasks = collect_tasks(ctx.bg_queue, ctx.delegate_tool).await;
+    if tasks.is_empty() {
+        return false;
+    }
+    clamp_selection(tasks, state);
+    state.width = super::ui::get_terminal_width().max(40);
+    state.body = task_body(
+        &tasks[state.selected_idx],
+        ctx.store,
+        ctx.process_expanded,
+        state.width,
+    )
+    .await;
+    render_current(tasks, state);
+    true
+}
+
+/// Keep the selected index inside the current task list.
+fn clamp_selection(tasks: &[JobSummary], state: &mut ViewerState) {
+    if state.selected_idx >= tasks.len() {
+        state.selected_idx = tasks.len().saturating_sub(1);
+    }
+}
+
+/// Repaint at the auto-scroll-aware offset, updating both bounds.
+fn render_current(tasks: &[JobSummary], state: &mut ViewerState) {
+    let target_offset = if state.auto_scroll {
+        usize::MAX
+    } else {
+        state.scroll_offset
+    };
+    let (eff, max) = render_viewer_frame(
+        &tasks[state.selected_idx],
+        tasks,
+        state.selected_idx,
+        target_offset,
+        &state.body,
+        state.width,
+    );
+    state.scroll_offset = eff;
+    state.max_offset = max;
+}
+
+/// Repaint at an explicit scroll offset; `max_offset` cannot change here.
+fn render_scroll(tasks: &[JobSummary], state: &mut ViewerState) {
+    let (eff, _) = render_viewer_frame(
+        &tasks[state.selected_idx],
+        tasks,
+        state.selected_idx,
+        state.scroll_offset,
+        &state.body,
+        state.width,
+    );
+    state.scroll_offset = eff;
+}
+
+/// Jump to another task and reset the viewport to the newest output.
+async fn select_task(
+    tasks: &[JobSummary],
+    ctx: &ViewerContext<'_>,
+    state: &mut ViewerState,
+    idx: usize,
+) {
+    state.selected_idx = idx;
+    state.auto_scroll = true;
+    state.scroll_offset = usize::MAX;
+    state.width = super::ui::get_terminal_width().max(40);
+    state.body = task_body(
+        &tasks[state.selected_idx],
+        ctx.store,
+        ctx.process_expanded,
+        state.width,
+    )
+    .await;
+    let (eff, max) = render_viewer_frame(
+        &tasks[state.selected_idx],
+        tasks,
+        state.selected_idx,
+        state.scroll_offset,
+        &state.body,
+        state.width,
+    );
+    state.scroll_offset = eff;
+    state.max_offset = max;
+}
+
+/// Apply one key. Returns `false` when the viewer should close.
+async fn handle_viewer_key(
+    key: AppKey,
+    ctx: &ViewerContext<'_>,
+    tasks: &mut Vec<JobSummary>,
+    state: &mut ViewerState,
+) -> bool {
+    match key {
+        AppKey::Up | AppKey::Char('k') | AppKey::Char('K') => {
+            state.auto_scroll = false;
+            if state.scroll_offset > 0 {
+                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                render_scroll(tasks, state);
+            }
+        }
+        AppKey::Down | AppKey::Char('j') | AppKey::Char('J') => {
+            if state.scroll_offset < state.max_offset {
+                state.scroll_offset = state.scroll_offset.saturating_add(1);
+                if state.scroll_offset >= state.max_offset {
+                    state.auto_scroll = true;
+                }
+                render_scroll(tasks, state);
+            }
+        }
+        AppKey::PageUp | AppKey::Char('b') => {
+            state.auto_scroll = false;
+            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+            render_scroll(tasks, state);
+        }
+        AppKey::PageDown | AppKey::Char('f') | AppKey::Char(' ') => {
+            state.scroll_offset = (state.scroll_offset + 10).min(state.max_offset);
+            if state.scroll_offset >= state.max_offset {
+                state.auto_scroll = true;
+            }
+            render_scroll(tasks, state);
+        }
+        AppKey::Home | AppKey::Char('g') => {
+            state.auto_scroll = false;
+            state.scroll_offset = 0;
+            render_scroll(tasks, state);
+        }
+        AppKey::End | AppKey::Char('G') => {
+            state.auto_scroll = true;
+            state.scroll_offset = state.max_offset;
+            render_scroll(tasks, state);
+        }
+        AppKey::Tab | AppKey::Right | AppKey::Char('l') | AppKey::Char('L') => {
+            let idx = (state.selected_idx + 1) % tasks.len();
+            select_task(tasks, ctx, state, idx).await;
+        }
+        AppKey::BackTab | AppKey::Left | AppKey::Char('h') | AppKey::Char('H') => {
+            let idx = if state.selected_idx == 0 {
+                tasks.len() - 1
+            } else {
+                state.selected_idx - 1
+            };
+            select_task(tasks, ctx, state, idx).await;
+        }
+        AppKey::Char(c @ '1'..='9') => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < tasks.len() {
+                select_task(tasks, ctx, state, idx).await;
+            }
+        }
+        AppKey::Char('x') | AppKey::Char('X') => {
+            // Kill / cancel active job or subagent
+            let task = tasks.get(state.selected_idx);
+            if let Some(task) = task {
+                if let Some(q) = ctx.bg_queue {
+                    let _ = q.kill(&task.id);
+                }
+                if let Some(dt) = ctx.delegate_tool {
+                    let _ = dt.kill(&task.id).await;
+                }
+            }
+            *tasks = collect_tasks(ctx.bg_queue, ctx.delegate_tool).await;
+            if tasks.is_empty() {
+                return false;
+            }
+            clamp_selection(tasks, state);
+            state.width = super::ui::get_terminal_width().max(40);
+            state.body = task_body(
+                &tasks[state.selected_idx],
+                ctx.store,
+                ctx.process_expanded,
+                state.width,
+            )
+            .await;
+            let (eff, max) = render_viewer_frame(
+                &tasks[state.selected_idx],
+                tasks,
+                state.selected_idx,
+                state.scroll_offset,
+                &state.body,
+                state.width,
+            );
+            state.scroll_offset = eff;
+            state.max_offset = max;
+        }
+        AppKey::Escape
+        | AppKey::Char('q')
+        | AppKey::Char('Q')
+        | AppKey::CtrlC
+        | AppKey::Ctrl('c')
+        | AppKey::CtrlShiftB
+        | AppKey::Ctrl('b')
+        | AppKey::Char('\x02') => {
+            return false;
+        }
+        _ => {}
+    }
+    true
 }
 
 /// The rows for one task.

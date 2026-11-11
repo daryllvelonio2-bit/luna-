@@ -339,59 +339,9 @@ where
         // silently guards nothing, which is worse than no hook at all.
         let mut execution_result = execution_result;
 
-        // Safety cap: never allow an unbounded tool result (from any tool, MCP, or plugin) to blow
-        // past model context limits. The middle is dropped rather than the tail: a long build log
-        // or listing is mostly repetition, while its last lines carry the outcome. Results this
-        // large are rare; the median is around 1 KB.
-        const MAX_TOOL_RESULT_CHARS: usize = 100_000;
-        const TOOL_RESULT_CLIPPED: &str =
-            "\n\n[tool output clipped: middle omitted to protect the context window]\n\n";
-        if execution_result.content.len() > MAX_TOOL_RESULT_CHARS {
-            execution_result.content = crate::tools::clip_middle(
-                &execution_result.content,
-                MAX_TOOL_RESULT_CHARS,
-                TOOL_RESULT_CLIPPED,
-            );
-        }
-        if let Some(hooks) = self.hooks.as_ref() {
-            let event = if execution_result.is_error {
-                HookEvent::PostToolUseFailure
-            } else {
-                HookEvent::PostToolUse
-            };
-            let context = HookContext {
-                session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
-                tool: Some(tool_call.name.as_str()),
-                arguments: Some(effective_arguments),
-                message: Some(execution_result.content.as_str()),
-                reason: execution_result
-                    .is_error
-                    .then_some(execution_result.content.as_str()),
-            };
-            let hook_outcome = hooks.run(event, &context).await;
-            for note in &hook_outcome.notes {
-                debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
-            }
-            if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
-                match crate::hooks::replacement_text(&replacement) {
-                    Some(text) => {
-                        debug!(
-                            tool = %tool_call.name,
-                            "{} hook replaced the result the model sees ({} -> {} chars)",
-                            event.as_str(),
-                            execution_result.content.chars().count(),
-                            text.chars().count()
-                        );
-                        execution_result.content = text;
-                    }
-                    None => warn!(
-                        tool = %tool_call.name,
-                        "{} hook returned a payload with no \"content\"; ignoring it",
-                        event.as_str()
-                    ),
-                }
-            }
-        }
+        self.clip_tool_result(&mut execution_result);
+        self.apply_post_tool_use_hook(tool_call, effective_arguments, &mut execution_result)
+            .await;
 
         if let Some(ref observer) = self.observer {
             observer(AgentEvent::ToolExecuted {
@@ -409,36 +359,141 @@ where
             denied: is_denial,
         });
 
-        // Track consecutive non-working calls (failure thrashing guardrail).
-        // Human/policy denials are intentional choices, not malfunctioning tool thrashing.
+        self.track_tool_failure(
+            tool_call,
+            is_denial,
+            &execution_result,
+            state.consecutive_failures,
+        )?;
+
+        self.bridge_note_pointer(tool_call, &mut execution_result)
+            .await;
+
+        // Add tool result to conversation history
+        let tool_message = Message::tool(execution_result);
+        self.append(&tool_message, false).await?;
+        state.messages.push(tool_message);
+
+        let rebound = self
+            .try_rebind_completed_fold(state.messages, state.fold_watermark, state.system_text)
+            .await;
+
+        let current_tokens = estimate_tokens(state.messages).tokens;
+        // A fold grew the live transcript from `state.messages`, which the rebind has just
+        // replaced with what the store now holds. Let the gauge fall to that size during the turn
+        // rather than waiting for the boundary.
+        self.report_context_tokens(current_tokens, rebound);
+
+        Ok(())
+    }
+
+    /// Never allow an unbounded tool result (from any tool, MCP, or plugin) to blow past model
+    /// context limits. The middle is dropped rather than the tail: a long build log or listing is
+    /// mostly repetition, while its last lines carry the outcome. Results this large are rare; the
+    /// median is around 1 KB.
+    fn clip_tool_result(&self, execution_result: &mut ToolResult) {
+        const MAX_TOOL_RESULT_CHARS: usize = 100_000;
+        const TOOL_RESULT_CLIPPED: &str =
+            "\n\n[tool output clipped: middle omitted to protect the context window]\n\n";
+        if execution_result.content.len() > MAX_TOOL_RESULT_CHARS {
+            execution_result.content = crate::tools::clip_middle(
+                &execution_result.content,
+                MAX_TOOL_RESULT_CHARS,
+                TOOL_RESULT_CLIPPED,
+            );
+        }
+    }
+
+    /// Run the `post_tool_use` hook and let its replacement text (if any) stand in for the result.
+    async fn apply_post_tool_use_hook(
+        &self,
+        tool_call: &ToolCall,
+        effective_arguments: &serde_json::Value,
+        execution_result: &mut ToolResult,
+    ) {
+        let Some(hooks) = self.hooks.as_ref() else {
+            return;
+        };
+        let event = if execution_result.is_error {
+            HookEvent::PostToolUseFailure
+        } else {
+            HookEvent::PostToolUse
+        };
+        let context = HookContext {
+            session_id: self.session.as_ref().map(|b| b.session_id.as_str()),
+            tool: Some(tool_call.name.as_str()),
+            arguments: Some(effective_arguments),
+            message: Some(execution_result.content.as_str()),
+            reason: execution_result
+                .is_error
+                .then_some(execution_result.content.as_str()),
+        };
+        let hook_outcome = hooks.run(event, &context).await;
+        for note in &hook_outcome.notes {
+            debug!(tool = %tool_call.name, "{} hook: {}", event.as_str(), note);
+        }
+        if let HookVerdict::ProceedWith(replacement) = hook_outcome.verdict {
+            match crate::hooks::replacement_text(&replacement) {
+                Some(text) => {
+                    debug!(
+                        tool = %tool_call.name,
+                        "{} hook replaced the result the model sees ({} -> {} chars)",
+                        event.as_str(),
+                        execution_result.content.chars().count(),
+                        text.chars().count()
+                    );
+                    execution_result.content = text;
+                }
+                None => warn!(
+                    tool = %tool_call.name,
+                    "{} hook returned a payload with no \"content\"; ignoring it",
+                    event.as_str()
+                ),
+            }
+        }
+    }
+
+    /// Track consecutive non-working calls (failure thrashing guardrail). Human/policy denials are
+    /// intentional choices, not malfunctioning tool thrashing.
+    fn track_tool_failure(
+        &self,
+        tool_call: &ToolCall,
+        is_denial: bool,
+        execution_result: &ToolResult,
+        consecutive_failures: &mut usize,
+    ) -> Result<(), HarnessError> {
         if execution_result.is_error && !is_denial {
-            *state.consecutive_failures += 1;
+            *consecutive_failures += 1;
             warn!(
                 "Tool '{}' failed (consecutive failures: {}/{})",
-                tool_call.name, state.consecutive_failures, self.config.max_consecutive_failures
+                tool_call.name, consecutive_failures, self.config.max_consecutive_failures
             );
 
-            if *state.consecutive_failures >= self.config.max_consecutive_failures {
+            if *consecutive_failures >= self.config.max_consecutive_failures {
                 error!(
                     "Halt triggered: {} consecutive tool failures exceeded threshold",
-                    state.consecutive_failures
+                    consecutive_failures
                 );
                 return Err(HarnessError::ConsecutiveFailuresExceeded {
-                    failures: *state.consecutive_failures,
+                    failures: *consecutive_failures,
                     last_tool: tool_call.name.clone(),
                 });
             }
         } else {
             // Reset consecutive failures on successful execution
-            if *state.consecutive_failures > 0 {
+            if *consecutive_failures > 0 {
                 debug!(
                     "Resetting consecutive failures counter from {} to 0",
-                    state.consecutive_failures
+                    consecutive_failures
                 );
             }
-            *state.consecutive_failures = 0;
+            *consecutive_failures = 0;
         }
+        Ok(())
+    }
 
+    /// Keep the memory note-pointer bridge in step with `save_note`/`update_note`/`delete_note`.
+    async fn bridge_note_pointer(&self, tool_call: &ToolCall, execution_result: &mut ToolResult) {
         // If a note was saved or updated successfully, ensure memory pointer bridge is updated
         if (tool_call.name == "save_note" || tool_call.name == "update_note")
             && !execution_result.is_error
@@ -471,8 +526,8 @@ where
             }
         }
 
-        // ...and if a note was deleted, drop its pointer so memory holds no dangling
-        // reference to a document that no longer exists.
+        // ...and if a note was deleted, drop its pointer so memory holds no dangling reference to a
+        // document that no longer exists.
         if tool_call.name == "delete_note" && !execution_result.is_error {
             if let Ok(removed) =
                 serde_json::from_str::<serde_json::Value>(&execution_result.content)
@@ -488,27 +543,5 @@ where
                 }
             }
         }
-
-        // Add tool result to conversation history
-        let tool_message = Message::tool(execution_result);
-        self.append(&tool_message, false).await?;
-        state.messages.push(tool_message);
-
-        let rebound = self
-            .try_rebind_completed_fold(state.messages, state.fold_watermark, state.system_text)
-            .await;
-
-        let current_tokens = estimate_tokens(state.messages).tokens;
-        if let Some(ref observer) = self.observer {
-            observer(AgentEvent::ContextTokensUpdated {
-                tokens_used: current_tokens,
-                // The fold grew the live transcript from `state.messages`, which the rebind has
-                // just replaced with what the store now holds. Let the gauge fall to that size
-                // during the turn rather than waiting for the boundary.
-                reset: rebound,
-            });
-        }
-
-        Ok(())
     }
 }

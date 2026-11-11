@@ -58,21 +58,27 @@ fn emit(line: &serde_json::Value) {
     let _ = stdout.flush();
 }
 
-pub async fn run_exec(
-    config: Config,
-    cred_manager: Arc<CredentialManager>,
-    discovery: Arc<ModelDiscovery>,
-    options: ExecOptions,
-) -> Result<(), HarnessError> {
-    let prompt = read_prompt(options.prompt)?;
-    if prompt.trim().is_empty() {
-        return Err(HarnessError::ConfigurationError(
-            "luna exec: empty prompt".to_string(),
-        ));
-    }
+struct ExecTools {
+    memory: Arc<harness_memory::MemoryEngineKind>,
+    notes: Arc<FileNotesEngine>,
+    registry: Arc<DefaultToolRegistry>,
+    checkpoints: Arc<harness_core::CheckpointController>,
+}
 
-    let store = Arc::new(open_store(&config)?);
-    let session_id = resolve_session(store.as_ref(), options.selection).await?;
+async fn resolve_exec_session(
+    config: &Config,
+    selection: SessionSelection,
+) -> Result<
+    (
+        Arc<harness_core::SqliteSessionStore>,
+        String,
+        String,
+        String,
+    ),
+    HarnessError,
+> {
+    let store = Arc::new(open_store(config)?);
+    let session_id = resolve_session(store.as_ref(), selection).await?;
 
     // The session carries its model, so `--session` resumes on the model it was using.
     let record = store.get(&session_id).await?;
@@ -89,44 +95,69 @@ pub async fn run_exec(
         .set_model(&session_id, &provider_id, &model_id)
         .await?;
 
-    let provider = Arc::new(GenericProviderClient::new(
-        provider_id.clone(),
-        model_id.clone(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(&provider_id),
-    )?);
+    Ok((store, session_id, provider_id, model_id))
+}
 
-    let memory = build_memory_engine(&config)?;
+/// The tool surface matches the interactive chat: a headless run that could do less than the chat
+/// could would be a different agent wearing the same name.
+async fn build_exec_tools(config: &Config, session_id: &str) -> Result<ExecTools, HarnessError> {
+    let memory = build_memory_engine(config)?;
     let notes = Arc::new(FileNotesEngine::new(
         config.paths.notes_dir.clone(),
         Some(config.paths.notes_db.clone()),
     )?);
 
-    // The tool surface matches the interactive chat: a headless run that could do less than the
-    // chat could would be a different agent wearing the same name.
     let background_mode = config.memory.mode.is_background();
     let registry = Arc::new(DefaultToolRegistry::new());
-    if !background_mode {
-        registry
-            .register(Arc::new(SaveMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(SaveNoteTool::new(notes.clone())))
-            .await?;
-        registry
-            .register(Arc::new(UpdateNoteTool::new(notes.clone())))
-            .await?;
-        registry
-            .register(Arc::new(DeleteNoteTool::new(notes.clone())))
-            .await?;
+    register_exec_write_tools(&registry, &memory, &notes, background_mode).await?;
+    register_exec_read_tools(&registry, &memory, &notes).await?;
+    register_exec_skills(&registry, config).await?;
+    crate::commands::desktop::tools::register(registry.as_ref()).await?;
+    let checkpoints = register_exec_core_tools(&registry, config, session_id).await?;
+
+    Ok(ExecTools {
+        memory,
+        notes,
+        registry,
+        checkpoints,
+    })
+}
+
+async fn register_exec_write_tools(
+    registry: &Arc<DefaultToolRegistry>,
+    memory: &Arc<harness_memory::MemoryEngineKind>,
+    notes: &Arc<FileNotesEngine>,
+    background_mode: bool,
+) -> Result<(), HarnessError> {
+    if background_mode {
+        return Ok(());
     }
+    registry
+        .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(SaveNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+        .await?;
+    Ok(())
+}
+
+async fn register_exec_read_tools(
+    registry: &Arc<DefaultToolRegistry>,
+    memory: &Arc<harness_memory::MemoryEngineKind>,
+    notes: &Arc<FileNotesEngine>,
+) -> Result<(), HarnessError> {
     registry
         .register(Arc::new(SearchNotesTool::new(notes.clone())))
         .await?;
@@ -141,7 +172,13 @@ pub async fn run_exec(
             MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
         ))
         .await?;
+    Ok(())
+}
 
+async fn register_exec_skills(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+) -> Result<(), HarnessError> {
     let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
     if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
@@ -167,9 +204,14 @@ pub async fn run_exec(
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
             .await?;
     }
-    // The desktop tools, and the skill that documents them.
-    crate::commands::desktop::tools::register(registry.as_ref()).await?;
+    Ok(())
+}
 
+async fn register_exec_core_tools(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+    session_id: &str,
+) -> Result<Arc<harness_core::CheckpointController>, HarnessError> {
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     let bg_queue = Arc::new(
         harness_core::tasks::BackgroundTaskQueue::new(config.paths.jobs_dir.clone())
@@ -177,10 +219,10 @@ pub async fn run_exec(
     );
     // The todo list belongs to the session this run belongs to.
     let todo_scope =
-        harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), &session_id);
+        harness_core::tools::TodoScope::new(config.paths.todos_dir.clone(), session_id);
     harness_core::tools::register_core_tools_shared_queue(
         &reg_dyn,
-        &config,
+        config,
         harness_core::tools::ReadCache::new(),
         None,
         None,
@@ -200,52 +242,11 @@ pub async fn run_exec(
             checkpoints.clone(),
         )))
         .await;
+    Ok(checkpoints)
+}
 
-    let usage = Arc::new(super::usage::UsageRecorder::from_config(&config));
-    let permissions = PermissionEngine::validate(config.tools.permissions.clone())?;
-    let approver = headless_approver(&config, options.yes);
-
-    let mut agent_cfg = AgentConfig {
-        require_hitl_for_mutation: config.agent.require_hitl_for_mutation,
-        ..AgentConfig::default()
-    };
-    agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
-    agent_cfg.profile_persona = config.agent.profile_persona.clone();
-    agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
-    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
-    agent_cfg.memory_mode = config.memory.mode;
-    // Follow the model's real window rather than the config's fixed bar; a headless run must fold
-    // before the provider rejects the request, not after.
-    agent_cfg.context_window =
-        Some(super::context_window::context_window_for(&config, &provider_id, &model_id) as usize);
-
-    // Hooks are part of the agent, not part of the REPL: `luna exec` is the path CI and scripts
-    // take, and a guardrail that only arms in an interactive session is a guardrail that is off
-    // exactly where nobody is watching. Same fail-closed loader as `chat`.
-    let hooks = Arc::new(harness_core::HookRunner::load(
-        &config.paths.workspace_root,
-        &config.hooks,
-    )?);
-
-    let mut agent: ChatAgent = Agent::new(provider, memory, notes, registry, agent_cfg)
-        .with_permissions(permissions)
-        .with_hooks(hooks)
-        .with_checkpoints(checkpoints)
-        .with_approval(approver, approval_settings(&config))
-        .with_session(SessionBinding {
-            store: store.clone(),
-            session_id: session_id.clone(),
-            resume_max_messages: config.session.resume_max_messages,
-        });
-
-    if options.json {
-        emit(&serde_json::json!({
-            "type": "start",
-            "session": session_id,
-            "provider": provider_id,
-            "model": model_id,
-            "prompt": prompt,
-        }));
+fn install_exec_observer(agent: &mut ChatAgent, json: bool) {
+    if json {
         let observer: harness_core::AgentObserver = Arc::new(|event| {
             let line = match event {
                 AgentEvent::ReasoningDelta(text) => {
@@ -295,14 +296,23 @@ pub async fn run_exec(
         });
         agent.set_observer(observer);
     }
+}
 
+async fn run_exec_turn(
+    agent: &mut ChatAgent,
+    prompt: &str,
+    usage: &Arc<super::usage::UsageRecorder>,
+    provider_id: &str,
+    model_id: &str,
+    session_id: &str,
+) -> Result<harness_core::TurnOutcome, HarnessError> {
     // `session_start` before the turn and `session_end` after it, mirroring the REPL.
     agent
         .emit_hook_event(harness_core::HookEvent::SessionStart, None)
         .await?;
     let outcome = agent
         .run_turn(
-            &crate::commands::prompt_images::inline_image_paths(&prompt),
+            &crate::commands::prompt_images::inline_image_paths(prompt),
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -318,68 +328,28 @@ pub async fn run_exec(
     if let Ok(outcome) = &outcome {
         usage
             .record(
-                &provider_id,
-                &model_id,
-                Some(&session_id),
+                provider_id,
+                model_id,
+                Some(session_id),
                 outcome,
                 harness_core::usage::SOURCE_EXEC,
             )
             .await;
     }
 
+    outcome
+}
+
+fn report_exec_outcome(
+    outcome: Result<harness_core::TurnOutcome, HarnessError>,
+    json: bool,
+    strict: bool,
+    session_id: &str,
+) -> Result<(), HarnessError> {
     match outcome {
-        Ok(outcome) => {
-            let failed_tools = outcome
-                .tool_calls
-                .iter()
-                .filter(|call| call.is_error)
-                .count();
-            let denied = outcome.tool_calls.iter().filter(|call| call.denied).count();
-
-            if options.json {
-                // The turn completed; `ok` says so. Which tools errored is in `tool_calls`, where
-                // the caller can see that a failing command or a sandbox refusal was the task's
-                // point rather than a broken run — a turn that ends normally is not a failed run.
-                emit(&serde_json::json!({
-                    "type": "result",
-                    "ok": true,
-                    "answer": outcome.reply,
-                    "reasoning": outcome.reasoning,
-                    "session": session_id,
-                    "tool_calls": outcome.tool_calls.iter().map(|call| serde_json::json!({
-                        "name": call.name,
-                        "ok": !call.is_error,
-                        "denied": call.denied,
-                        "output": call.output,
-                    })).collect::<Vec<_>>(),
-                    "replayed": outcome.replayed.as_ref().map(|replay: &ReplayNotice| replay.replayed),
-                    "usage": outcome.usage.as_ref().map(|usage| serde_json::json!({
-                        "prompt_tokens": usage.prompt_tokens,
-                        "completion_tokens": usage.completion_tokens,
-                        "total_tokens": usage.total_tokens,
-                    })),
-                    "duration_ms": outcome.duration_ms,
-                }));
-            } else {
-                println!("{}", outcome.reply);
-            }
-
-            // A denial always fails the run, `--strict` or not: the caller asked for work that
-            // policy refused, and a green exit status would claim it happened.
-            if denied > 0 {
-                return Err(HarnessError::ApprovalRejected(format!(
-                    "luna exec: {denied} tool call(s) were denied — see the tool results above"
-                )));
-            }
-            if options.strict && failed_tools > 0 {
-                return Err(HarnessError::StrictFailure(format!(
-                    "luna exec --strict: {failed_tools} tool call(s) failed"
-                )));
-            }
-            Ok(())
-        }
+        Ok(outcome) => report_exec_success(&outcome, json, strict, session_id),
         Err(error) => {
-            if options.json {
+            if json {
                 emit(&serde_json::json!({
                     "type": "result",
                     "ok": false,
@@ -390,6 +360,155 @@ pub async fn run_exec(
             Err(error)
         }
     }
+}
+
+fn report_exec_success(
+    outcome: &harness_core::TurnOutcome,
+    json: bool,
+    strict: bool,
+    session_id: &str,
+) -> Result<(), HarnessError> {
+    let failed_tools = outcome
+        .tool_calls
+        .iter()
+        .filter(|call| call.is_error)
+        .count();
+    let denied = outcome.tool_calls.iter().filter(|call| call.denied).count();
+
+    if json {
+        // The turn completed; `ok` says so. Which tools errored is in `tool_calls`, where
+        // the caller can see that a failing command or a sandbox refusal was the task's
+        // point rather than a broken run — a turn that ends normally is not a failed run.
+        emit(&serde_json::json!({
+            "type": "result",
+            "ok": true,
+            "answer": outcome.reply,
+            "reasoning": outcome.reasoning,
+            "session": session_id,
+            "tool_calls": outcome.tool_calls.iter().map(|call| serde_json::json!({
+                "name": call.name,
+                "ok": !call.is_error,
+                "denied": call.denied,
+                "output": call.output,
+            })).collect::<Vec<_>>(),
+            "replayed": outcome.replayed.as_ref().map(|replay: &ReplayNotice| replay.replayed),
+            "usage": outcome.usage.as_ref().map(|usage| serde_json::json!({
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+            })),
+            "duration_ms": outcome.duration_ms,
+        }));
+    } else {
+        println!("{}", outcome.reply);
+    }
+
+    // A denial always fails the run, `--strict` or not: the caller asked for work that
+    // policy refused, and a green exit status would claim it happened.
+    if denied > 0 {
+        return Err(HarnessError::ApprovalRejected(format!(
+            "luna exec: {denied} tool call(s) were denied — see the tool results above"
+        )));
+    }
+    if strict && failed_tools > 0 {
+        return Err(HarnessError::StrictFailure(format!(
+            "luna exec --strict: {failed_tools} tool call(s) failed"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn run_exec(
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+    options: ExecOptions,
+) -> Result<(), HarnessError> {
+    let prompt = read_prompt(options.prompt.clone())?;
+    if prompt.trim().is_empty() {
+        return Err(HarnessError::ConfigurationError(
+            "luna exec: empty prompt".to_string(),
+        ));
+    }
+
+    let (store, session_id, provider_id, model_id) =
+        resolve_exec_session(&config, options.selection).await?;
+
+    let provider = Arc::new(GenericProviderClient::new(
+        provider_id.clone(),
+        model_id.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&provider_id),
+    )?);
+
+    let ExecTools {
+        memory,
+        notes,
+        registry,
+        checkpoints,
+    } = build_exec_tools(&config, &session_id).await?;
+
+    let usage = Arc::new(super::usage::UsageRecorder::from_config(&config));
+    let permissions = PermissionEngine::validate(config.tools.permissions.clone())?;
+    let approver = headless_approver(&config, options.yes);
+
+    let mut agent_cfg = AgentConfig {
+        require_hitl_for_mutation: config.agent.require_hitl_for_mutation,
+        ..AgentConfig::default()
+    };
+    agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
+    agent_cfg.profile_persona = config.agent.profile_persona.clone();
+    agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
+    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
+    agent_cfg.memory_mode = config.memory.mode;
+    // Follow the model's real window rather than the config's fixed bar; a headless run must fold
+    // before the provider rejects the request, not after.
+    agent_cfg.context_window =
+        Some(super::context_window::context_window_for(&config, &provider_id, &model_id) as usize);
+
+    // Hooks are part of the agent, not part of the REPL: `luna exec` is the path CI and scripts
+    // take, and a guardrail that only arms in an interactive session is a guardrail that is off
+    // exactly where nobody is watching. Same fail-closed loader as `chat`.
+    let hooks = Arc::new(harness_core::HookRunner::load(
+        &config.paths.workspace_root,
+        &config.hooks,
+    )?);
+
+    let mut agent: ChatAgent = Agent::new(provider, memory, notes, registry, agent_cfg)
+        .with_permissions(permissions)
+        .with_hooks(hooks)
+        .with_checkpoints(checkpoints)
+        .with_approval(approver, approval_settings(&config))
+        .with_session(SessionBinding {
+            store: store.clone(),
+            session_id: session_id.clone(),
+            resume_max_messages: config.session.resume_max_messages,
+        });
+
+    if options.json {
+        emit(&serde_json::json!({
+            "type": "start",
+            "session": session_id,
+            "provider": provider_id,
+            "model": model_id,
+            "prompt": prompt,
+        }));
+    }
+
+    install_exec_observer(&mut agent, options.json);
+
+    let outcome = run_exec_turn(
+        &mut agent,
+        &prompt,
+        &usage,
+        &provider_id,
+        &model_id,
+        &session_id,
+    )
+    .await;
+
+    report_exec_outcome(outcome, options.json, options.strict, &session_id)
 }
 
 /// Headless approval is fail-closed unless the caller said `--yes` or the config says `allow`.

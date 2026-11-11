@@ -75,6 +75,80 @@ pub struct CredentialManager {
     state: RwLock<LunaAuthStorage>,
 }
 
+/// The indices of the credentials that have not been retired.
+fn active_credential_indices(provider_state: &ProviderAuthState) -> Vec<usize> {
+    provider_state
+        .credentials
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.is_temporarily_disabled)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Pick the credential the provider's rotation strategy names.
+fn select_credential_index(
+    provider_state: &mut ProviderAuthState,
+    active_credentials: &[usize],
+) -> usize {
+    match provider_state.strategy {
+        RotationStrategy::Never => {
+            // Never rotate: strictly pick the priority credential, or the first active one
+            // if none is explicitly marked priority.
+            if let Some(idx) = provider_state
+                .credentials
+                .iter()
+                .position(|c| c.is_priority)
+            {
+                provider_state.credentials[idx].is_temporarily_disabled = false;
+                idx
+            } else {
+                active_credentials[0]
+            }
+        }
+        RotationStrategy::FillFirst => {
+            // Priority credential first, otherwise first active credential
+            if let Some(idx) = active_credentials
+                .iter()
+                .copied()
+                .find(|&i| provider_state.credentials[i].is_priority)
+            {
+                idx
+            } else {
+                active_credentials[0]
+            }
+        }
+        RotationStrategy::RoundRobin => {
+            let count = active_credentials.len();
+            // Per provider, and persisted: the position survives a restart (t_29ea5d7c). A
+            // process-local counter restarted from 0 in every new process, so round_robin
+            // always opened on the same key, and `current_round_robin_index` sat dead in the
+            // file. The counter advances even when the provider later rejects the pick —
+            // which is fine: it only decides *who goes next*, unlike LeastUsed, which must
+            // count real traffic.
+            let consumed = provider_state.current_round_robin_index;
+            provider_state.current_round_robin_index = consumed.wrapping_add(1) % count.max(1);
+            active_credentials[consumed % count]
+        }
+        RotationStrategy::Random => {
+            let mut rng = rand::thread_rng();
+            let idx = rng.gen_range(0..active_credentials.len());
+            active_credentials[idx]
+        }
+        RotationStrategy::LeastUsed => {
+            let mut min_idx = active_credentials[0];
+            let mut min_usage = provider_state.credentials[min_idx].usage_count;
+            for &idx in &active_credentials[1..] {
+                if provider_state.credentials[idx].usage_count < min_usage {
+                    min_usage = provider_state.credentials[idx].usage_count;
+                    min_idx = idx;
+                }
+            }
+            min_idx
+        }
+    }
+}
+
 impl CredentialManager {
     /// Load the credential store, failing loudly if it exists but cannot be read.
     ///
@@ -114,7 +188,12 @@ impl CredentialManager {
         use std::os::unix::ffi::OsStrExt;
         let lock_path = self.storage_path.with_extension("lock");
         if let Some(parent) = lock_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot create the credential store directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
         }
         let c_path = std::ffi::CString::new(lock_path.as_os_str().as_bytes())
             .map_err(|e| HarnessError::Io(e.to_string()))?;
@@ -148,7 +227,12 @@ impl CredentialManager {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot restrict credential store {} to its owner: {error}",
+                    path.display()
+                ))
+            })?;
         }
         let data = fs::read_to_string(path).map_err(|e| {
             HarnessError::Io(format!(
@@ -210,6 +294,8 @@ impl CredentialManager {
                 ))
             })?;
             file.write_all(bytes.as_bytes()).map_err(|e| {
+                // Best effort: the temp file never became the store; remove it if we can, but the
+                // write error is what the caller needs to see.
                 let _ = fs::remove_file(&tmp_path);
                 HarnessError::Io(format!(
                     "cannot write temp credential store {}: {e}",
@@ -217,6 +303,7 @@ impl CredentialManager {
                 ))
             })?;
             file.sync_all().map_err(|e| {
+                // Best effort: see the write_all error path above.
                 let _ = fs::remove_file(&tmp_path);
                 HarnessError::Io(format!(
                     "cannot sync temp credential store {}: {e}",
@@ -235,6 +322,8 @@ impl CredentialManager {
         }
 
         harness_core::fsutil::replace_file(&tmp_path, &self.storage_path).map_err(|e| {
+            // Best effort: the rename failed, so the temp file is garbage. The rename error is the
+            // one that explains why the store was not updated.
             let _ = fs::remove_file(&tmp_path);
             HarnessError::Io(format!(
                 "cannot rename credential store {} to {}: {e}",
@@ -246,7 +335,14 @@ impl CredentialManager {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600));
+            fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    HarnessError::Io(format!(
+                        "cannot restrict credential store {} to its owner: {error}",
+                        self.storage_path.display()
+                    ))
+                },
+            )?;
         }
 
         Ok(())
@@ -648,13 +744,7 @@ impl CredentialManager {
             }
         })?;
 
-        let active_credentials: Vec<usize> = provider_state
-            .credentials
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.is_temporarily_disabled)
-            .map(|(i, _)| i)
-            .collect();
+        let active_credentials = active_credential_indices(provider_state);
 
         if active_credentials.is_empty() {
             // Recovery hatch, kept deliberately: `is_temporarily_disabled` is part of the persisted
@@ -671,62 +761,7 @@ impl CredentialManager {
             });
         }
 
-        let selected_index = match provider_state.strategy {
-            RotationStrategy::Never => {
-                // Never rotate: strictly pick the priority credential, or the first active one
-                // if none is explicitly marked priority.
-                if let Some(idx) = provider_state
-                    .credentials
-                    .iter()
-                    .position(|c| c.is_priority)
-                {
-                    provider_state.credentials[idx].is_temporarily_disabled = false;
-                    idx
-                } else {
-                    active_credentials[0]
-                }
-            }
-            RotationStrategy::FillFirst => {
-                // Priority credential first, otherwise first active credential
-                if let Some(idx) = active_credentials
-                    .iter()
-                    .copied()
-                    .find(|&i| provider_state.credentials[i].is_priority)
-                {
-                    idx
-                } else {
-                    active_credentials[0]
-                }
-            }
-            RotationStrategy::RoundRobin => {
-                let count = active_credentials.len();
-                // Per provider, and persisted: the position survives a restart (t_29ea5d7c). A
-                // process-local counter restarted from 0 in every new process, so round_robin
-                // always opened on the same key, and `current_round_robin_index` sat dead in the
-                // file. The counter advances even when the provider later rejects the pick —
-                // which is fine: it only decides *who goes next*, unlike LeastUsed, which must
-                // count real traffic.
-                let consumed = provider_state.current_round_robin_index;
-                provider_state.current_round_robin_index = consumed.wrapping_add(1) % count.max(1);
-                active_credentials[consumed % count]
-            }
-            RotationStrategy::Random => {
-                let mut rng = rand::thread_rng();
-                let idx = rng.gen_range(0..active_credentials.len());
-                active_credentials[idx]
-            }
-            RotationStrategy::LeastUsed => {
-                let mut min_idx = active_credentials[0];
-                let mut min_usage = provider_state.credentials[min_idx].usage_count;
-                for &idx in &active_credentials[1..] {
-                    if provider_state.credentials[idx].usage_count < min_usage {
-                        min_usage = provider_state.credentials[idx].usage_count;
-                        min_idx = idx;
-                    }
-                }
-                min_idx
-            }
-        };
+        let selected_index = select_credential_index(provider_state, &active_credentials);
 
         let cred = &mut provider_state.credentials[selected_index];
         cred.usage_count += 1;

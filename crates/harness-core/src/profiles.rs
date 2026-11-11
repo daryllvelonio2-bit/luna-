@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{home_dir, Config};
+use crate::config::{Config, PathsSettings};
 use crate::error::HarnessError;
 
 /// The built-in profile every installation starts with.
@@ -157,8 +157,11 @@ impl ProfilePaths {
 }
 
 /// The default profile directory root: `~/.luna/profiles`.
+///
+/// Resolved through [`PathsSettings`] so a relocated `paths.profiles_dir` cannot be bypassed by a
+/// second spelling of the home directory here.
 pub fn profiles_root() -> PathBuf {
-    home_dir().join(".luna").join("profiles")
+    PathsSettings::default().profiles_dir
 }
 
 fn flush(

@@ -60,31 +60,11 @@ pub fn extract_note(note: &Note) -> Extraction {
     let mut edges = Vec::new();
     let mut terms = BTreeSet::new();
 
-    let mut page = Node::new(note_id(&note_slug), note.title.clone(), NodeKind::Note)
-        .at(source_file.clone(), 1)
-        .with("id", note.id.clone());
-    if !note.summary_pointer.trim().is_empty() {
-        page = page.with("summary_pointer", note.summary_pointer.trim());
-    }
-    if !note.tags.is_empty() {
-        page = page.with("tags", note.tags.join(", "));
-    }
+    let page = page_node(note, &note_slug, &source_file);
     let page_id = page.id.clone();
     nodes.push(page);
 
-    for tag in &note.tags {
-        if tag.trim().is_empty() {
-            continue;
-        }
-        let id = tag_id(tag);
-        nodes.push(Node::new(id.clone(), tag.trim(), NodeKind::Tag).at(source_file.clone(), 1));
-        edges.push(Edge::new(
-            &page_id,
-            id,
-            Relation::Tagged,
-            Confidence::Extracted,
-        ));
-    }
+    add_tag_edges(note, &page_id, &source_file, &mut nodes, &mut edges);
 
     if let Some(parent) = note.parent_id.as_deref().filter(|p| !p.trim().is_empty()) {
         let parent_slug = slug(parent);
@@ -116,74 +96,29 @@ pub fn extract_note(note: &Note) -> Extraction {
             continue;
         }
 
-        if let Some((level, title)) = atx_heading(line) {
-            let heading = Node::new(
-                heading_id(&note_slug, &slug(&title), line_no),
-                title.clone(),
-                NodeKind::Heading,
-            )
-            .at(source_file.clone(), line_no)
-            .with("level", level.to_string());
-            let heading_nid = heading.id.clone();
-
-            while heading_stack
-                .last()
-                .is_some_and(|(parent_level, _)| *parent_level >= level)
-            {
-                heading_stack.pop();
-            }
-            let parent = heading_stack
-                .last()
-                .map(|(_, id)| id.clone())
-                .unwrap_or_else(|| page_id.clone());
-            edges.push(Edge::new(
-                parent,
-                heading_nid.clone(),
-                Relation::Contains,
-                Confidence::Extracted,
-            ));
-            heading_stack.push((level, heading_nid));
-            nodes.push(heading);
+        if add_heading(
+            line,
+            line_no,
+            &note_slug,
+            &source_file,
+            &page_id,
+            &mut heading_stack,
+            &mut nodes,
+            &mut edges,
+        ) {
             continue;
         }
 
-        for target in wikilinks(line) {
-            add_note_link(
-                &page_id,
-                &note_slug,
-                &target,
-                line_no,
-                &source_file,
-                &mut nodes,
-                &mut edges,
-            );
-        }
-        for target in markdown_links(line) {
-            add_markdown_link(
-                &page_id,
-                &note_slug,
-                &target,
-                line_no,
-                &source_file,
-                &mut nodes,
-                &mut edges,
-            );
-        }
-        for span in code_spans(line) {
-            if mentions >= MAX_MENTIONS {
-                break;
-            }
-            if add_code_span(
-                &page_id,
-                &span,
-                line_no,
-                &source_file,
-                &mut nodes,
-                &mut edges,
-            ) {
-                mentions += 1;
-            }
-        }
+        scan_inline_links(
+            line,
+            line_no,
+            &note_slug,
+            &source_file,
+            &page_id,
+            &mut mentions,
+            &mut nodes,
+            &mut edges,
+        );
 
         for term in terms_in(line) {
             if terms.len() >= MAX_TERMS {
@@ -197,6 +132,128 @@ pub fn extract_note(note: &Note) -> Extraction {
         nodes,
         edges,
         terms: terms.into_iter().collect(),
+    }
+}
+
+fn page_node(note: &Note, note_slug: &str, source_file: &str) -> Node {
+    let mut page = Node::new(note_id(note_slug), note.title.clone(), NodeKind::Note)
+        .at(source_file.to_string(), 1)
+        .with("id", note.id.clone());
+    if !note.summary_pointer.trim().is_empty() {
+        page = page.with("summary_pointer", note.summary_pointer.trim());
+    }
+    if !note.tags.is_empty() {
+        page = page.with("tags", note.tags.join(", "));
+    }
+    page
+}
+
+fn add_tag_edges(
+    note: &Note,
+    page_id: &str,
+    source_file: &str,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    for tag in &note.tags {
+        if tag.trim().is_empty() {
+            continue;
+        }
+        let id = tag_id(tag);
+        nodes.push(Node::new(id.clone(), tag.trim(), NodeKind::Tag).at(source_file.to_string(), 1));
+        edges.push(Edge::new(
+            page_id,
+            id,
+            Relation::Tagged,
+            Confidence::Extracted,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_heading(
+    line: &str,
+    line_no: usize,
+    note_slug: &str,
+    source_file: &str,
+    page_id: &str,
+    heading_stack: &mut Vec<(usize, String)>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) -> bool {
+    let Some((level, title)) = atx_heading(line) else {
+        return false;
+    };
+    let heading = Node::new(
+        heading_id(note_slug, &slug(&title), line_no),
+        title.clone(),
+        NodeKind::Heading,
+    )
+    .at(source_file.to_string(), line_no)
+    .with("level", level.to_string());
+    let heading_nid = heading.id.clone();
+
+    while heading_stack
+        .last()
+        .is_some_and(|(parent_level, _)| *parent_level >= level)
+    {
+        heading_stack.pop();
+    }
+    let parent = heading_stack
+        .last()
+        .map(|(_, id)| id.clone())
+        .unwrap_or_else(|| page_id.to_string());
+    edges.push(Edge::new(
+        parent,
+        heading_nid.clone(),
+        Relation::Contains,
+        Confidence::Extracted,
+    ));
+    heading_stack.push((level, heading_nid));
+    nodes.push(heading);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_inline_links(
+    line: &str,
+    line_no: usize,
+    note_slug: &str,
+    source_file: &str,
+    page_id: &str,
+    mentions: &mut usize,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    for target in wikilinks(line) {
+        add_note_link(
+            page_id,
+            note_slug,
+            &target,
+            line_no,
+            source_file,
+            nodes,
+            edges,
+        );
+    }
+    for target in markdown_links(line) {
+        add_markdown_link(
+            page_id,
+            note_slug,
+            &target,
+            line_no,
+            source_file,
+            nodes,
+            edges,
+        );
+    }
+    for span in code_spans(line) {
+        if *mentions >= MAX_MENTIONS {
+            break;
+        }
+        if add_code_span(page_id, &span, line_no, source_file, nodes, edges) {
+            *mentions += 1;
+        }
     }
 }
 

@@ -13,9 +13,9 @@ use harness_core::{Config, HarnessError, ReasoningEffort, WorkerProfile};
 use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
 
 use super::picker::pick_provider_and_model;
-use super::ChatAgent;
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::ui::ChatUi;
+use crate::commands::chat::ChatAgent;
 use crate::commands::prompt_images::inline_image_paths;
 
 /// `/worker` — list workers, or configure one with the provider/model picker.

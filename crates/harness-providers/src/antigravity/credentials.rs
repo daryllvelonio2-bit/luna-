@@ -8,6 +8,9 @@ use serde_json::json;
 
 use super::*;
 
+/// The token-info probe is a best-effort display-name lookup, not part of starting a turn.
+const EMAIL_PROBE_TIMEOUT_SECS: u64 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntigravityCredentials {
     pub access_token: String,
@@ -339,7 +342,7 @@ pub async fn resolve_antigravity_email_strict(
             );
             if let Ok(resp) = http_client
                 .get(&url)
-                .timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(EMAIL_PROBE_TIMEOUT_SECS))
                 .send()
                 .await
             {

@@ -226,15 +226,41 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
             percent: AUTO_COMPACT_DEFAULT_PERCENT,
             turns: AUTO_COMPACT_DEFAULT_TURNS,
         };
-        writer.blank()?;
-        writer.write_centered(
-            &format!("✓ Auto-compact: {}", summary(&selection)),
-            Some(NAME_COLOR),
-        )?;
-        return Ok(selection);
+        return finish(writer, selection);
     }
 
     // Ask for threshold
+    let chosen_threshold = ask_threshold(writer, reader, size)?;
+
+    // Ask for percent
+    let (chosen_percent, chosen_turns) = ask_percent(writer, reader, size)?;
+
+    let selection = AutoCompactSelection {
+        enabled: true,
+        threshold: chosen_threshold,
+        percent: chosen_percent,
+        turns: chosen_turns,
+    };
+    finish(writer, selection)
+}
+
+fn finish<W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    selection: AutoCompactSelection,
+) -> Result<AutoCompactSelection, HarnessError> {
+    writer.blank()?;
+    writer.write_centered(
+        &format!("✓ Auto-compact: {}", summary(&selection)),
+        Some(NAME_COLOR),
+    )?;
+    Ok(selection)
+}
+
+fn ask_threshold<R: BufRead, W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    reader: &mut R,
+    size: Size,
+) -> Result<usize, HarnessError> {
     let mut chosen_threshold = AUTO_COMPACT_DEFAULT_THRESHOLD;
     for attempt in 1..=MAX_ATTEMPTS {
         writer.write_prompt_line(&prompt_line(size, THRESHOLD_PROMPT))?;
@@ -257,8 +283,14 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
             }
         }
     }
+    Ok(chosen_threshold)
+}
 
-    // Ask for percent
+fn ask_percent<R: BufRead, W: Write, P: Pacer>(
+    writer: &mut Typewriter<'_, W, P>,
+    reader: &mut R,
+    size: Size,
+) -> Result<(usize, usize), HarnessError> {
     let mut chosen_percent = AUTO_COMPACT_DEFAULT_PERCENT;
     let mut chosen_turns = AUTO_COMPACT_DEFAULT_TURNS;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -283,17 +315,5 @@ pub fn select<R: BufRead, W: Write, P: Pacer>(
             }
         }
     }
-
-    let selection = AutoCompactSelection {
-        enabled: true,
-        threshold: chosen_threshold,
-        percent: chosen_percent,
-        turns: chosen_turns,
-    };
-    writer.blank()?;
-    writer.write_centered(
-        &format!("✓ Auto-compact: {}", summary(&selection)),
-        Some(NAME_COLOR),
-    )?;
-    Ok(selection)
+    Ok((chosen_percent, chosen_turns))
 }

@@ -283,7 +283,7 @@ impl FileNotesEngine {
         let mut cache_updates = Vec::new();
 
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
             for (project, path) in paths {
                 current_paths.insert(path.clone());
                 let mtime = mtimes
@@ -312,7 +312,7 @@ impl FileNotesEngine {
         }
 
         if !cache_updates.is_empty() {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
             for (path, mtime, note) in cache_updates {
                 cache.insert(path, (mtime, note));
             }
@@ -659,7 +659,15 @@ fn write_note_with_chunks(dir: &Path, note: &Note) -> Result<PathBuf, HarnessErr
         .join(format!("{}-part-{}.md", note.id, check_part))
         .is_file()
     {
-        let _ = std::fs::remove_file(dir.join(format!("{}-part-{}.md", note.id, check_part)));
+        let stale = dir.join(format!("{}-part-{}.md", note.id, check_part));
+        // Best effort: a part file that cannot be removed is stale, not part of the note, and the
+        // next save will try again. Report it instead of failing the write that succeeded.
+        if let Err(error) = std::fs::remove_file(&stale) {
+            warn!(
+                "could not remove stale note part '{}': {error}",
+                stale.display()
+            );
+        }
         check_part += 1;
     }
 
@@ -960,7 +968,13 @@ impl NotesEngine for FileNotesEngine {
         while let Ok(part_path) = self.note_path(&format!("{}-part-{}", qualified, p)) {
             if part_path.is_file() {
                 let part_target = archive_dir.join(format!("{}-part-{}.md", note.id, p));
-                let _ = harness_core::fsutil::replace_file(&part_path, &part_target);
+                harness_core::fsutil::replace_file(&part_path, &part_target).map_err(|error| {
+                    HarnessError::NotesError(format!(
+                        "Failed to archive note part '{}' to '{}': {error}",
+                        part_path.display(),
+                        part_target.display()
+                    ))
+                })?;
                 if let Ok(mut cache) = self.cache.write() {
                     cache.remove(&part_path);
                 }
@@ -1080,6 +1094,8 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
         ))
     })?;
     harness_core::fsutil::replace_file(&tmp, &path).map_err(|e| {
+        // Best effort: the temp file is already unreferenced; failing to delete it must not hide
+        // the commit error that sent us here.
         let _ = std::fs::remove_file(&tmp);
         HarnessError::NotesError(format!("Failed to commit note '{}': {}", path.display(), e))
     })?;
@@ -1089,115 +1105,143 @@ fn write_note(dir: &Path, note: &Note, skip_existing: bool) -> Result<PathBuf, H
 /// Reads a note file back. The front matter is the metadata; everything after the closing fence is
 /// verbatim content, so `content: ---` or `title:` inside a note body is never mistaken for data.
 fn parse_note_file(path: &Path) -> Result<Note, HarnessError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        HarnessError::NotesError(format!("Failed to read '{}': {}", path.display(), e))
-    })?;
-
-    let fallback_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("note")
-        .to_string();
+    let raw = read_note_source(path)?;
+    let fallback_id = note_fallback_id(path);
 
     let mut lines = raw.lines();
-    let mut title = String::new();
-    let mut id = String::new();
-    let mut pointer = String::new();
-    let mut tags: Vec<String> = Vec::new();
-    let mut created = String::new();
-    let mut updated = String::new();
-    let mut parent_id: Option<String> = None;
-    let mut part_number: Option<usize> = None;
-    let mut part_count: Option<usize> = None;
-    let mut content_hash: Option<String> = None;
-
-    let body_lines: Vec<&str>;
-
-    if raw.starts_with(FRONT_MATTER_FENCE) {
-        // Skip the opening fence, then read key/value pairs until the closing fence.
-        lines.next();
-        for line in lines.by_ref() {
-            if line.trim() == FRONT_MATTER_FENCE {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                let mut value = value.trim().to_string();
-                if ((value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\'')))
-                    && value.len() >= 2
-                {
-                    value = value[1..value.len() - 1].to_string();
-                }
-                match key.trim() {
-                    "id" => id = value,
-                    "parent_id" => parent_id = Some(value),
-                    "part_number" => part_number = value.parse().ok(),
-                    "part_count" => part_count = value.parse().ok(),
-                    "content_hash" => content_hash = Some(value),
-                    "title" => title = value,
-                    "summary_pointer" => pointer = value,
-                    "created_at" => created = value,
-                    "updated_at" => updated = value,
-                    "tags" => {
-                        tags = value
-                            .split(',')
-                            .map(|t| t.trim().to_string())
-                            .filter(|t| !t.is_empty())
-                            .collect()
-                    }
-                    _ => {}
-                }
-            }
-        }
-        body_lines = lines.collect();
+    let (meta, body_lines): (NoteFrontMatter, Vec<&str>) = if raw.starts_with(FRONT_MATTER_FENCE) {
+        (parse_front_matter(&mut lines), lines.collect())
     } else {
-        // A hand-written markdown file in the folder: the first heading is the title, the whole
-        // file is the content. Nothing is lost just because the user did not write front matter.
-        let first_heading = raw
-            .lines()
-            .find(|l| l.trim_start().starts_with('#'))
-            .map(|l| l.trim_start_matches('#').trim().to_string());
-        title = first_heading.unwrap_or_else(|| fallback_id.clone());
-        body_lines = raw.lines().collect();
-    }
+        (
+            handwritten_front_matter(&raw, &fallback_id),
+            raw.lines().collect(),
+        )
+    };
 
     let content = body_lines.join("\n").trim_matches('\n').to_string();
-    if title.trim().is_empty() {
-        title = fallback_id.clone();
-    }
+    let title = if meta.title.trim().is_empty() {
+        fallback_id.clone()
+    } else {
+        meta.title
+    };
 
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(Utc::now);
+    let mtime = note_mtime(path);
 
     let note = Note {
-        id: if id.trim().is_empty() || !is_safe_note_id(&id) {
+        id: if meta.id.trim().is_empty() || !is_safe_note_id(&meta.id) {
             fallback_id
         } else {
-            id
+            meta.id
         },
         title,
         content,
-        summary_pointer: if pointer.trim().is_empty() {
+        summary_pointer: if meta.pointer.trim().is_empty() {
             PointerDistiller::distill("", "")
         } else {
-            pointer
+            meta.pointer
         },
-        tags,
-        created_at: parse_timestamp(&created),
-        updated_at: if updated.trim().is_empty() {
+        tags: meta.tags,
+        created_at: parse_timestamp(&meta.created),
+        updated_at: if meta.updated.trim().is_empty() {
             mtime
         } else {
-            parse_timestamp(&updated)
+            parse_timestamp(&meta.updated)
         },
-        parent_id,
-        part_number,
-        part_count,
-        content_hash,
+        parent_id: meta.parent_id,
+        part_number: meta.part_number,
+        part_count: meta.part_count,
+        content_hash: meta.content_hash,
     };
     Ok(note)
+}
+
+fn read_note_source(path: &Path) -> Result<String, HarnessError> {
+    std::fs::read_to_string(path).map_err(|e| {
+        HarnessError::NotesError(format!("Failed to read '{}': {}", path.display(), e))
+    })
+}
+
+fn note_fallback_id(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("note")
+        .to_string()
+}
+
+fn note_mtime(path: &Path) -> DateTime<Utc> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(Utc::now)
+}
+
+#[derive(Default)]
+struct NoteFrontMatter {
+    title: String,
+    id: String,
+    pointer: String,
+    tags: Vec<String>,
+    created: String,
+    updated: String,
+    parent_id: Option<String>,
+    part_number: Option<usize>,
+    part_count: Option<usize>,
+    content_hash: Option<String>,
+}
+
+/// Parses the YAML-ish front matter, leaving `lines` positioned at the first body line.
+fn parse_front_matter(lines: &mut std::str::Lines<'_>) -> NoteFrontMatter {
+    let mut meta = NoteFrontMatter::default();
+    // Skip the opening fence, then read key/value pairs until the closing fence.
+    lines.next();
+    for line in lines.by_ref() {
+        if line.trim() == FRONT_MATTER_FENCE {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let mut value = value.trim().to_string();
+            if ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+                && value.len() >= 2
+            {
+                value = value[1..value.len() - 1].to_string();
+            }
+            match key.trim() {
+                "id" => meta.id = value,
+                "parent_id" => meta.parent_id = Some(value),
+                "part_number" => meta.part_number = value.parse().ok(),
+                "part_count" => meta.part_count = value.parse().ok(),
+                "content_hash" => meta.content_hash = Some(value),
+                "title" => meta.title = value,
+                "summary_pointer" => meta.pointer = value,
+                "created_at" => meta.created = value,
+                "updated_at" => meta.updated = value,
+                "tags" => {
+                    meta.tags = value
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                }
+                _ => {}
+            }
+        }
+    }
+    meta
+}
+
+/// A hand-written markdown file in the folder: the first heading is the title, the whole
+/// file is the content. Nothing is lost just because the user did not write front matter.
+fn handwritten_front_matter(raw: &str, fallback_id: &str) -> NoteFrontMatter {
+    let first_heading = raw
+        .lines()
+        .find(|l| l.trim_start().starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim().to_string());
+    NoteFrontMatter {
+        title: first_heading.unwrap_or_else(|| fallback_id.to_string()),
+        ..Default::default()
+    }
 }
 
 /// Front matter is one line per field: a newline in a value would forge the next field.

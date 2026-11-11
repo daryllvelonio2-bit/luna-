@@ -131,23 +131,9 @@ const NR_SOCKET: u32 = if cfg!(target_arch = "x86_64") {
     0
 };
 
-/// Install the no-network filter on the calling thread's process. Irreversible.
-///
-/// Called from a `pre_exec` hook, so it must not allocate after the filter is installed; everything
-/// it needs lives on the stack.
+/// The classic-BPF program that allows everything except non-`AF_UNIX` `socket(2)` calls.
 #[cfg(target_os = "linux")]
-pub fn install_no_network() -> io::Result<()> {
-    use std::io::Error;
-
-    // A seccomp filter can only be *tightened*, so refusing on an unknown architecture is the only
-    // honest option: guessing a syscall number would either block the wrong thing or nothing.
-    if AUDIT_ARCH == 0 || NR_SOCKET == 0 {
-        return Err(Error::new(
-            io::ErrorKind::Unsupported,
-            "tools.network = deny: no seccomp program for this architecture",
-        ));
-    }
-
+fn seccomp_filter() -> [libc::sock_filter; 9] {
     const BPF_LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
     const BPF_JMP_JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
     const BPF_RET_K: u16 = 0x06; // BPF_RET | BPF_K
@@ -155,12 +141,9 @@ pub fn install_no_network() -> io::Result<()> {
     const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
     const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
     const SECCOMP_RET_ALLOW: u32 = 0x7FFF_0000;
-    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
-    const PR_SET_SECCOMP: libc::c_int = 22;
-    const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
     const AF_UNIX: u32 = 1;
 
-    let filter = [
+    [
         // A = seccomp_data.arch
         libc::sock_filter {
             code: BPF_LD_W_ABS,
@@ -221,32 +204,61 @@ pub fn install_no_network() -> io::Result<()> {
             jf: 0,
             k: SECCOMP_RET_KILL_PROCESS,
         },
-    ];
+    ]
+}
+
+/// Install `program` on the calling process. Irreversible.
+#[cfg(target_os = "linux")]
+unsafe fn apply_filter(program: &libc::sock_fprog) -> io::Result<()> {
+    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+    const PR_SET_SECCOMP: libc::c_int = 22;
+    const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
+
+    // SAFETY: `prctl` with these options only reads the pointers passed; the filter array outlives
+    // the calls (it lives in `install_no_network`'s stack frame) and the kernel copies it.
+    // Without `NO_NEW_PRIVS`, a setuid binary in the command could re-exec and lose the filter.
+    if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if libc::prctl(
+        PR_SET_SECCOMP,
+        SECCOMP_MODE_FILTER,
+        program as *const libc::sock_fprog,
+        0,
+        0,
+    ) != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Install the no-network filter on the calling thread's process. Irreversible.
+///
+/// Called from a `pre_exec` hook, so it must not allocate after the filter is installed; everything
+/// it needs lives on the stack.
+#[cfg(target_os = "linux")]
+pub fn install_no_network() -> io::Result<()> {
+    use std::io::Error;
+
+    // A seccomp filter can only be *tightened*, so refusing on an unknown architecture is the only
+    // honest option: guessing a syscall number would either block the wrong thing or nothing.
+    if AUDIT_ARCH == 0 || NR_SOCKET == 0 {
+        return Err(Error::new(
+            io::ErrorKind::Unsupported,
+            "tools.network = deny: no seccomp program for this architecture",
+        ));
+    }
+
+    let filter = seccomp_filter();
 
     let program = libc::sock_fprog {
         len: filter.len() as libc::c_ushort,
         filter: filter.as_ptr() as *mut libc::sock_filter,
     };
 
-    // SAFETY: `prctl` with these options reads the pointers passed; the filter array outlives the
-    // calls (it is on this stack frame) and the kernel copies it.
-    unsafe {
-        // Without this, a setuid binary in the command could re-exec and lose the filter.
-        if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            return Err(Error::last_os_error());
-        }
-        if libc::prctl(
-            PR_SET_SECCOMP,
-            SECCOMP_MODE_FILTER,
-            &program as *const libc::sock_fprog,
-            0,
-            0,
-        ) != 0
-        {
-            return Err(Error::last_os_error());
-        }
-    }
-    Ok(())
+    // SAFETY: the filter and program are live on this stack frame for the whole call.
+    unsafe { apply_filter(&program) }
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -372,120 +372,14 @@ impl Tool for TodoListTool {
 
         let reply = match action {
             "list" => Self::render(&file),
-            "add" => {
-                let mut texts_to_add = Vec::new();
-                if let Some(arr) = args
-                    .get("tasks")
-                    .or_else(|| args.get("items"))
-                    .and_then(|v| v.as_array())
-                {
-                    for v in arr {
-                        if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                            texts_to_add.push(s.to_string());
-                        }
-                    }
-                } else if let Some(t) = args
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                {
-                    if t.contains('\n') {
-                        for line in t.lines() {
-                            let clean = line
-                                .trim()
-                                .trim_start_matches(['-', '*', '+', '•'])
-                                .trim_start_matches(|c: char| {
-                                    c.is_ascii_digit() || c == '.' || c == ')'
-                                })
-                                .trim();
-                            if !clean.is_empty() {
-                                texts_to_add.push(clean.to_string());
-                            }
-                        }
-                    } else {
-                        texts_to_add.push(t.to_string());
-                    }
-                }
-
-                if texts_to_add.is_empty() {
-                    return Ok(bad("'add' requires non-empty 'text' or 'tasks'".to_string()));
-                }
-
-                // Any tasks from previous work that were already marked Done must not linger
-                // or resurrect when new tasks are added. If all existing tasks were Done, start fresh.
-                if !file.items.is_empty()
-                    && file
-                        .items
-                        .iter()
-                        .all(|item| item.status == TodoStatus::Done)
-                {
-                    file.items.clear();
-                    file.next_id = 0;
-                } else {
-                    file.items.retain(|item| item.status != TodoStatus::Done);
-                }
-
-                let mut added_msgs = Vec::new();
-                for text in texts_to_add {
-                    let id = file.next_id;
-                    file.next_id += 1;
-                    file.items.push(TodoItem {
-                        id,
-                        text: text.clone(),
-                        status: TodoStatus::Pending,
-                    });
-                    added_msgs.push(format!("[{}] (pending): {}", id, text));
-                }
-                self.store(&file)?;
-                let mut out = if added_msgs.len() == 1 {
-                    format!("added {}", added_msgs[0])
-                } else {
-                    format!(
-                        "added {} tasks:\n{}",
-                        added_msgs.len(),
-                        added_msgs.join("\n")
-                    )
-                };
-                out.push_str("\n\nReminder: Keep this checklist updated in real time. Call `todo_list(action: \"update\", id: <id>, status: \"in_progress\"|\"done\")` immediately after each step is finished so the user sees live progress.");
-                out
-            }
-            "update" => {
-                let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
-                    return Ok(bad("'update' requires 'id'".to_string()));
-                };
-                let Some(item) = file.items.iter_mut().find(|item| item.id == id) else {
-                    return Ok(bad(format!("no task with id {}", id)));
-                };
-                if let Some(text) = args.get("text").and_then(|t| t.as_str()) {
-                    let text = text.trim();
-                    if !text.is_empty() {
-                        item.text = text.to_string();
-                    }
-                }
-                if let Some(status) = args.get("status").and_then(|s| s.as_str()) {
-                    let Some(status) = TodoStatus::parse(status) else {
-                        return Ok(bad(format!(
-                            "unknown status '{}': use pending, in_progress or done",
-                            status
-                        )));
-                    };
-                    item.status = status;
-                }
-                let rendered = format!("[{}] {} {}", item.id, item.status.as_str(), item.text);
-                self.store(&file)?;
-                let done = file
-                    .items
-                    .iter()
-                    .filter(|i| i.status == TodoStatus::Done)
-                    .count();
-                format!(
-                    "{} ({}/{} tasks completed)",
-                    rendered,
-                    done,
-                    file.items.len()
-                )
-            }
+            "add" => match self.add_tasks(call_id, args, &mut file)? {
+                ActionOutcome::Reply(reply) => reply,
+                ActionOutcome::ToolError(result) => return Ok(result),
+            },
+            "update" => match self.update_task(call_id, args, &mut file)? {
+                ActionOutcome::Reply(reply) => reply,
+                ActionOutcome::ToolError(result) => return Ok(result),
+            },
             "remove" => {
                 let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
                     return Ok(bad("'remove' requires 'id'".to_string()));
@@ -524,6 +418,160 @@ impl Tool for TodoListTool {
 
         Ok(ToolResult::success(call_id, reply))
     }
+}
+
+/// The mutating actions, split out so the dispatch above stays readable.
+impl TodoListTool {
+    /// `action: add` — append every text the call names, dropping tasks already marked done.
+    fn add_tasks(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        file: &mut TodoFile,
+    ) -> Result<ActionOutcome, HarnessError> {
+        let texts_to_add = collect_added_texts(args);
+
+        if texts_to_add.is_empty() {
+            return Ok(ActionOutcome::ToolError(ToolResult::error(
+                call_id,
+                "'add' requires non-empty 'text' or 'tasks'".to_string(),
+            )));
+        }
+
+        // Any tasks from previous work that were already marked Done must not linger or resurrect
+        // when new tasks are added. If all existing tasks were Done, start fresh.
+        if !file.items.is_empty()
+            && file
+                .items
+                .iter()
+                .all(|item| item.status == TodoStatus::Done)
+        {
+            file.items.clear();
+            file.next_id = 0;
+        } else {
+            file.items.retain(|item| item.status != TodoStatus::Done);
+        }
+
+        let mut added_msgs = Vec::new();
+        for text in texts_to_add {
+            let id = file.next_id;
+            file.next_id += 1;
+            file.items.push(TodoItem {
+                id,
+                text: text.clone(),
+                status: TodoStatus::Pending,
+            });
+            added_msgs.push(format!("[{}] (pending): {}", id, text));
+        }
+        self.store(file)?;
+        let mut out = if added_msgs.len() == 1 {
+            format!("added {}", added_msgs[0])
+        } else {
+            format!(
+                "added {} tasks:\n{}",
+                added_msgs.len(),
+                added_msgs.join("\n")
+            )
+        };
+        out.push_str("\n\nReminder: Keep this checklist updated in real time. Call `todo_list(action: \"update\", id: <id>, status: \"in_progress\"|\"done\")` immediately after each step is finished so the user sees live progress.");
+        Ok(ActionOutcome::Reply(out))
+    }
+
+    /// `action: update` — change one task's text and/or status.
+    fn update_task(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        file: &mut TodoFile,
+    ) -> Result<ActionOutcome, HarnessError> {
+        let Some(id) = args.get("id").and_then(|i| i.as_u64()) else {
+            return Ok(ActionOutcome::ToolError(ToolResult::error(
+                call_id,
+                "'update' requires 'id'".to_string(),
+            )));
+        };
+        let Some(item) = file.items.iter_mut().find(|item| item.id == id) else {
+            return Ok(ActionOutcome::ToolError(ToolResult::error(
+                call_id,
+                format!("no task with id {}", id),
+            )));
+        };
+        if let Some(text) = args.get("text").and_then(|t| t.as_str()) {
+            let text = text.trim();
+            if !text.is_empty() {
+                item.text = text.to_string();
+            }
+        }
+        if let Some(status) = args.get("status").and_then(|s| s.as_str()) {
+            let Some(status) = TodoStatus::parse(status) else {
+                return Ok(ActionOutcome::ToolError(ToolResult::error(
+                    call_id,
+                    format!(
+                        "unknown status '{}': use pending, in_progress or done",
+                        status
+                    ),
+                )));
+            };
+            item.status = status;
+        }
+        let rendered = format!("[{}] {} {}", item.id, item.status.as_str(), item.text);
+        self.store(file)?;
+        let done = file
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::Done)
+            .count();
+        Ok(ActionOutcome::Reply(format!(
+            "{} ({}/{} tasks completed)",
+            rendered,
+            done,
+            file.items.len()
+        )))
+    }
+}
+
+/// One mutating action's outcome: the reply to return, or the correction the model gets.
+enum ActionOutcome {
+    Reply(String),
+    ToolError(ToolResult),
+}
+
+/// The texts an `add` call names: the `tasks`/`items` array when present, else `text` (split on
+/// newlines and stripped of list markers).
+fn collect_added_texts(args: &serde_json::Value) -> Vec<String> {
+    let mut texts_to_add = Vec::new();
+    if let Some(arr) = args
+        .get("tasks")
+        .or_else(|| args.get("items"))
+        .and_then(|v| v.as_array())
+    {
+        for v in arr {
+            if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                texts_to_add.push(s.to_string());
+            }
+        }
+    } else if let Some(t) = args
+        .get("text")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        if t.contains('\n') {
+            for line in t.lines() {
+                let clean = line
+                    .trim()
+                    .trim_start_matches(['-', '*', '+', '•'])
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim();
+                if !clean.is_empty() {
+                    texts_to_add.push(clean.to_string());
+                }
+            }
+        } else {
+            texts_to_add.push(t.to_string());
+        }
+    }
+    texts_to_add
 }
 
 #[cfg(test)]

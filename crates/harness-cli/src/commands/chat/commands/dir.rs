@@ -1,6 +1,6 @@
 //! The slash command that inspects or changes the active workspace directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use colored::Colorize;
@@ -28,36 +28,67 @@ pub(crate) async fn handle_dir_command(
             || a.eq_ignore_ascii_case("--reset")
             || a.eq_ignore_ascii_case("-r")
         {
-            let layers =
-                harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
-            let cleared = harness_core::config::unset_in_file(&layers, "paths.workspace_root")?;
-
-            let default_dir = harness_core::fsutil::canonicalize(
-                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            )
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-            apply_workspace_change(config, agent, default_dir.clone()).await?;
-
-            if cleared.is_some() {
-                ui.emit_above(&format!(
-                    "{} Workspace reset to default: {} (global config cleared)",
-                    "✔".green().bold(),
-                    default_dir.display().to_string().bold()
-                ));
-            } else {
-                ui.emit_above(&format!(
-                    "{} Workspace reset to default: {}",
-                    "✔".green().bold(),
-                    default_dir.display().to_string().bold()
-                ));
-            }
-            return Ok(());
+            return reset_workspace(ui, config, agent).await;
         }
     }
 
     // Parse potential path and flags from arg (e.g. `/dir /path --global` or `/dir --session /path`)
-    let (path_str_opt, explicit_scope) = match trimmed_arg {
+    let (path_str_opt, explicit_scope) = parse_dir_args(trimmed_arg);
+
+    let Some(target_dir) = resolve_target_dir(key_rx, ui, config, path_str_opt).await? else {
+        return Ok(());
+    };
+
+    let Some(is_global) = choose_dir_scope(key_rx, ui, explicit_scope).await else {
+        return Ok(());
+    };
+
+    if is_global {
+        persist_global_workspace(ui, &target_dir)?;
+    }
+
+    apply_workspace_change(config, agent, target_dir.clone()).await?;
+
+    report_workspace_switch(ui, &target_dir, is_global);
+
+    Ok(())
+}
+
+/// Clear the workspace root and fall back to the current directory.
+async fn reset_workspace(
+    ui: &ChatUi,
+    config: &mut Config,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let cleared = harness_core::config::unset_in_file(&layers, "paths.workspace_root")?;
+
+    let default_dir = harness_core::fsutil::canonicalize(
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    )
+    .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    apply_workspace_change(config, agent, default_dir.clone()).await?;
+
+    if cleared.is_some() {
+        ui.emit_above(&format!(
+            "{} Workspace reset to default: {} (global config cleared)",
+            "✔".green().bold(),
+            default_dir.display().to_string().bold()
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Workspace reset to default: {}",
+            "✔".green().bold(),
+            default_dir.display().to_string().bold()
+        ));
+    }
+    Ok(())
+}
+
+/// Split a `/dir` argument into an optional path and an explicit global/session scope.
+fn parse_dir_args(trimmed_arg: Option<&str>) -> (Option<String>, Option<bool>) {
+    match trimmed_arg {
         Some(a) => {
             let parts: Vec<&str> = a.split_whitespace().collect();
             let mut scope = None;
@@ -85,11 +116,19 @@ pub(crate) async fn handle_dir_command(
             (p_opt, scope)
         }
         None => (None, None),
-    };
+    }
+}
 
-    let target_dir = match path_str_opt {
-        Some(ref p_str) => {
-            let expanded = harness_core::config::expand_tilde(p_str);
+/// Resolve the directory from the argument or the picker. `None` stops the command.
+async fn resolve_target_dir(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+    config: &Config,
+    path_str_opt: Option<String>,
+) -> Result<Option<PathBuf>, HarnessError> {
+    match path_str_opt {
+        Some(p_str) => {
+            let expanded = harness_core::config::expand_tilde(&p_str);
             let p = PathBuf::from(expanded);
             if !p.is_dir() {
                 ui.emit_above(&format!(
@@ -97,72 +136,76 @@ pub(crate) async fn handle_dir_command(
                     "✖".red().bold(),
                     p_str
                 ));
-                return Ok(());
+                return Ok(None);
             }
-            harness_core::fsutil::canonicalize(&p).unwrap_or(p)
+            Ok(Some(harness_core::fsutil::canonicalize(&p).unwrap_or(p)))
         }
         None => {
             ui.redraw_input_line();
-            let chosen =
-                picker::pick_workspace_directory(key_rx, ui, &config.paths.workspace_root).await?;
-            match chosen {
-                Some(p) => p,
-                None => return Ok(()),
-            }
-        }
-    };
-
-    // Determine scope: explicit from flag, or interactive prompt via select_from_rx
-    let is_global = if let Some(global) = explicit_scope {
-        global
-    } else if ui.is_attended {
-        let scope_options = [
-            "This session only (active for current session)".to_string(),
-            "Default global workspace (persisted in config for all sessions)".to_string(),
-        ];
-        while key_rx.try_recv().is_ok() {}
-        let sel = picker::select_from_rx(
-            key_rx,
-            ui,
-            "Workspace Scope",
-            &scope_options,
-            0,
-            true,
-            false,
-        )
-        .await;
-        match sel {
-            Some(1) => true,
-            Some(0) => false,
-            None => {
-                ui.clear_box_on_exit();
-                ui.draw_initial_box();
-                return Ok(());
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
-
-    if is_global {
-        let layers =
-            harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
-        if let Err(e) = harness_core::config::set_in_file(
-            &layers,
-            "paths.workspace_root",
-            &target_dir.display().to_string(),
-        ) {
-            ui.emit_above(&format!(
-                "{} Failed to persist global workspace root: {}",
-                "⚠".yellow(),
-                e
-            ));
+            picker::pick_workspace_directory(key_rx, ui, &config.paths.workspace_root).await
         }
     }
+}
 
-    apply_workspace_change(config, agent, target_dir.clone()).await?;
+/// Determine scope: explicit from flag, or interactive prompt via select_from_rx. `None` means the
+/// picker was cancelled and the box already restored.
+async fn choose_dir_scope(
+    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    ui: &ChatUi,
+    explicit_scope: Option<bool>,
+) -> Option<bool> {
+    if let Some(global) = explicit_scope {
+        return Some(global);
+    }
+    if !ui.is_attended {
+        return Some(false);
+    }
+    let scope_options = [
+        "This session only (active for current session)".to_string(),
+        "Default global workspace (persisted in config for all sessions)".to_string(),
+    ];
+    while key_rx.try_recv().is_ok() {}
+    let sel = picker::select_from_rx(
+        key_rx,
+        ui,
+        "Workspace Scope",
+        &scope_options,
+        0,
+        true,
+        false,
+    )
+    .await;
+    match sel {
+        Some(1) => Some(true),
+        Some(0) => Some(false),
+        None => {
+            ui.clear_box_on_exit();
+            ui.draw_initial_box();
+            None
+        }
+        _ => Some(false),
+    }
+}
 
+/// Persist the workspace root globally, warning when the write fails.
+fn persist_global_workspace(ui: &ChatUi, target_dir: &Path) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    if let Err(e) = harness_core::config::set_in_file(
+        &layers,
+        "paths.workspace_root",
+        &target_dir.display().to_string(),
+    ) {
+        ui.emit_above(&format!(
+            "{} Failed to persist global workspace root: {}",
+            "⚠".yellow(),
+            e
+        ));
+    }
+    Ok(())
+}
+
+/// Tell the user where the workspace now points.
+fn report_workspace_switch(ui: &ChatUi, target_dir: &Path, is_global: bool) {
     if is_global {
         ui.emit_above(&format!(
             "{} Workspace switched globally to: {} (saved to config)",
@@ -176,8 +219,6 @@ pub(crate) async fn handle_dir_command(
             target_dir.display().to_string().bold()
         ));
     }
-
-    Ok(())
 }
 
 async fn apply_workspace_change(

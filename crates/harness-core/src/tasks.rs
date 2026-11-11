@@ -63,6 +63,104 @@ struct InternalJob {
     kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
+/// Everything the spawned task needs to announce exactly one completion.
+struct JobRun {
+    cmd_str: String,
+    workdir: PathBuf,
+    network: crate::tools::netguard::NetworkPolicy,
+    status: Arc<Mutex<String>>,
+    kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    notifier: Arc<Mutex<Option<JobCompletionNotifier>>>,
+    notify_id: String,
+    notify_command: String,
+    notify_log: PathBuf,
+    started_at: Instant,
+}
+
+impl JobRun {
+    /// Set the final status and, if anyone is listening, deliver the completion event. Called once
+    /// per job, from whichever path stopped it.
+    fn finish(&self, new_status: String) {
+        {
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            *st = new_status.clone();
+        }
+        // The job has stopped: a later `kill` is a no-op rather than a lie.
+        let _ = self
+            .kill_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let callback = self
+            .notifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(callback) = callback {
+            callback(JobCompletion {
+                id: self.notify_id.clone(),
+                command: self.notify_command.clone(),
+                status: new_status,
+                elapsed_secs: self.started_at.elapsed().as_secs(),
+                log_path: self.notify_log.to_string_lossy().to_string(),
+                output_tail: read_tail(&self.notify_log, 40),
+            });
+        }
+    }
+
+    async fn run(self, kill_rx: oneshot::Receiver<()>, log_file: File) {
+        // Every exit path — a refused spawn, a kill, a natural exit — lands here exactly once.
+        // Setting the status and announcing the completion together is what keeps `process
+        // poll` and the host's notification from disagreeing about whether a job is done.
+        let stdout = log_file
+            .try_clone()
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
+        let mut cmd = crate::tools::shell::shell_command(&self.cmd_str);
+        cmd.current_dir(&self.workdir)
+            .stdout(stdout)
+            .stderr(log_file);
+
+        if let Err(error) = crate::tools::netguard::apply(&mut cmd, self.network) {
+            self.finish(format!(
+                "failed to spawn: cannot enforce tools.network = {}: {error}",
+                self.network.as_str()
+            ));
+            return;
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.finish(format!("failed to spawn: {}", e));
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = kill_rx => {
+                #[cfg(windows)]
+                crate::tools::shell::kill_process_group(child.id());
+                let _ = child.kill().await;
+                self.finish("killed".to_string());
+            }
+            res = child.wait() => {
+                let status = match res {
+                    Ok(status) => {
+                        if status.success() {
+                            "completed (exit 0)".to_string()
+                        } else {
+                            format!("failed (exit {})", status.code().unwrap_or(-1))
+                        }
+                    }
+                    Err(e) => format!("error: {}", e),
+                };
+                self.finish(status);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BackgroundTaskQueue {
     jobs_dir: PathBuf,
@@ -106,11 +204,8 @@ impl BackgroundTaskQueue {
         self
     }
 
-    pub fn spawn(&self, command: &str, workdir: &Path) -> Result<String, HarnessError> {
-        let num = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let id = format!("job_{:06x}", num);
-        let log_path = self.jobs_dir.join(format!("{}.log", id));
-
+    /// Create the jobs directory if needed and open a fresh log file for `log_path`.
+    fn open_log(&self, log_path: &Path) -> Result<File, HarnessError> {
         if let Err(error) = std::fs::create_dir_all(&self.jobs_dir) {
             return Err(HarnessError::Io(format!(
                 "Failed to create jobs directory '{}': {}",
@@ -118,13 +213,21 @@ impl BackgroundTaskQueue {
                 error
             )));
         }
-        let log_file = File::create(&log_path).map_err(|e| {
+        File::create(log_path).map_err(|e| {
             HarnessError::Io(format!(
                 "Failed to create background log file '{}': {}",
                 log_path.display(),
                 e
             ))
-        })?;
+        })
+    }
+
+    pub fn spawn(&self, command: &str, workdir: &Path) -> Result<String, HarnessError> {
+        let num = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let id = format!("job_{:06x}", num);
+        let log_path = self.jobs_dir.join(format!("{}.log", id));
+
+        let log_file = self.open_log(&log_path)?;
 
         let (kill_tx, kill_rx) = oneshot::channel();
         let status = Arc::new(Mutex::new("running".to_string()));
@@ -147,91 +250,20 @@ impl BackgroundTaskQueue {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.clone(), internal);
 
-        let cmd_str = command.to_string();
-        let notify_command = command.to_string();
-        let workdir_buf = workdir.to_path_buf();
-        let network = self.network;
-        let status_clone = status;
-        let notifier = self.completion_notifier.clone();
-        let notify_id = id.clone();
-        let notify_log = log_path.clone();
-        let kill_tx_task = kill_tx;
+        let run = JobRun {
+            cmd_str: command.to_string(),
+            workdir: workdir.to_path_buf(),
+            network: self.network,
+            status,
+            kill_tx,
+            notifier: self.completion_notifier.clone(),
+            notify_id: id.clone(),
+            notify_command: command.to_string(),
+            notify_log: log_path,
+            started_at,
+        };
 
-        tokio::spawn(async move {
-            // Every exit path — a refused spawn, a kill, a natural exit — lands here exactly once.
-            // Setting the status and announcing the completion together is what keeps `process
-            // poll` and the host's notification from disagreeing about whether a job is done.
-            let finish = move |new_status: String| {
-                {
-                    let mut st = status_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    *st = new_status.clone();
-                }
-                // The job has stopped: a later `kill` is a no-op rather than a lie.
-                let _ = kill_tx_task
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                let callback = notifier.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(callback) = callback {
-                    callback(JobCompletion {
-                        id: notify_id.clone(),
-                        command: notify_command.clone(),
-                        status: new_status,
-                        elapsed_secs: started_at.elapsed().as_secs(),
-                        log_path: notify_log.to_string_lossy().to_string(),
-                        output_tail: read_tail(&notify_log, 40),
-                    });
-                }
-            };
-
-            let std_file = log_file;
-            let stdout = std_file
-                .try_clone()
-                .map(std::process::Stdio::from)
-                .unwrap_or_else(|_| std::process::Stdio::null());
-            let mut cmd = crate::tools::shell::shell_command(&cmd_str);
-            cmd.current_dir(&workdir_buf)
-                .stdout(stdout)
-                .stderr(std_file);
-
-            if let Err(error) = crate::tools::netguard::apply(&mut cmd, network) {
-                finish(format!(
-                    "failed to spawn: cannot enforce tools.network = {}: {error}",
-                    network.as_str()
-                ));
-                return;
-            }
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    finish(format!("failed to spawn: {}", e));
-                    return;
-                }
-            };
-
-            tokio::select! {
-                _ = kill_rx => {
-                    #[cfg(windows)]
-                    crate::tools::shell::kill_process_group(child.id());
-                    let _ = child.kill().await;
-                    finish("killed".to_string());
-                }
-                res = child.wait() => {
-                    let status = match res {
-                        Ok(status) => {
-                            if status.success() {
-                                "completed (exit 0)".to_string()
-                            } else {
-                                format!("failed (exit {})", status.code().unwrap_or(-1))
-                            }
-                        }
-                        Err(e) => format!("error: {}", e),
-                    };
-                    finish(status);
-                }
-            }
-        });
+        tokio::spawn(run.run(kill_rx, log_file));
 
         info!(id = %id, command = %command, "Spawned background task");
         Ok(id)

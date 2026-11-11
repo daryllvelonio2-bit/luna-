@@ -438,19 +438,7 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
     let width = 1_200.0f32;
     let height = 900.0f32;
     if n > 700 {
-        let mut placed = BTreeMap::new();
-        let radius = (width.min(height) / 2.0) - 60.0;
-        for (index, id) in ids.iter().enumerate() {
-            let angle = std::f32::consts::TAU * index as f32 / n as f32;
-            placed.insert(
-                (*id).to_string(),
-                (
-                    width / 2.0 + radius * angle.cos(),
-                    height / 2.0 + radius * angle.sin(),
-                ),
-            );
-        }
-        return placed;
+        return circle_layout(&ids, width, height);
     }
 
     let index: BTreeMap<&str, usize> = ids
@@ -458,7 +446,37 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
         .enumerate()
         .map(|(position, id)| (*id, position))
         .collect();
-    let mut positions: Vec<(f32, f32)> = (0..n)
+    let mut positions = initial_positions(n, width, height);
+    let links = layout_links(graph, &index);
+    relax_layout(&mut positions, &links, width, height);
+
+    ids.iter()
+        .enumerate()
+        .map(|(position, id)| ((*id).to_string(), positions[position]))
+        .collect()
+}
+
+/// Very large graphs fall back to a circle rather than paying a quadratic cost
+/// the exporter cannot justify for a file nobody will read at that size.
+fn circle_layout(ids: &[&str], width: f32, height: f32) -> BTreeMap<String, (f32, f32)> {
+    let n = ids.len();
+    let mut placed = BTreeMap::new();
+    let radius = (width.min(height) / 2.0) - 60.0;
+    for (index, id) in ids.iter().enumerate() {
+        let angle = std::f32::consts::TAU * index as f32 / n as f32;
+        placed.insert(
+            (*id).to_string(),
+            (
+                width / 2.0 + radius * angle.cos(),
+                height / 2.0 + radius * angle.sin(),
+            ),
+        );
+    }
+    placed
+}
+
+fn initial_positions(n: usize, width: f32, height: f32) -> Vec<(f32, f32)> {
+    (0..n)
         .map(|position| {
             let angle = std::f32::consts::TAU * position as f32 / n as f32;
             (
@@ -466,8 +484,11 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
                 height / 2.0 + 300.0 * angle.sin(),
             )
         })
-        .collect();
-    let links: Vec<(usize, usize)> = graph
+        .collect()
+}
+
+fn layout_links(graph: &NoteGraph, index: &BTreeMap<&str, usize>) -> Vec<(usize, usize)> {
+    graph
         .edges
         .iter()
         .filter_map(|edge| {
@@ -475,8 +496,11 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
             let target = *index.get(edge.target.as_str())?;
             (source != target).then_some((source, target))
         })
-        .collect();
+        .collect()
+}
 
+fn relax_layout(positions: &mut [(f32, f32)], links: &[(usize, usize)], width: f32, height: f32) {
+    let n = positions.len();
     let area = width * height;
     let k = (area / n as f32).sqrt();
     let iterations = if n > 300 { 120 } else { 300 };
@@ -501,7 +525,7 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
         }
 
         // Springs along the edges.
-        for (source, target) in &links {
+        for (source, target) in links {
             let dx = positions[*source].0 - positions[*target].0;
             let dy = positions[*source].1 - positions[*target].1;
             let distance = (dx * dx + dy * dy).sqrt().max(0.01);
@@ -529,11 +553,6 @@ fn svg_layout(graph: &NoteGraph) -> BTreeMap<String, (f32, f32)> {
         }
         temperature *= 0.95;
     }
-
-    ids.iter()
-        .enumerate()
-        .map(|(position, id)| ((*id).to_string(), positions[position]))
-        .collect()
 }
 
 fn xml_escape(text: &str) -> String {
@@ -580,6 +599,15 @@ pub fn graph_svg(
         communities.len()
     ));
 
+    push_svg_edges(&mut out, graph, &positions);
+    push_svg_nodes(&mut out, graph, &positions, &node_community);
+    push_svg_legend(&mut out, communities, labels, width);
+
+    out.push_str("</svg>\n");
+    out
+}
+
+fn push_svg_edges(out: &mut String, graph: &NoteGraph, positions: &BTreeMap<String, (f32, f32)>) {
     for edge in &graph.edges {
         let (Some(source), Some(target)) =
             (positions.get(&edge.source), positions.get(&edge.target))
@@ -597,7 +625,14 @@ pub fn graph_svg(
         ));
         out.push('\n');
     }
+}
 
+fn push_svg_nodes(
+    out: &mut String,
+    graph: &NoteGraph,
+    positions: &BTreeMap<String, (f32, f32)>,
+    node_community: &BTreeMap<&str, usize>,
+) {
     for node in graph.nodes.values() {
         let Some(position) = positions.get(&node.id) else {
             continue;
@@ -627,7 +662,14 @@ pub fn graph_svg(
             out.push('\n');
         }
     }
+}
 
+fn push_svg_legend(
+    out: &mut String,
+    communities: &BTreeMap<usize, Vec<String>>,
+    labels: &BTreeMap<usize, String>,
+    width: f32,
+) {
     // Community legend, bounded so a graph with a hundred tiny components does
     // not fill the corner.
     let mut legend: Vec<(usize, &str, usize)> = communities
@@ -659,9 +701,6 @@ pub fn graph_svg(
             legend_y += 18.0;
         }
     }
-
-    out.push_str("</svg>\n");
-    out
 }
 
 /// Write `<path>` as an SVG, leaving an identical file untouched.

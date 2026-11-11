@@ -363,7 +363,7 @@ impl TurnSnapshot {
         let recorded: Vec<String> = self
             .files
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|file| file.path.clone())
             .collect();

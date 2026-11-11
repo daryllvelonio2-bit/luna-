@@ -36,6 +36,14 @@ pub const FALLBACK_MODELS_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
+/// One immediate retry per endpoint, then the fallback endpoint. A transport error this early is
+/// usually a stale pooled connection, so a second attempt costs one request, not a duplicated turn.
+const TRANSPORT_ATTEMPTS_PER_ENDPOINT: usize = 2;
+/// Pause between transport retries and between the primary and fallback endpoint.
+const TRANSPORT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(150);
+/// Advertised cool-off when Google reports the model as overloaded.
+const OVERLOADED_RETRY_AFTER_SECS: u64 = 10;
+
 pub const AGY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 pub const AGY_CLIENT_SECRET: &str = "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";
@@ -125,12 +133,12 @@ async fn post_antigravity_with_transport_retry(
     http_client: &reqwest::Client,
     token: &str,
     payload: &serde_json::Value,
-) -> Result<reqwest::Response, reqwest::Error> {
+) -> Result<reqwest::Response, String> {
     let endpoints = [CODE_ASSIST_ENDPOINT, FALLBACK_CODE_ASSIST_ENDPOINT];
     let mut last_err = None;
 
     for (ep_idx, ep) in endpoints.iter().enumerate() {
-        for attempt in 0..2 {
+        for attempt in 0..TRANSPORT_ATTEMPTS_PER_ENDPOINT {
             let res = http_client
                 .post(*ep)
                 .header(AUTHORIZATION, format!("Bearer {}", token))
@@ -145,22 +153,25 @@ async fn post_antigravity_with_transport_retry(
                 Err(err) => {
                     let is_transport_error =
                         err.is_connect() || err.is_request() || err.is_timeout() || err.is_body();
-                    last_err = Some(err);
                     if !is_transport_error {
-                        return Err(last_err.unwrap());
+                        return Err(err.to_string());
                     }
+                    last_err = Some(err);
                     if attempt == 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        tokio::time::sleep(TRANSPORT_RETRY_PAUSE).await;
                     }
                 }
             }
         }
         if ep_idx == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tokio::time::sleep(TRANSPORT_RETRY_PAUSE).await;
         }
     }
 
-    Err(last_err.expect("at least one endpoint attempt was made"))
+    Err(last_err.map_or_else(
+        || "no Code Assist endpoint attempt was made".to_string(),
+        |error| error.to_string(),
+    ))
 }
 
 /// POST one turn to Code Assist, refreshing the OAuth token once on a 401 and mapping the
@@ -217,7 +228,7 @@ async fn post_antigravity_turn(
         }),
         429 => Err(HarnessError::RateLimited {
             provider: "antigravity".to_string(),
-            retry_after_secs: Some(10),
+            retry_after_secs: Some(OVERLOADED_RETRY_AFTER_SECS),
         }),
         503 => {
             let body = resp.text().await.unwrap_or_default();
@@ -282,7 +293,7 @@ pub async fn stream_antigravity_completion(
                                 {
                                     vec![Err(HarnessError::RateLimited {
                                         provider: "antigravity".to_string(),
-                                        retry_after_secs: Some(10),
+                                        retry_after_secs: Some(OVERLOADED_RETRY_AFTER_SECS),
                                     })]
                                 } else if code == 503 || msg.to_lowercase().contains("overloaded") {
                                     vec![Err(HarnessError::ProviderError {

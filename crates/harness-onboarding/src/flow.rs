@@ -155,6 +155,187 @@ pub fn run_interactive(layers: &Layers) -> Result<Outcome, HarnessError> {
     run(layers, &mut reader, &mut out, &mut pacer, &size)
 }
 
+/// Run only the memory configuration step against any reader/writer pair.
+pub fn run_memory<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(MemoryMode, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let memory = crate::memory_step::select(&mut writer, reader)?;
+    let config_path = store::persist_memory(layers, memory)?;
+    Ok((memory, config_path))
+}
+
+/// Run only the memory configuration step on the real terminal.
+pub fn run_memory_interactive(layers: &Layers) -> Result<(MemoryMode, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_memory(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
+/// Run only the notes configuration step against any reader/writer pair.
+pub fn run_notes<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(PathBuf, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let notes_dir = crate::notes_step::select(&mut writer, reader)?;
+    let config_path = store::persist_notes(layers, &notes_dir)?;
+    Ok((notes_dir, config_path))
+}
+
+/// Run only the notes configuration step on the real terminal.
+pub fn run_notes_interactive(layers: &Layers) -> Result<(PathBuf, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_notes(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
+/// Run only the auto-compaction configuration step against any reader/writer pair.
+pub fn run_compact<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(store::AutoCompactSelection, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let auto_compact = crate::compact_step::select(&mut writer, reader)?;
+    let config_path = store::persist_auto_compact(layers, &auto_compact)?;
+    Ok((auto_compact, config_path))
+}
+
+/// Run only the auto-compaction configuration step on the real terminal.
+pub fn run_compact_interactive(
+    layers: &Layers,
+) -> Result<(store::AutoCompactSelection, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_compact(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
+/// Run only the gateway configuration step against any reader/writer pair.
+pub fn run_gateway<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(store::GatewaySelection, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let gateway = crate::gateway_step::select(&mut writer, reader)?;
+    let config_path = store::persist_gateway(layers, &gateway)?;
+    Ok((gateway, config_path))
+}
+
+/// Run only the gateway configuration step on the real terminal.
+pub fn run_gateway_interactive(
+    layers: &Layers,
+) -> Result<(store::GatewaySelection, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_gateway(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
+/// Run only the web access configuration step against any reader/writer pair.
+pub fn run_web<R, W, P>(
+    layers: &Layers,
+    reader: &mut R,
+    out: &mut W,
+    pacer: &mut P,
+    size: &dyn Fn() -> Size,
+) -> Result<(store::WebSelection, PathBuf), HarnessError>
+where
+    R: BufRead,
+    W: Write,
+    P: Pacer,
+{
+    let _guard = CursorGuard::new();
+    let mut writer = Typewriter::new(out, pacer, size);
+    let web = crate::web_step::select(&mut writer, reader)?;
+    let config_path = store::persist_web(layers, &web)?;
+    Ok((web, config_path))
+}
+
+/// Run only the web access configuration step on the real terminal.
+pub fn run_web_interactive(
+    layers: &Layers,
+) -> Result<(store::WebSelection, PathBuf), HarnessError> {
+    crate::signal::install()?;
+    let size = || match crossterm::terminal::size() {
+        Ok((columns, rows)) => Size::new(columns, rows),
+        _ => Size::fallback(),
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut pacer = RealPacer;
+    run_web(layers, &mut reader, &mut out, &mut pacer, &size)
+}
+
 /// Phase 1: clear the screen, hide the cursor, stream the briefing.
 fn briefing<W: Write, P: Pacer>(writer: &mut Typewriter<'_, W, P>) -> Result<(), HarnessError> {
     writer.clear_screen()?;
@@ -248,74 +429,24 @@ pub fn confirmation_lines(
     }
     // Same shape as the profile block above: label, then the value — on one line when it fits and
     // wrapped under the label when the terminal is too narrow for both.
-    let label = "Memory writer";
-    let summary = crate::memory_step::summary(memory);
-    if label.len() + 2 + summary.len() <= limit {
-        lines.push(
-            Line::of(Span::muted(format!("{label}  "))).with(Span::strong(summary, NAME_COLOR)),
-        );
-    } else {
-        lines.push(Line::of(Span::muted(label)));
-        for wrapped in screen::wrap(summary, limit) {
-            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
-        }
-    }
+    push_labeled(
+        &mut lines,
+        "Memory writer",
+        crate::memory_step::summary(memory),
+        limit,
+    );
     lines.push(Line::blank());
-    let nd_label = "Notes directory";
     let nd_summary = notes_dir.display().to_string();
-    if nd_label.len() + 2 + nd_summary.len() <= limit {
-        lines.push(
-            Line::of(Span::muted(format!("{nd_label}  ")))
-                .with(Span::strong(nd_summary, NAME_COLOR)),
-        );
-    } else {
-        lines.push(Line::of(Span::muted(nd_label)));
-        for wrapped in screen::wrap(&nd_summary, limit) {
-            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
-        }
-    }
+    push_labeled(&mut lines, "Notes directory", &nd_summary, limit);
     lines.push(Line::blank());
-    let ac_label = "Auto-compact";
     let ac_summary = crate::compact_step::summary(auto_compact);
-    if ac_label.len() + 2 + ac_summary.len() <= limit {
-        lines.push(
-            Line::of(Span::muted(format!("{ac_label}  ")))
-                .with(Span::strong(ac_summary, NAME_COLOR)),
-        );
-    } else {
-        lines.push(Line::of(Span::muted(ac_label)));
-        for wrapped in screen::wrap(&ac_summary, limit) {
-            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
-        }
-    }
+    push_labeled(&mut lines, "Auto-compact", &ac_summary, limit);
     lines.push(Line::blank());
-    let gw_label = "Messaging gateway";
     let gw_summary = crate::gateway_step::summary(gateway);
-    if gw_label.len() + 2 + gw_summary.len() <= limit {
-        lines.push(
-            Line::of(Span::muted(format!("{gw_label}  ")))
-                .with(Span::strong(gw_summary, NAME_COLOR)),
-        );
-    } else {
-        lines.push(Line::of(Span::muted(gw_label)));
-        for wrapped in screen::wrap(&gw_summary, limit) {
-            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
-        }
-    }
+    push_labeled(&mut lines, "Messaging gateway", &gw_summary, limit);
     lines.push(Line::blank());
-    let web_label = "Web access";
     let web_summary = crate::web_step::summary(web);
-    if web_label.len() + 2 + web_summary.len() <= limit {
-        lines.push(
-            Line::of(Span::muted(format!("{web_label}  ")))
-                .with(Span::strong(web_summary, NAME_COLOR)),
-        );
-    } else {
-        lines.push(Line::of(Span::muted(web_label)));
-        for wrapped in screen::wrap(&web_summary, limit) {
-            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
-        }
-    }
+    push_labeled(&mut lines, "Web access", &web_summary, limit);
     lines.push(Line::blank());
     for wrapped in screen::wrap(
         &format!("Config written to {}", config_path.display()),
@@ -333,6 +464,20 @@ pub fn confirmation_lines(
         .into_iter()
         .map(Line::trim_end)
         .collect()
+}
+
+/// A label followed by its value: on one line when both fit, wrapped under the label otherwise.
+fn push_labeled(lines: &mut Vec<Line>, label: &str, summary: &str, limit: usize) {
+    if label.len() + 2 + summary.len() <= limit {
+        lines.push(
+            Line::of(Span::muted(format!("{label}  "))).with(Span::strong(summary, NAME_COLOR)),
+        );
+    } else {
+        lines.push(Line::of(Span::muted(label)));
+        for wrapped in screen::wrap(summary, limit) {
+            lines.push(Line::of(Span::strong(wrapped, NAME_COLOR)));
+        }
+    }
 }
 
 #[cfg(test)]

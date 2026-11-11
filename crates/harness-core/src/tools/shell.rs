@@ -624,25 +624,10 @@ impl Tool for TerminalTool {
             .and_then(|b| b.as_bool())
             .unwrap_or(false);
         if background {
-            if let Some(ref q) = self.queue {
-                return match q.spawn(&effective_command, &resolved_workdir) {
-                    Ok(job_id) => {
-                        let msg = json!({
-                            "job_id": job_id,
-                            "command": effective_command,
-                            "status": "running",
-                            "message": format!("Task running in background. Use process(action='poll', job_id='{}') to check progress.", job_id),
-                        });
-                        Ok(ToolResult::success(
-                            call_id,
-                            serde_json::to_string_pretty(&msg).unwrap_or_default(),
-                        ))
-                    }
-                    Err(e) => Ok(ToolResult::error(
-                        call_id,
-                        format!("Failed to queue background task: {}", e),
-                    )),
-                };
+            if let Some(result) =
+                self.spawn_background_task(call_id, &effective_command, &resolved_workdir)
+            {
+                return Ok(result);
             }
         }
 
@@ -651,106 +636,20 @@ impl Tool for TerminalTool {
             .and_then(|t| t.as_u64())
             .unwrap_or(self.default_timeout_secs);
 
-        let (exec_command, sudo_stdin) = if cfg!(windows) {
-            // Windows has no sudo(8); a command that mentions it fails at the shell with a
-            // normal "not recognized" result instead of being rewritten or prompting.
-            (effective_command.clone(), None)
-        } else {
-            let (rewritten, sudo_count) = rewrite_sudo_command(&effective_command);
-            if sudo_count > 0 {
-                if check_sudo_nopasswd_with_env(&resolved_workdir, &self.env_vars).await {
-                    (effective_command.clone(), None)
-                } else {
-                    let cached_opt = self
-                        .sudo_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    let password_opt = match cached_opt {
-                        Some(p) => Some(p),
-                        None => {
-                            if let Some(ref prompter) = self.sudo_prompter {
-                                match prompter.prompt_sudo_password(&effective_command).await {
-                                    Ok(Some(pwd)) if !pwd.is_empty() => {
-                                        *self
-                                            .sudo_cache
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner()) = Some(pwd.clone());
-                                        Some(pwd)
-                                    }
-                                    _ => None,
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    };
+        let (exec_command, sudo_stdin) = self
+            .prepare_exec_command(&effective_command, &resolved_workdir)
+            .await;
 
-                    if let Some(pwd) = password_opt {
-                        let stdin_data = (pwd + "\n").repeat(sudo_count);
-                        (rewritten, Some(stdin_data))
-                    } else {
-                        (effective_command.clone(), None)
-                    }
-                }
-            } else {
-                (effective_command.clone(), None)
-            }
-        };
+        let final_exec_command = Self::detached_command(&exec_command, sudo_stdin.as_ref());
 
-        let is_background = cfg!(unix) && exec_command.trim().ends_with('&');
-        let final_exec_command = if is_background && sudo_stdin.is_none() {
-            let stripped = exec_command.trim().trim_end_matches('&').trim();
-            format!("( {} ) </dev/null >/dev/null 2>&1 & echo $!", stripped)
-        } else {
-            exec_command.clone()
-        };
-
-        let mut cmd = shell_command(&final_exec_command);
-        cmd.current_dir(&resolved_workdir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        // Put the shell at the head of its own process group, so a timeout can take the whole tree
-        // with it: `kill_on_drop` alone kills the shell and leaves its children running (see
-        // `kill_process_group`).
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        if sudo_stdin.is_some() {
-            cmd.stdin(std::process::Stdio::piped());
-        } else {
-            cmd.stdin(std::process::Stdio::null());
-        }
-
-        for (k, v) in &self.env_vars {
-            cmd.env(k, v);
-        }
-        // Never leak the sudo password env var into child processes.
-        cmd.env_remove("SUDO_PASSWORD");
-
-        // The network policy is installed in the child between fork and exec, so `sh` and everything
-        // it starts inherit it. A failure here is reported instead of running unconfined.
-        if let Err(error) = crate::tools::netguard::apply(&mut cmd, self.network) {
-            return Ok(ToolResult::error(
-                call_id,
-                format!(
-                    "Cannot enforce tools.network = {}: {}",
-                    self.network.as_str(),
-                    error
-                ),
-            ));
-        }
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(ToolResult::error(
-                    call_id,
-                    format!("Failed to spawn command: {}", e),
-                ))
-            }
+        let mut child = match self.spawn_child(
+            call_id,
+            &final_exec_command,
+            &resolved_workdir,
+            sudo_stdin.as_ref(),
+        ) {
+            Ok(child) => child,
+            Err(result) => return Ok(result),
         };
         // The group leader (see `process_group(0)` above): a timeout takes the group down, not
         // just the shell.
@@ -786,61 +685,227 @@ impl Tool for TerminalTool {
                 );
                 (stdout, stderr, status)
             }) => {
-                match res {
-                    Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
-                        let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-                        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-                        if !stderr.is_empty() {
-                            if !stdout.is_empty() {
-                                stdout.push('\n');
-                            }
-                            stdout.push_str(&stderr);
-                        }
+                self.finish_command(call_id, res, child_pid, timeout_secs, &final_exec_command)
+            }
+        }
+    }
+}
 
-                        if stdout.len() > self.output_max_bytes {
-                            stdout.truncate(self.output_max_bytes);
-                            stdout.push_str("\n\n[Truncated: output limit reached]");
-                        }
+/// The phases of a terminal run, kept off the trait impl.
+impl TerminalTool {
+    /// Rewrite a trailing `&` into a detached form that still reports the child pid.
+    fn detached_command(exec_command: &str, sudo_stdin: Option<&String>) -> String {
+        let is_background = cfg!(unix) && exec_command.trim().ends_with('&');
+        if is_background && sudo_stdin.is_none() {
+            let stripped = exec_command.trim().trim_end_matches('&').trim();
+            format!("( {} ) </dev/null >/dev/null 2>&1 & echo $!", stripped)
+        } else {
+            exec_command.to_string()
+        }
+    }
 
-                        if status.success() {
-                            Ok(ToolResult::success(call_id, stdout))
-                        } else {
-                            if is_sudo_auth_failure(&stdout) {
-                                *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            }
-                            let code = status.code().unwrap_or(-1);
-                            if is_benign_exit(&final_exec_command, code) {
-                                let content = if stdout.trim().is_empty() {
-                                    "(no matches found)".to_string()
-                                } else {
-                                    stdout
-                                };
-                                Ok(ToolResult::success(call_id, content))
-                            } else {
-                                Ok(ToolResult {
-                                    call_id: call_id.to_string(),
-                                    content: format!("exit code: {}\n{}", code, stdout),
-                                    is_error: true,
-                                })
-                            }
-                        }
+    /// Spawn the child with the pipes, process group, environment and network policy the command
+    /// runs under.
+    fn spawn_child(
+        &self,
+        call_id: &str,
+        final_exec_command: &str,
+        resolved_workdir: &Path,
+        sudo_stdin: Option<&String>,
+    ) -> Result<tokio::process::Child, ToolResult> {
+        let mut cmd = shell_command(final_exec_command);
+        cmd.current_dir(resolved_workdir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        // Put the shell at the head of its own process group, so a timeout can take the whole tree
+        // with it: `kill_on_drop` alone kills the shell and leaves its children running (see
+        // `kill_process_group`).
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        if sudo_stdin.is_some() {
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
+
+        for (k, v) in &self.env_vars {
+            cmd.env(k, v);
+        }
+        // Never leak the sudo password env var into child processes.
+        cmd.env_remove("SUDO_PASSWORD");
+
+        // The network policy is installed in the child between fork and exec, so `sh` and everything
+        // it starts inherit it. A failure here is reported instead of running unconfined.
+        if let Err(error) = crate::tools::netguard::apply(&mut cmd, self.network) {
+            return Err(ToolResult::error(
+                call_id,
+                format!(
+                    "Cannot enforce tools.network = {}: {}",
+                    self.network.as_str(),
+                    error
+                ),
+            ));
+        }
+
+        cmd.spawn()
+            .map_err(|e| ToolResult::error(call_id, format!("Failed to spawn command: {}", e)))
+    }
+
+    /// Hand the command to the background queue when one is attached; `None` means the caller
+    /// should run it in the foreground instead.
+    fn spawn_background_task(
+        &self,
+        call_id: &str,
+        effective_command: &str,
+        workdir: &Path,
+    ) -> Option<ToolResult> {
+        let queue = self.queue.as_ref()?;
+        Some(match queue.spawn(effective_command, workdir) {
+            Ok(job_id) => {
+                let msg = json!({
+                    "job_id": job_id,
+                    "command": effective_command,
+                    "status": "running",
+                    "message": format!("Task running in background. Use process(action='poll', job_id='{}') to check progress.", job_id),
+                });
+                ToolResult::success(
+                    call_id,
+                    serde_json::to_string_pretty(&msg).unwrap_or_default(),
+                )
+            }
+            Err(e) => ToolResult::error(call_id, format!("Failed to queue background task: {}", e)),
+        })
+    }
+
+    /// Resolve the command to actually execute and, when sudo needs a password on stdin, the
+    /// payload to write there.
+    async fn prepare_exec_command(
+        &self,
+        effective_command: &str,
+        resolved_workdir: &Path,
+    ) -> (String, Option<String>) {
+        if cfg!(windows) {
+            // Windows has no sudo(8); a command that mentions it fails at the shell with a
+            // normal "not recognized" result instead of being rewritten or prompting.
+            return (effective_command.to_string(), None);
+        }
+        let (rewritten, sudo_count) = rewrite_sudo_command(effective_command);
+        if sudo_count == 0 {
+            return (effective_command.to_string(), None);
+        }
+        if check_sudo_nopasswd_with_env(resolved_workdir, &self.env_vars).await {
+            return (effective_command.to_string(), None);
+        }
+
+        let cached_opt = self
+            .sudo_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let password_opt = match cached_opt {
+            Some(p) => Some(p),
+            None => self.prompt_for_sudo(effective_command).await,
+        };
+
+        match password_opt {
+            Some(pwd) => {
+                let stdin_data = (pwd + "\n").repeat(sudo_count);
+                (rewritten, Some(stdin_data))
+            }
+            None => (effective_command.to_string(), None),
+        }
+    }
+
+    /// Ask the host for the sudo password, caching a non-empty answer for the rest of the session.
+    async fn prompt_for_sudo(&self, command: &str) -> Option<String> {
+        let prompter = self.sudo_prompter.as_ref()?;
+        match prompter.prompt_sudo_password(command).await {
+            Ok(Some(pwd)) if !pwd.is_empty() => {
+                *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(pwd.clone());
+                Some(pwd)
+            }
+            _ => None,
+        }
+    }
+
+    /// Turn the finished (or timed-out) child into the tool result.
+    #[allow(clippy::type_complexity)]
+    fn finish_command(
+        &self,
+        call_id: &str,
+        outcome: Result<
+            (Vec<u8>, Vec<u8>, std::io::Result<std::process::ExitStatus>),
+            tokio::time::error::Elapsed,
+        >,
+        child_pid: Option<u32>,
+        timeout_secs: u64,
+        final_exec_command: &str,
+    ) -> Result<ToolResult, HarnessError> {
+        match outcome {
+            Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
+                let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+                let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+                if !stderr.is_empty() {
+                    if !stdout.is_empty() {
+                        stdout.push('\n');
                     }
-                    Ok((_, _, Err(e))) => {
-                        Ok(ToolResult::error(call_id, format!("Process error: {}", e)))
-                    }
-                    Err(_) => {
-                        kill_process_group(child_pid);
-                        Ok(ToolResult {
-                            call_id: call_id.to_string(),
-                            content: format!(
-                                "Command timed out after {}s; it and everything it had started were killed. \
-                                 A cold build or a full test suite needs a bigger budget: pass timeout_s \
-                                 (e.g. 600) for this call, or run it with background: true and poll it.",
-                                timeout_secs
-                            ),
-                            is_error: true,
-                        })
-                    }
+                    stdout.push_str(&stderr);
+                }
+
+                if stdout.len() > self.output_max_bytes {
+                    stdout.truncate(self.output_max_bytes);
+                    stdout.push_str("\n\n[Truncated: output limit reached]");
+                }
+
+                Ok(self.exit_result(call_id, stdout, status, final_exec_command))
+            }
+            Ok((_, _, Err(e))) => Ok(ToolResult::error(call_id, format!("Process error: {}", e))),
+            Err(_) => {
+                kill_process_group(child_pid);
+                Ok(ToolResult {
+                    call_id: call_id.to_string(),
+                    content: format!(
+                        "Command timed out after {}s; it and everything it had started were killed. \
+                         A cold build or a full test suite needs a bigger budget: pass timeout_s \
+                         (e.g. 600) for this call, or run it with background: true and poll it.",
+                        timeout_secs
+                    ),
+                    is_error: true,
+                })
+            }
+        }
+    }
+
+    /// Map a child's exit status to a tool result, keeping the harness's benign-exit exceptions.
+    fn exit_result(
+        &self,
+        call_id: &str,
+        stdout: String,
+        status: std::process::ExitStatus,
+        final_exec_command: &str,
+    ) -> ToolResult {
+        if status.success() {
+            ToolResult::success(call_id, stdout)
+        } else {
+            if is_sudo_auth_failure(&stdout) {
+                *self.sudo_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            let code = status.code().unwrap_or(-1);
+            if is_benign_exit(final_exec_command, code) {
+                let content = if stdout.trim().is_empty() {
+                    "(no matches found)".to_string()
+                } else {
+                    stdout
+                };
+                ToolResult::success(call_id, content)
+            } else {
+                ToolResult {
+                    call_id: call_id.to_string(),
+                    content: format!("exit code: {}\n{}", code, stdout),
+                    is_error: true,
                 }
             }
         }

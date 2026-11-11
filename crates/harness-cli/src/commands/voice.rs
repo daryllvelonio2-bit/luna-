@@ -71,6 +71,33 @@ pub async fn run_voice_loop(
 ) -> Result<(), HarnessError> {
     let provider_id = config.model.provider.clone();
 
+    print_voice_banner();
+
+    let provider = build_voice_provider(&config, provider_id.clone(), cred_manager, discovery)?;
+
+    let memory = build_memory_engine(&config)?;
+    let notes = Arc::new(FileNotesEngine::new(
+        config.paths.notes_dir.clone(),
+        Some(config.paths.notes_db.clone()),
+    )?);
+    let registry = Arc::new(DefaultToolRegistry::new());
+
+    register_voice_memory_tools(&registry, &config, &memory, &notes).await?;
+    register_voice_core_tools(&registry, &config).await?;
+    register_voice_skills(&registry, &config).await?;
+    // The desktop tools, and the skill that documents them.
+    crate::commands::desktop::tools::register(registry.as_ref()).await?;
+
+    let agent = build_voice_agent(&config, provider, memory, notes, registry, &provider_id)?;
+
+    let session = build_voice_session();
+
+    let cancel = CancellationToken::new();
+    session.run_hands_free_loop(agent, cancel).await
+}
+
+/// Print the hands-free header and the honest note about the stub recogniser.
+fn print_voice_banner() {
     crate::commands::clear_screen();
     println!(
         "{}",
@@ -98,24 +125,32 @@ pub async fn run_voice_loop(
          sentence and the reply is not spoken. This is the loop's demo path, not recognition."
             .yellow()
     );
+}
 
-    let provider = Arc::new(GenericProviderClient::new(
+/// Build the provider client the voice agent talks through.
+fn build_voice_provider(
+    config: &Config,
+    provider_id: String,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+) -> Result<Arc<GenericProviderClient>, HarnessError> {
+    Ok(Arc::new(GenericProviderClient::new(
         provider_id.clone(),
         config.model.default.clone(),
         cred_manager,
         discovery,
         config.providers.get(&provider_id),
-    )?);
+    )?))
+}
 
-    let memory = build_memory_engine(&config)?;
-    let notes = Arc::new(FileNotesEngine::new(
-        config.paths.notes_dir.clone(),
-        Some(config.paths.notes_db.clone()),
-    )?);
-    let registry = Arc::new(DefaultToolRegistry::new());
-
-    let background_mode = config.memory.mode.is_background();
-    if !background_mode {
+/// Register memory and note tools, plus the note-backed memory search.
+async fn register_voice_memory_tools(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+    memory: &Arc<harness_memory::MemoryEngineKind>,
+    notes: &Arc<FileNotesEngine>,
+) -> Result<(), HarnessError> {
+    if !config.memory.mode.is_background() {
         registry
             .register(Arc::new(SaveMemoryTool::new(memory.clone())))
             .await?;
@@ -149,8 +184,14 @@ pub async fn run_voice_loop(
             MemorySearchTool::new(memory.clone()).with_notes(notes.clone()),
         ))
         .await?;
+    Ok(())
+}
 
-    // Register core filesystem and shell tools (§2.2)
+/// Register core filesystem and shell tools (§2.2).
+async fn register_voice_core_tools(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+) -> Result<(), HarnessError> {
     let read_cache = harness_core::tools::ReadCache::new();
     let reg_dyn: Arc<dyn ToolRegistry> = registry.clone();
     // A hands-free run is its own conversation, so it gets its own list.
@@ -158,8 +199,14 @@ pub async fn run_voice_loop(
         config.paths.todos_dir.clone(),
         format!("voice_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S")),
     );
-    harness_core::tools::register_core_tools(&reg_dyn, &config, read_cache, todo_scope).await?;
+    harness_core::tools::register_core_tools(&reg_dyn, config, read_cache, todo_scope).await
+}
 
+/// Load the global, workspace and builtin skills and register their tools.
+async fn register_voice_skills(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+) -> Result<(), HarnessError> {
     let mut all_skills = Vec::new();
     let _ = std::fs::create_dir_all(&config.paths.skills_dir);
     if let Ok(skills) = harness_plugins::SkillLoader::load_skills_from_dir(&config.paths.skills_dir)
@@ -186,33 +233,53 @@ pub async fn run_voice_loop(
             .register(Arc::new(harness_plugins::SkillsListTool::new(skills_arc)))
             .await?;
     }
-    // The desktop tools, and the skill that documents them.
-    crate::commands::desktop::tools::register(registry.as_ref()).await?;
+    Ok(())
+}
 
+/// Assemble the live agent with the voice configuration and approver.
+fn build_voice_agent(
+    config: &Config,
+    provider: Arc<GenericProviderClient>,
+    memory: Arc<harness_memory::MemoryEngineKind>,
+    notes: Arc<FileNotesEngine>,
+    registry: Arc<DefaultToolRegistry>,
+    provider_id: &str,
+) -> Result<
+    Arc<
+        Agent<
+            GenericProviderClient,
+            harness_memory::MemoryEngineKind,
+            FileNotesEngine,
+            DefaultToolRegistry,
+        >,
+    >,
+    HarnessError,
+> {
     let mut agent_cfg = config.agent.clone();
     agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
     agent_cfg.memory_mode = config.memory.mode;
     agent_cfg.context_window = Some(super::context_window::context_window_for(
-        &config,
-        &provider_id,
+        config,
+        provider_id,
         &config.model.default,
     ) as usize);
 
-    let agent = Arc::new(
+    Ok(Arc::new(
         Agent::new(provider, memory, notes, registry, agent_cfg)
             .with_permissions(harness_core::PermissionEngine::validate(
                 config.tools.permissions.clone(),
             )?)
-            .with_approval(build_approver(&config), approval_settings(&config)),
-    );
+            .with_approval(build_approver(config), approval_settings(config)),
+    ))
+}
 
-    let session = VoiceSession::new(
+/// The demo pipeline: stub wake word, fixed transcription, silent synthesis.
+fn build_voice_session(
+) -> VoiceSession<DefaultWakeWordDetector, DefaultSpeechToText, DefaultTextToSpeech> {
+    VoiceSession::new(
         Arc::new(DefaultWakeWordDetector),
         Arc::new(DefaultSpeechToText),
         Arc::new(DefaultTextToSpeech),
         VoicePipelineConfig::default(),
-    );
-
-    let cancel = CancellationToken::new();
-    session.run_hands_free_loop(agent, cancel).await
+    )
 }

@@ -27,36 +27,8 @@ where
     /// been resolved, so text a user wrote in a profile cannot remove or duplicate the locked
     /// tool/memory blocks. Markers inside profile text stay literal.
     pub(super) async fn system_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
-        let default_profile = crate::profiles::default_profile()?;
-        let persona = self
-            .config
-            .profile_persona
-            .as_deref()
-            .unwrap_or(&default_profile.persona);
-        // `system_prompt_override` replaces only the behavior section; the static contract below
-        // it still applies. That is what makes it safe for specialized subagents.
-        let behavior = self
-            .config
-            .system_prompt_override
-            .as_deref()
-            .or(self.config.profile_behavior.as_deref())
-            .unwrap_or(&default_profile.behavior);
-        let memory_prompt = if self.config.memory_enabled {
-            let query = if let Some(root) = &self.config.workspace_root {
-                let project_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !project_name.is_empty() && !user_input.contains(project_name) {
-                    format!("{user_input} {project_name}")
-                } else {
-                    user_input.to_string()
-                }
-            } else {
-                user_input.to_string()
-            };
-            let relevant_memories = self.memory.retrieve_cards(&query, 12).await?;
-            self.memory.format_as_system_prompt(&relevant_memories)
-        } else {
-            String::new()
-        };
+        let (persona, behavior) = self.persona_and_behavior()?;
+        let memory_prompt = self.memory_prompt(user_input).await?;
         let persistent_memory_tag = if self.config.memory_enabled {
             " with persistent memory"
         } else {
@@ -83,8 +55,65 @@ where
         } else {
             String::new()
         };
+        let memory_instruction = self.memory_instruction()?;
 
-        let memory_instruction = match self.config.memory_mode {
+        let base = self.fill_base_prompt(
+            &persona,
+            &behavior,
+            persistent_memory_tag,
+            &active_memories_block,
+            skills_protocol,
+            &mcp_protocol,
+            &memory_instruction,
+        )?;
+        let env_info = self.runtime_environment();
+
+        Ok(format!("{}{}", base, env_info))
+    }
+
+    /// The active profile's persona and behavior. `system_prompt_override` replaces only the
+    /// behavior section; the static contract below it still applies, which is what makes it safe
+    /// for specialized subagents.
+    fn persona_and_behavior(&self) -> Result<(String, String), HarnessError> {
+        let default_profile = crate::profiles::default_profile()?;
+        let persona = self
+            .config
+            .profile_persona
+            .as_deref()
+            .unwrap_or(&default_profile.persona)
+            .to_string();
+        let behavior = self
+            .config
+            .system_prompt_override
+            .as_deref()
+            .or(self.config.profile_behavior.as_deref())
+            .unwrap_or(&default_profile.behavior)
+            .to_string();
+        Ok((persona, behavior))
+    }
+
+    /// The retrieved memory cards, as the block the system prompt carries.
+    async fn memory_prompt(&self, user_input: &str) -> Result<String, HarnessError> {
+        if !self.config.memory_enabled {
+            return Ok(String::new());
+        }
+        let query = if let Some(root) = &self.config.workspace_root {
+            let project_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !project_name.is_empty() && !user_input.contains(project_name) {
+                format!("{user_input} {project_name}")
+            } else {
+                user_input.to_string()
+            }
+        } else {
+            user_input.to_string()
+        };
+        let relevant_memories = self.memory.retrieve_cards(&query, 12).await?;
+        Ok(self.memory.format_as_system_prompt(&relevant_memories))
+    }
+
+    /// The memory/notes protocol for the configured mode.
+    fn memory_instruction(&self) -> Result<String, HarnessError> {
+        match self.config.memory_mode {
             crate::config::MemoryMode::Session => {
                 let mut sections = Vec::new();
                 if self.config.memory_enabled {
@@ -98,9 +127,9 @@ where
                     )?);
                 }
                 if sections.is_empty() {
-                    String::new()
+                    Ok(String::new())
                 } else {
-                    format!("{}\n\n", sections.join("\n\n"))
+                    Ok(format!("{}\n\n", sections.join("\n\n")))
                 }
             }
             crate::config::MemoryMode::Background => {
@@ -120,30 +149,48 @@ where
                     (false, false) => {}
                 }
                 if sections.is_empty() {
-                    String::new()
+                    Ok(String::new())
                 } else {
-                    format!("{}\n\n", sections.join("\n\n"))
+                    Ok(format!("{}\n\n", sections.join("\n\n")))
                 }
             }
-        };
+        }
+    }
 
-        let base = crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
+    /// Substitute the static `prompts.md` contract's markers. Behavior is substituted *last*, after
+    /// every other marker has been resolved, so text a user wrote in a profile cannot remove or
+    /// duplicate the locked tool/memory blocks; markers inside profile text stay literal.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_base_prompt(
+        &self,
+        persona: &str,
+        behavior: &str,
+        persistent_memory_tag: &str,
+        active_memories_block: &str,
+        skills_protocol: &str,
+        mcp_protocol: &str,
+        memory_instruction: &str,
+    ) -> Result<String, HarnessError> {
+        Ok(crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
             .replace("{{PERSISTENT_MEMORY_TAG}}", persistent_memory_tag)
-            .replace("{{ACTIVE_MEMORIES_BLOCK}}", &active_memories_block)
+            .replace("{{ACTIVE_MEMORIES_BLOCK}}", active_memories_block)
             .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
-            .replace("{{MCP_PROTOCOL}}", &mcp_protocol)
-            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", &memory_instruction)
-            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", &memory_instruction)
+            .replace("{{MCP_PROTOCOL}}", mcp_protocol)
+            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", memory_instruction)
+            .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", memory_instruction)
             .replace(
                 "{{SYSTEM_PROMPT_PREFIX}}",
                 self.config.system_prompt_prefix.as_deref().unwrap_or(""),
             )
             .replace("{{PROFILE_PERSONA}}", persona)
-            // Behavior is last: a profile cannot re-open a marker the static contract already
-            // resolved, and a marker it writes stays literal text.
-            .replace("{{PROFILE_BEHAVIOR}}", behavior);
+            // A profile cannot re-open a marker the static contract already resolved, and a
+            // marker it writes stays literal text.
+            .replace("{{PROFILE_BEHAVIOR}}", behavior))
+    }
 
-        let env_info = if let Some(ref root) = self.config.workspace_root {
+    /// The runtime-environment footer: workspace root, cwd and OS.
+    fn runtime_environment(&self) -> String {
+        if let Some(ref root) = self.config.workspace_root {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
             format!(
                 "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root. Changing directory with cd in terminal does not persist to native tools or across turns.",
@@ -160,9 +207,7 @@ where
             )
         } else {
             String::new()
-        };
-
-        Ok(format!("{}{}", base, env_info))
+        }
     }
 
     /// The registered MCP tools as a `- name: description` index for the prompt.

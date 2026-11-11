@@ -192,6 +192,101 @@ pub fn persist(
     config_file(layers)
 }
 
+/// Write the memory mode selection, returning the config file path that was written.
+pub fn persist_memory(layers: &Layers, memory: MemoryMode) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(layers, MEMORY_MODE_KEY, memory.as_str())?;
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
+/// Write the notes storage directory selection, returning the config file path that was written.
+pub fn persist_notes(
+    layers: &Layers,
+    notes_dir: &std::path::Path,
+) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(layers, NOTES_DIR_KEY, &notes_dir.to_string_lossy())?;
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
+/// Write the auto-compaction selection, returning the config file path that was written.
+pub fn persist_auto_compact(
+    layers: &Layers,
+    auto_compact: &AutoCompactSelection,
+) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_ENABLED_KEY,
+        if auto_compact.enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_THRESHOLD_KEY,
+        &auto_compact.threshold.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_PERCENT_KEY,
+        &auto_compact.percent.to_string(),
+    )?;
+    config::set_in_file(
+        layers,
+        AUTO_COMPACT_TURNS_KEY,
+        &auto_compact.turns.to_string(),
+    )?;
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
+/// Write the messaging gateway selection, returning the config file path that was written.
+pub fn persist_gateway(
+    layers: &Layers,
+    gateway: &GatewaySelection,
+) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(
+        layers,
+        GATEWAY_ENABLED_KEY,
+        if gateway.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, GATEWAY_PLATFORM_KEY, &gateway.platform)?;
+    if let Some(token) = &gateway.token {
+        if !token.is_empty() {
+            let key = match gateway.platform.as_str() {
+                "telegram" => GATEWAY_TELEGRAM_BOT_TOKEN_KEY,
+                "discord" => GATEWAY_DISCORD_BOT_TOKEN_KEY,
+                "whatsapp" => GATEWAY_WHATSAPP_TOKEN_KEY,
+                _ => "",
+            };
+            if !key.is_empty() {
+                config::set_in_file(layers, key, token)?;
+            }
+        }
+    }
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
+/// Write the web access selection, returning the config file path that was written.
+pub fn persist_web(layers: &Layers, web: &WebSelection) -> Result<PathBuf, HarnessError> {
+    config::set_in_file(
+        layers,
+        WEB_ENABLED_KEY,
+        if web.enabled { "true" } else { "false" },
+    )?;
+    config::set_in_file(layers, WEB_BACKEND_KEY, web.backend.as_str())?;
+    config::set_in_file(
+        layers,
+        WEB_API_KEY_ENV_KEY,
+        web.api_key_env.as_deref().unwrap_or(""),
+    )?;
+    config::set_in_file(layers, FIRST_RUN_KEY, "false")?;
+    config_file(layers)
+}
+
 /// Where the config file lives, or an error when the process has neither `$LUNA_CONFIG` nor `$HOME`.
 pub fn config_file(layers: &Layers) -> Result<PathBuf, HarnessError> {
     layers.file.clone().ok_or_else(|| {

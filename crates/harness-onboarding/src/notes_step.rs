@@ -24,7 +24,7 @@ pub const HINT: &str = "Enter an absolute or relative path, or press Enter to ke
 pub const MAX_ATTEMPTS: usize = 10;
 
 pub fn default_notes_dir() -> PathBuf {
-    harness_core::config::home_dir().join(".luna").join("notes")
+    harness_core::config::PathsSettings::default().notes_dir
 }
 
 pub fn parse_path(answer: &str) -> PathBuf {

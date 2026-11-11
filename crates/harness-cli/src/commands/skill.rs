@@ -441,6 +441,46 @@ async fn install(
     json: bool,
     config: &Config,
 ) -> Result<(), HarnessError> {
+    let (parsed, archive) = fetch_archive(source).await?;
+
+    let skills_dir = config.paths.skills_dir.clone();
+    fs::create_dir_all(&skills_dir).map_err(|e| io_error(&skills_dir, &e))?;
+    // Staged in the system temp dir rather than inside `skills_dir`: the loader walks that
+    // directory recursively and does not skip dot-directories, so a half-extracted skill there
+    // would be visible to a chat session running at the same time. The install copies rather than
+    // renames, so the two do not have to share a filesystem.
+    let staging = Staging(std::env::temp_dir().join(format!("luna-skill-{}", std::process::id())));
+    let root = extract_archive(&archive, &staging.0)?;
+    let root = resolve_subpath(&root, &parsed.subpath)?;
+
+    let SkillsFound {
+        skills,
+        broken,
+        shadowed: found_shadowed,
+    } = find_skills(&root)?;
+    ensure_skills_found(&skills, &broken, &parsed)?;
+
+    let selected = select_skills(skills, only)?;
+    let installed = install_selected(&selected, &skills_dir, force)?;
+
+    // Copies that were passed over are reported for the skills that were actually installed: with
+    // `--skill ponytail-gain`, a variant of `ponytail-audit` is not this install's business.
+    let installed_names: Vec<&str> = installed.iter().map(|(name, _, _)| name.as_str()).collect();
+    let shadowed: Vec<&(String, String)> = found_shadowed
+        .iter()
+        .filter(|(name, _)| installed_names.contains(&name.as_str()))
+        .collect();
+
+    if json {
+        print_install_json(&installed, &shadowed, &broken);
+    } else {
+        print_install_text(&installed, &shadowed, &broken, &skills_dir);
+    }
+    Ok(())
+}
+
+/// Resolve the source, pick a branch, and download the repository tarball.
+async fn fetch_archive(source: &str) -> Result<(SkillSource, Vec<u8>), HarnessError> {
     let parsed = parse_source(source)?;
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -458,59 +498,67 @@ async fn install(
         },
     };
     let archive = download(&client, &parsed, &refs).await?;
+    Ok((parsed, archive))
+}
 
-    let skills_dir = config.paths.skills_dir.clone();
-    fs::create_dir_all(&skills_dir).map_err(|e| io_error(&skills_dir, &e))?;
-    // Staged in the system temp dir rather than inside `skills_dir`: the loader walks that
-    // directory recursively and does not skip dot-directories, so a half-extracted skill there
-    // would be visible to a chat session running at the same time. The install copies rather than
-    // renames, so the two do not have to share a filesystem.
-    let staging = Staging(std::env::temp_dir().join(format!("luna-skill-{}", std::process::id())));
-    let root = extract_archive(&archive, &staging.0)?;
-    let root = resolve_subpath(&root, &parsed.subpath)?;
-
-    let found = find_skills(&root)?;
-    if found.skills.is_empty() {
-        let where_ = parsed.subpath.as_deref().unwrap_or("the repository root");
-        let mut message = format!(
-            "no SKILL.md found under {where_} in {}/{}",
-            parsed.owner, parsed.repo
-        );
-        for problem in &found.broken {
-            message.push_str(&format!("\n  {problem}"));
-        }
-        return Err(refuse(&message));
+/// Refuse a repository that holds no usable skill, naming the files that looked like one.
+fn ensure_skills_found(
+    skills: &[(PathBuf, Skill)],
+    broken: &[String],
+    parsed: &SkillSource,
+) -> Result<(), HarnessError> {
+    if !skills.is_empty() {
+        return Ok(());
     }
+    let where_ = parsed.subpath.as_deref().unwrap_or("the repository root");
+    let mut message = format!(
+        "no SKILL.md found under {where_} in {}/{}",
+        parsed.owner, parsed.repo
+    );
+    for problem in broken {
+        message.push_str(&format!("\n  {problem}"));
+    }
+    Err(refuse(&message))
+}
 
-    let selected: Vec<(PathBuf, Skill)> = if only.is_empty() {
-        found.skills
-    } else {
-        let missing: Vec<&str> = only
+/// Keep every skill, or only the requested names, refusing any name the source does not hold.
+fn select_skills(
+    skills: Vec<(PathBuf, Skill)>,
+    only: &[String],
+) -> Result<Vec<(PathBuf, Skill)>, HarnessError> {
+    if only.is_empty() {
+        return Ok(skills);
+    }
+    let missing: Vec<&str> = only
+        .iter()
+        .filter(|name| !skills.iter().any(|(_, skill)| &skill.name == *name))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        let available: Vec<&str> = skills
             .iter()
-            .filter(|name| !found.skills.iter().any(|(_, skill)| &skill.name == *name))
-            .map(String::as_str)
+            .map(|(_, skill)| skill.name.as_str())
             .collect();
-        if !missing.is_empty() {
-            let available: Vec<&str> = found
-                .skills
-                .iter()
-                .map(|(_, skill)| skill.name.as_str())
-                .collect();
-            return Err(refuse(&format!(
-                "{} not in this source — it holds: {}",
-                missing.join(", "),
-                available.join(", ")
-            )));
-        }
-        found
-            .skills
-            .into_iter()
-            .filter(|(_, skill)| only.contains(&skill.name))
-            .collect()
-    };
+        return Err(refuse(&format!(
+            "{} not in this source — it holds: {}",
+            missing.join(", "),
+            available.join(", ")
+        )));
+    }
+    Ok(skills
+        .into_iter()
+        .filter(|(_, skill)| only.contains(&skill.name))
+        .collect())
+}
 
+/// Copy each selected skill into the skills directory, replacing only when forced.
+fn install_selected(
+    selected: &[(PathBuf, Skill)],
+    skills_dir: &Path,
+    force: bool,
+) -> Result<Vec<(String, PathBuf, bool)>, HarnessError> {
     let mut installed = Vec::new();
-    for (dir, skill) in &selected {
+    for (dir, skill) in selected {
         let name = safe_skill_dir_name(&skill.name)?;
         let target = skills_dir.join(&name);
         if target.exists() {
@@ -525,48 +573,52 @@ async fn install(
         copy_tree(dir, &target)?;
         installed.push((name, target, skill.command.is_some()));
     }
+    Ok(installed)
+}
 
-    // Copies that were passed over are reported for the skills that were actually installed: with
-    // `--skill ponytail-gain`, a variant of `ponytail-audit` is not this install's business.
-    let installed_names: Vec<&str> = installed.iter().map(|(name, _, _)| name.as_str()).collect();
-    let shadowed: Vec<&(String, String)> = found
-        .shadowed
+/// One JSON object on stdout, including shadowed copies and broken files.
+fn print_install_json(
+    installed: &[(String, PathBuf, bool)],
+    shadowed: &[&(String, String)],
+    broken: &[String],
+) {
+    let rows: Vec<serde_json::Value> = installed
         .iter()
-        .filter(|(name, _)| installed_names.contains(&name.as_str()))
-        .collect();
-
-    if json {
-        let rows: Vec<serde_json::Value> = installed
-            .iter()
-            .map(|(name, path, has_command)| {
-                serde_json::json!({
-                    "name": name,
-                    "path": path.display().to_string(),
-                    "has_command": has_command,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
+        .map(|(name, path, has_command)| {
             serde_json::json!({
-                "installed": rows,
-                "shadowed": shadowed
-                    .iter()
-                    .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
-                    .collect::<Vec<_>>(),
-                "broken": found.broken,
+                "name": name,
+                "path": path.display().to_string(),
+                "has_command": has_command,
             })
-        );
-        return Ok(());
-    }
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "installed": rows,
+            "shadowed": shadowed
+                .iter()
+                .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
+                .collect::<Vec<_>>(),
+            "broken": broken,
+        })
+    );
+}
 
+/// The human-readable install report.
+fn print_install_text(
+    installed: &[(String, PathBuf, bool)],
+    shadowed: &[&(String, String)],
+    broken: &[String],
+    skills_dir: &Path,
+) {
     println!(
         "installed {} skill{} into {}",
         installed.len(),
         if installed.len() == 1 { "" } else { "s" },
         skills_dir.display().to_string().bold()
     );
-    for (name, _, has_command) in &installed {
+    for (name, _, has_command) in installed {
         let note = if *has_command {
             " (runs a command, so it needs approval)"
         } else {
@@ -588,11 +640,10 @@ async fn install(
             .dimmed()
         );
     }
-    for problem in &found.broken {
+    for problem in broken {
         println!("  {}", format!("skipped — {problem}").dimmed());
     }
     println!("available now: `/skills` in a chat session, and `luna skill list` from the shell");
-    Ok(())
 }
 
 /// The repository's default branch, so `owner/repo` alone installs what the browser shows.

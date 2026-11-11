@@ -21,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+use tracing::warn;
 
 use super::{MemoryStore, Record, StoreConfig};
 
@@ -30,6 +31,15 @@ pub const LOCK_REFUSAL_ERROR_CLASS: &str = "LockHeldByOtherProcess";
 pub const LOCK_DEFER_BACKOFF_SECS: u64 = 60;
 pub const HOOK_PROBE_TIMEOUT_MS: u64 = 150;
 pub const JOB_RETENTION_DAYS: i64 = 7;
+
+/// How long the worker backs off after a queue read fails. The queue is on local disk, so a
+/// persistent failure is a broken store rather than backpressure; the pause keeps the loop from
+/// spinning while it is logged and retried.
+const WORKER_ERROR_BACKOFF: Duration = Duration::from_millis(500);
+/// How long the worker waits when the queue is empty.
+const WORKER_IDLE_POLL: Duration = Duration::from_millis(300);
+/// How often the TCP accept loop checks the shutdown flag while idle.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -526,7 +536,7 @@ pub fn ensure_token(paths: &DaemonPaths) -> Result<String, HarnessError> {
         if let Ok(tok) = fs::read_to_string(&paths.token_file) {
             let trimmed = tok.trim().to_string();
             if !trimmed.is_empty() {
-                tighten_permissions(&paths.token_file);
+                tighten_permissions(&paths.token_file)?;
                 return Ok(trimmed);
             }
         }
@@ -534,18 +544,26 @@ pub fn ensure_token(paths: &DaemonPaths) -> Result<String, HarnessError> {
     let token = uuid::Uuid::new_v4().to_string();
     fs::write(&paths.token_file, format!("{token}\n"))
         .map_err(|e| HarnessError::Io(e.to_string()))?;
-    tighten_permissions(&paths.token_file);
+    tighten_permissions(&paths.token_file)?;
     Ok(token)
 }
 
-fn tighten_permissions(path: &Path) {
+/// The token authenticates every write, so leaving it group/world-readable is a startup error, not
+/// a warning.
+fn tighten_permissions(path: &Path) -> Result<(), HarnessError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            HarnessError::Io(format!(
+                "cannot restrict daemon token {} to its owner: {error}",
+                path.display()
+            ))
+        })?;
     }
     #[cfg(not(unix))]
     let _ = path;
+    Ok(())
 }
 
 /// Native Luna daemon client over Unix Domain Socket or TCP loopback.
@@ -660,12 +678,15 @@ impl NativeDaemonClient {
 
     pub async fn shutdown(&self) -> Result<(), HarnessError> {
         let req = json!({ "action": "shutdown", "token": self.token });
+        // Best effort: a daemon that already exited cannot acknowledge, and shutdown is idempotent.
         let _ = self.send_command(req).await;
         Ok(())
     }
 
     async fn send_command(&self, request: Value) -> Result<Value, HarnessError> {
-        let req_bytes = format!("{}\n", serde_json::to_string(&request).unwrap());
+        let request = serde_json::to_string(&request)
+            .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
+        let req_bytes = format!("{request}\n");
 
         #[cfg(unix)]
         if let Some(sock_path) = &self.socket_path {
@@ -880,13 +901,17 @@ impl DaemonRuntime {
         })
     }
 
-    pub fn start_worker(&self) {
+    pub fn start_worker(&self) -> Result<(), HarnessError> {
         let queue = self.queue.clone();
         let store = self.store.clone();
         let shutdown = self.shutdown.clone();
 
-        let _ = queue.recover_running();
-        let _ = queue.prune_terminal(JOB_RETENTION_DAYS);
+        if let Err(error) = queue.recover_running() {
+            warn!("could not recover interrupted memory jobs: {error}");
+        }
+        if let Err(error) = queue.prune_terminal(JOB_RETENTION_DAYS) {
+            warn!("could not prune finished memory jobs: {error}");
+        }
 
         std::thread::Builder::new()
             .name("luna-memory-daemon-worker".to_string())
@@ -900,20 +925,28 @@ impl DaemonRuntime {
 
                     let job_opt = match queue.claim_next(&exclude) {
                         Ok(opt) => opt,
-                        Err(_) => {
-                            std::thread::sleep(Duration::from_millis(500));
+                        Err(error) => {
+                            warn!("could not claim the next memory job: {error}");
+                            std::thread::sleep(WORKER_ERROR_BACKOFF);
                             continue;
                         }
                     };
 
                     let Some(job) = job_opt else {
-                        std::thread::sleep(Duration::from_millis(300));
+                        std::thread::sleep(WORKER_IDLE_POLL);
                         continue;
                     };
 
                     match execute_job_dispatch(&store, &job.kind, &job.payload) {
                         Ok(res) => {
-                            let _ = queue.finish(&job.id, "succeeded", Some(&res), None, true);
+                            if let Err(error) =
+                                queue.finish(&job.id, "succeeded", Some(&res), None, true)
+                            {
+                                warn!(
+                                    "could not mark memory job '{}' as finished: {error}",
+                                    job.id
+                                );
+                            }
                         }
                         Err(e) => {
                             let err_msg = e.to_string();
@@ -922,8 +955,11 @@ impl DaemonRuntime {
                                     "error_class": LOCK_REFUSAL_ERROR_CLASS,
                                     "message": err_msg
                                 });
-                                let _ =
-                                    queue.defer(&job.id, job.started_at.as_deref(), Some(&err_val));
+                                if let Err(error) =
+                                    queue.defer(&job.id, job.started_at.as_deref(), Some(&err_val))
+                                {
+                                    warn!("could not defer memory job '{}': {error}", job.id);
+                                }
                                 deferred_until.insert(
                                     job.id,
                                     Instant::now() + Duration::from_secs(LOCK_DEFER_BACKOFF_SECS),
@@ -933,13 +969,23 @@ impl DaemonRuntime {
                                     "error_class": "ExecutionError",
                                     "message": err_msg
                                 });
-                                let _ = queue.finish(&job.id, "failed", None, Some(&err_val), true);
+                                if let Err(error) =
+                                    queue.finish(&job.id, "failed", None, Some(&err_val), true)
+                                {
+                                    warn!(
+                                        "could not mark memory job '{}' as failed: {error}",
+                                        job.id
+                                    );
+                                }
                             }
                         }
                     }
                 }
             })
-            .expect("failed to spawn daemon worker thread");
+            .map_err(|error| {
+                HarnessError::Io(format!("failed to spawn the memory daemon worker: {error}"))
+            })?;
+        Ok(())
     }
 
     /// Serve on loopback only.
@@ -957,6 +1003,40 @@ impl DaemonRuntime {
             ));
         }
         let token = ensure_token(&self.paths)?;
+        self.write_endpoint_files(port, &token)?;
+
+        self.start_worker()?;
+
+        let tcp_listener = TcpListener::bind((bind_host, port))
+            .await
+            .map_err(|e| HarnessError::Io(format!("failed to bind {bind_host}:{port}: {e}")))?;
+
+        #[cfg(unix)]
+        let unix_listener_opt = Some(self.bind_unix_listener()?);
+
+        let queue = self.queue.clone();
+        let store = self.store.clone();
+        let shutdown = self.shutdown.clone();
+
+        #[cfg(unix)]
+        if let Some(unix_listener) = unix_listener_opt {
+            serve_unix_connections(
+                unix_listener,
+                queue.clone(),
+                store.clone(),
+                token.clone(),
+                shutdown.clone(),
+            );
+        }
+
+        serve_tcp_connections(tcp_listener, queue, store, token, shutdown).await;
+
+        self.cleanup();
+        Ok(())
+    }
+
+    /// Write the endpoint and pid files that describe this running daemon.
+    fn write_endpoint_files(&self, port: u16, token: &str) -> Result<(), HarnessError> {
         let pid = std::process::id();
 
         #[cfg(unix)]
@@ -970,89 +1050,115 @@ impl DaemonRuntime {
             started_at: Utc::now().to_rfc3339(),
             socket_path,
             port: Some(port),
-            token: token.clone(),
+            token: token.to_string(),
         };
 
-        fs::write(
-            &self.paths.endpoint_file,
-            serde_json::to_string_pretty(&endpoint_info).unwrap() + "\n",
-        )
-        .map_err(|e| HarnessError::Io(e.to_string()))?;
+        let endpoint_json = serde_json::to_string_pretty(&endpoint_info)
+            .map_err(|error| HarnessError::SerializationError(error.to_string()))?;
+        fs::write(&self.paths.endpoint_file, endpoint_json + "\n")
+            .map_err(|e| HarnessError::Io(e.to_string()))?;
 
         fs::write(&self.paths.pid_file, format!("{pid}\n"))
             .map_err(|e| HarnessError::Io(e.to_string()))?;
-
-        self.start_worker();
-
-        let tcp_listener = TcpListener::bind((bind_host, port))
-            .await
-            .map_err(|e| HarnessError::Io(format!("failed to bind {bind_host}:{port}: {e}")))?;
-
-        #[cfg(unix)]
-        let unix_listener_opt = {
-            if self.paths.socket_file.exists() {
-                let _ = fs::remove_file(&self.paths.socket_file);
-            }
-            let listener = UnixListener::bind(&self.paths.socket_file).ok();
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.paths.socket_file, fs::Permissions::from_mode(0o600));
-            listener
-        };
-
-        let queue = self.queue.clone();
-        let store = self.store.clone();
-        let shutdown = self.shutdown.clone();
-
-        #[cfg(unix)]
-        if let Some(unix_listener) = unix_listener_opt {
-            let q = queue.clone();
-            let s = store.clone();
-            let tok = token.clone();
-            let sd = shutdown.clone();
-            tokio::spawn(async move {
-                while !sd.load(Ordering::Relaxed) {
-                    match unix_listener.accept().await {
-                        Ok((stream, _)) => {
-                            let q = q.clone();
-                            let s = s.clone();
-                            let tok = tok.clone();
-                            let sd = sd.clone();
-                            tokio::spawn(async move {
-                                let _ = handle_unix_connection(stream, q, s, tok, sd).await;
-                            });
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        while !shutdown.load(Ordering::Relaxed) {
-            tokio::select! {
-                res = tcp_listener.accept() => {
-                    if let Ok((stream, _)) = res {
-                        let q = queue.clone();
-                        let s = store.clone();
-                        let tok = token.clone();
-                        let sd = shutdown.clone();
-                        tokio::spawn(async move {
-                            let _ = handle_tcp_connection(stream, q, s, tok, sd).await;
-                        });
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-            }
-        }
-
-        self.cleanup();
         Ok(())
     }
 
+    /// Bind the unix socket, removing a stale file and restricting it to its owner.
+    #[cfg(unix)]
+    fn bind_unix_listener(&self) -> Result<UnixListener, HarnessError> {
+        if self.paths.socket_file.exists() {
+            fs::remove_file(&self.paths.socket_file).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot remove the stale daemon socket {}: {error}",
+                    self.paths.socket_file.display()
+                ))
+            })?;
+        }
+        let listener = UnixListener::bind(&self.paths.socket_file).map_err(|error| {
+            HarnessError::Io(format!(
+                "cannot bind the daemon socket {}: {error}",
+                self.paths.socket_file.display()
+            ))
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&self.paths.socket_file, fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                HarnessError::Io(format!(
+                    "cannot restrict the daemon socket {} to its owner: {error}",
+                    self.paths.socket_file.display()
+                ))
+            },
+        )?;
+        Ok(listener)
+    }
+
     pub fn cleanup(&self) {
+        // Best effort: these files describe a process that is leaving; a failure here is only
+        // noise for the next start, which already treats a stale socket as removable.
         let _ = fs::remove_file(&self.paths.endpoint_file);
         let _ = fs::remove_file(&self.paths.pid_file);
         #[cfg(unix)]
         let _ = fs::remove_file(&self.paths.socket_file);
+    }
+}
+
+/// Accept unix connections until shutdown.
+#[cfg(unix)]
+fn serve_unix_connections(
+    unix_listener: UnixListener,
+    queue: Arc<QueueStore>,
+    store: Arc<MemoryStore>,
+    token: String,
+    shutdown: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        while !shutdown.load(Ordering::Relaxed) {
+            match unix_listener.accept().await {
+                Ok((stream, _)) => {
+                    let q = queue.clone();
+                    let s = store.clone();
+                    let tok = token.clone();
+                    let sd = shutdown.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = handle_unix_connection(stream, q, s, tok, sd).await {
+                            warn!("memory daemon unix connection failed: {error}");
+                        }
+                    });
+                }
+                Err(error) => {
+                    warn!("memory daemon unix listener stopped: {error}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Accept TCP connections until shutdown.
+async fn serve_tcp_connections(
+    tcp_listener: TcpListener,
+    queue: Arc<QueueStore>,
+    store: Arc<MemoryStore>,
+    token: String,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tokio::select! {
+            res = tcp_listener.accept() => {
+                if let Ok((stream, _)) = res {
+                    let q = queue.clone();
+                    let s = store.clone();
+                    let tok = token.clone();
+                    let sd = shutdown.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = handle_tcp_connection(stream, q, s, tok, sd).await {
+                            warn!("memory daemon TCP connection failed: {error}");
+                        }
+                    });
+                }
+            }
+            _ = tokio::time::sleep(SHUTDOWN_POLL) => {}
+        }
     }
 }
 

@@ -24,11 +24,24 @@ pub struct McpToolDef {
 }
 
 pub fn all_mcp_tools() -> Vec<McpToolDef> {
+    let mut tools = Vec::new();
+    tools.extend(store_tool_defs());
+    tools.extend(read_tool_defs());
+    tools.extend(write_tool_defs());
+    tools.extend(kg_tool_defs());
+    tools.extend(graph_tool_defs());
+    tools.extend(journal_tool_defs());
+    tools.extend(coordination_tool_defs());
+    tools.extend(task_tool_defs());
+    tools
+}
+
+fn store_tool_defs() -> Vec<McpToolDef> {
     vec![
-        // Store
         McpToolDef {
             name: "memory_status".to_string(),
-            description: "Memory overview — total records, domains, topics, and embedder".to_string(),
+            description: "Memory overview — total records, domains, topics, and embedder"
+                .to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         McpToolDef {
@@ -38,7 +51,8 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_list_topics".to_string(),
-            description: "List topics within a domain (or all topics if no domain given)".to_string(),
+            description: "List topics within a domain (or all topics if no domain given)"
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -53,13 +67,20 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_get_summary_spec".to_string(),
-            description: "Get the compact summary specification dialect used for compression".to_string(),
+            description: "Get the compact summary specification dialect used for compression"
+                .to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
-        // Read
+    ]
+}
+
+fn read_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_search".to_string(),
-            description: "Hybrid semantic search over active memory records with BM25 and vector ranking".to_string(),
+            description:
+                "Hybrid semantic search over active memory records with BM25 and vector ranking"
+                    .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -86,7 +107,8 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_list_records".to_string(),
-            description: "List active records with optional domain/topic filters and pagination".to_string(),
+            description: "List active records with optional domain/topic filters and pagination"
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -104,10 +126,15 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_reconnect".to_string(),
-            description: "Force derived index reload and rebuild from canonical Markdown files".to_string(),
+            description: "Force derived index reload and rebuild from canonical Markdown files"
+                .to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
-        // Write
+    ]
+}
+
+fn write_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_add_record".to_string(),
             description: "File verbatim content into a domain/topic with structured frontmatter".to_string(),
@@ -195,10 +222,16 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                 }
             }),
         },
-        // Knowledge Graph
+    ]
+}
+
+fn kg_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_kg_query".to_string(),
-            description: "Query knowledge graph for an entity's relationships with temporal validity".to_string(),
+            description:
+                "Query knowledge graph for an entity's relationships with temporal validity"
+                    .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -211,7 +244,9 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_kg_add".to_string(),
-            description: "Add a relationship fact to the knowledge graph (subject → predicate → object)".to_string(),
+            description:
+                "Add a relationship fact to the knowledge graph (subject → predicate → object)"
+                    .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -240,7 +275,8 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_kg_supersede".to_string(),
-            description: "Atomically supersede a single-valued relationship with a new value".to_string(),
+            description: "Atomically supersede a single-valued relationship with a new value"
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -266,10 +302,16 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
         },
         McpToolDef {
             name: "memory_kg_stats".to_string(),
-            description: "Get knowledge graph statistics: entity count, active triples, historical triples".to_string(),
+            description:
+                "Get knowledge graph statistics: entity count, active triples, historical triples"
+                    .to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
-        // Graph & Links
+    ]
+}
+
+fn graph_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_traverse".to_string(),
             description: "BFS graph traversal starting from an entity or domain".to_string(),
@@ -359,7 +401,11 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                 "required": ["domain", "entity_a", "entity_b"]
             }),
         },
-        // Journal
+    ]
+}
+
+fn journal_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_journal_write".to_string(),
             description: "Append an entry to an agent's daily journal".to_string(),
@@ -384,7 +430,11 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                 }
             }),
         },
-        // Coordination
+    ]
+}
+
+fn coordination_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_event_append".to_string(),
             description: "Append an immutable multi-agent coordination event".to_string(),
@@ -441,6 +491,11 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
                 "required": ["event_id", "agent"]
             }),
         },
+    ]
+}
+
+fn task_tool_defs() -> Vec<McpToolDef> {
+    vec![
         McpToolDef {
             name: "memory_task_create".to_string(),
             description: "Create a canonical delegation task request".to_string(),
@@ -528,6 +583,56 @@ pub fn dispatch_mcp_tool(
     args: &Value,
 ) -> Result<Value, HarnessError> {
     match tool {
+        "memory_status"
+        | "memory_list_domains"
+        | "memory_list_topics"
+        | "memory_get_taxonomy"
+        | "memory_get_summary_spec" => dispatch_store_tool(store, tool, args),
+        "memory_search" => dispatch_search_tool(store, tool, args),
+        "memory_get_record"
+        | "memory_list_records"
+        | "memory_recent_checkpoint"
+        | "memory_reconnect" => dispatch_records_tool(store, tool, args),
+        "memory_add_record"
+        | "memory_update_record"
+        | "memory_delete_record"
+        | "memory_delete_by_source"
+        | "memory_check_duplicate" => dispatch_write_tool(store, tool, args),
+        "memory_mine" | "memory_sync" => dispatch_mine_tool(store, tool, args),
+        "memory_kg_query"
+        | "memory_kg_add"
+        | "memory_kg_invalidate"
+        | "memory_kg_supersede"
+        | "memory_kg_timeline"
+        | "memory_kg_stats" => dispatch_kg_tool(store, tool, args),
+        "memory_traverse"
+        | "memory_find_crosslinks"
+        | "memory_list_crosslinks"
+        | "memory_follow_crosslinks"
+        | "memory_list_links"
+        | "memory_create_crosslink"
+        | "memory_delete_crosslink"
+        | "memory_delete_link" => dispatch_graph_tool(store, tool, args),
+        "memory_journal_write" | "memory_journal_read" => dispatch_journal_tool(store, tool, args),
+        "memory_event_append" | "memory_event_list" | "memory_event_wait" | "memory_event_ack" => {
+            dispatch_event_tool(store, tool, args)
+        }
+        "memory_task_create" | "memory_patch_submit" => dispatch_delegation_tool(store, tool, args),
+        "memory_peers"
+        | "memory_artifact_put"
+        | "memory_artifact_get"
+        | "memory_checkpoint"
+        | "memory_hook_settings" => dispatch_hub_tool(store, tool, args),
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_store_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_status" => {
             let status = store.status()?;
             let domains: Vec<String> = status.by_domain.keys().cloned().collect();
@@ -571,6 +676,16 @@ pub fn dispatch_mcp_tool(
             }))
         }
         "memory_get_summary_spec" => Ok(json!({ "spec": SUMMARY_SPEC })),
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_search_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_search" => {
             let query = args.get("query").and_then(Value::as_str).unwrap_or("");
             let domain = args
@@ -620,6 +735,16 @@ pub fn dispatch_mcp_tool(
                 .collect();
             Ok(json!({ "results": formatted, "count": formatted.len() }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_records_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_get_record" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or("");
             match store.get_record(id)? {
@@ -689,6 +814,16 @@ pub fn dispatch_mcp_tool(
             let count = store.reindex()?;
             Ok(json!({ "success": true, "reindexed": count }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_write_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_add_record" => {
             let domain = args
                 .get("domain")
@@ -790,6 +925,16 @@ pub fn dispatch_mcp_tool(
                 None => Ok(json!({ "duplicate": false })),
             }
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_mine_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_mine" => {
             let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
             let mode = args
@@ -814,6 +959,12 @@ pub fn dispatch_mcp_tool(
             let count = store.reindex()?;
             Ok(json!({ "success": true, "records_checked": count }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_kg_tool(store: &MemoryStore, tool: &str, args: &Value) -> Result<Value, HarnessError> {
+    match tool {
         "memory_kg_query" => {
             let entity = args.get("entity").and_then(Value::as_str).unwrap_or("");
             let as_of = args.get("as_of").and_then(Value::as_str);
@@ -870,6 +1021,16 @@ pub fn dispatch_mcp_tool(
                 "relationship_types": stats.relationship_types
             }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_graph_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_traverse" => {
             let start = args.get("start").and_then(Value::as_str).unwrap_or("");
             let max_hops = args.get("max_hops").and_then(Value::as_u64).unwrap_or(2) as usize;
@@ -947,6 +1108,16 @@ pub fn dispatch_mcp_tool(
             let pruned = store.links_store().prune_links(d, 1000)?;
             Ok(json!({ "success": true, "pruned": pruned }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_journal_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_journal_write" => {
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
             let agent = args.get("agent").and_then(Value::as_str).unwrap_or("luna");
@@ -963,6 +1134,16 @@ pub fn dispatch_mcp_tool(
             let entries = store.journal_read(agent, date, limit)?;
             Ok(json!({ "agent": agent, "entries": entries }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_event_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_event_append" => {
             let etype = args
                 .get("type")
@@ -1011,6 +1192,16 @@ pub fn dispatch_mcp_tool(
             store.event_ack(stream, agent, event_id)?;
             Ok(json!({ "success": true }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_delegation_tool(
+    store: &MemoryStore,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, HarnessError> {
+    match tool {
         "memory_task_create" => {
             let project = args
                 .get("project")
@@ -1073,6 +1264,12 @@ pub fn dispatch_mcp_tool(
             )?;
             Ok(json!({ "success": true, "artifact_id": art_id, "event": event }))
         }
+        other => Err(HarnessError::ToolNotFound(other.to_string())),
+    }
+}
+
+fn dispatch_hub_tool(store: &MemoryStore, tool: &str, args: &Value) -> Result<Value, HarnessError> {
+    match tool {
         "memory_peers" => {
             let events = store.event_list("main", None, Some(100), None)?;
             let mut peers = HashMap::new();

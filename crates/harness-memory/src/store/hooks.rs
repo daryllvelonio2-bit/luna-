@@ -7,10 +7,18 @@ use std::path::{Path, PathBuf};
 
 use harness_core::HarnessError;
 use serde_json::{json, Value};
+use tracing::warn;
 
 use super::MemoryStore;
 
 pub const DEFAULT_SAVE_INTERVAL: usize = 10;
+
+/// Serialize a hook reply. The hook contract is JSON on stdout, so a serialization failure is a
+/// hook failure rather than an empty reply the caller could mistake for success.
+fn json_reply(value: Value) -> Result<String, HarnessError> {
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| HarnessError::SerializationError(error.to_string()))
+}
 
 pub fn hook_state_dir(root: &Path) -> PathBuf {
     root.join("hooks_state")
@@ -46,7 +54,7 @@ pub fn run_hook(
             "session_id": session_id,
             "success": true
         });
-        return Ok(serde_json::to_string_pretty(&res).unwrap());
+        return json_reply(res);
     }
     match normalized.as_str() {
         "session-start" => {
@@ -59,7 +67,7 @@ pub fn run_hook(
                 "system_prompt_addition": context_block,
                 "success": true
             });
-            Ok(serde_json::to_string_pretty(&res).unwrap())
+            json_reply(res)
         }
         "stop" => {
             let last_save_file = state_dir.join(format!("{session_id}_last_save"));
@@ -93,7 +101,7 @@ pub fn run_hook(
                             "records_written": report.records,
                             "success": true
                         });
-                        Ok(serde_json::to_string_pretty(&res).unwrap())
+                        json_reply(res)
                     }
                     None => {
                         let res = json!({
@@ -104,7 +112,7 @@ pub fn run_hook(
                             "messages_since_save": since,
                             "success": true
                         });
-                        Ok(serde_json::to_string_pretty(&res).unwrap())
+                        json_reply(res)
                     }
                 }
             } else {
@@ -115,18 +123,25 @@ pub fn run_hook(
                     "messages_since_save": since,
                     "success": true
                 });
-                Ok(serde_json::to_string_pretty(&res).unwrap())
+                json_reply(res)
             }
         }
         "session-end" => {
             let saved = save_transcript(store, &session_id, transcript_path.as_deref())?;
-            let _ = store.journal_write(
+            if let Err(error) = store.journal_write(
                 "luna",
                 &format!("Session {session_id} ended cleanly."),
                 None,
-            );
+            ) {
+                warn!("could not write the session-end journal entry: {error}");
+            }
             let last_save_file = state_dir.join(format!("{session_id}_last_save"));
-            let _ = fs::remove_file(last_save_file);
+            // Best effort: the marker may already be gone, and its absence is the desired state.
+            if let Err(error) = fs::remove_file(last_save_file) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!("could not clear the session save marker: {error}");
+                }
+            }
 
             let res = json!({
                 "decision": if saved.is_some() { "session_saved" } else { "session_ended" },
@@ -134,18 +149,20 @@ pub fn run_hook(
                 "records_written": saved.as_ref().map(|r| r.records).unwrap_or(0),
                 "success": true
             });
-            Ok(serde_json::to_string_pretty(&res).unwrap())
+            json_reply(res)
         }
         "precompact" => {
             let saved = save_transcript(store, &session_id, transcript_path.as_deref())?;
-            let _ = store.reindex();
+            if let Err(error) = store.reindex() {
+                warn!("precompact reindex failed: {error}");
+            }
             let res = json!({
                 "decision": if saved.is_some() { "precompact_mined" } else { "precompact_reindexed" },
                 "session_id": session_id,
                 "records_written": saved.as_ref().map(|r| r.records).unwrap_or(0),
                 "success": true
             });
-            Ok(serde_json::to_string_pretty(&res).unwrap())
+            json_reply(res)
         }
         other => Err(HarnessError::MemoryError(format!("unknown hook: {other}"))),
     }
