@@ -59,6 +59,9 @@ pub(super) struct LiveRegion {
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     pub(super) compaction: Option<Compaction>,
+    /// Limit on lines displayed per execution block while in progress.
+    /// `None` means uncapped (display everything). `Some(1..=10)` caps output.
+    pub(super) block_limit: Option<usize>,
     pub(super) rows: Vec<String>,
 }
 

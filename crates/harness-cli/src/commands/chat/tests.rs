@@ -646,6 +646,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     let mut process_expanded = false;
     let todo_scope = TodoScope::new(tmp.path().join("todos"), &session_id);
     let plan_mode = Arc::new(AtomicBool::new(false));
+    let display_settings = Arc::new(std::sync::RwLock::new(config.display.clone()));
     let feature_toggles = FeatureToggles::default();
     let (_tx, mut rx) = mpsc::unbounded_channel();
 
@@ -675,6 +676,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();
@@ -706,6 +708,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();
@@ -736,6 +739,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();
@@ -766,6 +770,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();
@@ -797,6 +802,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();
@@ -829,6 +835,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        &display_settings,
     )
     .await
     .unwrap();

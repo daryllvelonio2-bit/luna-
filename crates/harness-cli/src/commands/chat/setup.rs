@@ -81,6 +81,7 @@ pub(super) struct ChatRuntime {
     pub(super) in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>>,
     pub(super) interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
     pub(super) compacting: Arc<AtomicBool>,
+    pub(super) display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 /// The registry and the shared handles it was built with.
@@ -464,6 +465,7 @@ fn assemble_agent(
     ui: Arc<ChatUi>,
     checkpoints: Arc<CheckpointController>,
     store: Arc<SqliteSessionStore>,
+    display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 ) -> Result<AgentHandles, HarnessError> {
     let mut agent_config = config.agent.clone();
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
@@ -516,6 +518,7 @@ fn assemble_agent(
             interruptions.clone(),
             session.todo_scope.clone(),
             compacting.clone(),
+            display_settings,
         ));
     if let Some(setup) = compaction {
         agent = agent.with_compaction(setup);
@@ -589,6 +592,8 @@ pub(super) async fn prepare(
     let is_attended = detect_attended_terminal();
     let job_rx = start_job_notifications(&tool_setup.bg_queue, is_attended);
     let ui = Arc::new(ChatUi::new(is_attended));
+    ui.set_display_block_limit(config.display.block_limit);
+    let display_settings = Arc::new(std::sync::RwLock::new(config.display.clone()));
     let approval = build_approval_state(&config, is_attended);
 
     let (clarify_tx, clarify_rx) = register_clarify_tool(&tooling.registry).await?;
@@ -613,6 +618,7 @@ pub(super) async fn prepare(
         ui.clone(),
         tool_setup.checkpoints,
         store.clone(),
+        display_settings.clone(),
     )?;
 
     tool_setup
@@ -652,6 +658,7 @@ pub(super) async fn prepare(
         in_flight_tools: handles.in_flight_tools,
         interruptions: handles.interruptions,
         compacting: handles.compacting,
+        display_settings,
     })
 }
 

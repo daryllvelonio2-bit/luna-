@@ -107,6 +107,9 @@ pub struct Config {
     /// `/carbon fix this` runs it on a fork of the current conversation.
     #[serde(default)]
     pub workers: BTreeMap<String, WorkerProfile>,
+    /// CLI display preferences (live block limit, turn completion collapse).
+    #[serde(default)]
+    pub display: DisplaySettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -159,6 +162,7 @@ impl Default for Config {
             gateway: GatewaySettings::default(),
             mcp: McpSettings::default(),
             workers: BTreeMap::new(),
+            display: DisplaySettings::default(),
         }
     }
 }
@@ -222,6 +226,13 @@ impl Config {
             if worker.model.trim().is_empty() {
                 return Err(HarnessError::ConfigurationError(format!(
                     "workers.{name}.model must not be empty"
+                )));
+            }
+        }
+        if let Some(limit) = self.display.block_limit {
+            if !(1..=10).contains(&limit) {
+                return Err(HarnessError::ConfigurationError(format!(
+                    "display.block_limit must be between 1 and 10, got {limit}"
                 )));
             }
         }
@@ -928,6 +939,26 @@ impl Default for SessionSettings {
     fn default() -> Self {
         Self {
             resume_max_messages: 200,
+        }
+    }
+}
+
+/// Display preferences for the interactive CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DisplaySettings {
+    /// Limit on lines displayed per execution block while in progress.
+    /// `None` means uncapped (display everything). `Some(1..=10)` caps output.
+    pub block_limit: Option<usize>,
+    /// Whether process blocks collapse when a turn completes. Defaults to true.
+    pub auto_collapse: bool,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            block_limit: None,
+            auto_collapse: true,
         }
     }
 }

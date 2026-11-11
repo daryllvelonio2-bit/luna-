@@ -570,6 +570,39 @@ fn read_results_show_lines_range_and_meaningful_content() {
 }
 
 #[test]
+fn live_tool_output_shows_all_lines_when_uncapped() {
+    let output = "1|first line\n2|second line\n3|third line\n4|fourth line";
+    let lines = format_live_tool_output(Some("read_file"), false, output, None);
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains("1|first line"));
+    assert!(lines[3].contains("4|fourth line"));
+}
+
+#[test]
+fn live_tool_output_respects_configured_display_block_limit() {
+    let output = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6";
+    let lines = format_live_tool_output(Some("terminal"), false, output, Some(3));
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].contains("line 1"));
+    assert!(lines[2].contains("line 3"));
+    assert!(lines[3].contains("(+3 lines hidden by display limit)"));
+}
+
+#[test]
+fn live_tool_output_handles_empty_and_error() {
+    let empty = format_live_tool_output(Some("terminal"), false, "", None);
+    assert_eq!(empty.len(), 1);
+    assert!(empty[0].contains("done"));
+
+    let err_out = "failed to compile\nundefined function foo\nat line 42";
+    let err_lines = format_live_tool_output(Some("terminal"), true, err_out, Some(2));
+    assert_eq!(err_lines.len(), 3);
+    assert!(err_lines[0].contains("failed to compile"));
+    assert!(err_lines[1].contains("undefined function foo"));
+    assert!(err_lines[2].contains("(+1 error lines hidden by display limit)"));
+}
+
+#[test]
 fn bounded_output_keeps_the_newest_lines_and_counts_the_dropped_ones() {
     let output = (0..100)
         .map(|i| format!("line {i}"))

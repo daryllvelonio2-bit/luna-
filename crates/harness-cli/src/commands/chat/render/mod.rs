@@ -48,7 +48,8 @@ pub use notices::{
 pub use paths::{shorten_path, shorten_paths_in_text};
 #[allow(unused_imports)]
 pub use results::{
-    format_approval_verdict, format_process_header, format_tool_result, format_tool_result_for,
+    format_approval_verdict, format_live_tool_output, format_process_header, format_tool_result,
+    format_tool_result_for,
 };
 pub use tools::{format_tool_call, tool_activity_detail};
 pub use transcript::{

@@ -42,6 +42,7 @@ pub(super) async fn run_tail(
         interrupt_handle,
         in_flight_tools,
         interruptions,
+        display_settings,
         ..
     } = env;
     let ReplState {
@@ -120,6 +121,7 @@ pub(super) async fn run_tail(
         Some(bg_queue.as_ref()),
         Some(delegate_tool.as_ref()),
         Some(pending_images),
+        display_settings,
     )
     .await?;
     finish_slash_command(ui, turns, display, *process_expanded, active_turn.is_none());

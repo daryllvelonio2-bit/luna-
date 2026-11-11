@@ -144,6 +144,10 @@ async fn handle_success(
         st.idle_pass.mark_passed(st.turns.len());
     }
 
+    if env.config.display.auto_collapse {
+        st.process_expanded = false;
+    }
+
     if env.ui.is_attended {
         repaint_attended(env, st);
     } else if !outcome.reply.is_empty() {

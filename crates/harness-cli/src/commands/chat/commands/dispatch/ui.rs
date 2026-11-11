@@ -114,4 +114,20 @@ impl<'a> SlashContext<'a> {
         self.ui.emit_above(&help_text);
         Ok(SlashOutcome::Continue)
     }
+
+    pub(super) async fn cmd_settings(
+        &mut self,
+        arg: Option<&str>,
+    ) -> Result<SlashOutcome, HarnessError> {
+        handle_settings_command(
+            Some(&mut *self.key_rx),
+            self.ui,
+            self.config,
+            self.display_settings,
+            self.process_expanded,
+            arg,
+        )
+        .await?;
+        Ok(SlashOutcome::Continue)
+    }
 }

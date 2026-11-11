@@ -14,8 +14,9 @@ use harness_core::{SessionStore, SqliteSessionStore};
 use super::render::{
     bounded_tool_output, clean_user_query_for_transcript, compaction_report, extract_patch_diff,
     format_delegate_duration, format_delegate_notification, format_delegate_title,
-    format_tool_call, format_tool_result, format_tool_result_for, has_verdict, is_non_tool_event,
-    right_aligned_user_message, OutputBlockKind, TurnProcessItem, LUNA_LABEL,
+    format_live_tool_output, format_tool_call, format_tool_result, format_tool_result_for,
+    has_verdict, is_non_tool_event, right_aligned_user_message, OutputBlockKind, TurnProcessItem,
+    LUNA_LABEL,
 };
 use super::todo;
 use super::turn;
@@ -32,6 +33,7 @@ pub(super) fn agent_observer(
     interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
     todo_scope: harness_core::tools::TodoScope,
     compacting: Arc<AtomicBool>,
+    display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 ) -> Arc<dyn Fn(harness_core::AgentEvent) + Send + Sync> {
     let state = ObserverState {
         ui,
@@ -39,6 +41,7 @@ pub(super) fn agent_observer(
         interruptions,
         todo_scope,
         compacting,
+        display_settings,
     };
     Arc::new(move |event| state.handle(event))
 }
@@ -50,6 +53,7 @@ struct ObserverState {
     interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
     todo_scope: harness_core::tools::TodoScope,
     compacting: Arc<AtomicBool>,
+    display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 impl ObserverState {
@@ -172,7 +176,7 @@ impl ObserverState {
         } else {
             " (success)".green().to_string()
         };
-        let (line, diff_to_show, result_line) = {
+        let (line, diff_to_show) = {
             let mut tools = self
                 .in_flight_tools
                 .lock()
@@ -196,24 +200,23 @@ impl ObserverState {
                     } else {
                         Vec::new()
                     };
-                (
-                    item.call_formatted.clone(),
-                    diff,
-                    Some(item.result_formatted.clone()),
-                )
+                (item.call_formatted.clone(), diff)
             } else {
                 (
                     format_tool_result_for(Some(&name), is_error, &output),
                     Vec::new(),
-                    None,
                 )
             }
         };
         self.ui.emit_above(&line);
-        // The retained result under the call: a failing build's first error, a short
-        // payload, or an MCP tool's answer. Ctrl+O shows the bounded body behind it.
-        if let Some(result_line) = result_line {
-            self.ui.emit_above(&result_line);
+        let block_limit = self
+            .display_settings
+            .read()
+            .ok()
+            .and_then(|s| s.block_limit);
+        let live_output = format_live_tool_output(Some(&name), is_error, &output, block_limit);
+        for out_line in live_output {
+            self.ui.emit_above(&out_line);
         }
         if !diff_to_show.is_empty() {
             self.ui.emit_above(&diff_to_show.join("\n"));

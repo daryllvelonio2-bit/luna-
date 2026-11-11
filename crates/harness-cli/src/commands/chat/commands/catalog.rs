@@ -282,6 +282,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Create, list, or delete named workers invoked as /<name> <task>",
     },
     SlashCommand {
+        name: "/settings",
+        details: "Configure CLI display limits, collapse behavior, and preferences",
+    },
+    SlashCommand {
         name: "/exit",
         details: "Exit Luna chat session",
     },

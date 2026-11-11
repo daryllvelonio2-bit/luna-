@@ -17,6 +17,7 @@ pub(super) struct Activity {
 ///
 /// A tail, not a log: the composer has to stay usable while a build prints thousands of lines. The
 /// full output still reaches the model with the result; this is only the live view.
+#[allow(dead_code)]
 pub(super) const TOOL_TAIL_LINES: usize = 8;
 
 /// How many lines the tail keeps in memory, so Ctrl+O can expand it without re-reading the child.

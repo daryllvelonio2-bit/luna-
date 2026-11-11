@@ -27,8 +27,8 @@ use super::{
     handle_delete_command, handle_diff_command, handle_dir_command, handle_feature_toggle,
     handle_fork_command, handle_model_switch, handle_name_command, handle_new_command,
     handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
-    handle_summarize_and_new_command, handle_thinking_switch, handle_usage_command,
-    parse_profile_command, profile_wizard, worker, Feature, FeatureToggles,
+    handle_settings_command, handle_summarize_and_new_command, handle_thinking_switch,
+    handle_usage_command, parse_profile_command, profile_wizard, worker, Feature, FeatureToggles,
 };
 
 mod context;
@@ -79,6 +79,7 @@ pub(crate) async fn execute_slash_command(
     // Clipboard images waiting to ride the next prompt. Worker invocations consume them the same
     // way a normal turn does, so `/carbon look at this` can carry a pasted screenshot.
     pending_images: Option<&Arc<std::sync::Mutex<Vec<String>>>>,
+    display_settings: &Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 ) -> Result<SlashOutcome, HarnessError> {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let name = parts[0];
@@ -111,6 +112,7 @@ pub(crate) async fn execute_slash_command(
         bg_queue,
         delegate_tool,
         pending_images,
+        display_settings,
     }
     .dispatch(cmd, name, arg)
     .await
@@ -140,6 +142,7 @@ struct SlashContext<'a> {
     bg_queue: Option<&'a harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Option<&'a harness_core::tools::DelegateTaskTool>,
     pending_images: Option<&'a Arc<std::sync::Mutex<Vec<String>>>>,
+    display_settings: &'a Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 impl<'a> SlashContext<'a> {
@@ -184,6 +187,7 @@ impl<'a> SlashContext<'a> {
             "/help" | "/commands" | "/?" => self.cmd_help().await,
             "/profile" | "/profiles" => self.cmd_profile(arg).await,
             "/worker" => self.cmd_worker(arg).await,
+            "/settings" => self.cmd_settings(arg).await,
             "exit" | "quit" | "/exit" | "/quit" => self.cmd_exit().await,
             _ => self.cmd_fallback(cmd, name, arg).await,
         }

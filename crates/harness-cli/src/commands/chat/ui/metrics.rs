@@ -1,7 +1,7 @@
 use super::super::render::reasoning_rows;
 use super::consts::MIN_LIVE_REASONING_ROWS;
 use super::panels::LiveRegion;
-use super::tail::{TOOL_TAIL_BUFFER_LINES, TOOL_TAIL_LINES};
+use super::tail::TOOL_TAIL_BUFFER_LINES;
 use super::terminal::get_terminal_height;
 
 pub fn visible_width(s: &str) -> usize {
@@ -20,8 +20,10 @@ pub fn visible_width(s: &str) -> usize {
 pub(super) fn tool_tail_limit(live: &LiveRegion) -> usize {
     if live.tool_output_expanded {
         TOOL_TAIL_BUFFER_LINES
+    } else if let Some(limit) = live.block_limit {
+        limit
     } else {
-        TOOL_TAIL_LINES
+        TOOL_TAIL_BUFFER_LINES
     }
 }
 

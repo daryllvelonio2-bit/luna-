@@ -235,6 +235,85 @@ pub fn format_tool_result(is_error: bool, output: &str) -> String {
     format_tool_result_for(None, is_error, output)
 }
 
+/// Formats live execution output for the CLI during in-progress execution.
+///
+/// Unlike the compact single-line verdict, this displays the executed lines (file content read,
+/// search matches found, shell command output, query responses) according to `block_limit`.
+/// If `block_limit` is `None`, all lines are displayed without capping.
+pub fn format_live_tool_output(
+    _tool: Option<&str>,
+    is_error: bool,
+    output: &str,
+    block_limit: Option<usize>,
+) -> Vec<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return vec![format!("  {} {}", "✓".green(), "done".dimmed())];
+    }
+
+    if is_error {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let total = lines.len();
+        let cap = block_limit.unwrap_or(total);
+        let show = total.min(cap);
+        let mut out = Vec::new();
+        for (i, line) in lines[..show].iter().enumerate() {
+            if i == 0 {
+                out.push(format!("  {} {}", "✖".red(), line.red()));
+            } else {
+                out.push(format!("    {}", line.red()));
+            }
+        }
+        if total > show {
+            let hidden = total - show;
+            out.push(
+                format!(
+                    "  {} (+{} error lines hidden by display limit)",
+                    "…".dimmed(),
+                    hidden
+                )
+                .dimmed()
+                .to_string(),
+            );
+        }
+        return out;
+    }
+
+    if let Some(json_summary) = format_json_result(trimmed) {
+        return vec![json_summary];
+    }
+
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let total = lines.len();
+    let cap = block_limit.unwrap_or(total);
+    let show = total.min(cap);
+    let mut out = Vec::new();
+
+    for (i, line) in lines[..show].iter().enumerate() {
+        let clean = line.trim_end();
+        if i == 0 {
+            out.push(format!("  {} {}", "✓".green(), clean.dimmed()));
+        } else {
+            out.push(format!("    {}", clean.dimmed()));
+        }
+    }
+
+    if total > show {
+        let hidden = total - show;
+        out.push(
+            format!(
+                "  {} (+{} lines hidden by display limit)",
+                "…".dimmed(),
+                hidden
+            )
+            .dimmed()
+            .to_string(),
+        );
+    }
+
+    out
+}
+
 /// Render a tool result with tool-specific formatting (e.g. for search_files, read_file).
 pub fn format_tool_result_for(tool: Option<&str>, is_error: bool, output: &str) -> String {
     let trimmed = output.trim();

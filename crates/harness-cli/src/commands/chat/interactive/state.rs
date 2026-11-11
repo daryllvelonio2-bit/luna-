@@ -71,6 +71,7 @@ pub(super) struct Env<'a> {
     pub(super) current_model: &'a mut String,
     pub(super) compact_provider: &'a mut Option<String>,
     pub(super) compact_model: &'a mut Option<String>,
+    pub(super) display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 impl<'a> Env<'a> {
@@ -105,6 +106,7 @@ impl<'a> Env<'a> {
             current_model: &mut rt.current_model,
             compact_provider: &mut rt.compact_provider,
             compact_model: &mut rt.compact_model,
+            display_settings: rt.display_settings.clone(),
         }
     }
 }

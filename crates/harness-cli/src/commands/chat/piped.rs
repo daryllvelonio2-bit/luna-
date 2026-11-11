@@ -15,8 +15,9 @@ use super::commands::{
     handle_compact_model_switch, handle_default_model_switch, handle_delete_command,
     handle_diff_command, handle_feature_toggle, handle_fork_command, handle_model_switch,
     handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
-    handle_sessions_switch, handle_summarize_and_new_command, handle_thinking_switch,
-    handle_usage_command, is_bare_feature_command, looks_like_path, Feature,
+    handle_sessions_switch, handle_settings_command, handle_summarize_and_new_command,
+    handle_thinking_switch, handle_usage_command, is_bare_feature_command, looks_like_path,
+    Feature,
 };
 use super::render::{reply_for_display, TurnRecord, LUNA_LABEL, PROMPT};
 use super::setup::ChatRuntime;
@@ -57,7 +58,7 @@ pub(super) async fn run(rt: &mut ChatRuntime) -> Result<(), HarnessError> {
         if handle_name_and_summarize_commands(rt, &query).await? {
             continue;
         }
-        if handle_maintenance_commands(rt, &query).await? {
+        if handle_maintenance_commands(rt, &query, &mut process_expanded).await? {
             continue;
         }
         if handle_session_reset_commands(rt, &query).await? {
@@ -495,10 +496,11 @@ async fn handle_name_and_summarize_commands(
     Ok(false)
 }
 
-/// `/diff`, `/rewind`, `/auto-compact`, and `/compact`.
+/// `/diff`, `/rewind`, `/auto-compact`, `/compact`, and `/settings`.
 async fn handle_maintenance_commands(
     rt: &mut ChatRuntime,
     query: &str,
+    process_expanded: &mut bool,
 ) -> Result<bool, HarnessError> {
     if query.starts_with("/diff") {
         let arg = query.strip_prefix("/diff").unwrap().trim();
@@ -528,6 +530,20 @@ async fn handle_maintenance_commands(
             &rt.agent,
             &rt.current_provider,
             &rt.current_model,
+        )
+        .await?;
+        return Ok(true);
+    }
+    if query.starts_with("/settings") {
+        let arg = query.strip_prefix("/settings").unwrap().trim();
+        let arg_opt = if arg.is_empty() { None } else { Some(arg) };
+        handle_settings_command(
+            None,
+            rt.ui.as_ref(),
+            &mut rt.config,
+            &rt.display_settings,
+            process_expanded,
+            arg_opt,
         )
         .await?;
         return Ok(true);

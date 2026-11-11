@@ -630,3 +630,47 @@ fn worker_profiles_require_a_provider_and_model() {
     cfg.workers.get_mut("carbon").unwrap().model = "m".to_string();
     assert!(cfg.validate().is_ok());
 }
+
+#[test]
+fn display_defaults_are_uncapped_and_auto_collapse() {
+    let cfg = Config::default();
+    assert_eq!(cfg.display.block_limit, None);
+    assert!(cfg.display.auto_collapse);
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn display_block_limit_validation() {
+    let mut cfg = Config::default();
+    cfg.display.block_limit = Some(5);
+    assert!(cfg.validate().is_ok());
+
+    cfg.display.block_limit = Some(1);
+    assert!(cfg.validate().is_ok());
+
+    cfg.display.block_limit = Some(10);
+    assert!(cfg.validate().is_ok());
+
+    cfg.display.block_limit = Some(0);
+    assert!(cfg.validate().is_err());
+
+    cfg.display.block_limit = Some(11);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn display_settings_round_trip_through_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layers = layers(Some(config_path(&tmp)));
+
+    set_in_file(&layers, "display.block_limit", "4").unwrap();
+    set_in_file(&layers, "display.auto_collapse", "false").unwrap();
+
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert_eq!(cfg.display.block_limit, Some(4));
+    assert!(!cfg.display.auto_collapse);
+
+    unset_in_file(&layers, "display.block_limit").unwrap();
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert_eq!(cfg.display.block_limit, None);
+}
