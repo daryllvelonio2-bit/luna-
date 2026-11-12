@@ -1,0 +1,43 @@
+[package]
+name = "luna-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Slint frontend for the Luna Android automation app"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "luna-app"
+path = "src/main.rs"
+
+[dependencies]
+slint = { version = "1.18", features = ["backend-android-activity-06"] }
+harness-mobile = { workspace = true }
+harness-ui-spec = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.18"
+
+[package.metadata.android]
+package = "com.luna.automation"
+apk_name = "luna"
+build_targets = ["aarch64-linux-android"]
+strip = "strip"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Luna"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+extract_native_libs = true
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"

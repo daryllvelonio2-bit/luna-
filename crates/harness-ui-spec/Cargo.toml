@@ -1,0 +1,12 @@
+[package]
+name = "harness-ui-spec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Versioned JSON UI specification for AI-generated, natively rendered screens"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

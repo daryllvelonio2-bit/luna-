@@ -12,9 +12,17 @@ members = [
     "crates/harness-onboarding",
     "crates/harness-desktop",
     "crates/harness-desktop-linux",
+    "crates/harness-ui-spec",
+    "crates/harness-mobile",
+    "crates/luna-app",
     "crates/harness-cli",
 ]
 resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
 
 [workspace.package]
 version = "0.1.8"
@@ -76,3 +84,5 @@ harness-telemetry = { path = "crates/harness-telemetry" }
 harness-onboarding = { path = "crates/harness-onboarding" }
 harness-desktop = { path = "crates/harness-desktop" }
 harness-desktop-linux = { path = "crates/harness-desktop-linux" }
+harness-ui-spec = { path = "crates/harness-ui-spec" }
+harness-mobile = { path = "crates/harness-mobile" }

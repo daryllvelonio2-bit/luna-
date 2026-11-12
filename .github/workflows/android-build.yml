@@ -1,0 +1,81 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/android-ui-runtime
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/harness-core/**"
+      - "crates/harness-providers/**"
+      - "crates/harness-memory/**"
+      - "crates/harness-notes/**"
+      - "crates/harness-note-graph/**"
+      - "crates/harness-ui-spec/**"
+      - "crates/harness-mobile/**"
+      - "crates/luna-app/**"
+      - ".github/workflows/android-build.yml"
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Point the C toolchain at the NDK
+        run: |
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android26-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android26-clang++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=$TOOLCHAIN/llvm-ranlib" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+
+      - name: Create a release signing key
+        run: |
+          keytool -genkeypair \
+            -keystore "$PWD/release.keystore" \
+            -storepass android -keypass android \
+            -alias luna -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Luna, OU=Mobile, O=Luna, C=US"
+          echo "CARGO_APK_RELEASE_KEYSTORE=$PWD/release.keystore" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        working-directory: crates/luna-app
+        run: cargo apk build --target aarch64-linux-android --lib --release
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          find target -name "*.apk" -exec cp {} dist/ \;
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-apk
+          path: dist/*.apk
+          if-no-files-found: error

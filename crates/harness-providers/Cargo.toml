@@ -21,10 +21,15 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
-keyring = { workspace = true }
 rusqlite = { workspace = true }
 libc = { workspace = true }
 base64 = { workspace = true }
+
+# keyring's Linux backend links a desktop secret-service stack that has no Android
+# equivalent. Nothing in this crate calls the keyring API today; it stays available on
+# desktop targets for the credential-store work that references it.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

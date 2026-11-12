@@ -1,0 +1,161 @@
+import { ScrollView, LineEdit, Button, CheckBox, ComboBox } from "std-widgets.slint";
+
+export struct RowItem {
+    kind: int,
+    id: string,
+    label: string,
+    value: string,
+    action: string,
+    options: [string],
+}
+
+export component AppWindow inherits Window {
+    title: "Luna";
+    preferred-width: 420px;
+    preferred-height: 820px;
+    background: #ffffff;
+
+    in property <[string]> transcript;
+    in property <[RowItem]> rows;
+    in property <string> status;
+    in-out property <string> draft;
+
+    callback send-prompt(string);
+    callback press(string);
+    callback edit(string, string);
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        Text {
+            text: "Luna";
+            font-size: 24px;
+            font-weight: 700;
+            color: #111827;
+        }
+        Text {
+            text: root.status;
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        Rectangle {
+            border-radius: 10px;
+            background: #f3f4f6;
+            vertical-stretch: 1;
+            ScrollView {
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    for line in root.transcript : Text {
+                        text: line;
+                        wrap: word-wrap;
+                        color: #1f2937;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 320px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #d1d5db;
+            background: #ffffff;
+            ScrollView {
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    for row in root.rows : VerticalLayout {
+                        spacing: 4px;
+                        if row.kind == 1 : Text {
+                            text: row.label;
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #111827;
+                        }
+                        if row.kind == 0 : Text {
+                            text: row.label;
+                            wrap: word-wrap;
+                            color: #1f2937;
+                        }
+                        if row.kind == 2 : Text {
+                            text: row.label;
+                            font-size: 12px;
+                            color: #6b7280;
+                        }
+                        if row.kind == 3 : VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: row.label;
+                                font-size: 12px;
+                                color: #6b7280;
+                            }
+                            LineEdit {
+                                text: row.value;
+                                edited(text) => { root.edit(row.id, text); }
+                            }
+                        }
+                        if row.kind == 4 : VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: row.label;
+                                font-size: 12px;
+                                color: #6b7280;
+                            }
+                            ComboBox {
+                                model: row.options;
+                                current-value: row.value;
+                                selected(value) => { root.edit(row.id, value); }
+                            }
+                        }
+                        if row.kind == 5 : CheckBox {
+                            text: row.label;
+                            checked: row.value == "on";
+                            toggled => {
+                                root.edit(row.id, self.checked ? "true" : "false");
+                            }
+                        }
+                        if row.kind == 6 : Button {
+                            text: row.label;
+                            clicked => { root.press(row.action); }
+                        }
+                        if row.kind == 7 : Text {
+                            text: row.label;
+                            font-family: "monospace";
+                            color: #374151;
+                        }
+                        if row.kind == 8 : Text {
+                            text: row.label;
+                            color: #9ca3af;
+                        }
+                        if row.kind == 9 : Rectangle {
+                            height: 8px;
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            prompt := LineEdit {
+                text: root.draft;
+                placeholder-text: "Ask Luna to build a screen";
+                edited(text) => { root.draft = text; }
+                accepted(text) => {
+                    root.send-prompt(text);
+                    root.draft = "";
+                }
+            }
+            Button {
+                text: "Send";
+                clicked => {
+                    root.send-prompt(root.draft);
+                    root.draft = "";
+                }
+            }
+        }
+    }
+}
