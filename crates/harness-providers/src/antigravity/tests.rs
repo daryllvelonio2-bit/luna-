@@ -10,21 +10,42 @@ use serde_json::json;
 
 #[test]
 fn test_resolve_antigravity_model_mappings() {
-    // The two Gemini rows share the one tiered backend key; effort is carried by thinkingConfig.
+    // A row the listing published resolves to the key it names, tier and all: the Gemini 4
+    // families are keys of their own, not one tiered key with the effort beside it.
+    assert_eq!(
+        resolve_antigravity_model("Gemini 4 Argon (Medium)", Some(&ReasoningEffort::High)),
+        "gemini-4-argon-medium",
+        "the tier in the row's own name is the tier it runs at"
+    );
+    assert_eq!(
+        resolve_antigravity_model("Gemini 4 Hydrogen (XHigh)", None),
+        "gemini-4-hydrogen-xhigh"
+    );
+    assert_eq!(
+        resolve_antigravity_model("antigravity/Gemini 3.8 Flash (Low)", None),
+        "gemini-3.8-flash-low"
+    );
+
+    // The family names an older Luna wrote, and the effort the session asked for.
     assert_eq!(
         resolve_antigravity_model("Gemini 4 Argon", Some(&ReasoningEffort::High)),
-        "gemini-3.8-flash-tiered"
+        "gemini-4-argon-high"
     );
     assert_eq!(
         resolve_antigravity_model("Gemini 4 Argon", None),
-        "gemini-3.8-flash-tiered"
+        "gemini-4-argon-medium"
     );
     assert_eq!(
-        resolve_antigravity_model("antigravity/Gemini 3.8 Flash", Some(&ReasoningEffort::Low)),
-        "gemini-3.8-flash-tiered"
+        resolve_antigravity_model("Gemini 4 Hydrogen", None),
+        "gemini-4-hydrogen-medium"
     );
     assert_eq!(
-        resolve_antigravity_model("gemini-3.8-flash", None),
+        resolve_antigravity_model("Gemini 3.8 Flash", Some(&ReasoningEffort::Low)),
+        "gemini-3.8-flash-low"
+    );
+    // The retired single tiered key is a key, not a name: a session that stored it keeps it.
+    assert_eq!(
+        resolve_antigravity_model("gemini-3.8-flash-tiered", None),
         "gemini-3.8-flash-tiered"
     );
 
@@ -34,7 +55,7 @@ fn test_resolve_antigravity_model_mappings() {
         "claude-opus-5-5-medium"
     );
     assert_eq!(
-        resolve_antigravity_model("Claude Opus 5.5", Some(&ReasoningEffort::High)),
+        resolve_antigravity_model("Claude Opus 5.5 (High)", None),
         "claude-opus-5-5-high"
     );
     assert_eq!(
@@ -72,55 +93,92 @@ fn test_resolve_antigravity_model_mappings() {
     assert_eq!(
         resolve_antigravity_model("gemini-2.5-flash", None),
         "gemini-2.5-flash",
-        "an explicit backend key is not silently replaced by the tiered model"
+        "an explicit backend key is not silently replaced by another model"
+    );
+    assert_eq!(
+        resolve_antigravity_model("Gemini 2.5 Pro", None),
+        "gemini-2.5-pro"
     );
 }
 
-/// The live table is folded into the CLI's switcher: its display names decide membership, stale
-/// families and internal entries are dropped, and the tiered Gemini key becomes the two Gemini
-/// rows the client shows.
+/// The listing is read as the endpoint describes it: the switcher's own order and labels decide
+/// the rows, the internal and disabled entries are dropped, and the retired `-tiered` alias — which
+/// the endpoint still publishes without a name — is not a row but still resolves.
 #[test]
-fn the_live_table_is_folded_into_the_cli_switcher() {
+fn the_live_table_becomes_the_rows_the_cli_shows() {
     use super::quota::models_from_listing;
 
     let listing = json!({
         "models": {
+            "gemini-4-argon-medium": { "displayName": "Gemini 4 Argon (Medium)", "supportsThinking": true },
+            "gemini-4-hydrogen-high": { "displayName": "Gemini 4 Hydrogen (High)", "supportsThinking": true },
+            "gemini-4-carbon-disabled": { "displayName": "Gemini 4 Carbon" },
             "gemini-3.8-flash-tiered": { "displayName": null },
             "gemini-3.8-flash-high": { "displayName": "Gemini 3.8 Flash (High)" },
             "claude-opus-5-5-low": { "displayName": "Claude Opus 5.5 (Low)" },
-            "claude-opus-5-5-high": { "displayName": "Claude Opus 5.5 (High)" },
             "claude-sonnet-5-5-medium": { "displayName": "Claude Sonnet 5.5 (Medium)" },
             "gpt-oss-120b-medium": { "displayName": "GPT-OSS 120B (Medium)" },
-            // Retired and internal entries must not reach the picker.
-            "gemini-2.5-pro": { "displayName": "Gemini 2.5 Pro" },
-            "gemini-2.5-flash": { "displayName": "Gemini 3.5 Flash Lite" },
-            "gemini-3-flash": { "displayName": "Gemini 3 Flash" },
+            "gemini-3.1-flash-image": { "displayName": "Gemini 3.1 Flash Image", "supportsThinking": false },
+            // Internal helpers are published without a name.
             "chat_20706": { "displayName": null },
             "tab_flash_lite_preview": { "displayName": null }
-        }
+        },
+        "agentModelSorts": [{
+            "displayName": "Recommended",
+            "groups": [{ "modelIds": [
+                "gemini-4-argon-medium",
+                "gemini-4-hydrogen-high",
+                "gemini-4-carbon-disabled",
+                "gemini-3.8-flash-high"
+            ]}]
+        }]
     });
 
+    let rows = models_from_listing(&listing);
     assert_eq!(
-        models_from_listing(&listing),
-        vec![
-            "Gemini 4 Argon",
-            "Gemini 3.8 Flash",
-            "Claude Opus 5.5",
-            "Claude Sonnet 5.5",
-            "GPT-OSS 120B (Medium)",
-        ]
+        &rows[..4],
+        &[
+            "Gemini 4 Argon (Medium)",
+            "Gemini 4 Hydrogen (High)",
+            "Gemini 3.8 Flash (High)",
+            "Claude Opus 5.5 (Low)",
+        ],
+        "the switcher's own order first, then everything else usable: {rows:?}"
+    );
+    assert!(
+        rows.contains(&"Claude Sonnet 5.5 (Medium)".to_string()),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&"Gemini 3.1 Flash Image".to_string()),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("Carbon")),
+        "a row the CLI marks disabled answers 404 on a turn: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("3.5 Flash Lite")),
+        "{rows:?}"
     );
 
-    // An account without the newer Claude/GPT families gets only what it can spend on.
-    let claude_only = json!({
-        "models": {
-            "claude-sonnet-5-5-low": { "displayName": "Claude Sonnet 5.5 (Low)" }
-        }
-    });
+    // The row that was published resolves to its own key, and the alias is not a row.
     assert_eq!(
-        models_from_listing(&claude_only),
-        vec!["Gemini 4 Argon", "Gemini 3.8 Flash", "Claude Sonnet 5.5"]
+        resolve_antigravity_model("Gemini 4 Argon (Medium)", None),
+        "gemini-4-argon-medium"
     );
+    assert!(resolve_antigravity_model("gemini-3.8-flash-tiered", None).ends_with("tiered"));
+    // The listing also says which models take a thinking config.
+    assert!(
+        !antigravity_model_supports_thinking("gemini-3.1-flash-image"),
+        "an image model rejects a thinking config"
+    );
+    assert!(antigravity_model_supports_thinking("gemini-4-argon-medium"));
+    // And the media families are recognised before any listing has been read.
+    assert!(!antigravity_model_supports_thinking(
+        "gemini-3.1-flash-image-preview"
+    ));
+    assert!(antigravity_model_supports_thinking("gemini-2.5-flash"));
 
     // Nothing recognised: the caller falls back rather than showing a partial or empty picker.
     assert!(models_from_listing(&json!({ "models": { "chat_20706": {} } })).is_empty());
@@ -353,7 +411,7 @@ fn a_reasoning_turn_replays_a_thought_part_before_its_call() {
 fn format_quota_display_separates_gemini_and_claude_groups() {
     let mut models_quota = std::collections::HashMap::new();
     models_quota.insert(
-        "gemini-3.8-flash-tiered".to_string(),
+        "gemini-4-argon-medium".to_string(),
         AntigravityModelQuotaInfo {
             remaining_fraction: Some(0.0628),
             reset_time: None,
@@ -392,7 +450,7 @@ fn format_quota_display_separates_gemini_and_claude_groups() {
     // A Gemini model reads the 6% from its own quotaInfo, and the weekly window from the only
     // weekly bucket the account has. Missing that weekly window is what showed "5h 6%" alone.
     assert_eq!(
-        display("gemini-3.8-flash"),
+        display("Gemini 4 Argon (Medium)"),
         vec![
             QuotaLine {
                 window: QuotaWindow::FiveHour,
@@ -488,7 +546,7 @@ fn format_quota_display_gemini_with_both_5h_and_weekly() {
 fn a_quota_window_without_a_reset_time_carries_none() {
     let mut models_quota = std::collections::HashMap::new();
     models_quota.insert(
-        "gemini-3.8-flash-tiered".to_string(),
+        "gemini-3.8-flash-medium".to_string(),
         AntigravityModelQuotaInfo {
             remaining_fraction: Some(0.82),
             reset_time: None,
@@ -500,7 +558,7 @@ fn a_quota_window_without_a_reset_time_carries_none() {
     };
 
     let lines = summary
-        .quota_lines("gemini-3.8-flash")
+        .quota_lines("Gemini 3.8 Flash (Medium)")
         .expect("gemini quota");
     assert_eq!(
         lines,
@@ -1107,22 +1165,33 @@ fn a_numeric_enum_is_dropped_before_code_assist_rejects_the_request() {
     );
 }
 
-/// Code Assist gates on the client identity, not just the version: `antigravity/1.x` is answered
-/// with "This version of Antigravity is no longer supported" even though `agy 1.5.3` works, because
-/// the CLI identifies as `antigravity-cli/1.5.3`. The header must keep that product prefix.
+/// The model table is gated on the client identity, and the identity that is served the current
+/// models is `antigravity/cli/…`. Probed live: `antigravity-cli/1.5.7` — this route's old header —
+/// gets a twenty-model table with no Gemini 4 in it, while `antigravity/cli/1.5.7` gets thirty-one
+/// including the whole `gemini-4-*` family.
 #[test]
-fn the_client_identifies_as_the_cli_not_the_retired_desktop_app() {
+fn the_client_identifies_as_the_cli_that_is_served_the_current_models() {
     let agent = user_agent();
-    let version = agent
-        .strip_prefix("antigravity-cli/")
+    let product = agent.split(' ').next().unwrap_or_default();
+    let version = product
+        .strip_prefix("antigravity/cli/")
         .unwrap_or_else(|| panic!("the client must identify as the CLI: {agent}"));
     assert!(
         is_version_like(version),
         "the version is digits and dots: {agent}"
     );
     assert!(
-        !agent.starts_with("antigravity/"),
-        "the retired desktop product is refused by the backend: {agent}"
+        !product.starts_with("antigravity-cli/"),
+        "the retired product token is answered with the model table that has no Gemini 4: {agent}"
+    );
+    assert_eq!(
+        product,
+        format!("antigravity/cli/{version}"),
+        "the desktop form `antigravity/<version>` is refused outright: {agent}"
+    );
+    assert!(
+        agent.contains("auth_method=consumer"),
+        "the suffix mirrors what the CLI sends: {agent}"
     );
 }
 

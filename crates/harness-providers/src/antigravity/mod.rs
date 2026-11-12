@@ -70,29 +70,58 @@ pub fn agy_client_secret() -> String {
 }
 /// The product half of the `User-Agent`.
 ///
-/// Code Assist gates on the client identity, not just a version number: `antigravity/1.x` is the
-/// retired desktop app and is answered with "This version of Antigravity is no longer supported",
-/// even at 1.5.3, while `antigravity-cli/1.x` — what the `agy` CLI sends — is served normally.
-/// (Probed against the live endpoint: `antigravity/1.2.7` and `antigravity/1.5.3` are refused,
-/// `antigravity-cli/1.5.3` and `antigravity/2.0.0` are answered.)
-const USER_AGENT_PRODUCT: &str = "antigravity-cli";
+/// The model table is gated on this token, not on the version. Probed live: `antigravity-cli/1.5.7`
+/// — the identity this route used, and what `agy 1.5.3` sent — is answered with the retired
+/// twenty-model table, which has `gemini-3.8-flash-tiered` and no Gemini 4 at all. The current CLI
+/// sends `antigravity/cli/1.5.7`, and the same endpoint then publishes thirty-one models, the whole
+/// `gemini-4-argon` / `gemini-4-hydrogen` family included. (The parenthetical and the version make
+/// no difference: `antigravity/cli/9.9.9` and a bare `antigravity/cli/1.5.7` both get the new
+/// table, while `antigravity/1.5.3` — the retired desktop app — is refused outright.)
+const USER_AGENT_PRODUCT: &str = "antigravity/cli";
 
 /// The version to claim when no local `agy` can be asked.
 pub const FALLBACK_CLIENT_VERSION: &str = "1.5.3";
 
-/// The `User-Agent` this route sends, e.g. `antigravity-cli/1.5.3`.
+/// The `User-Agent` this route sends, e.g.
+/// `antigravity/cli/1.5.7 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)`.
 ///
 /// The version is read from the installed `agy` so the header follows the client's own updates
-/// instead of freezing at a number the server later retires (the old `antigravity/1.2.7` is
-/// exactly that). Probing happens once per process: `Command` is not cheap, and the version cannot
-/// change mid-session.
+/// instead of freezing at a number the server later retires. The suffix mirrors what the CLI sends;
+/// it is not what gates the model table, and it is built from this machine rather than copied, so it
+/// never claims a build this binary is not.
 pub fn user_agent() -> &'static str {
     static USER_AGENT: OnceLock<String> = OnceLock::new();
     USER_AGENT.get_or_init(|| {
         let version =
             installed_client_version().unwrap_or_else(|| FALLBACK_CLIENT_VERSION.to_string());
-        format!("{USER_AGENT_PRODUCT}/{version}")
+        format!(
+            "{USER_AGENT_PRODUCT}/{version} (aidev_client; os_type={}; arch={}; auth_method=consumer)",
+            os_type(),
+            arch()
+        )
     })
+}
+
+/// The `os_type` the CLI reports for this machine.
+fn os_type() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// The `arch` the CLI reports for this machine.
+fn arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        std::env::consts::ARCH
+    }
 }
 
 /// The version `agy --version` prints, or `None` when the binary is absent or unusable.
@@ -124,9 +153,9 @@ pub use credentials::{
 };
 use payload::{build_antigravity_payload, parse_antigravity_chunk};
 pub use quota::{
-    fetch_antigravity_models, resolve_antigravity_model, retrieve_antigravity_quota,
-    AntigravityModelQuotaInfo, AntigravityQuotaBucket, AntigravityQuotaGroup,
-    AntigravityQuotaSummary, QuotaLine, QuotaWindow, ANTIGRAVITY_MODELS,
+    antigravity_model_supports_thinking, fetch_antigravity_models, resolve_antigravity_model,
+    retrieve_antigravity_quota, AntigravityModelQuotaInfo, AntigravityQuotaBucket,
+    AntigravityQuotaGroup, AntigravityQuotaSummary, QuotaLine, QuotaWindow, ANTIGRAVITY_MODELS,
 };
 
 async fn post_antigravity_with_transport_retry(

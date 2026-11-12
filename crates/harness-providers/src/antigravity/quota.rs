@@ -358,41 +358,150 @@ pub async fn retrieve_antigravity_quota(
     Ok(summary)
 }
 
-/// The rows the Antigravity CLI's model switcher shows, in its order.
+/// What the account's own endpoint publishes when it cannot be reached.
 ///
-/// These are the names the CLI puts in front of the user, not the backend keys: the switcher has
-/// one row per model family and a separate effort control, and `gpt-oss` has only its medium tier
-/// so its tier is part of the name. The endpoint does not publish `gemini-4-argon` at all (it
-/// publishes the single tiered Gemini key), and it still lists retired models such as
-/// `gemini-2.5-pro`; mirroring the live table verbatim is exactly how the picker drifted from the
-/// CLI. This list is the fallback and the ordering the live listing is folded into.
+/// The endpoint is the authority for this list — `antigravityModelSorts` carries the rows the CLI
+/// shows, in its own order, with a display name each — so this table is only the fallback for an
+/// outage, and the seed for name→key resolution before anything has been fetched. It is written
+/// against a live account (31 models, 17 recommended rows) rather than the retired five-row family
+/// list this used to be: `gemini-4-argon`, `gemini-4-hydrogen` and the tiered `gemini-3.8-flash`
+/// rows are all real keys of the current table.
 pub const ANTIGRAVITY_MODELS: &[&str] = &[
-    "Gemini 4 Argon",
-    "Gemini 3.8 Flash",
-    "Claude Opus 5.5",
-    "Claude Sonnet 5.5",
+    "Gemini 4 Argon (Medium)",
+    "Gemini 4 Argon (High)",
+    "Gemini 4 Argon (Low)",
+    "Gemini 4 Hydrogen (High)",
+    "Gemini 4 Hydrogen (XHigh)",
+    "Gemini 4 Hydrogen (Medium)",
+    "Gemini 4 Hydrogen (Low)",
+    "Gemini 3.8 Flash (High)",
+    "Gemini 3.8 Flash (Medium)",
+    "Gemini 3.8 Flash (Low)",
+    "Claude Opus 5.5 (Low)",
+    "Claude Opus 5.5 (Medium)",
+    "Claude Opus 5.5 (High)",
+    "Claude Sonnet 5.5 (Low)",
+    "Claude Sonnet 5.5 (Medium)",
+    "Claude Sonnet 5.5 (High)",
     "GPT-OSS 120B (Medium)",
 ];
 
-/// The effort tier a model request asks for, from an explicit suffix or the session's effort.
+/// `Gemini 4 Argon (Medium)` → `gemini-4-argon-medium`.
 ///
-/// The CLI exposes low/medium/high beside the model, and a name that already carries a tier (an
-/// old session, or an id copied from `agy models`) keeps that tier rather than being re-tiered by
-/// the current session setting.
-fn requested_tier(lower: &str, effort: Option<&ReasoningEffort>) -> &'static str {
-    for (suffix, tier) in [
-        ("-low", "low"),
-        ("(low)", "low"),
-        ("-medium", "medium"),
-        ("(medium)", "medium"),
-        ("-high", "high"),
-        ("(high)", "high"),
-        ("-max", "max"),
-        ("(max)", "max"),
-    ] {
-        if lower.ends_with(suffix) {
-            return tier;
+/// Every row the endpoint publishes is its key with the spaces dashed and the tier folded in, so
+/// the display name alone is enough to name the model the backend expects. `GPT-OSS 120B (Medium)`
+/// → `gpt-oss-120b-medium` holds the same way.
+fn key_from_display_name(name: &str) -> String {
+    let dashed = name
+        .replace(['(', ')'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase();
+    // A generation is written with a dash in a Claude key (`claude-opus-5-5-low`) and with its dot
+    // in a Gemini one (`gemini-3.8-flash-medium`), and the display name spells both the same way.
+    // The family is what decides.
+    if dashed.starts_with("claude-") {
+        dashed.replace("5.5", "5-5").replace("4.6", "4-6")
+    } else {
+        dashed
+    }
+}
+
+/// Which backend key each row of the live listing (or [`ANTIGRAVITY_MODELS`]) names.
+///
+/// Resolution has to answer for a *name* — the picker, the status line and a stored session all
+/// hand over what the user chose — and only the endpoint knows which key is behind the row it
+/// published. So the listing is remembered process-wide as it is read, and a name that has been
+/// seen resolves to its own key rather than to a guess. The static table seeds it first, so a
+/// session restored from cache (the listing is cached for a day) still resolves exactly.
+#[derive(Default)]
+struct ModelRegistry {
+    /// Display name, lowercased, to the backend key it names.
+    by_name: std::collections::HashMap<String, String>,
+    /// Backend key to whether the endpoint says it takes a thinking config.
+    thinking: std::collections::HashMap<String, bool>,
+}
+
+static MODEL_REGISTRY: std::sync::OnceLock<std::sync::RwLock<ModelRegistry>> =
+    std::sync::OnceLock::new();
+
+fn registry() -> &'static std::sync::RwLock<ModelRegistry> {
+    MODEL_REGISTRY.get_or_init(|| {
+        let mut registry = ModelRegistry::default();
+        for name in ANTIGRAVITY_MODELS {
+            registry.by_name.insert(
+                name.to_lowercase(),
+                key_from_display_name(&name.to_lowercase()),
+            );
         }
+        std::sync::RwLock::new(registry)
+    })
+}
+
+/// The backend key a display name was published for, if the listing (or the static table) named it.
+fn registered_key(name: &str) -> Option<String> {
+    registry().read().ok()?.by_name.get(name).cloned()
+}
+
+/// Whether the endpoint says this backend key accepts a thinking config.
+///
+/// `gemini-3.1-flash-image` answers HTTP 400 — "Thinking level is not supported for this model" —
+/// when one is sent, so the answer is worth having before the request is built. The listing's own
+/// `supportsThinking` is the authority once it has been read; until then a model that names a
+/// media output (an image, speech or music model) is the one case this route knows about, and every
+/// other model takes a thinking config.
+pub fn antigravity_model_supports_thinking(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    if let Some(known) = registry()
+        .read()
+        .ok()
+        .and_then(|registry| registry.thinking.get(&lower).copied())
+    {
+        return known;
+    }
+    !names_a_media_output(&lower)
+}
+
+/// Whether a model key names something other than text: an image, speech or music model has no
+/// thinking to configure.
+fn names_a_media_output(key: &str) -> bool {
+    ["image", "imagen", "tts", "audio", "lyria"]
+        .iter()
+        .any(|marker| key.contains(marker))
+}
+
+/// The tier suffix a name may already carry, and the tier it names.
+///
+/// The CLI writes a tier two ways: a backend key suffixes it with a dash
+/// (`claude-opus-5-5-high`), a display row with parentheses (`Gemini 4 Hydrogen (XHigh)`). Both
+/// spellings mean the same thing, and a name that already carries one keeps it rather than being
+/// re-tiered by the session setting.
+const TIER_SUFFIXES: &[(&str, &str)] = &[
+    ("-low", "low"),
+    ("(low)", "low"),
+    ("-medium", "medium"),
+    ("(medium)", "medium"),
+    ("-high", "high"),
+    ("(high)", "high"),
+    ("-xhigh", "xhigh"),
+    ("(xhigh)", "xhigh"),
+    ("-max", "max"),
+    ("(max)", "max"),
+];
+
+/// The tier a name already names, if any.
+fn explicit_tier(lower: &str) -> Option<&'static str> {
+    TIER_SUFFIXES
+        .iter()
+        .find(|(suffix, _)| lower.ends_with(suffix))
+        .map(|(_, tier)| *tier)
+}
+
+/// The effort tier a model request asks for, from an explicit suffix or the session's effort.
+fn requested_tier(lower: &str, effort: Option<&ReasoningEffort>) -> &'static str {
+    if let Some(tier) = explicit_tier(lower) {
+        return tier;
     }
     match effort {
         Some(ReasoningEffort::Minimal) | Some(ReasoningEffort::Low) => "low",
@@ -411,10 +520,13 @@ fn is_claude_55(lower: &str) -> bool {
 
 /// Resolves user-facing model names and reasoning effort settings to backend Code Assist model names.
 ///
-/// The Gemini rows share one backend key, `gemini-3.8-flash-tiered`: it is the tiered model the
-/// endpoint publishes and the effort is carried by `thinkingConfig`, not by the key. Claude and
-/// GPT-OSS select a tier-suffixed key instead. Names written by an older Luna (or copied from
-/// `agy models`) still resolve, so a stored session keeps working after the picker is corrected.
+/// The name a caller hands over is what the user picked: a row the endpoint published ("Gemini 4
+/// Argon (Medium)"), a name written by an older Luna ("Gemini 4 Argon"), or a backend key copied
+/// from `agy models` (`gemini-4-hydrogen-xhigh`). The published row and the key are answered
+/// exactly — the row through the listing's own name→key table, the key as given — and only a name
+/// nothing has published yet is resolved by the family rules below. Claude and GPT-OSS select a
+/// tier-suffixed key, the Gemini 4 families carry their tier in the key itself, and the effort in
+/// `thinkingConfig` follows the tier the name already chose.
 pub fn resolve_antigravity_model(
     raw_model: &str,
     reasoning_effort: Option<&ReasoningEffort>,
@@ -423,7 +535,22 @@ pub fn resolve_antigravity_model(
     let cleaned = cleaned.strip_prefix("antigravity/").unwrap_or(cleaned);
     let cleaned = cleaned.strip_prefix("agy/").unwrap_or(cleaned);
     let lower = cleaned.to_lowercase();
+    if lower.is_empty() {
+        return cleaned.to_string();
+    }
+
+    // A row the listing published is the model it names; so is a key handed over as a key. This is
+    // the path the picker and a restored session take, and it never guesses.
+    if let Some(key) = registered_key(&lower) {
+        return key;
+    }
+
     let tier = requested_tier(&lower, reasoning_effort);
+    // The name as a key would be written: spaces dashed and the parenthesised tier folded in. The
+    // families below are decided on this form, so `Gemini 3.8 Flash (Low)` and
+    // `gemini-3.8-flash-low` take the same path.
+    let dashed = key_from_display_name(&lower);
+    let key_shaped = !lower.contains(' ');
 
     if lower.contains("opus") {
         if is_claude_55(&lower) {
@@ -439,93 +566,159 @@ pub fn resolve_antigravity_model(
         }
     } else if lower.contains("gpt-oss") || lower.contains("oss") {
         "gpt-oss-120b-medium".to_string()
-    } else if lower.starts_with("gemini-")
-        && !lower.starts_with("gemini-3.8-flash")
-        && !lower.starts_with("gemini-4-argon")
-    {
+    } else if dashed.starts_with("gemini-4-argon") || dashed.starts_with("gemini-4-hydrogen") {
+        // The Gemini 4 rows are keys of their own, one per tier — `gemini-4-argon-medium`, not a
+        // single tiered key with the effort beside it. A name that already carries a tier keeps it;
+        // a bare family name takes the tier the session asked for.
+        if explicit_tier(&lower).is_some() {
+            dashed
+        } else {
+            format!("{dashed}-{tier}")
+        }
+    } else if dashed.starts_with("gemini-3.8-flash") {
+        // The 3.8 line is published as three tiered keys; `-tiered` is the retired single key and is
+        // passed through untiered, so a session that stored it keeps the model it ran on.
+        if lower.ends_with("-tiered") {
+            cleaned.to_string()
+        } else if explicit_tier(&lower).is_some() {
+            dashed
+        } else {
+            format!("{dashed}-{tier}")
+        }
+    } else if key_shaped && lower.starts_with("gemini-") {
         // An explicit backend key from an older session (gemini-2.5-flash, gemini-3-flash,
-        // gemini-3.1-flash-lite) is already what the endpoint expects. Mapping it to the tiered
-        // key would silently change which model answers, and would give a Gemini 3 validator a
-        // 2.5 request's signature rules.
+        // gemini-3.1-flash-lite) is already what the endpoint expects. Mapping it to another key
+        // would silently change which model answers, and would give a Gemini 3 validator a 2.5
+        // request's signature rules.
         cleaned.to_string()
     } else if lower.contains("pro") && !lower.contains("argon") {
         "gemini-2.5-pro".to_string()
-    } else if lower.contains("argon") || lower.contains("gemini") || lower.contains("flash") {
-        "gemini-3.8-flash-tiered".to_string()
+    } else if lower.contains(' ') {
+        // A display row nothing has published yet: its own name is the key, dashed, with the tier
+        // folded in — the shape every row on this route has.
+        dashed
     } else {
         cleaned.to_string()
     }
 }
 
-/// The CLI switcher row a backend model key belongs to.
-///
-/// The endpoint's `displayName` is the authority when it carries one, but it has gaps and lies:
-/// `gemini-3.8-flash-tiered` has no name, while three retired Gemini keys all claim
-/// "Gemini 3.5 Flash Lite". Only the families in [`ANTIGRAVITY_MODELS`] are recognised, so those
-/// stale keys and the internal `chat_*`/`tab_*` entries never reach the picker.
-fn cli_model_family(key: &str, display_name: Option<&str>) -> Option<&'static str> {
-    let key = key.to_ascii_lowercase();
-    let display = display_name.unwrap_or("").to_ascii_lowercase();
-
-    // The tiered key is the current Gemini model even though its display name is absent. It is
-    // what the CLI presents as Gemini 4 Argon; Gemini 3.8 Flash is the client-side alias beside it.
-    if key.contains("gemini-3.8-flash-tiered") {
-        return Some("Gemini 4 Argon");
-    }
-    if key.contains("gemini-4-argon") || display.starts_with("gemini 4 argon") {
-        return Some("Gemini 4 Argon");
-    }
-    if key.contains("gemini-3.8-flash") || display.starts_with("gemini 3.8 flash") {
-        return Some("Gemini 3.8 Flash");
-    }
-    if key.contains("claude-opus-5-5") || display.starts_with("claude opus 5.5") {
-        return Some("Claude Opus 5.5");
-    }
-    if key.contains("claude-sonnet-5-5") || display.starts_with("claude sonnet 5.5") {
-        return Some("Claude Sonnet 5.5");
-    }
-    if key.contains("gpt-oss-120b") || display.starts_with("gpt-oss 120b") {
-        return Some("GPT-OSS 120B (Medium)");
-    }
-    None
+/// One row of the account's own model table: the key, the name it is shown under, and whether it
+/// takes a thinking config.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ListedModel {
+    pub key: String,
+    pub name: String,
+    pub supports_thinking: Option<bool>,
 }
 
-/// The switcher rows present in a `fetchAvailableModels` body.
+/// The rows the endpoint published, in the order the CLI shows them.
 ///
-/// An empty body, or one with no recognised family, yields an empty list so the caller can fall
-/// back to [`ANTIGRAVITY_MODELS`] rather than showing a partial picker. The two Gemini rows are
-/// client aliases and are always present: the endpoint publishes only the tiered key for them.
+/// The response is read as it describes itself. `agentModelSorts` is the switcher's own list —
+/// one group per recommendation level, ids in the order they are offered — and each id's
+/// `displayName` is the row's label, so a model the account gains appears in the picker without a
+/// release here. The full `models` map is then folded in after it, so a model that is usable but
+/// not recommended is still offered.
+///
+/// Two entries are left out on purpose: an id the CLI itself marks disabled (`-disabled`, and the
+/// Gemini 4 Carbon row is exactly that: it is in the recommended list with no quota behind it, and
+/// a turn against it answers 404), and any entry the endpoint publishes without a display name —
+/// the internal `chat_*`/`tab_*` helpers, and the retired `gemini-3.8-flash-tiered` alias. The
+/// alias still resolves (see [`resolve_antigravity_model`]); it is simply not a row of its own.
 pub(super) fn models_from_listing(value: &serde_json::Value) -> Vec<String> {
-    let Some(models) = value.get("models").and_then(|models| models.as_object()) else {
+    let models = value.get("models").and_then(|models| models.as_object());
+    let Some(models) = models else {
         return Vec::new();
     };
 
-    let mut seen = std::collections::HashSet::new();
-    for (key, entry) in models {
-        let display = entry.get("displayName").and_then(|name| name.as_str());
-        if let Some(family) = cli_model_family(key, display) {
-            seen.insert(family);
+    let entry = |key: &str| {
+        let e = models.get(key)?;
+        let name = e.get("displayName").and_then(|name| name.as_str())?.trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some(ListedModel {
+            key: key.to_string(),
+            name: name.to_string(),
+            supports_thinking: e.get("supportsThinking").and_then(|s| s.as_bool()),
+        })
+    };
+
+    let mut listed: Vec<ListedModel> = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_names = std::collections::HashSet::new();
+    let mut push = |key: &str, listed: &mut Vec<ListedModel>| {
+        let key = key.trim();
+        if key.is_empty() || key.ends_with("-disabled") || !seen_keys.insert(key.to_lowercase()) {
+            return;
+        }
+        if let Some(model) = entry(key) {
+            // Four retired Gemini keys all claim the display name "Gemini 3.5 Flash Lite". Two
+            // identical rows would be a choice the picker cannot express — the user sees one label
+            // and gets whichever key resolution happened to keep — so the first row to claim a name
+            // is the one the name means. It is the recommended order that decides that, and the
+            // published `gemini-3.5-flash-lite` key is not among them.
+            if !seen_names.insert(model.name.to_lowercase()) {
+                return;
+            }
+            listed.push(model);
+        }
+    };
+
+    for sort in value
+        .get("agentModelSorts")
+        .and_then(|sorts| sorts.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        for group in sort
+            .get("groups")
+            .and_then(|groups| groups.as_array())
+            .unwrap_or(&Vec::new())
+        {
+            for id in group
+                .get("modelIds")
+                .and_then(|ids| ids.as_array())
+                .unwrap_or(&Vec::new())
+            {
+                if let Some(id) = id.as_str() {
+                    push(id, &mut listed);
+                }
+            }
         }
     }
-    if seen.is_empty() {
+
+    let mut rest: Vec<&String> = models.keys().collect();
+    rest.sort();
+    for key in rest {
+        push(key, &mut listed);
+    }
+
+    if listed.is_empty() {
         return Vec::new();
     }
-    seen.insert("Gemini 4 Argon");
-    seen.insert("Gemini 3.8 Flash");
 
-    ANTIGRAVITY_MODELS
-        .iter()
-        .filter(|name| seen.contains(**name))
-        .map(|name| (*name).to_string())
-        .collect()
+    {
+        let mut registry = registry()
+            .write()
+            .expect("the model registry is not poisoned");
+        for model in &listed {
+            registry
+                .by_name
+                .insert(model.name.to_lowercase(), model.key.clone());
+            if let Some(supports) = model.supports_thinking {
+                registry.thinking.insert(model.key.to_lowercase(), supports);
+            }
+        }
+    }
+
+    listed.into_iter().map(|model| model.name).collect()
 }
 
 /// Fetches the model rows the Antigravity CLI shows.
 ///
-/// The live `fetchAvailableModels` call decides which families the account can actually spend on;
-/// the result is folded into the CLI's own order and display names. A retired key in the response
-/// is not evidence that the CLI still offers it, and an endpoint outage must not empty the picker,
-/// so an unreachable or unrecognised response falls back to [`ANTIGRAVITY_MODELS`].
+/// The live `fetchAvailableModels` call is what decides which models the account can spend on, and
+/// the rows come back in the CLI's own order with the CLI's own labels. An endpoint outage must not
+/// empty the picker, so an unreachable or unrecognised response falls back to
+/// [`ANTIGRAVITY_MODELS`], which is the same table as of the last probe.
 pub async fn fetch_antigravity_models(
     http_client: &reqwest::Client,
     bearer_token: &str,

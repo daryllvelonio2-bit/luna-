@@ -603,12 +603,17 @@ fn antigravity_descriptor() -> ProviderDescriptor {
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         auth_header_format: AuthHeaderFormat::Bearer,
         context_windows: ctx_windows(&[
+            // Every row the endpoint publishes reports 1,048,576 input tokens (its `maxTokens`);
+            // the picker hands over the display name, and a stored session may still hold the
+            // family name or a backend key from an older build.
             ("Gemini 4 Argon", 1_000_000),
+            ("Gemini 4 Hydrogen", 1_000_000),
             ("Gemini 3.8 Flash", 1_000_000),
             ("Claude Opus 5.5", 200_000),
             ("Claude Sonnet 5.5", 200_000),
             ("GPT-OSS 120B (Medium)", 128_000),
-            // Names written by an older Luna, and backend keys a stored session may still hold.
+            ("gemini-4-argon", 1_000_000),
+            ("gemini-4-hydrogen", 1_000_000),
             ("gemini-3.8-flash", 1_000_000),
             ("gemini-3.8-flash-tiered", 1_000_000),
             ("claude-sonnet-4-6", 200_000),

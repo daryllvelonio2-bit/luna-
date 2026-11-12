@@ -461,7 +461,15 @@ fn build_generation_config(options: &CompletionOptions, resolved_model: &str) ->
         gen_config["topP"] = json!(top_p);
     }
 
-    let budget = options.reasoning_effort.map(thinking_budget);
+    // A model that names no thinking — an image or speech model — is sent no config at all:
+    // `gemini-3.1-flash-image` answers HTTP 400, "Thinking level is not supported for this model",
+    // for a request that carries one.
+    let supports_thinking = super::quota::antigravity_model_supports_thinking(resolved_model);
+    let budget = if supports_thinking {
+        options.reasoning_effort.map(thinking_budget)
+    } else {
+        None
+    };
     if let Some(budget) = budget {
         gen_config["thinkingConfig"] = json!({ "thinkingBudget": budget });
     }
@@ -474,9 +482,11 @@ fn build_generation_config(options: &CompletionOptions, resolved_model: &str) ->
     //
     // With no declared effort Gemini thinks dynamically and publishes no budget to reserve, so the
     // cap is left off entirely: `max_tokens` bounds the answer, and that bound cannot be expressed
-    // as a bound on thinking-plus-answer without knowing the former.
+    // as a bound on thinking-plus-answer without knowing the former. A model the listing reports as
+    // non-thinking is not charged for thinking either, so its cap is the plain one.
+    let counts_thinking = supports_thinking && counts_thinking_against_output(resolved_model);
     if let Some(max_tok) = options.max_tokens {
-        let cap = match (counts_thinking_against_output(resolved_model), budget) {
+        let cap = match (counts_thinking, budget) {
             (true, Some(budget)) => Some(max_tok.saturating_add(budget)),
             (true, None) => None,
             (false, _) => Some(max_tok),
