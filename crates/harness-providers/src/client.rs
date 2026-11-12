@@ -655,6 +655,46 @@ impl GenericProviderClient {
         self.retire_if_auth_failure(&secret, res).await
     }
 
+    async fn complete_via_codex(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<Message, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::codex::execute_codex_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
+    async fn stream_via_codex(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &CompletionOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, HarnessError>>, HarnessError> {
+        let (_, _, secret) = self.build_auth_headers().await?;
+        let res = crate::codex::stream_codex_completion(
+            &self.http_client,
+            secret.expose_secret(),
+            model,
+            messages,
+            tools,
+            options,
+        )
+        .await;
+        self.retire_if_auth_failure(&secret, res).await
+    }
+
     /// The `/chat/completions` body for a non-streaming request.
     fn build_complete_body(
         &self,
@@ -1140,6 +1180,14 @@ impl ModelProvider for GenericProviderClient {
                 .await;
         }
 
+        // Codex speaks the Responses protocol, not chat completions, so it has its own body and
+        // its own SSE reader rather than the `/chat/completions` path below.
+        if self.provider_id == "codex" {
+            return self
+                .complete_via_codex(&model, messages, tools, options)
+                .await;
+        }
+
         if self.provider_id == "opencode-cli" || self.provider_id == "opencode-headless" {
             return crate::opencode::execute_opencode_completion_cli(
                 &model, messages, tools, options,
@@ -1189,6 +1237,12 @@ impl ModelProvider for GenericProviderClient {
         if self.provider_id == "antigravity" || self.provider_id == "agy" {
             return self
                 .stream_via_antigravity(&model, messages, tools, options)
+                .await;
+        }
+
+        if self.provider_id == "codex" {
+            return self
+                .stream_via_codex(&model, messages, tools, options)
                 .await;
         }
 

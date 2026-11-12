@@ -28,6 +28,7 @@ enum ConnectAction {
     RemoveKey,
     ImportAntigravity,
     ImportOpencode,
+    ImportCodex,
     RotationStrategy,
     ResetCooldowns,
     Back,
@@ -42,6 +43,7 @@ impl ConnectAction {
             ConnectAction::RemoveKey => "Remove a credential",
             ConnectAction::ImportAntigravity => "Import Antigravity / Google",
             ConnectAction::ImportOpencode => "Import OpenCode / Shiina",
+            ConnectAction::ImportCodex => "Import Codex / ChatGPT",
             ConnectAction::RotationStrategy => "Set rotation strategy",
             ConnectAction::ResetCooldowns => "Reset cooldowns",
             ConnectAction::Back => "Back to chat",
@@ -77,6 +79,7 @@ pub(crate) async fn handle_connect_command(
             ConnectAction::RemoveKey => remove_key(key_rx, ui, cred_manager).await,
             ConnectAction::ImportAntigravity => import_antigravity(ui, cred_manager).await,
             ConnectAction::ImportOpencode => import_opencode(ui, cred_manager).await,
+            ConnectAction::ImportCodex => import_codex(ui, cred_manager).await,
             ConnectAction::RotationStrategy => set_strategy(key_rx, ui, cred_manager).await,
             ConnectAction::ResetCooldowns => reset_cooldowns(key_rx, ui, cred_manager).await,
             ConnectAction::Back => {
@@ -105,13 +108,14 @@ async fn pick_action(
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
 ) -> Option<ConnectAction> {
-    const ACTIONS: [ConnectAction; 9] = [
+    const ACTIONS: [ConnectAction; 10] = [
         ConnectAction::AddKey,
         ConnectAction::ListKeys,
         ConnectAction::SetPriority,
         ConnectAction::RemoveKey,
         ConnectAction::ImportAntigravity,
         ConnectAction::ImportOpencode,
+        ConnectAction::ImportCodex,
         ConnectAction::RotationStrategy,
         ConnectAction::ResetCooldowns,
         ConnectAction::Back,
@@ -534,6 +538,47 @@ async fn import_opencode(
             ));
         }
     }
+    Ok(())
+}
+
+/// Copy the Codex CLI's ChatGPT login into the credential pool.
+///
+/// The login is read from the CLI's own `auth.json` rather than asked for again, and the models it
+/// buys are reachable straight from the API — no `codex exec`, no local server. A machine whose
+/// Codex CLI is signed in with a plain OpenAI API key has no `tokens` object in that file, and it
+/// is named here instead of being imported as something it is not.
+async fn import_codex(
+    ui: &ChatUi,
+    cred_manager: &Arc<CredentialManager>,
+) -> Result<(), HarnessError> {
+    let credentials = harness_providers::detect_codex_credentials()?;
+    let id = cred_manager
+        .add_credential(
+            "codex",
+            &credentials.label(),
+            &credentials.to_secret(),
+            true,
+        )
+        .await?;
+    let _ = cred_manager
+        .set_rotation_strategy("codex", RotationStrategy::FillFirst)
+        .await;
+
+    let models = match harness_providers::build_http_client(30) {
+        Ok(http_client) => harness_providers::fetch_codex_models(&http_client, &credentials)
+            .await
+            .map(|models| models.len())
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    ui.emit_above(&format!(
+        "{} Codex imported as {} ({}) — {} model(s) available; pick one with /model",
+        "✔".green().bold(),
+        credentials.label().green(),
+        id.dimmed(),
+        models
+    ));
     Ok(())
 }
 

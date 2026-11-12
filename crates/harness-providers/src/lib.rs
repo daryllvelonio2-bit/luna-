@@ -3,6 +3,7 @@ pub mod auth;
 pub mod capability;
 pub mod catalog;
 pub mod client;
+pub mod codex;
 pub mod discovery;
 pub mod kiro;
 pub mod opencode;
@@ -25,6 +26,10 @@ pub use catalog::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_TIMEOUT_SECS,
 };
 pub use client::{build_http_client, GenericProviderClient};
+pub use codex::{
+    detect_codex_credentials, detect_codex_credentials_in, execute_codex_completion,
+    fetch_codex_models, stream_codex_completion, CodexCredentials,
+};
 pub use discovery::{ModelDiscovery, ModelListing};
 pub use opencode::{
     detect_opencode_credentials, detect_opencode_credentials_in, ensure_compat_tools,

@@ -348,6 +348,15 @@ impl ModelDiscovery {
                 .map(names_only);
         }
 
+        if provider_id == "codex" {
+            // The catalogue lives behind the credential, and its endpoint demands the client
+            // version as a query parameter, so it cannot be reached by base_url alone.
+            let credentials = crate::codex::parse_codex_secret(api_key);
+            return crate::codex::fetch_codex_models(&http_client, &credentials)
+                .await
+                .map(names_only);
+        }
+
         if provider_id == "opencode-cli" || provider_id == "opencode-headless" {
             return crate::opencode::fetch_opencode_cli_models()
                 .await

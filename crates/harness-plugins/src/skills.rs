@@ -398,7 +398,11 @@ impl Tool for SkillViewTool {
             (raw_name, None)
         };
 
-        let Some(skill) = self.skills.iter().find(|s| names_match(&s.name, skill_query)) else {
+        let Some(skill) = self
+            .skills
+            .iter()
+            .find(|s| names_match(&s.name, skill_query))
+        else {
             let available: Vec<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
             return Ok(ToolResult::error(
                 call_id,
@@ -431,7 +435,10 @@ impl Tool for SkillViewTool {
             let Ok(canonical_base) = base_dir.canonicalize() else {
                 return Ok(ToolResult::error(
                     call_id,
-                    format!("Skill directory '{}' could not be resolved.", base_dir.display()),
+                    format!(
+                        "Skill directory '{}' could not be resolved.",
+                        base_dir.display()
+                    ),
                 ));
             };
 
@@ -738,11 +745,7 @@ Test instructions
             "Strict craft floor checklist.",
         )
         .unwrap();
-        fs::write(
-            skill_dir.join("scripts/build.sh"),
-            "#!/bin/sh\necho built",
-        )
-        .unwrap();
+        fs::write(skill_dir.join("scripts/build.sh"), "#!/bin/sh\necho built").unwrap();
 
         let skills = Arc::new(vec![Skill {
             name: "crafty".to_string(),

@@ -88,6 +88,7 @@ pub fn get_provider_catalog() -> Vec<ProviderDescriptor> {
         ai_gateway_descriptor(),
         custom_descriptor(),
         antigravity_descriptor(),
+        codex_descriptor(),
         xkiro_descriptor(),
         tokenharbor_descriptor(),
         cline_descriptor(),
@@ -617,6 +618,28 @@ fn antigravity_descriptor() -> ProviderDescriptor {
     }
 }
 
+/// The Codex CLI's own backend, reached with the login that CLI already holds.
+///
+/// The base URL is the ChatGPT backend rather than an OpenAI-compatible `/v1`: this route speaks
+/// the Responses protocol (see `crate::codex`), so the descriptor's model list is a fallback for
+/// discovery and its context window is the one every model on it reports (272,000).
+fn codex_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "codex".to_string(),
+        display_name: "Codex (ChatGPT login)".to_string(),
+        default_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: ctx_windows(&[
+            ("gpt-5.6-luna", 272_000),
+            ("gpt-5.6-terra", 272_000),
+            ("gpt-reserve", 272_000),
+            ("codex-auto-review", 272_000),
+        ]),
+    }
+}
+
 fn xkiro_descriptor() -> ProviderDescriptor {
     ProviderDescriptor {
         id: "xkiro".to_string(),
@@ -770,7 +793,9 @@ pub fn canonicalize_provider_id(id: &str) -> &str {
         "opencode-native" | "opencode-zen" | "opencode-local" | "opencode-agent" => "opencode",
         "opencode-cli" | "opencode-headless" | "opencode-bin" => "opencode-cli",
         "kiro-ai" => "kiro",
-        "openai-codex" => "openai",
+        // The Codex CLI's ChatGPT login is a provider of its own, not an OpenAI API key: folding
+        // it into `openai` would send a ChatGPT token to api.openai.com.
+        "openai-codex" | "codex-cli" | "chatgpt-codex" => "codex",
         _ => id,
     }
 }
@@ -796,6 +821,7 @@ pub fn route_caches_prompt_prefix(id: &str) -> bool {
             | "gemini"
             | "deepseek"
             | "antigravity"
+            | "codex"
             | "supercode"
             | "opencode"
             | "opencode-cli"
@@ -868,6 +894,7 @@ pub fn get_default_model(provider: &str) -> &'static str {
         "copilot" => "gpt-4o",
         "openai" => "gpt-4o",
         "antigravity" | "agy" => "Gemini 3.8 Flash",
+        "codex" => "gpt-5.6-luna",
         "opencode" | "opencode-zen" => "deepseek-v4.1-flash-free",
         "opencode-cli" => "opencode/deepseek-v4.1-flash-free",
         _ => "default",
