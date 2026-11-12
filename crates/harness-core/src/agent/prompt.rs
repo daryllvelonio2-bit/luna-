@@ -38,7 +38,7 @@ where
         // procedure only enters the context when `skill_view` loads it. The instruction is what
         // makes that discovery reliable — without it the model has no reason to look.
         let skills_protocol = if self.config.skills_enabled {
-            "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions."
+            "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions. Load companion reference files directly with `skill_view(name, path)` or `skill_view(\"skill/path\")`."
         } else {
             ""
         };

@@ -408,7 +408,18 @@ fn format_skill_call(glyph: &str, verb: &str, arguments: &serde_json::Value) -> 
     let skill_name = arg_text(arguments, "name")
         .or_else(|| arg_text(arguments, "skill"))
         .unwrap_or("");
-    format!("{} {} {}", glyph, verb_column(verb), quoted_arg(skill_name))
+    let path = arg_text(arguments, "path").unwrap_or("");
+    if !path.is_empty() {
+        format!(
+            "{} {} {} ({})",
+            glyph,
+            verb_column(verb),
+            quoted_arg(skill_name),
+            path
+        )
+    } else {
+        format!("{} {} {}", glyph, verb_column(verb), quoted_arg(skill_name))
+    }
 }
 
 fn format_skills_list_call(glyph: &str, verb: &str) -> String {

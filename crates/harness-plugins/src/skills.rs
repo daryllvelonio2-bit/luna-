@@ -304,6 +304,33 @@ fn render_instructions(skill: &Skill, args: &serde_json::Value) -> String {
     )
 }
 
+fn list_companion_files(base_dir: &Path) -> Vec<String> {
+    if !base_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    for entry in WalkDir::new(base_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if let Ok(rel) = path.strip_prefix(base_dir) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.eq_ignore_ascii_case("SKILL.md")
+                || rel_str.starts_with(".git/")
+                || rel_str.starts_with("node_modules/")
+                || rel_str.contains("/__pycache__/")
+            {
+                continue;
+            }
+            files.push(rel_str);
+        }
+    }
+    files.sort();
+    files
+}
+
 pub struct SkillViewTool {
     skills: Arc<Vec<Skill>>,
 }
@@ -321,7 +348,7 @@ impl Tool for SkillViewTool {
     }
 
     fn description(&self) -> &str {
-        "Load the full instructions for an available skill. Call this after skills_list names a skill that matches the task, then follow those instructions."
+        "Load the full instructions for an available skill, or inspect companion reference files within a skill. Call this after skills_list names a skill that matches the task, then follow those instructions."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -330,7 +357,11 @@ impl Tool for SkillViewTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Name of the skill to inspect"
+                    "description": "Name of the skill to inspect (e.g. 'impeccable'), or combined skill and companion path (e.g. 'impeccable/reference/craft-floor.md')."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to a companion reference file or script within the skill directory (e.g. 'reference/craft-floor.md')."
                 }
             },
             "required": ["name"]
@@ -343,35 +374,176 @@ impl Tool for SkillViewTool {
         args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
-        let name = args
+        let raw_name = args
             .get("name")
             .and_then(|n| n.as_str())
             .unwrap_or_default()
             .trim();
-        if let Some(skill) = self.skills.iter().find(|s| names_match(&s.name, name)) {
-            let mut output = format!(
-                "# Skill: {}\n{}\n\n## Instructions\n{}",
-                skill.name, skill.description, skill.instructions
-            );
-            if let Some(ref cmd) = skill.command {
-                output.push_str(&format!("\n\n## Command Template\n{}", cmd));
-            }
-            Ok(ToolResult::success(call_id, output))
+        let explicit_path = args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+
+        let (skill_query, rel_path) = if let Some(p) = explicit_path {
+            (raw_name, Some(p))
+        } else if let Some(skill) = self.skills.iter().find(|s| names_match(&s.name, raw_name)) {
+            (skill.name.as_str(), None)
+        } else if let Some((skill_part, file_part)) = raw_name
+            .split_once('/')
+            .or_else(|| raw_name.split_once('\\'))
+        {
+            (skill_part.trim(), Some(file_part.trim()))
         } else {
+            (raw_name, None)
+        };
+
+        let Some(skill) = self.skills.iter().find(|s| names_match(&s.name, skill_query)) else {
             let available: Vec<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
-            Ok(ToolResult::error(
+            return Ok(ToolResult::error(
                 call_id,
                 format!(
                     "Skill '{}' not found. Available skills: {}",
-                    name,
+                    skill_query,
                     if available.is_empty() {
                         "none".to_string()
                     } else {
                         available.join(", ")
                     }
                 ),
-            ))
+            ));
+        };
+
+        if let Some(subpath) = rel_path {
+            if skill.file_path == Path::new("<builtin>") {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Builtin skill '{}' has no companion files.", skill.name),
+                ));
+            }
+            let base_dir = skill.file_path.parent().unwrap_or(Path::new(""));
+            if !base_dir.is_dir() {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Skill directory '{}' does not exist.", base_dir.display()),
+                ));
+            }
+            let Ok(canonical_base) = base_dir.canonicalize() else {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Skill directory '{}' could not be resolved.", base_dir.display()),
+                ));
+            };
+
+            let clean_subpath = subpath.trim_start_matches('/').trim_start_matches('\\');
+            let mut target_path = base_dir.join(clean_subpath);
+
+            if !target_path.exists() && !clean_subpath.ends_with(".md") {
+                let with_md = base_dir.join(format!("{}.md", clean_subpath));
+                if with_md.exists() {
+                    target_path = with_md;
+                }
+            }
+
+            let canonical_target = match target_path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    let available = list_companion_files(base_dir);
+                    let list_str = if available.is_empty() {
+                        "No companion files in this skill.".to_string()
+                    } else {
+                        let max_suggest = 30;
+                        let sample: Vec<String> = available
+                            .iter()
+                            .take(max_suggest)
+                            .map(|f| format!("- {}", f))
+                            .collect();
+                        let mut s = format!("Available companion files:\n{}", sample.join("\n"));
+                        if available.len() > max_suggest {
+                            s.push_str(&format!(
+                                "\n... and {} more files",
+                                available.len() - max_suggest
+                            ));
+                        }
+                        s
+                    };
+                    return Ok(ToolResult::error(
+                        call_id,
+                        format!(
+                            "Companion file '{}' not found in skill '{}'.\n{}",
+                            clean_subpath, skill.name, list_str
+                        ),
+                    ));
+                }
+            };
+
+            if !canonical_target.starts_with(&canonical_base) {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!(
+                        "Access denied: companion file '{}' escapes skill directory.",
+                        clean_subpath
+                    ),
+                ));
+            }
+
+            if !canonical_target.is_file() {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Path '{}' is a directory, not a file.", clean_subpath),
+                ));
+            }
+
+            return match fs::read_to_string(&canonical_target) {
+                Ok(content) => {
+                    let output = format!(
+                        "# Skill File: {}/{}\nBase Directory: {}\nFull Path: {}\n\n{}",
+                        skill.name,
+                        clean_subpath,
+                        base_dir.display(),
+                        canonical_target.display(),
+                        content
+                    );
+                    Ok(ToolResult::success(call_id, output))
+                }
+                Err(e) => Ok(ToolResult::error(
+                    call_id,
+                    format!("Failed to read companion file '{}': {}", clean_subpath, e),
+                )),
+            };
         }
+
+        let mut output = format!("# Skill: {}\n{}\n", skill.name, skill.description);
+        if skill.file_path != Path::new("<builtin>") {
+            if let Some(parent) = skill.file_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    output.push_str(&format!("Base Directory: {}\n", parent.display()));
+                }
+                let companion_files = list_companion_files(parent);
+                if !companion_files.is_empty() {
+                    let count = companion_files.len();
+                    let max_show = 40;
+                    let mut list_text = String::new();
+                    for f in companion_files.iter().take(max_show) {
+                        list_text.push_str(&format!("- {}\n", f));
+                    }
+                    if count > max_show {
+                        list_text.push_str(&format!("... and {} more files\n", count - max_show));
+                    }
+                    output.push_str(&format!(
+                        "\n## Companion Files ({})\n{}\n(Inspect any companion file directly with `skill_view(name=\"{}/<path>\")`)\n",
+                        count,
+                        list_text.trim_end(),
+                        skill.name
+                    ));
+                }
+            }
+        }
+        output.push_str(&format!("\n## Instructions\n{}", skill.instructions));
+        if let Some(ref cmd) = skill.command {
+            output.push_str(&format!("\n\n## Command Template\n{}", cmd));
+        }
+        Ok(ToolResult::success(call_id, output))
     }
 }
 
@@ -547,5 +719,117 @@ Test instructions
             .unwrap();
         assert!(not_found.is_error);
         assert!(not_found.content.contains("Skill 'unknown' not found"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_view_companion_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("crafty");
+        fs::create_dir_all(skill_dir.join("reference")).unwrap();
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: crafty\ndescription: UI craft guidelines\n---\nCraft high quality interfaces.",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("reference/craft-floor.md"),
+            "Strict craft floor checklist.",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("scripts/build.sh"),
+            "#!/bin/sh\necho built",
+        )
+        .unwrap();
+
+        let skills = Arc::new(vec![Skill {
+            name: "crafty".to_string(),
+            description: "UI craft guidelines".to_string(),
+            instructions: "Craft high quality interfaces.".to_string(),
+            file_path: skill_dir.join("SKILL.md"),
+            command: None,
+            timeout_secs: None,
+            parameters: None,
+        }]);
+
+        let view_tool = SkillViewTool::new(skills);
+        let cancel = CancellationToken::new();
+
+        // 1. Inspect main skill - should list companion files and base dir
+        let main_res = view_tool
+            .execute("c1", &serde_json::json!({ "name": "crafty" }), &cancel)
+            .await
+            .unwrap();
+        assert!(!main_res.is_error);
+        assert!(main_res.content.contains("Base Directory:"));
+        assert!(main_res.content.contains("## Companion Files"));
+        assert!(main_res.content.contains("reference/craft-floor.md"));
+        assert!(main_res.content.contains("scripts/build.sh"));
+
+        // 2. Inspect companion file via combined slash name
+        let comp_res1 = view_tool
+            .execute(
+                "c2",
+                &serde_json::json!({ "name": "crafty/reference/craft-floor.md" }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(!comp_res1.is_error);
+        assert!(comp_res1.content.contains("Strict craft floor checklist."));
+        assert!(comp_res1.content.contains("Full Path:"));
+
+        // 3. Inspect companion file via name + explicit path
+        let comp_res2 = view_tool
+            .execute(
+                "c3",
+                &serde_json::json!({ "name": "crafty", "path": "reference/craft-floor.md" }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(!comp_res2.is_error);
+        assert!(comp_res2.content.contains("Strict craft floor checklist."));
+
+        // 4. Inspect companion file without .md extension
+        let comp_res3 = view_tool
+            .execute(
+                "c4",
+                &serde_json::json!({ "name": "crafty/reference/craft-floor" }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(!comp_res3.is_error);
+        assert!(comp_res3.content.contains("Strict craft floor checklist."));
+
+        // 5. Missing companion file provides available files in error
+        let missing_res = view_tool
+            .execute(
+                "c5",
+                &serde_json::json!({ "name": "crafty/reference/missing.md" }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(missing_res.is_error);
+        assert!(missing_res
+            .content
+            .contains("Companion file 'reference/missing.md' not found in skill 'crafty'"));
+        assert!(missing_res.content.contains("Available companion files:"));
+        assert!(missing_res.content.contains("reference/craft-floor.md"));
+
+        // 6. Security traversal check
+        let escape_res = view_tool
+            .execute(
+                "c6",
+                &serde_json::json!({ "name": "crafty/../../secret.txt" }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(escape_res.is_error);
     }
 }
