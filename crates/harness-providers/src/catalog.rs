@@ -622,7 +622,9 @@ fn antigravity_descriptor() -> ProviderDescriptor {
 ///
 /// The base URL is the ChatGPT backend rather than an OpenAI-compatible `/v1`: this route speaks
 /// the Responses protocol (see `crate::codex`), so the descriptor's model list is a fallback for
-/// discovery and its context window is the one every model on it reports (272,000).
+/// discovery and its context window is the one every model on it reports (272,000) — read off the
+/// endpoint, because the `gpt-6-*` slugs carry no family the heuristics recognise and would
+/// otherwise be folded at the 128k default.
 fn codex_descriptor() -> ProviderDescriptor {
     ProviderDescriptor {
         id: "codex".to_string(),
@@ -632,6 +634,7 @@ fn codex_descriptor() -> ProviderDescriptor {
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         auth_header_format: AuthHeaderFormat::Bearer,
         context_windows: ctx_windows(&[
+            ("gpt-6-luna", 272_000),
             ("gpt-5.6-luna", 272_000),
             ("gpt-5.6-terra", 272_000),
             ("gpt-reserve", 272_000),
@@ -1033,6 +1036,30 @@ fn family_context_window(leaf: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every model on the Codex route reports the same 272k window, and none of the slugs carries
+    /// a family the heuristics know — without the descriptor entry `gpt-6-luna` folds at 128k.
+    #[test]
+    fn the_codex_route_reports_its_models_full_window() {
+        for model in [
+            "gpt-6-luna",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-reserve",
+            "codex-auto-review",
+        ] {
+            assert_eq!(
+                get_context_window("codex", model),
+                Some(272_000),
+                "{model} is a 272k model on this route"
+            );
+        }
+        assert_eq!(get_default_model("codex"), "gpt-5.6-luna");
+        assert!(route_caches_prompt_prefix("codex"));
+        // The old alias pointed a ChatGPT login at api.openai.com, which would reject it.
+        assert_eq!(canonicalize_provider_id("openai-codex"), "codex");
+        assert_eq!(find_provider("openai-codex").unwrap().id, "codex");
+    }
 
     #[test]
     fn gemini_uses_its_openai_compatible_bearer_route() {
