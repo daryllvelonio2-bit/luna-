@@ -23,8 +23,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install ALSA system dependency
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libgles2-mesa-dev
 
       # Formatting is its own step so a whitespace failure reads as one line instead of
       # scrolling past in the middle of a compile log.
