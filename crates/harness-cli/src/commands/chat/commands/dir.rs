@@ -54,8 +54,41 @@ pub(crate) async fn handle_dir_command(
     Ok(())
 }
 
+/// Apply a workspace path and scope chosen in a TUI modal.
+///
+/// The interactive CLI path resolves the directory through a picker before reaching
+/// `apply_workspace_change`; the TUI asks for the path in its own input modal, so this helper
+/// starts from the typed string instead.
+pub(crate) async fn apply_dir_choice(
+    ui: &ChatUi,
+    config: &mut Config,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    path_str: &str,
+    is_global: bool,
+) -> Result<(), HarnessError> {
+    let expanded = harness_core::config::expand_tilde(path_str.trim());
+    let path = PathBuf::from(expanded);
+    if !path.is_dir() {
+        ui.emit_above(&format!(
+            "{} Directory not found: {}",
+            "✖".red().bold(),
+            path_str
+        ));
+        return Ok(());
+    }
+    let target_dir = harness_core::fsutil::canonicalize(&path).unwrap_or(path);
+
+    if is_global {
+        persist_global_workspace(ui, &target_dir)?;
+    }
+
+    apply_workspace_change(config, agent, target_dir.clone()).await?;
+    report_workspace_switch(ui, &target_dir, is_global);
+    Ok(())
+}
+
 /// Clear the workspace root and fall back to the current directory.
-async fn reset_workspace(
+pub(crate) async fn reset_workspace(
     ui: &ChatUi,
     config: &mut Config,
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
@@ -87,7 +120,7 @@ async fn reset_workspace(
 }
 
 /// Split a `/dir` argument into an optional path and an explicit global/session scope.
-fn parse_dir_args(trimmed_arg: Option<&str>) -> (Option<String>, Option<bool>) {
+pub(crate) fn parse_dir_args(trimmed_arg: Option<&str>) -> (Option<String>, Option<bool>) {
     match trimmed_arg {
         Some(a) => {
             let parts: Vec<&str> = a.split_whitespace().collect();

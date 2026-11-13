@@ -1203,3 +1203,14 @@ async fn apply_auto_compact_settings(
     ));
     Ok(())
 }
+
+/// Apply threshold/percent values typed into the TUI's auto-compact modal.
+pub(crate) async fn apply_auto_compact_values(
+    ui: &ChatUi,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    threshold: usize,
+    percent: usize,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(Config::default())?;
+    apply_auto_compact_settings(ui, agent, &layers, threshold, percent).await
+}

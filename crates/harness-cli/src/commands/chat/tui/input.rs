@@ -3,8 +3,7 @@
 use std::io;
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use harness_core::{ApprovalDecision, HarnessError, ReasoningEffort};
 use ratatui::backend::CrosstermBackend;
@@ -12,8 +11,8 @@ use ratatui::Terminal;
 
 use super::super::interactive::state::{Env, Flow};
 use super::actions::{
-    apply_agent_mode, apply_model_selection, apply_thinking_selection, create_new_session,
-    interrupt_turn, open_models_for_provider, open_provider_picker, open_session_picker,
+    apply_agent_mode, apply_model_target, apply_thinking_selection, create_new_session,
+    interrupt_turn, open_models_for_target, open_provider_picker_for, open_session_picker,
     run_palette_action, run_slash_command, set_all_process_expanded, submit_composer,
     switch_to_session, sync_slash_popup,
 };
@@ -56,7 +55,8 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
         ActiveModal::None => {
             if cleaned.is_empty() {
                 if let Ok(Some(img)) = crate::commands::clipboard_image::read_clipboard_image() {
-                    st.composer.attach_image(img.width, img.height, img.data_url());
+                    st.composer
+                        .attach_image(img.width, img.height, img.data_url());
                     sync_slash_popup(env, st);
                 }
                 return;
@@ -68,15 +68,21 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
-        ActiveModal::SessionPicker { query, selected, .. } => {
+        ActiveModal::SessionPicker {
+            query, selected, ..
+        } => {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
-        ActiveModal::ProviderPicker { query, selected, .. } => {
+        ActiveModal::ProviderPicker {
+            query, selected, ..
+        } => {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
-        ActiveModal::ModelPicker { query, selected, .. } => {
+        ActiveModal::ModelPicker {
+            query, selected, ..
+        } => {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
@@ -89,6 +95,9 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
         }
         ActiveModal::Sudo { input, .. } => {
             input.push_str(cleaned.trim());
+        }
+        ActiveModal::InputModal { value, .. } => {
+            value.push_str(cleaned.trim());
         }
         _ => {}
     }
@@ -122,12 +131,14 @@ async fn handle_mouse(
                     }
                     TabHitTarget::Session(id) => {
                         if let Err(e) = switch_to_session(env, st, &id).await {
-                            env.ui.set_transient_error(Some(format!("Session switch failed: {e}")));
+                            env.ui
+                                .set_transient_error(Some(format!("Session switch failed: {e}")));
                         }
                     }
                     TabHitTarget::NewSession => {
                         if let Err(e) = create_new_session(env, st).await {
-                            env.ui.set_transient_error(Some(format!("New session failed: {e}")));
+                            env.ui
+                                .set_transient_error(Some(format!("New session failed: {e}")));
                         }
                     }
                 }
@@ -233,7 +244,8 @@ async fn handle_key(
     // Ctrl+N opens a new session tab.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
         if let Err(e) = create_new_session(env, st).await {
-            env.ui.set_transient_error(Some(format!("New session failed: {e}")));
+            env.ui
+                .set_transient_error(Some(format!("New session failed: {e}")));
         }
         return Ok(Flow::Continue);
     }
@@ -293,8 +305,9 @@ async fn handle_key(
                 st.slash_popup.dismissed = true;
                 return Ok(Flow::Continue);
             }
-            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT)
-                && !key.modifiers.contains(KeyModifiers::ALT) =>
+            KeyCode::Enter
+                if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 if let Some(entry) = st.slash_popup.matches.get(st.slash_popup.selected).cloned() {
                     // Commands that expect an argument complete into composer if user hasn't typed exact match.
@@ -413,7 +426,8 @@ async fn handle_key(
 fn handle_ctrl_v(env: &Env<'_>, st: &mut TuiState) {
     match crate::commands::clipboard_image::read_clipboard_image() {
         Ok(Some(img)) => {
-            st.composer.attach_image(img.width, img.height, img.data_url());
+            st.composer
+                .attach_image(img.width, img.height, img.data_url());
             sync_slash_popup(env, st);
             return;
         }
@@ -524,8 +538,8 @@ async fn handle_modal_key(
                     };
                 }
                 KeyCode::Enter => {
-                    if let Some(id) = filtered_ids
-                        .get(selected.min(filtered_ids.len().saturating_sub(1)))
+                    if let Some(id) =
+                        filtered_ids.get(selected.min(filtered_ids.len().saturating_sub(1)))
                     {
                         if let Err(e) = switch_to_session(env, st, id).await {
                             env.ui
@@ -559,6 +573,7 @@ async fn handle_modal_key(
             }
         }
         ActiveModal::ProviderPicker {
+            target,
             mut query,
             items,
             mut selected,
@@ -580,6 +595,7 @@ async fn handle_modal_key(
                         };
                     }
                     st.modal = ActiveModal::ProviderPicker {
+                        target,
                         query,
                         items,
                         selected,
@@ -590,21 +606,24 @@ async fn handle_modal_key(
                         selected = (selected + 1) % filtered_ids.len();
                     }
                     st.modal = ActiveModal::ProviderPicker {
+                        target,
                         query,
                         items,
                         selected,
                     };
                 }
                 KeyCode::Enter | KeyCode::Right => {
-                    if let Some(provider_id) = filtered_ids
-                        .get(selected.min(filtered_ids.len().saturating_sub(1)))
+                    if let Some(provider_id) =
+                        filtered_ids.get(selected.min(filtered_ids.len().saturating_sub(1)))
                     {
-                        open_models_for_provider(env, st, provider_id, String::new()).await;
+                        open_models_for_target(env, st, target.clone(), provider_id, String::new())
+                            .await;
                     }
                 }
                 KeyCode::Backspace => {
                     query.pop();
                     st.modal = ActiveModal::ProviderPicker {
+                        target,
                         query,
                         items,
                         selected: 0,
@@ -613,6 +632,7 @@ async fn handle_modal_key(
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     query.push(c);
                     st.modal = ActiveModal::ProviderPicker {
+                        target,
                         query,
                         items,
                         selected: 0,
@@ -620,6 +640,7 @@ async fn handle_modal_key(
                 }
                 _ => {
                     st.modal = ActiveModal::ProviderPicker {
+                        target,
                         query,
                         items,
                         selected,
@@ -628,6 +649,7 @@ async fn handle_modal_key(
             }
         }
         ActiveModal::ModelPicker {
+            target,
             provider,
             provider_display,
             mut query,
@@ -651,6 +673,7 @@ async fn handle_modal_key(
                         };
                     }
                     st.modal = ActiveModal::ModelPicker {
+                        target,
                         provider,
                         provider_display,
                         query,
@@ -663,6 +686,7 @@ async fn handle_modal_key(
                         selected = (selected + 1) % filtered_pairs.len();
                     }
                     st.modal = ActiveModal::ModelPicker {
+                        target,
                         provider,
                         provider_display,
                         query,
@@ -671,13 +695,15 @@ async fn handle_modal_key(
                     };
                 }
                 KeyCode::Left => {
-                    open_provider_picker(env, st).await;
+                    open_provider_picker_for(env, st, target.clone()).await;
                 }
                 KeyCode::Enter => {
-                    if let Some((prov, model)) = filtered_pairs
-                        .get(selected.min(filtered_pairs.len().saturating_sub(1)))
+                    if let Some((prov, model)) =
+                        filtered_pairs.get(selected.min(filtered_pairs.len().saturating_sub(1)))
                     {
-                        if let Err(e) = apply_model_selection(env, st, prov, model, true).await {
+                        if let Err(e) =
+                            apply_model_target(env, st, target.clone(), prov, model).await
+                        {
                             env.ui
                                 .set_transient_error(Some(format!("Model switch failed: {e}")));
                         }
@@ -685,10 +711,11 @@ async fn handle_modal_key(
                 }
                 KeyCode::Backspace => {
                     if query.is_empty() {
-                        open_provider_picker(env, st).await;
+                        open_provider_picker_for(env, st, target.clone()).await;
                     } else {
                         query.pop();
                         st.modal = ActiveModal::ModelPicker {
+                            target,
                             provider,
                             provider_display,
                             query,
@@ -700,6 +727,7 @@ async fn handle_modal_key(
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     query.push(c);
                     st.modal = ActiveModal::ModelPicker {
+                        target,
                         provider,
                         provider_display,
                         query,
@@ -709,6 +737,7 @@ async fn handle_modal_key(
                 }
                 _ => {
                     st.modal = ActiveModal::ModelPicker {
+                        target,
                         provider,
                         provider_display,
                         query,
@@ -718,6 +747,158 @@ async fn handle_modal_key(
                 }
             }
         }
+        ActiveModal::SelectModal {
+            title,
+            items,
+            mut selected,
+            action,
+        } => {
+            if key.code == KeyCode::Esc {
+                return Ok(Flow::Continue);
+            }
+            match key.code {
+                KeyCode::Up => {
+                    if !items.is_empty() {
+                        selected = if selected == 0 {
+                            items.len() - 1
+                        } else {
+                            selected - 1
+                        };
+                    }
+                    st.modal = ActiveModal::SelectModal {
+                        title,
+                        items,
+                        selected,
+                        action,
+                    };
+                }
+                KeyCode::Down => {
+                    if !items.is_empty() {
+                        selected = (selected + 1) % items.len();
+                    }
+                    st.modal = ActiveModal::SelectModal {
+                        title,
+                        items,
+                        selected,
+                        action,
+                    };
+                }
+                KeyCode::Enter => {
+                    let choice = selected.min(items.len().saturating_sub(1));
+                    super::actions::run_select_action(env, st, action, choice).await;
+                }
+                _ => {
+                    st.modal = ActiveModal::SelectModal {
+                        title,
+                        items,
+                        selected,
+                        action,
+                    };
+                }
+            }
+        }
+        ActiveModal::InputModal {
+            title,
+            prompt,
+            mut value,
+            secret,
+            action,
+        } => match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Enter => {
+                super::actions::run_input_action(env, st, action, value).await;
+            }
+            KeyCode::Backspace => {
+                value.pop();
+                st.modal = ActiveModal::InputModal {
+                    title,
+                    prompt,
+                    value,
+                    secret,
+                    action,
+                };
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                value.push(c);
+                st.modal = ActiveModal::InputModal {
+                    title,
+                    prompt,
+                    value,
+                    secret,
+                    action,
+                };
+            }
+            _ => {
+                st.modal = ActiveModal::InputModal {
+                    title,
+                    prompt,
+                    value,
+                    secret,
+                    action,
+                };
+            }
+        },
+        ActiveModal::TextModal {
+            title,
+            lines,
+            mut scroll,
+        } => match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Up => {
+                scroll = scroll.saturating_sub(1);
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll,
+                };
+            }
+            KeyCode::Down => {
+                scroll = (scroll + 1).min(lines.len().saturating_sub(1));
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll,
+                };
+            }
+            KeyCode::PageUp => {
+                scroll = scroll.saturating_sub(10);
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll,
+                };
+            }
+            KeyCode::PageDown => {
+                scroll = (scroll + 10).min(lines.len().saturating_sub(1));
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll,
+                };
+            }
+            KeyCode::Home => {
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll: 0,
+                };
+            }
+            KeyCode::End => {
+                let last = lines.len().saturating_sub(1);
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll: last,
+                };
+            }
+            _ => {
+                st.modal = ActiveModal::TextModal {
+                    title,
+                    lines,
+                    scroll,
+                };
+            }
+        },
         ActiveModal::ThinkingPicker {
             current,
             mut selected,

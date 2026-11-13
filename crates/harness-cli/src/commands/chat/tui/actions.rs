@@ -5,23 +5,24 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use harness_core::{
     CompactionSetup, HarnessError, ReasoningEffort, SessionBinding, SessionStore, TurnOutcome,
 };
-use harness_providers::GenericProviderClient;
+use harness_providers::{GenericProviderClient, RotationStrategy};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use super::super::commands::{
-    command_entries, execute_slash_command, looks_like_path, SlashOutcome,
+    apply_auto_compact_values, apply_dir_choice, command_entries, connected_providers,
+    execute_slash_command, handle_settings_command, list_keys_text, looks_like_path,
+    parse_dir_args, provider_id_of, provider_items, reset_workspace, SlashOutcome,
+    RESERVED_COMMAND_NAMES,
 };
 use super::super::helpers::{finish_slash_command, IdleMemoryPass};
 use super::super::history::append_prompt_history;
 use super::super::interactive::state::{Env, Flow};
-use super::super::keys::{self, AppKey};
+use super::super::keys::AppKey;
 use super::super::observers::agent_observer;
 use super::super::render::{parse_turns_from_history, TurnProcessItem};
 use super::super::status::refresh_antigravity_status_if_needed;
@@ -32,8 +33,8 @@ use super::super::turn::{
 };
 use super::super::ui::ChatUi;
 use super::state::{
-    ActiveModal, AgentMode, BackgroundSession, LiveThinkingView, ModelPickerItem, PaletteAction,
-    ProviderPickerItem, SessionTab, TuiState, TurnMeta,
+    ActiveModal, AgentMode, BackgroundSession, InputAction, LiveThinkingView, ModelPickerItem,
+    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
 use crate::commands::context_window::context_window;
@@ -106,10 +107,7 @@ pub fn sync_slash_popup(env: &Env<'_>, st: &mut TuiState) {
 
     let query = st.composer.text.to_ascii_lowercase();
     let skills_arc = env.skills_arc.clone();
-    let skills: &[harness_plugins::Skill] = skills_arc
-        .as_deref()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let skills: &[harness_plugins::Skill] = skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
     let all = command_entries(
         env.config,
         skills,
@@ -369,7 +367,12 @@ pub async fn switch_to_session(
         st.reasoning_effort,
     )?;
 
-    let used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    let used = agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
     let turns = parse_turns_from_history(&replayed.history);
     let turn_meta: Vec<TurnMeta> = turns
         .iter()
@@ -415,7 +418,13 @@ pub async fn switch_to_session(
     env.ui.set_session_name(&record.name);
     env.ui.clear_live_state();
     env.ui.clear_transient_error();
-    refresh_antigravity_status_if_needed(&env.ui, &target_provider, &target_model, &env.cred_manager).await;
+    refresh_antigravity_status_if_needed(
+        &env.ui,
+        &target_provider,
+        &target_model,
+        &env.cred_manager,
+    )
+    .await;
     refresh_tabs(env, st).await;
     Ok(())
 }
@@ -498,9 +507,18 @@ pub async fn open_provider_picker(env: &Env<'_>, st: &mut TuiState) {
     open_provider_picker_with_query(env, st, String::new()).await;
 }
 
-pub async fn open_provider_picker_with_query(
+pub async fn open_provider_picker_for(env: &Env<'_>, st: &mut TuiState, target: ModelTarget) {
+    open_provider_picker_with_target(env, st, target, String::new()).await;
+}
+
+pub async fn open_provider_picker_with_query(env: &Env<'_>, st: &mut TuiState, query: String) {
+    open_provider_picker_with_target(env, st, ModelTarget::Session, query).await;
+}
+
+pub async fn open_provider_picker_with_target(
     env: &Env<'_>,
     st: &mut TuiState,
+    target: ModelTarget,
     query: String,
 ) {
     let loaded = env.cred_manager.get_loaded_providers().await;
@@ -571,6 +589,7 @@ pub async fn open_provider_picker_with_query(
 
     let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
     st.modal = ActiveModal::ProviderPicker {
+        target,
         query,
         items,
         selected,
@@ -580,6 +599,16 @@ pub async fn open_provider_picker_with_query(
 pub async fn open_models_for_provider(
     env: &Env<'_>,
     st: &mut TuiState,
+    provider: &str,
+    query: String,
+) {
+    open_models_for_target(env, st, ModelTarget::Session, provider, query).await;
+}
+
+pub async fn open_models_for_target(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    target: ModelTarget,
     provider: &str,
     query: String,
 ) {
@@ -612,6 +641,7 @@ pub async fn open_models_for_provider(
 
     let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
     st.modal = ActiveModal::ModelPicker {
+        target,
         provider: provider.to_string(),
         provider_display: friendly_provider_name(provider),
         query,
@@ -691,6 +721,1003 @@ pub async fn apply_model_selection(
     }
     st.scroll_from_bottom = 0;
     Ok(())
+}
+
+/// Apply a provider → model choice to the slot the picker was opened for.
+pub async fn apply_model_target(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    target: ModelTarget,
+    provider: &str,
+    model: &str,
+) -> Result<(), HarnessError> {
+    if st.active_turn.is_some() && !matches!(target, ModelTarget::Worker(_)) {
+        env.ui.set_transient_error(Some(
+            "Wait for or interrupt the active turn in this session before changing models.".into(),
+        ));
+        return Ok(());
+    }
+
+    match target {
+        ModelTarget::Session => apply_model_selection(env, st, provider, model, true).await,
+        ModelTarget::Default { global } => match global {
+            Some(is_global) => apply_default_target(env, st, provider, model, is_global).await,
+            None => {
+                open_model_scope(
+                    env,
+                    st,
+                    ModelTarget::Default { global: None },
+                    provider,
+                    model,
+                );
+                Ok(())
+            }
+        },
+        ModelTarget::Compact { global } => match global {
+            Some(is_global) => apply_compact_target(env, st, provider, model, is_global).await,
+            None => {
+                open_model_scope(
+                    env,
+                    st,
+                    ModelTarget::Compact { global: None },
+                    provider,
+                    model,
+                );
+                Ok(())
+            }
+        },
+        ModelTarget::BgSaver => {
+            crate::commands::chat::commands::apply_bgsaver_model_choice(
+                &env.ui,
+                env.config,
+                &env.cred_manager,
+                &env.discovery,
+                &env.agent,
+                env.feature_toggles,
+                env.current_provider,
+                env.current_model,
+                provider.to_string(),
+                model.to_string(),
+            )
+            .await
+        }
+        ModelTarget::Worker(name) => apply_worker_target(env, st, &name, provider, model),
+    }
+    .map(|_| ())
+}
+
+async fn apply_default_target(
+    env: &mut Env<'_>,
+    _st: &mut TuiState,
+    provider: &str,
+    model: &str,
+    is_global: bool,
+) -> Result<(), HarnessError> {
+    crate::commands::chat::commands::apply_default_model_choice(
+        &env.ui,
+        env.config,
+        &env.cred_manager,
+        &env.discovery,
+        &env.agent,
+        &env.store,
+        env.session_id,
+        env.current_provider,
+        env.current_model,
+        env.compact_model,
+        provider.to_string(),
+        model.to_string(),
+        is_global,
+    )
+    .await
+}
+
+async fn apply_compact_target(
+    env: &mut Env<'_>,
+    _st: &mut TuiState,
+    provider: &str,
+    model: &str,
+    is_global: bool,
+) -> Result<(), HarnessError> {
+    crate::commands::chat::commands::apply_compact_model_choice(
+        &env.ui,
+        env.config,
+        &env.cred_manager,
+        &env.discovery,
+        &env.agent,
+        &env.store,
+        env.session_id,
+        env.compact_provider,
+        env.compact_model,
+        provider.to_string(),
+        model.to_string(),
+        is_global,
+    )
+    .await
+}
+
+fn open_model_scope(
+    _env: &mut Env<'_>,
+    st: &mut TuiState,
+    target: ModelTarget,
+    provider: &str,
+    model: &str,
+) {
+    st.modal = ActiveModal::SelectModal {
+        title: "Apply model to".to_string(),
+        items: vec![
+            "This session only".to_string(),
+            "Globally (save as default for all sessions)".to_string(),
+        ],
+        selected: 0,
+        action: SelectAction::ModelScope {
+            target,
+            provider: provider.to_string(),
+            model: model.to_string(),
+        },
+    };
+}
+
+fn apply_worker_target(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    name: &str,
+    provider: &str,
+    model: &str,
+) -> Result<(), HarnessError> {
+    let profile = harness_core::WorkerProfile {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        reasoning_effort: env
+            .config
+            .workers
+            .get(name)
+            .and_then(|w| w.reasoning_effort),
+    };
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    harness_core::config::set_worker_in_file(&layers, name, &profile)?;
+    env.config.workers.insert(name.to_string(), profile);
+    st.system_notices.push(format!(
+        "✔ Worker /{name} → {model} ({provider}) · invoke with /{name} <task>"
+    ));
+    Ok(())
+}
+
+/// Put plain text into a scrollable TUI modal. ANSI styling is stripped because ratatui cells
+/// render escape sequences literally.
+fn show_text_modal(st: &mut TuiState, title: &str, body: &str) {
+    let cleaned = dialoguer::console::strip_ansi_codes(body).to_string();
+    let lines: Vec<String> = if cleaned.trim().is_empty() {
+        vec!["(empty)".to_string()]
+    } else {
+        cleaned.lines().map(str::to_string).collect()
+    };
+    st.modal = ActiveModal::TextModal {
+        title: title.to_string(),
+        lines,
+        scroll: 0,
+    };
+}
+
+fn open_settings_menu(st: &mut TuiState, config: &harness_core::Config) {
+    let limit = match config.display.block_limit {
+        None => "uncapped".to_string(),
+        Some(1) => "1 line".to_string(),
+        Some(n) => format!("{n} lines"),
+    };
+    let collapse = if config.display.auto_collapse {
+        "on"
+    } else {
+        "off"
+    };
+    st.modal = ActiveModal::SelectModal {
+        title: "CLI Settings".to_string(),
+        items: vec![
+            format!("Display block limit · {limit}"),
+            format!("Auto-collapse on turn finish · {collapse}"),
+            "View current settings summary".to_string(),
+        ],
+        selected: 0,
+        action: SelectAction::SettingsMain,
+    };
+}
+
+fn open_dir_input(st: &mut TuiState, scope: Option<bool>) {
+    st.modal = ActiveModal::InputModal {
+        title: "Change Workspace".to_string(),
+        prompt: "Path to use as the workspace root (blank cancels)".to_string(),
+        value: String::new(),
+        secret: false,
+        action: InputAction::DirPath { scope },
+    };
+}
+
+fn open_dir_scope(st: &mut TuiState, path: String) {
+    st.modal = ActiveModal::SelectModal {
+        title: "Workspace Scope".to_string(),
+        items: vec![
+            "This session only".to_string(),
+            "Globally (persist for all sessions)".to_string(),
+        ],
+        selected: 0,
+        action: SelectAction::DirScope { path },
+    };
+}
+
+fn open_connect_menu(st: &mut TuiState) {
+    const ITEMS: [&str; 10] = [
+        "Add provider API key",
+        "List connected providers",
+        "Set priority credential",
+        "Remove a credential",
+        "Import Antigravity / Google",
+        "Import OpenCode / Shiina",
+        "Import Codex / ChatGPT",
+        "Set rotation strategy",
+        "Reset cooldowns",
+        "Back to chat",
+    ];
+    st.modal = ActiveModal::SelectModal {
+        title: "Connect a provider".to_string(),
+        items: ITEMS.iter().map(|item| item.to_string()).collect(),
+        selected: 0,
+        action: SelectAction::ConnectMenu,
+    };
+}
+
+async fn open_connect_add_provider(env: &Env<'_>, st: &mut TuiState) {
+    let providers = provider_items(&env.cred_manager).await;
+    let ids: Vec<String> = providers
+        .iter()
+        .map(|(label, _)| provider_id_of(label).to_string())
+        .collect();
+    st.modal = ActiveModal::SelectModal {
+        title: "Select provider".to_string(),
+        items: providers.into_iter().map(|(label, _)| label).collect(),
+        selected: 0,
+        action: SelectAction::ConnectAddProvider { ids },
+    };
+}
+
+async fn open_connect_remove_provider(env: &Env<'_>, st: &mut TuiState) {
+    let ids = connected_providers(&env.cred_manager).await;
+    if ids.is_empty() {
+        env.ui
+            .emit_above("Nothing to remove — no providers connected");
+        return;
+    }
+    st.modal = ActiveModal::SelectModal {
+        title: "Provider to remove from".to_string(),
+        items: ids.clone(),
+        selected: 0,
+        action: SelectAction::ConnectRemoveProvider { ids },
+    };
+}
+
+async fn open_connect_remove_credential(env: &Env<'_>, st: &mut TuiState, provider: String) {
+    let creds = env.cred_manager.get_credentials(&provider).await;
+    if creds.is_empty() {
+        env.ui
+            .emit_above(&format!("No credentials found for {provider}"));
+        open_connect_menu(st);
+        return;
+    }
+    let ids: Vec<String> = creds.iter().map(|cred| cred.id.clone()).collect();
+    let items: Vec<String> = creds
+        .iter()
+        .map(|cred| format!("{} (used {})", cred.label, cred.usage_count))
+        .collect();
+    st.modal = ActiveModal::SelectModal {
+        title: format!("Credential of {provider}"),
+        items,
+        selected: 0,
+        action: SelectAction::ConnectRemoveCredential { provider, ids },
+    };
+}
+
+async fn open_connect_priority_provider(env: &Env<'_>, st: &mut TuiState) {
+    let ids = connected_providers(&env.cred_manager).await;
+    if ids.is_empty() {
+        env.ui
+            .emit_above("Nothing to prioritize — no providers connected");
+        return;
+    }
+    if ids.len() == 1 {
+        let provider = ids[0].clone();
+        open_connect_priority_credential(env, st, provider).await;
+        return;
+    }
+    st.modal = ActiveModal::SelectModal {
+        title: "Provider to set priority for".to_string(),
+        items: ids.clone(),
+        selected: 0,
+        action: SelectAction::ConnectPriorityProvider { ids },
+    };
+}
+
+async fn open_connect_priority_credential(env: &Env<'_>, st: &mut TuiState, provider: String) {
+    let creds = env.cred_manager.get_credentials(&provider).await;
+    if creds.is_empty() {
+        env.ui
+            .emit_above(&format!("No credentials found for {provider}"));
+        open_connect_menu(st);
+        return;
+    }
+    let mut selected = 0;
+    let ids: Vec<String> = creds.iter().map(|cred| cred.id.clone()).collect();
+    let items: Vec<String> = creds
+        .iter()
+        .enumerate()
+        .map(|(index, cred)| {
+            if cred.is_priority {
+                selected = index;
+            }
+            let mut tags = Vec::new();
+            if cred.is_priority {
+                tags.push("current priority");
+            }
+            if cred.is_temporarily_disabled {
+                tags.push("cooldown");
+            }
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tags.join(", "))
+            };
+            format!("{} (used {}){}", cred.label, cred.usage_count, tag_str)
+        })
+        .collect();
+    st.modal = ActiveModal::SelectModal {
+        title: format!("Credential of {provider}"),
+        items,
+        selected,
+        action: SelectAction::ConnectPriorityCredential { provider, ids },
+    };
+}
+
+async fn open_connect_strategy_provider(env: &Env<'_>, st: &mut TuiState) {
+    let ids = connected_providers(&env.cred_manager).await;
+    if ids.is_empty() {
+        env.ui.emit_above("No providers connected yet");
+        return;
+    }
+    st.modal = ActiveModal::SelectModal {
+        title: "Provider to configure".to_string(),
+        items: ids.clone(),
+        selected: 0,
+        action: SelectAction::ConnectStrategyProvider { ids },
+    };
+}
+
+fn open_connect_strategy(st: &mut TuiState, provider: String) {
+    st.modal = ActiveModal::SelectModal {
+        title: format!("Strategy for {provider}"),
+        items: connect_strategies()
+            .iter()
+            .map(|(label, _)| label.to_string())
+            .collect(),
+        selected: 0,
+        action: SelectAction::ConnectStrategy { provider },
+    };
+}
+
+fn connect_strategies() -> [(&'static str, RotationStrategy); 5] {
+    [
+        (
+            "round_robin — cycle through keys evenly",
+            RotationStrategy::RoundRobin,
+        ),
+        (
+            "fill_first — use the first key until it fails",
+            RotationStrategy::FillFirst,
+        ),
+        (
+            "least_used — always pick the least-used key",
+            RotationStrategy::LeastUsed,
+        ),
+        ("random — pick a key at random", RotationStrategy::Random),
+        (
+            "never — never rotate, only use priority key",
+            RotationStrategy::Never,
+        ),
+    ]
+}
+
+async fn open_connect_reset_cooldowns(env: &Env<'_>, st: &mut TuiState) {
+    let ids = connected_providers(&env.cred_manager).await;
+    let mut items = vec!["All providers".to_string()];
+    items.extend(ids.iter().cloned());
+    st.modal = ActiveModal::SelectModal {
+        title: "Reset cooldowns for".to_string(),
+        items,
+        selected: 0,
+        action: SelectAction::ConnectResetCooldowns { ids },
+    };
+}
+
+async fn open_task_list(env: &Env<'_>, st: &mut TuiState) {
+    let tasks = super::super::viewer::collect_tasks(
+        Some(env.bg_queue.as_ref()),
+        Some(env.delegate_tool.as_ref()),
+    )
+    .await;
+    if tasks.is_empty() {
+        env.ui
+            .emit_above("No background tasks or subagents active or recorded");
+        return;
+    }
+    let items: Vec<String> = tasks
+        .iter()
+        .map(|task| {
+            let kind = if task.command.starts_with("worker:") {
+                "worker"
+            } else if task.id.starts_with("sub_") || task.command.starts_with("subagent:") {
+                "subagent"
+            } else {
+                "job"
+            };
+            let subject = task
+                .command
+                .strip_prefix("worker: ")
+                .or_else(|| task.command.strip_prefix("subagent: "))
+                .unwrap_or(&task.command);
+            format!(
+                "{} · {}s · {} · {}",
+                task.status, task.elapsed_secs, kind, subject
+            )
+        })
+        .collect();
+    let pairs: Vec<(String, String)> = tasks
+        .into_iter()
+        .map(|task| (task.id, task.log_path))
+        .collect();
+    st.modal = ActiveModal::SelectModal {
+        title: "Background Tasks".to_string(),
+        items,
+        selected: 0,
+        action: SelectAction::TaskList { tasks: pairs },
+    };
+}
+
+async fn open_auto_compact_threshold(env: &Env<'_>, st: &mut TuiState) {
+    let (_, threshold, _) = env.agent.lock().await.auto_compact_settings();
+    st.modal = ActiveModal::InputModal {
+        title: "Auto-compact — Threshold".to_string(),
+        prompt: "Token threshold, e.g. 200k. Blank keeps the default".to_string(),
+        value: threshold.to_string(),
+        secret: false,
+        action: InputAction::AutoCompactThreshold,
+    };
+}
+
+fn open_auto_compact_percent(st: &mut TuiState, threshold: usize, current: usize) {
+    st.modal = ActiveModal::InputModal {
+        title: "Auto-compact — Percentage".to_string(),
+        prompt: "Percent of context to compact, 1–100".to_string(),
+        value: current.to_string(),
+        secret: false,
+        action: InputAction::AutoCompactPercent { threshold },
+    };
+}
+
+fn open_profile_create_name(st: &mut TuiState) {
+    st.modal = ActiveModal::InputModal {
+        title: "Create Profile — Name".to_string(),
+        prompt: "Lowercase letters, digits and '-'".to_string(),
+        value: String::new(),
+        secret: false,
+        action: InputAction::ProfileCreateName,
+    };
+}
+
+fn open_profile_create_summary(st: &mut TuiState, name: String) {
+    st.modal = ActiveModal::InputModal {
+        title: "Create Profile — Summary".to_string(),
+        prompt: "One line describing what this profile is for".to_string(),
+        value: "Custom profile".to_string(),
+        secret: false,
+        action: InputAction::ProfileCreateSummary { name },
+    };
+}
+
+fn open_profile_create_providers(st: &mut TuiState, name: String, summary: String) {
+    st.modal = ActiveModal::SelectModal {
+        title: "Create Profile — Providers".to_string(),
+        items: vec![
+            "Yes, copy the default profile's credentials".to_string(),
+            "No, start with none".to_string(),
+        ],
+        selected: 0,
+        action: SelectAction::ProfileCreateProviders { name, summary },
+    };
+}
+
+/// Execute a choice from one of the generic [`ActiveModal::SelectModal`] menus.
+pub async fn run_select_action(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    action: SelectAction,
+    choice: usize,
+) {
+    match action {
+        SelectAction::SettingsMain => match choice {
+            0 => {
+                let items: Vec<String> =
+                    std::iter::once("Uncapped / Display everything (default)".to_string())
+                        .chain((1..=10).map(|n| {
+                            if n == 1 {
+                                "1 line".to_string()
+                            } else {
+                                format!("{n} lines")
+                            }
+                        }))
+                        .collect();
+                let selected = env.config.display.block_limit.unwrap_or(0);
+                st.modal = ActiveModal::SelectModal {
+                    title: "Select Display Block Limit".to_string(),
+                    items,
+                    selected,
+                    action: SelectAction::SettingsBlockLimit,
+                };
+            }
+            1 => {
+                let enabled = env.config.display.auto_collapse;
+                st.modal = ActiveModal::SelectModal {
+                    title: "Auto-collapse on Turn Completion".to_string(),
+                    items: vec![
+                        "Enabled (collapse when finished)".to_string(),
+                        "Disabled (keep expanded)".to_string(),
+                    ],
+                    selected: if enabled { 0 } else { 1 },
+                    action: SelectAction::SettingsCollapse,
+                };
+            }
+            _ => {
+                if let Err(error) = handle_settings_command(
+                    None,
+                    &env.ui,
+                    env.config,
+                    &env.display_settings,
+                    &mut st.process_expanded,
+                    Some("show"),
+                )
+                .await
+                {
+                    env.ui
+                        .set_transient_error(Some(format!("Settings failed: {error}")));
+                }
+            }
+        },
+        SelectAction::SettingsBlockLimit => {
+            let arg = if choice == 0 {
+                "limit all".to_string()
+            } else {
+                format!("limit {choice}")
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(&arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+        }
+        SelectAction::SettingsCollapse => {
+            let arg = if choice == 0 {
+                "collapse on"
+            } else {
+                "collapse off"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+        }
+        SelectAction::DirScope { path } => {
+            let is_global = choice == 1;
+            if let Err(error) =
+                apply_dir_choice(&env.ui, env.config, &env.agent, &path, is_global).await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Workspace change failed: {error}")));
+            }
+        }
+        SelectAction::ModelScope {
+            target,
+            provider,
+            model,
+        } => {
+            let is_global = choice == 1;
+            let result = match target {
+                ModelTarget::Default { .. } => {
+                    apply_default_target(env, st, &provider, &model, is_global).await
+                }
+                ModelTarget::Compact { .. } => {
+                    apply_compact_target(env, st, &provider, &model, is_global).await
+                }
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                env.ui
+                    .set_transient_error(Some(format!("Model switch failed: {error}")));
+            }
+        }
+        SelectAction::ConnectMenu => match choice {
+            0 => open_connect_add_provider(env, st).await,
+            1 => {
+                let text = list_keys_text(&env.cred_manager).await;
+                show_text_modal(st, "Connected Providers", &text);
+            }
+            2 => open_connect_priority_provider(env, st).await,
+            3 => open_connect_remove_provider(env, st).await,
+            4 => {
+                let result =
+                    super::super::connect::import_antigravity(&env.ui, &env.cred_manager).await;
+                finish_connect_action(env, st, result).await;
+            }
+            5 => {
+                let result =
+                    super::super::connect::import_opencode(&env.ui, &env.cred_manager).await;
+                finish_connect_action(env, st, result).await;
+            }
+            6 => {
+                let result = super::super::connect::import_codex(&env.ui, &env.cred_manager).await;
+                finish_connect_action(env, st, result).await;
+            }
+            7 => open_connect_strategy_provider(env, st).await,
+            8 => open_connect_reset_cooldowns(env, st).await,
+            _ => {}
+        },
+        SelectAction::ConnectAddProvider { ids } => {
+            if let Some(provider) = ids.get(choice) {
+                st.modal = ActiveModal::InputModal {
+                    title: "Add Provider — Label".to_string(),
+                    prompt: "Credential label (blank uses '<provider>-primary')".to_string(),
+                    value: String::new(),
+                    secret: false,
+                    action: InputAction::ApiKeyLabel {
+                        provider: provider.clone(),
+                    },
+                };
+            }
+        }
+        SelectAction::ConnectRemoveProvider { ids } => {
+            if let Some(provider) = ids.get(choice) {
+                open_connect_remove_credential(env, st, provider.clone()).await;
+            }
+        }
+        SelectAction::ConnectRemoveCredential { provider, ids } => {
+            let Some(id) = ids.get(choice) else {
+                return;
+            };
+            match env.cred_manager.remove_credential(&provider, id).await {
+                Ok(true) => env
+                    .ui
+                    .emit_above(&format!("✔ Credential removed from {provider}")),
+                Ok(false) => env
+                    .ui
+                    .set_transient_error(Some("Credential not found".to_string())),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Remove failed: {error}"))),
+            }
+            open_connect_menu(st);
+        }
+        SelectAction::ConnectPriorityProvider { ids } => {
+            if let Some(provider) = ids.get(choice) {
+                open_connect_priority_credential(env, st, provider.clone()).await;
+            }
+        }
+        SelectAction::ConnectPriorityCredential { provider, ids } => {
+            let Some(id) = ids.get(choice) else {
+                return;
+            };
+            match env
+                .cred_manager
+                .set_priority_credential(&provider, id)
+                .await
+            {
+                Ok(true) => {
+                    let current = env.cred_manager.get_rotation_strategy(&provider).await;
+                    if current != RotationStrategy::FillFirst && current != RotationStrategy::Never
+                    {
+                        let _ = env
+                            .cred_manager
+                            .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
+                            .await;
+                    }
+                    env.ui
+                        .emit_above(&format!("✔ Priority credential set for {provider}"));
+                }
+                Ok(false) => env
+                    .ui
+                    .set_transient_error(Some("Failed to set priority credential".to_string())),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Priority failed: {error}"))),
+            }
+            open_connect_menu(st);
+        }
+        SelectAction::ConnectStrategyProvider { ids } => {
+            if let Some(provider) = ids.get(choice) {
+                open_connect_strategy(st, provider.clone());
+            }
+        }
+        SelectAction::ConnectStrategy { provider } => {
+            let strategies = connect_strategies();
+            let Some((label, strategy)) = strategies.get(choice) else {
+                return;
+            };
+            match env
+                .cred_manager
+                .set_rotation_strategy(&provider, *strategy)
+                .await
+            {
+                Ok(()) => {
+                    let name = label.split(' ').next().unwrap_or("");
+                    env.ui
+                        .emit_above(&format!("✔ Rotation strategy for {provider} set to {name}"));
+                }
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Strategy failed: {error}"))),
+            }
+            open_connect_menu(st);
+        }
+        SelectAction::ConnectResetCooldowns { ids } => {
+            let target = if choice == 0 {
+                None
+            } else {
+                let Some(provider) = ids.get(choice - 1) else {
+                    return;
+                };
+                Some(provider.clone())
+            };
+            match env.cred_manager.reset_cooldowns(target.as_deref()).await {
+                Ok(count) => env
+                    .ui
+                    .emit_above(&format!("✔ {count} credential(s) re-enabled")),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Reset failed: {error}"))),
+            }
+            open_connect_menu(st);
+        }
+        SelectAction::ProfileDeleteConfirm { name } => {
+            if choice == 0 {
+                match crate::commands::profile::delete_profile(
+                    &name,
+                    &env.config.paths.profiles_dir,
+                ) {
+                    Ok(()) => env.ui.emit_above(&format!("✔ Deleted {name}")),
+                    Err(error) => env
+                        .ui
+                        .set_transient_error(Some(format!("Delete failed: {error}"))),
+                }
+            } else {
+                env.ui.emit_above("Cancelled.");
+            }
+        }
+        SelectAction::ProfileCreateProviders { name, summary } => {
+            let copy_providers = choice == 0;
+            match create_profile(env, &name, summary, copy_providers) {
+                Ok(dest) => {
+                    env.ui.emit_above(&format!("✔ Created {}", dest.display()));
+                    env.ui.emit_above(&format!(
+                        "Open the new profile with `luna {name}` or `{name}`."
+                    ));
+                }
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Create failed: {error}"))),
+            }
+        }
+        SelectAction::TaskList { tasks } => {
+            let Some((id, log_path)) = tasks.get(choice) else {
+                return;
+            };
+            let body = std::fs::read_to_string(log_path)
+                .unwrap_or_else(|_| format!("No log yet for {id}."));
+            show_text_modal(st, &format!("Task {id}"), &body);
+        }
+    }
+}
+
+async fn finish_connect_action(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    result: Result<(), HarnessError>,
+) {
+    if let Err(error) = result {
+        env.ui
+            .set_transient_error(Some(format!("Provider setup failed: {error}")));
+    }
+    refresh_antigravity_status_if_needed(
+        &env.ui,
+        env.current_provider,
+        env.current_model,
+        &env.cred_manager,
+    )
+    .await;
+    open_connect_menu(st);
+}
+
+fn create_profile(
+    env: &Env<'_>,
+    name: &str,
+    summary: String,
+    copy_providers: bool,
+) -> Result<std::path::PathBuf, HarnessError> {
+    let seed = harness_core::profiles::default_profile()?;
+    crate::commands::profile::create_profile_with(
+        &env.config.paths.profiles_dir,
+        env.config,
+        name,
+        summary,
+        seed.persona,
+        seed.behavior,
+        copy_providers,
+        &[],
+        &[],
+    )
+}
+
+/// Execute a value submitted from an [`ActiveModal::InputModal`].
+pub async fn run_input_action(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    action: InputAction,
+    value: String,
+) {
+    match action {
+        InputAction::DirPath { scope } => {
+            let path = value.trim();
+            if path.is_empty() {
+                env.ui.emit_above("Workspace unchanged");
+                return;
+            }
+            let expanded = harness_core::config::expand_tilde(path);
+            if !std::path::PathBuf::from(expanded).is_dir() {
+                env.ui
+                    .set_transient_error(Some(format!("Directory not found: {path}")));
+                open_dir_input(st, scope);
+                return;
+            }
+            match scope {
+                Some(is_global) => {
+                    if let Err(error) =
+                        apply_dir_choice(&env.ui, env.config, &env.agent, path, is_global).await
+                    {
+                        env.ui
+                            .set_transient_error(Some(format!("Workspace change failed: {error}")));
+                    }
+                }
+                None => open_dir_scope(st, path.to_string()),
+            }
+        }
+        InputAction::ApiKeyLabel { provider } => {
+            let label = if value.trim().is_empty() {
+                format!("{provider}-primary")
+            } else {
+                value.trim().to_string()
+            };
+            st.modal = ActiveModal::InputModal {
+                title: "Add Provider — API Key".to_string(),
+                prompt: format!("API key for {provider} (masked)"),
+                value: String::new(),
+                secret: true,
+                action: InputAction::ApiKeySecret { provider, label },
+            };
+        }
+        InputAction::ApiKeySecret { provider, label } => {
+            if value.is_empty() {
+                env.ui.emit_above("No key entered — nothing added");
+                open_connect_menu(st);
+                return;
+            }
+            match env
+                .cred_manager
+                .add_credential(&provider, &label, &value, true)
+                .await
+            {
+                Ok(id) => env.ui.emit_above(&format!(
+                    "✔ Credential '{label}' added for {provider} ({id})"
+                )),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Add credential failed: {error}"))),
+            }
+            refresh_antigravity_status_if_needed(
+                &env.ui,
+                env.current_provider,
+                env.current_model,
+                &env.cred_manager,
+            )
+            .await;
+            open_connect_menu(st);
+        }
+        InputAction::AutoCompactThreshold => {
+            match harness_onboarding::compact_step::parse_threshold(&value) {
+                Ok(threshold) => {
+                    let (_, _, current_percent) = env.agent.lock().await.auto_compact_settings();
+                    open_auto_compact_percent(st, threshold, current_percent);
+                }
+                Err(message) => {
+                    let typed = value;
+                    env.ui.set_transient_error(Some(message.clone()));
+                    st.modal = ActiveModal::InputModal {
+                        title: "Auto-compact — Threshold".to_string(),
+                        prompt: format!("{message}. Blank keeps the default"),
+                        value: typed,
+                        secret: false,
+                        action: InputAction::AutoCompactThreshold,
+                    };
+                }
+            }
+        }
+        InputAction::AutoCompactPercent { threshold } => {
+            match harness_onboarding::compact_step::parse_percent(&value) {
+                Ok(percent) => {
+                    if let Err(error) =
+                        apply_auto_compact_values(&env.ui, &env.agent, threshold, percent).await
+                    {
+                        env.ui.set_transient_error(Some(format!(
+                            "Auto-compact update failed: {error}"
+                        )));
+                    }
+                }
+                Err(message) => {
+                    let typed = value;
+                    env.ui.set_transient_error(Some(message.clone()));
+                    st.modal = ActiveModal::InputModal {
+                        title: "Auto-compact — Percentage".to_string(),
+                        prompt: format!("{message}. Enter 1–100"),
+                        value: typed,
+                        secret: false,
+                        action: InputAction::AutoCompactPercent { threshold },
+                    };
+                }
+            }
+        }
+        InputAction::ProfileCreateName => {
+            let name = value.trim().to_lowercase();
+            if let Err(error) = harness_core::profiles::validate_name(&name) {
+                env.ui
+                    .set_transient_error(Some(format!("Invalid name: {error}")));
+                st.modal = ActiveModal::InputModal {
+                    title: "Create Profile — Name".to_string(),
+                    prompt: "Lowercase letters, digits and '-'".to_string(),
+                    value,
+                    secret: false,
+                    action: InputAction::ProfileCreateName,
+                };
+                return;
+            }
+            open_profile_create_summary(st, name);
+        }
+        InputAction::ProfileCreateSummary { name } => {
+            let summary = if value.trim().is_empty() {
+                "Custom profile".to_string()
+            } else {
+                value.trim().to_string()
+            };
+            open_profile_create_providers(st, name, summary);
+        }
+    }
 }
 
 pub async fn apply_thinking_selection(
@@ -798,7 +1825,8 @@ pub async fn submit_composer(
             .extend(submitted.image_data_urls);
     }
 
-    let history_entry = crate::commands::prompt_images::remove_image_markers(&submitted.expanded_text);
+    let history_entry =
+        crate::commands::prompt_images::remove_image_markers(&submitted.expanded_text);
     let history_trimmed = history_entry.trim();
     if !history_trimmed.is_empty()
         && st.composer.prompt_history.last().map(String::as_str) != Some(history_trimmed)
@@ -867,12 +1895,115 @@ pub async fn submit_composer(
     Ok(Flow::Continue)
 }
 
-/// Run a slash command inside the TUI, opening native modals where available and suspending the
-/// alternate screen only for legacy interactive CLI commands (`/settings`, `/dir`, `/jobs`, etc.).
+/// Map a `/default_model` or `/compact-model` argument to the scope it asks for.
+fn model_scope_arg(arg: Option<&str>) -> Option<bool> {
+    match arg
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("global" | "--global" | "g") => Some(true),
+        Some("session" | "--session" | "this" | "local" | "s") => Some(false),
+        _ => None,
+    }
+}
+
+/// `/compact-model` treats every non-reset argument as an explicit scope, where only
+/// `global`/`--global` means global.
+fn compact_scope_arg(arg: Option<&str>) -> Option<bool> {
+    arg.map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "global" | "--global"
+        )
+    })
+}
+
+fn show_profile_usage(st: &mut TuiState) {
+    show_text_modal(
+        st,
+        "Profiles",
+        "Usage: /profile list | show [name] [--full] | path [name] | create [name] | delete <name>",
+    );
+}
+
+/// `/profile` in the TUI: plain reports open a text modal, while create and delete run the same
+/// filesystem helpers as the CLI wizard without any of its terminal drawing.
+fn route_profile_command(env: &mut Env<'_>, st: &mut TuiState, arg: Option<&str>) {
+    let Some(arg) = arg else {
+        show_profile_usage(st);
+        return;
+    };
+    let mut parts = arg.split_whitespace();
+    let Some(subcommand) = parts.next() else {
+        show_profile_usage(st);
+        return;
+    };
+
+    match subcommand.to_ascii_lowercase().as_str() {
+        "list" | "ls" => {
+            let text = crate::commands::profile::list_text(&env.config.paths.profiles_dir);
+            show_text_modal(st, "Profiles", &text);
+        }
+        "show" => {
+            let name = parts.next().map(str::to_string);
+            let full = parts.any(|part| part == "--full");
+            match crate::commands::profile::show_text(
+                name.as_deref()
+                    .unwrap_or(harness_core::profiles::DEFAULT_PROFILE),
+                &env.config.paths.profiles_dir,
+                full,
+            ) {
+                Ok(text) => show_text_modal(st, "Profile", &text),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Profile failed: {error}"))),
+            }
+        }
+        "path" => {
+            let name = parts.next().map(str::to_string);
+            match crate::commands::profile::path_text(
+                name.as_deref()
+                    .unwrap_or(harness_core::profiles::DEFAULT_PROFILE),
+                env.config,
+            ) {
+                Ok(text) => show_text_modal(st, "Profile Path", &text),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Profile failed: {error}"))),
+            }
+        }
+        "create" | "new" => match parts.next().map(str::to_string) {
+            Some(name) => match harness_core::profiles::validate_name(&name) {
+                Ok(()) => open_profile_create_summary(st, name),
+                Err(error) => env
+                    .ui
+                    .set_transient_error(Some(format!("Invalid name: {error}"))),
+            },
+            None => open_profile_create_name(st),
+        },
+        "delete" | "rm" => match parts.next().map(str::to_string) {
+            Some(name) => {
+                st.modal = ActiveModal::SelectModal {
+                    title: "Delete Profile".to_string(),
+                    items: vec![
+                        format!("Yes, delete '{name}' and all of its data"),
+                        "No, keep it".to_string(),
+                    ],
+                    selected: 1,
+                    action: SelectAction::ProfileDeleteConfirm { name },
+                };
+            }
+            None => show_profile_usage(st),
+        },
+        _ => show_profile_usage(st),
+    }
+}
+
+/// Run a slash command inside the TUI entirely with native modals and transcript output.
 pub async fn run_slash_command(
     env: &mut Env<'_>,
     st: &mut TuiState,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cmd: &str,
     display: &str,
 ) -> Result<Flow, HarnessError> {
@@ -903,9 +2034,8 @@ pub async fn run_slash_command(
                                 apply_model_selection(env, st, &prov.id, model_rest.trim(), true)
                                     .await
                             {
-                                env.ui.set_transient_error(Some(format!(
-                                    "Model switch failed: {e}"
-                                )));
+                                env.ui
+                                    .set_transient_error(Some(format!("Model switch failed: {e}")));
                             }
                             return Ok(Flow::Continue);
                         }
@@ -936,6 +2066,117 @@ pub async fn run_slash_command(
         "/thinking" | "/think" | "/reasoning" if arg.is_none() => {
             open_thinking_picker(env, st).await;
             return Ok(Flow::Continue);
+        }
+        "/settings" if arg.is_none() => {
+            open_settings_menu(st, env.config);
+            return Ok(Flow::Continue);
+        }
+        "/auto-compact" | "/autocompact" if arg.is_none() => {
+            open_auto_compact_threshold(env, st).await;
+            return Ok(Flow::Continue);
+        }
+        "/connect" => {
+            open_connect_menu(st);
+            return Ok(Flow::Continue);
+        }
+        "/jobs" | "/tasks" | "/subagents" => {
+            open_task_list(env, st).await;
+            return Ok(Flow::Continue);
+        }
+        "/profile" | "/profiles" => {
+            route_profile_command(env, st, arg);
+            return Ok(Flow::Continue);
+        }
+        "/dir" | "/workspace" => {
+            let raw = arg.map(str::trim).filter(|value| !value.is_empty());
+            let is_reset = raw.is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "reset" | "--reset" | "-r"
+                )
+            });
+            if is_reset {
+                if let Err(error) = reset_workspace(&env.ui, env.config, &env.agent).await {
+                    env.ui
+                        .set_transient_error(Some(format!("Workspace reset failed: {error}")));
+                }
+                return Ok(Flow::Continue);
+            }
+            let (path, scope) = parse_dir_args(raw);
+            match path {
+                Some(path) => match scope {
+                    Some(is_global) => {
+                        let expanded = harness_core::config::expand_tilde(&path);
+                        if !std::path::PathBuf::from(&expanded).is_dir() {
+                            env.ui
+                                .set_transient_error(Some(format!("Directory not found: {path}")));
+                        } else if let Err(error) =
+                            apply_dir_choice(&env.ui, env.config, &env.agent, &path, is_global)
+                                .await
+                        {
+                            env.ui.set_transient_error(Some(format!(
+                                "Workspace change failed: {error}"
+                            )));
+                        }
+                    }
+                    None => open_dir_scope(st, path),
+                },
+                None => open_dir_input(st, scope),
+            }
+            return Ok(Flow::Continue);
+        }
+        "/default_model" | "/default-model" => {
+            let global = model_scope_arg(arg);
+            open_provider_picker_for(env, st, ModelTarget::Default { global }).await;
+            return Ok(Flow::Continue);
+        }
+        "/compact-model" => {
+            let is_reset = arg.is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "reset" | "default"
+                )
+            });
+            if !is_reset {
+                let global = compact_scope_arg(arg);
+                open_provider_picker_for(env, st, ModelTarget::Compact { global }).await;
+                return Ok(Flow::Continue);
+            }
+        }
+        "/bgsaver-model" => {
+            let is_reset = arg.is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "reset" | "default" | "off"
+                )
+            });
+            if !is_reset {
+                open_provider_picker_for(env, st, ModelTarget::BgSaver).await;
+                return Ok(Flow::Continue);
+            }
+        }
+        "/worker" => {
+            if let Some(raw) = arg {
+                let name = raw.trim().to_ascii_lowercase();
+                let is_delete = name == "delete" || name.starts_with("delete ");
+                if !name.is_empty() && name != "list" && !is_delete {
+                    if let Err(error) = harness_core::config::validate_worker_name(&name) {
+                        env.ui
+                            .set_transient_error(Some(format!("Worker setup failed: {error}")));
+                        return Ok(Flow::Continue);
+                    }
+                    if RESERVED_COMMAND_NAMES.iter().any(|reserved| {
+                        reserved.trim_start_matches('/').eq_ignore_ascii_case(&name)
+                    }) {
+                        env.ui.set_transient_error(Some(format!(
+                            "Worker name '{name}' is a built-in command; pick another name"
+                        )));
+                        return Ok(Flow::Continue);
+                    }
+                    open_provider_picker_for(env, st, ModelTarget::Worker(name)).await;
+                    return Ok(Flow::Continue);
+                }
+            }
         }
         "/plan" => {
             let next = if st.mode == AgentMode::Plan {
@@ -999,36 +2240,8 @@ pub async fn run_slash_command(
         return Ok(Flow::Continue);
     }
 
-    // Legacy interactive modals that read `key_rx` directly: temporarily suspend TUI alt-screen.
-    let needs_legacy_modal = matches!(
-        name,
-        "/dir"
-            | "/settings"
-            | "/connect"
-            | "/profile"
-            | "/jobs"
-            | "/tasks"
-            | "/subagents"
-            | "/compact-model"
-            | "/bgsaver-model"
-            | "/default_model"
-            | "/auto-compact"
-            | "/autocompact"
-    );
-
     let skills_arc = env.skills_arc.clone();
-    let skills: &[harness_plugins::Skill] = skills_arc
-        .as_deref()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-
-    if needs_legacy_modal {
-        let res = suspend_tui_for_legacy_modal(env, st, terminal, cmd, skills).await;
-        drain_tui_notices(env, st);
-        sync_turn_meta_len(env, st);
-        refresh_tabs(env, st).await;
-        return res;
-    }
+    let skills: &[harness_plugins::Skill] = skills_arc.as_deref().map(Vec::as_slice).unwrap_or(&[]);
 
     let prev_len = st.turns.len();
     env.ui.begin_command_capture();
@@ -1130,107 +2343,6 @@ pub async fn run_slash_command(
     }
 }
 
-fn spawn_modal_key_reader() -> (Arc<std::sync::atomic::AtomicBool>, mpsc::UnboundedReceiver<AppKey>) {
-    let (tx, rx) = mpsc::unbounded_channel::<AppKey>();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_flag = stop.clone();
-    std::thread::spawn(move || {
-        while !stop_flag.load(Ordering::SeqCst) {
-            match keys::read_key() {
-                Ok(key) => {
-                    if tx.send(key).is_err() {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-    });
-    (stop, rx)
-}
-
-async fn suspend_tui_for_legacy_modal(
-    env: &mut Env<'_>,
-    st: &mut TuiState,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    cmd: &str,
-    skills: &[harness_plugins::Skill],
-) -> Result<Flow, HarnessError> {
-    // Leave TUI alternate screen and hand raw key reader temporarily to legacy dialoguer/modal code.
-    env.ui.set_tui_mode(false);
-    let _ = crossterm::execute!(
-        io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    );
-    let _ = terminal.show_cursor();
-
-    let (stop_reader, mut key_rx) = spawn_modal_key_reader();
-    let res = if cmd == "/jobs" || cmd == "/tasks" || cmd == "/subagents" {
-        super::super::viewer::show_background_task_viewer(
-            &mut key_rx,
-            Some(env.bg_queue.as_ref()),
-            Some(env.delegate_tool.as_ref()),
-            env.store.as_ref(),
-            &env.ui,
-            &st.turns,
-            st.process_expanded,
-        )
-        .await;
-        Ok(Flow::Continue)
-    } else {
-        env.ui.begin_command_capture();
-        let outcome = execute_slash_command(
-            cmd,
-            &mut key_rx,
-            &env.ui,
-            env.config,
-            &env.cred_manager,
-            &env.discovery,
-            &env.agent,
-            &env.store,
-            env.session_id,
-            env.current_provider,
-            env.current_model,
-            env.compact_provider,
-            env.compact_model,
-            &mut st.turns,
-            &mut st.process_expanded,
-            &env.todo_scope,
-            env.skills_readout.as_deref(),
-            skills,
-            env.feature_toggles,
-            &env.plan_mode,
-            st.active_goal.as_ref(),
-            Some(env.bg_queue.as_ref()),
-            Some(env.delegate_tool.as_ref()),
-            Some(&st.pending_images),
-            &env.display_settings,
-        )
-        .await?;
-        finish_slash_command(&env.ui, &mut st.turns, cmd, st.process_expanded, false);
-        match outcome {
-            SlashOutcome::Exit => Ok(Flow::Break),
-            _ => Ok(Flow::Continue),
-        }
-    };
-    stop_reader.store(true, Ordering::SeqCst);
-    drop(key_rx);
-
-    env.ui.set_tui_mode(true);
-    let _ = crossterm::terminal::enable_raw_mode();
-    let _ = crossterm::execute!(
-        io::stdout(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    );
-    let _ = terminal.clear();
-    res
-}
-
 /// Handle completion of an active turn in the TUI.
 pub async fn handle_turn_end(
     env: &Env<'_>,
@@ -1261,12 +2373,8 @@ pub async fn handle_turn_end(
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
     );
-    let interruptions: Vec<InterruptNotice> = std::mem::take(
-        &mut *env
-            .interruptions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
+    let interruptions: Vec<InterruptNotice> =
+        std::mem::take(&mut *env.interruptions.lock().unwrap_or_else(|e| e.into_inner()));
 
     let turn_dur = st.turn_start.elapsed();
     let mut goal_reply: Option<String> = None;
@@ -1284,7 +2392,10 @@ pub async fn handle_turn_end(
 
             let out_tokens = outcome.usage.as_ref().map(|u| u.completion_tokens);
             let has_prose_in_outcome = !outcome.reply.trim().is_empty();
-            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
                 if !current_tools.is_empty() || secs.is_some() {
                     current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
                 }
@@ -1297,7 +2408,9 @@ pub async fn handle_turn_end(
             let turn_reasoning = if current_tools.iter().any(|it| it.is_thinking()) {
                 None
             } else {
-                trailing_reasoning.map(|(r, _)| r).or_else(|| outcome.reasoning.clone())
+                trailing_reasoning
+                    .map(|(r, _)| r)
+                    .or_else(|| outcome.reasoning.clone())
             };
             let added = turn_records(
                 &st.current_query,
@@ -1337,7 +2450,10 @@ pub async fn handle_turn_end(
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
-            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
                 current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
             }
             let added = turn_records(
@@ -1379,7 +2495,13 @@ pub async fn handle_turn_end(
     }
 
     // Refresh context estimate
-    let used = env.agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    let used = env
+        .agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
     let ctx_max = context_window(
         env.config,
         env.discovery.as_ref(),
@@ -1449,12 +2571,8 @@ pub async fn handle_background_turn_end(
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
     );
-    let interruptions: Vec<InterruptNotice> = std::mem::take(
-        &mut *slot
-            .interruptions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
+    let interruptions: Vec<InterruptNotice> =
+        std::mem::take(&mut *slot.interruptions.lock().unwrap_or_else(|e| e.into_inner()));
 
     let turn_dur = slot.turn_start.elapsed();
     let mut goal_reply: Option<String> = None;
@@ -1462,16 +2580,14 @@ pub async fn handle_background_turn_end(
     match turn_res {
         Ok(Ok(outcome)) => {
             env.usage
-                .record_chat(
-                    &slot.provider,
-                    &slot.model,
-                    Some(bg_session_id),
-                    &outcome,
-                )
+                .record_chat(&slot.provider, &slot.model, Some(bg_session_id), &outcome)
                 .await;
             let out_tokens = outcome.usage.as_ref().map(|u| u.completion_tokens);
             let has_prose_in_outcome = !outcome.reply.trim().is_empty();
-            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
                 if !current_tools.is_empty() || secs.is_some() {
                     current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
                 }
@@ -1484,7 +2600,9 @@ pub async fn handle_background_turn_end(
             let turn_reasoning = if current_tools.iter().any(|it| it.is_thinking()) {
                 None
             } else {
-                trailing_reasoning.map(|(r, _)| r).or_else(|| outcome.reasoning.clone())
+                trailing_reasoning
+                    .map(|(r, _)| r)
+                    .or_else(|| outcome.reasoning.clone())
             };
             let added = turn_records(
                 &slot.current_query,
@@ -1526,7 +2644,10 @@ pub async fn handle_background_turn_end(
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
-            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+            if let Some((r, secs)) = trailing_reasoning
+                .as_ref()
+                .filter(|(s, _)| !s.trim().is_empty())
+            {
                 current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
             }
             let added = turn_records(
@@ -1586,8 +2707,10 @@ pub async fn handle_background_turn_end(
         if let Some(ref mut goal) = slot.active_goal {
             match harness_core::GoalRunState::evaluate_reply(&reply) {
                 harness_core::GoalVerdict::Complete(_) => {
-                    slot.system_notices
-                        .push(format!("✔ Goal achieved in {} iteration(s).", goal.iteration));
+                    slot.system_notices.push(format!(
+                        "✔ Goal achieved in {} iteration(s).",
+                        goal.iteration
+                    ));
                     slot.active_goal = None;
                     slot.ui.set_goal_status(None);
                 }
@@ -1652,8 +2775,10 @@ fn advance_goal_tui(env: &Env<'_>, st: &mut TuiState, reply: &str) {
     };
     match harness_core::GoalRunState::evaluate_reply(reply) {
         harness_core::GoalVerdict::Complete(_) => {
-            st.system_notices
-                .push(format!("✔ Goal achieved in {} iteration(s).", goal.iteration));
+            st.system_notices.push(format!(
+                "✔ Goal achieved in {} iteration(s).",
+                goal.iteration
+            ));
             st.active_goal = None;
             env.ui.set_goal_status(None);
         }
@@ -1745,4 +2870,30 @@ pub async fn interrupt_turn(env: &Env<'_>, st: &mut TuiState) {
     )
     .await;
     sync_turn_meta_len(env, st);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_scope_arg, model_scope_arg};
+
+    #[test]
+    fn default_model_scope_flags_are_recognised() {
+        assert_eq!(model_scope_arg(Some("global")), Some(true));
+        assert_eq!(model_scope_arg(Some("--global")), Some(true));
+        assert_eq!(model_scope_arg(Some("session")), Some(false));
+        assert_eq!(model_scope_arg(Some("--session")), Some(false));
+    }
+
+    #[test]
+    fn a_bare_default_model_asks_for_scope() {
+        assert_eq!(model_scope_arg(None), None);
+        assert_eq!(model_scope_arg(Some("anything else")), None);
+    }
+
+    #[test]
+    fn compact_model_scope_defaults_to_session_for_any_other_argument() {
+        assert_eq!(compact_scope_arg(None), None);
+        assert_eq!(compact_scope_arg(Some("global")), Some(true));
+        assert_eq!(compact_scope_arg(Some("whatever")), Some(false));
+    }
 }

@@ -20,6 +20,101 @@ use super::super::ChatAgent;
 use crate::commands::clarify::{ClarifyRequest, ClarifyResponse};
 
 /// Agent execution mode toggled by `Shift+Tab` (shown in coral/accent on composer footer).
+/// Which model slot a provider → model picker is choosing for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ModelTarget {
+    /// The live session model (`/model`).
+    #[default]
+    Session,
+    /// The persisted default model (`/default_model`). `global` is the scope the caller already
+    /// supplied; `None` means ask with a follow-up picker.
+    Default { global: Option<bool> },
+    /// The compaction model (`/compact-model`).
+    Compact { global: Option<bool> },
+    /// The background memory saver's model (`/bgsaver-model`).
+    BgSaver,
+    /// A named worker's model (`/worker <name>`).
+    Worker(String),
+}
+
+/// A choice a generic TUI select modal hands back to the action layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectAction {
+    SettingsMain,
+    SettingsBlockLimit,
+    SettingsCollapse,
+    DirScope {
+        path: String,
+    },
+    ModelScope {
+        target: ModelTarget,
+        provider: String,
+        model: String,
+    },
+    ConnectMenu,
+    ConnectAddProvider {
+        ids: Vec<String>,
+    },
+    ConnectRemoveProvider {
+        ids: Vec<String>,
+    },
+    ConnectRemoveCredential {
+        provider: String,
+        ids: Vec<String>,
+    },
+    ConnectPriorityProvider {
+        ids: Vec<String>,
+    },
+    ConnectPriorityCredential {
+        provider: String,
+        ids: Vec<String>,
+    },
+    ConnectStrategyProvider {
+        ids: Vec<String>,
+    },
+    ConnectStrategy {
+        provider: String,
+    },
+    ConnectResetCooldowns {
+        ids: Vec<String>,
+    },
+    ProfileDeleteConfirm {
+        name: String,
+    },
+    ProfileCreateProviders {
+        name: String,
+        summary: String,
+    },
+    TaskList {
+        tasks: Vec<(String, String)>,
+    },
+}
+
+/// Text a generic TUI input modal hands back to the action layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAction {
+    DirPath {
+        /// `Some(true)` persists globally, `Some(false)` is session-only, and `None`
+        /// asks for the scope in a follow-up picker.
+        scope: Option<bool>,
+    },
+    ApiKeyLabel {
+        provider: String,
+    },
+    ApiKeySecret {
+        provider: String,
+        label: String,
+    },
+    AutoCompactThreshold,
+    AutoCompactPercent {
+        threshold: usize,
+    },
+    ProfileCreateName,
+    ProfileCreateSummary {
+        name: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
     #[default]
@@ -211,7 +306,8 @@ impl ComposerState {
     }
 
     fn prune_missing_attachments(&mut self) {
-        self.attachments.retain(|att| self.text.contains(&att.token));
+        self.attachments
+            .retain(|att| self.text.contains(&att.token));
     }
 
     /// Take and expand the composer for submission, clearing the input state.
@@ -619,16 +715,36 @@ pub enum ActiveModal {
         selected: usize,
     },
     ProviderPicker {
+        target: ModelTarget,
         query: String,
         items: Vec<ProviderPickerItem>,
         selected: usize,
     },
     ModelPicker {
+        target: ModelTarget,
         provider: String,
         provider_display: String,
         query: String,
         items: Vec<ModelPickerItem>,
         selected: usize,
+    },
+    SelectModal {
+        title: String,
+        items: Vec<String>,
+        selected: usize,
+        action: SelectAction,
+    },
+    InputModal {
+        title: String,
+        prompt: String,
+        value: String,
+        secret: bool,
+        action: InputAction,
+    },
+    TextModal {
+        title: String,
+        lines: Vec<String>,
+        scroll: usize,
     },
     ThinkingPicker {
         current: Option<ReasoningEffort>,

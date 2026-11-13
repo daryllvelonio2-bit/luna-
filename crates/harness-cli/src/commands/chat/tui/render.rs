@@ -9,7 +9,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use harness_core::ReasoningEffort;
 
-use super::super::render::{format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, SPINNER_FRAMES};
+use super::super::render::{
+    format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, SPINNER_FRAMES,
+};
 use super::super::ui::TuiLiveSnapshot;
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
@@ -18,8 +20,8 @@ use super::state::{
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
-    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SURFACE, BORDER_SUBTLE, GREEN_OK, LOGO_GRAY, RED_ERR,
-    TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY, YELLOW_WARN, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT,
+    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SURFACE, BORDER_SUBTLE, GREEN_OK, LOGO_GRAY,
+    LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY, YELLOW_WARN,
 };
 use ratatui::style::Color;
 
@@ -32,20 +34,12 @@ pub struct FooterInfo<'a> {
 }
 
 /// Draw one complete TUI frame.
-pub fn draw(
-    frame: &mut Frame,
-    st: &mut TuiState,
-    snap: &TuiLiveSnapshot,
-    info: &FooterInfo<'_>,
-) {
+pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: &FooterInfo<'_>) {
     let area = frame.area();
     st.last_rendered_rect = (area.width, area.height);
 
     // Paint the entire frame canvas `#0e0e0f`.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BG_CANVAS)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(BG_CANVAS)), area);
 
     if area.width < 20 || area.height < 8 {
         return;
@@ -220,13 +214,12 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_landing(
-    frame: &mut Frame,
-    area: Rect,
-    st: &TuiState,
-    info: &FooterInfo<'_>,
-) -> Rect {
-    let box_width = area.width.saturating_sub(12).clamp(40, 84).min(area.width.saturating_sub(2));
+fn render_landing(frame: &mut Frame, area: Rect, st: &TuiState, info: &FooterInfo<'_>) -> Rect {
+    let box_width = area
+        .width
+        .saturating_sub(12)
+        .clamp(40, 84)
+        .min(area.width.saturating_sub(2));
     let box_x = area.x + (area.width.saturating_sub(box_width)) / 2;
 
     let inner_text_w = box_width.saturating_sub(5) as usize;
@@ -309,14 +302,7 @@ fn render_landing(
         width: box_width,
         height: card_h.min(area.y + area.height.saturating_sub(cur_y + 2)),
     };
-    render_composer_card(
-        frame,
-        composer_rect,
-        st,
-        info,
-        &wrapped_input,
-        true,
-    );
+    render_composer_card(frame, composer_rect, st, info, &wrapped_input, true);
 
     // 4. Hint row right below composer card
     let hint_y = composer_rect.y + composer_rect.height;
@@ -473,14 +459,7 @@ fn render_conversation(
         width: content_w,
         height: card_h.min(area.y + area.height.saturating_sub(cur_y + 1)),
     };
-    render_composer_card(
-        frame,
-        composer_rect,
-        st,
-        info,
-        &wrapped_input,
-        false,
-    );
+    render_composer_card(frame, composer_rect, st, info, &wrapped_input, false);
 
     let hint_y = composer_rect.y + composer_rect.height;
     if hint_y < area.y + area.height {
@@ -765,11 +744,7 @@ fn render_composer_hint_row(
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
-fn build_chrome_lines(
-    st: &TuiState,
-    snap: &TuiLiveSnapshot,
-    width: usize,
-) -> Vec<Line<'static>> {
+fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(ref err) = snap.transient_error {
         lines.push(Line::from(vec![
@@ -781,14 +756,16 @@ fn build_chrome_lines(
         ]));
     }
     if let Some((forced, secs)) = snap.compacting {
-        let kind = if forced { "Compacting" } else { "Auto-compacting" };
+        let kind = if forced {
+            "Compacting"
+        } else {
+            "Auto-compacting"
+        };
         let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{spinner} {kind} context… ({secs:.1}s)"),
-                Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("{spinner} {kind} context… ({secs:.1}s)"),
+            Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
+        )]));
     }
     if let Some(ref todos) = snap.todo_snapshot {
         let total = todos.items.len();
@@ -827,10 +804,7 @@ fn build_chrome_lines(
                 String::new()
             };
             lines.push(Line::from(Span::styled(
-                truncate_str(
-                    &format!("{spinner} Subagent{more}: {goal} — {act}"),
-                    width,
-                ),
+                truncate_str(&format!("{spinner} Subagent{more}: {goal} — {act}"), width),
                 Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
             )));
         }
@@ -1007,8 +981,7 @@ fn render_completed_turn_process(
     for item in &turn.tool_items {
         if item.is_thinking() {
             if !pending_explored.is_empty() {
-                let open =
-                    process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
+                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
                 push_explored_group(
                     out,
                     hit_targets,
@@ -1038,8 +1011,7 @@ fn render_completed_turn_process(
             }
         } else if item.is_assistant_text() {
             if !pending_explored.is_empty() {
-                let open =
-                    process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
+                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
                 push_explored_group(
                     out,
                     hit_targets,
@@ -1065,8 +1037,7 @@ fn render_completed_turn_process(
             pending_explored.push(item);
         } else {
             if !pending_explored.is_empty() {
-                let open =
-                    process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
+                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
                 push_explored_group(
                     out,
                     hit_targets,
@@ -1431,7 +1402,9 @@ fn is_collapsible_exploration(item: &super::super::render::TurnProcessItem) -> b
     }
     match item.tool_name.as_str() {
         "read_file" | "read" | "list_files" | "ls" => true,
-        "search_files" | "grep" | "find" => item.output.lines().count() <= 1 && item.output_dropped == 0,
+        "search_files" | "grep" | "find" => {
+            item.output.lines().count() <= 1 && item.output_dropped == 0
+        }
         _ => false,
     }
 }
@@ -1514,7 +1487,8 @@ fn format_opencode_tool_header(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
     };
-    let arg_num = |key: &str| -> Option<u64> { arguments.and_then(|a| a.get(key)).and_then(|v| v.as_u64()) };
+    let arg_num =
+        |key: &str| -> Option<u64> { arguments.and_then(|a| a.get(key)).and_then(|v| v.as_u64()) };
 
     match tool_name {
         "terminal" | "shell" | "bash" => {
@@ -1578,7 +1552,10 @@ fn format_opencode_tool_header(
             }
         }
         "delegate_task" => {
-            if let Some(tasks) = arguments.and_then(|a| a.get("tasks")).and_then(|v| v.as_array()) {
+            if let Some(tasks) = arguments
+                .and_then(|a| a.get("tasks"))
+                .and_then(|v| v.as_array())
+            {
                 if let Some(goal) = tasks
                     .first()
                     .and_then(|t| t.get("goal"))
@@ -1626,7 +1603,10 @@ fn push_card_row(
         Span::styled("  ", Style::default().bg(BG_SURFACE)),
     ];
     spans.extend(content_spans);
-    spans.push(Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)));
+    spans.push(Span::styled(
+        " ".repeat(pad),
+        Style::default().bg(BG_SURFACE),
+    ));
     let row_idx = out.len();
     out.push(Line::from(spans));
     if let (Some(targets), Some(target)) = (hit_targets, click_target) {
@@ -1673,7 +1653,11 @@ fn push_completed_tool_card(
         return;
     }
 
-    let border_color = if item.is_error { RED_ERR } else { BORDER_SUBTLE };
+    let border_color = if item.is_error {
+        RED_ERR
+    } else {
+        BORDER_SUBTLE
+    };
     let (prefix, header_body) = format_opencode_tool_header(
         &item.tool_name,
         item.arguments.as_ref(),
@@ -1683,7 +1667,13 @@ fn push_completed_tool_card(
     let wrap_w = card_inner_w.saturating_sub(prefix_w).max(8);
     let header_lines = wrap_plain_text(&header_body, wrap_w);
 
-    push_card_blank_row(out, Some(hit_targets), Some(&click_target), border_color, width);
+    push_card_blank_row(
+        out,
+        Some(hit_targets),
+        Some(&click_target),
+        border_color,
+        width,
+    );
 
     for (i, hline) in header_lines.into_iter().enumerate() {
         let lead = if i == 0 {
@@ -1726,7 +1716,13 @@ fn push_completed_tool_card(
     let tail_cap = if open { 40 } else { 7 };
 
     if has_diff {
-        push_card_blank_row(out, Some(hit_targets), Some(&click_target), border_color, width);
+        push_card_blank_row(
+            out,
+            Some(hit_targets),
+            Some(&click_target),
+            border_color,
+            width,
+        );
         let max_diff = if open { item.diff_lines.len() } else { 10 };
         for diff in item.diff_lines.iter().take(max_diff) {
             let clean = strip_ansi(diff);
@@ -1763,7 +1759,13 @@ fn push_completed_tool_card(
             );
         }
     } else if !raw_lines.is_empty() {
-        push_card_blank_row(out, Some(hit_targets), Some(&click_target), border_color, width);
+        push_card_blank_row(
+            out,
+            Some(hit_targets),
+            Some(&click_target),
+            border_color,
+            width,
+        );
         let start = raw_lines.len().saturating_sub(tail_cap);
         let hidden = item.output_dropped + start;
         if hidden > 0 {
@@ -1800,7 +1802,13 @@ fn push_completed_tool_card(
             }
         }
     } else if item.is_error && !item.result_formatted.is_empty() {
-        push_card_blank_row(out, Some(hit_targets), Some(&click_target), border_color, width);
+        push_card_blank_row(
+            out,
+            Some(hit_targets),
+            Some(&click_target),
+            border_color,
+            width,
+        );
         let res_clean = strip_ansi(&item.result_formatted);
         push_card_row(
             out,
@@ -1815,7 +1823,13 @@ fn push_completed_tool_card(
         );
     }
 
-    push_card_blank_row(out, Some(hit_targets), Some(&click_target), border_color, width);
+    push_card_blank_row(
+        out,
+        Some(hit_targets),
+        Some(&click_target),
+        border_color,
+        width,
+    );
     out.push(Line::default());
 }
 
@@ -1931,12 +1945,7 @@ fn push_running_tool_card(
     out.push(Line::default());
 }
 
-fn push_user_card(
-    out: &mut Vec<Line<'static>>,
-    query: &str,
-    width: usize,
-    inner_w: usize,
-) {
+fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: usize, inner_w: usize) {
     let blank_fill = " ".repeat(width.saturating_sub(1));
     out.push(Line::from(vec![
         Span::styled("▎", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
@@ -1950,7 +1959,10 @@ fn push_user_card(
             Span::styled("  ", Style::default().bg(BG_SURFACE)),
         ];
         spans.extend(styled_composer_line_spans(&line));
-        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)));
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(BG_SURFACE),
+        ));
         out.push(Line::from(spans));
     }
 
@@ -1960,12 +1972,7 @@ fn push_user_card(
     ]));
 }
 
-fn render_slash_popup(
-    frame: &mut Frame,
-    screen: Rect,
-    composer_rect: Rect,
-    st: &TuiState,
-) {
+fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: &TuiState) {
     let max_items = st.slash_popup.matches.len().min(8);
     if max_items == 0 {
         return;
@@ -2011,8 +2018,7 @@ fn render_slash_popup(
             let name_fg = if sel { ACCENT_CORAL } else { TEXT_PRIMARY };
             let desc_w = (inner.width as usize).saturating_sub(entry.name.width() + 4);
             let desc = truncate_str(&entry.details, desc_w);
-            let pad = (inner.width as usize)
-                .saturating_sub(entry.name.width() + desc.width() + 3);
+            let pad = (inner.width as usize).saturating_sub(entry.name.width() + desc.width() + 3);
             Line::from(vec![
                 Span::styled(
                     format!(" {} ", entry.name),
@@ -2124,7 +2130,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                 } else {
                     "New session".to_string()
                 };
-                let right = format!(" {} msgs · {} ", sess.message_count, &sess.id[..sess.id.len().min(8)]);
+                let right = format!(
+                    " {} msgs · {} ",
+                    sess.message_count,
+                    &sess.id[..sess.id.len().min(8)]
+                );
                 let max_name = (inner.width as usize).saturating_sub(right.width() + 4);
                 let left = format!(" {marker} {}", truncate_str(&label, max_name));
                 let pad = (inner.width as usize).saturating_sub(left.width() + right.width());
@@ -2151,6 +2161,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             query,
             items,
             selected,
+            ..
         } => {
             let filtered = filtered_providers(items, query);
             let w = screen.width.saturating_sub(6).clamp(50, 78);
@@ -2218,12 +2229,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let h = screen.height.saturating_sub(4).clamp(10, 22);
             let rect = centered_rect(screen, w, h);
             let title = format!("Models · {provider_display}");
-            let inner = draw_modal_frame(
-                frame,
-                rect,
-                &title,
-                "enter select · ← providers · esc",
-            );
+            let inner = draw_modal_frame(frame, rect, &title, "enter select · ← providers · esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
@@ -2277,6 +2283,103 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
+        ActiveModal::SelectModal {
+            title,
+            items,
+            selected,
+            ..
+        } => {
+            let w = screen.width.saturating_sub(6).clamp(46, 76);
+            let h = screen.height.saturating_sub(4).clamp(8, 20);
+            let rect = centered_rect(screen, w, h);
+            let inner = draw_modal_frame(frame, rect, title, "↑/↓ · enter · esc");
+            let list_h = inner.height as usize;
+            let sel = (*selected).min(items.len().saturating_sub(1));
+            let scroll = sel.saturating_sub(list_h.saturating_sub(1));
+            let lines: Vec<Line<'static>> = items
+                .iter()
+                .enumerate()
+                .skip(scroll)
+                .take(list_h)
+                .map(|(idx, item)| {
+                    let is_sel = idx == sel;
+                    let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                    let prefix = if is_sel { " ▸ " } else { "   " };
+                    let text = format!(
+                        "{prefix}{}",
+                        truncate_str(item, (inner.width as usize).saturating_sub(3))
+                    );
+                    let pad = (inner.width as usize).saturating_sub(text.width());
+                    Line::from(vec![
+                        Span::styled(
+                            text,
+                            Style::default()
+                                .fg(if is_sel { ACCENT_CORAL } else { TEXT_PRIMARY })
+                                .bg(bg),
+                        ),
+                        Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        ActiveModal::InputModal {
+            title,
+            prompt,
+            value,
+            secret,
+            ..
+        } => {
+            let w = screen.width.saturating_sub(6).clamp(46, 76);
+            let rect = centered_rect(screen, w, 7);
+            let inner = draw_modal_frame(frame, rect, title, "enter · esc");
+            let shown = if *secret {
+                "*".repeat(value.chars().count())
+            } else {
+                value.clone()
+            };
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!(
+                        " {}",
+                        truncate_str(prompt, (inner.width as usize).saturating_sub(2))
+                    ),
+                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                )),
+                Line::default(),
+                Line::from(Span::styled(
+                    format!(
+                        " {}_",
+                        truncate_str(&shown, (inner.width as usize).saturating_sub(3))
+                    ),
+                    Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED),
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        ActiveModal::TextModal {
+            title,
+            lines,
+            scroll,
+        } => {
+            let w = screen.width.saturating_sub(6).clamp(50, 82);
+            let h = screen.height.saturating_sub(4).clamp(12, 24);
+            let rect = centered_rect(screen, w, h);
+            let inner = draw_modal_frame(frame, rect, title, "↑/↓ · pgup/pgdn · esc");
+            let visible = inner.height as usize;
+            let rows: Vec<Line<'static>> = lines
+                .iter()
+                .skip((*scroll).min(lines.len().saturating_sub(1)))
+                .take(visible)
+                .map(|line| {
+                    Line::from(Span::styled(
+                        truncate_str(line, (inner.width as usize).saturating_sub(1)),
+                        Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(rows), inner);
+        }
         ActiveModal::ThinkingPicker { current, selected } => {
             let options = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
             let rect = centered_rect(screen, 42, 11);
@@ -2326,7 +2429,10 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             ]));
             if let Some(ref target) = req.target {
                 lines.push(Line::from(Span::styled(
-                    format!(" Target: {}", truncate_str(target, (inner.width as usize).saturating_sub(10))),
+                    format!(
+                        " Target: {}",
+                        truncate_str(target, (inner.width as usize).saturating_sub(10))
+                    ),
                     Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
                 )));
             }
@@ -2342,7 +2448,10 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                         TEXT_MUTED
                     };
                     lines.push(Line::from(Span::styled(
-                        format!(" {}", truncate_str(dline, (inner.width as usize).saturating_sub(2))),
+                        format!(
+                            " {}",
+                            truncate_str(dline, (inner.width as usize).saturating_sub(2))
+                        ),
                         Style::default().fg(color).bg(BG_ELEVATED),
                     )));
                 }
@@ -2385,12 +2494,17 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(48, 76);
             let h = screen.height.saturating_sub(4).clamp(12, 20);
             let rect = centered_rect(screen, w, h);
-            let title = format!("Question {}/{}", question_idx + 1, req.questions.len().max(1));
+            let title = format!(
+                "Question {}/{}",
+                question_idx + 1,
+                req.questions.len().max(1)
+            );
             let inner = draw_modal_frame(frame, rect, &title, "enter · esc");
 
             let mut lines = Vec::new();
             if let Some(q) = req.questions.get(*question_idx) {
-                for wline in wrap_plain_text(&q.question, (inner.width as usize).saturating_sub(2)) {
+                for wline in wrap_plain_text(&q.question, (inner.width as usize).saturating_sub(2))
+                {
                     lines.push(Line::from(Span::styled(
                         format!(" {wline}"),
                         Style::default()
@@ -2447,7 +2561,10 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let masked = "*".repeat(input.chars().count());
             let lines = vec![
                 Line::from(Span::styled(
-                    format!(" {}", truncate_str(prompt, (inner.width as usize).saturating_sub(2))),
+                    format!(
+                        " {}",
+                        truncate_str(prompt, (inner.width as usize).saturating_sub(2))
+                    ),
                     Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
                 )),
                 Line::default(),
@@ -2534,11 +2651,7 @@ fn draw_modal_frame(frame: &mut Frame, rect: Rect, title: &str, hint: &str) -> R
 
 fn search_input_line(query: &str, width: usize) -> Line<'static> {
     let prefix = " > ";
-    let shown = if query.is_empty() {
-        "Search..."
-    } else {
-        query
-    };
+    let shown = if query.is_empty() { "Search..." } else { query };
     let color = if query.is_empty() {
         TEXT_MUTED
     } else {
@@ -2547,7 +2660,10 @@ fn search_input_line(query: &str, width: usize) -> Line<'static> {
     let pad = width.saturating_sub(prefix.width() + shown.width());
     Line::from(vec![
         Span::styled(prefix, Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED)),
-        Span::styled(shown.to_string(), Style::default().fg(color).bg(BG_ELEVATED)),
+        Span::styled(
+            shown.to_string(),
+            Style::default().fg(color).bg(BG_ELEVATED),
+        ),
         Span::styled(" ".repeat(pad), Style::default().bg(BG_ELEVATED)),
     ])
 }
@@ -2948,7 +3064,10 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("$ ls -la /home/janelle"))
             .unwrap();
-        assert!(card_line.spans.iter().all(|s| s.style.bg == Some(BG_SURFACE)));
+        assert!(card_line
+            .spans
+            .iter()
+            .all(|s| s.style.bg == Some(BG_SURFACE)));
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveThinkingStep(0))));

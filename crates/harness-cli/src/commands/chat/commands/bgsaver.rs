@@ -185,3 +185,72 @@ async fn attach(
     agent.set_memory_enabled(toggles.enabled(Feature::Memory));
     agent.set_notes_enabled(toggles.enabled(Feature::Notes));
 }
+
+/// Apply a `/bgsaver-model` choice picked in the TUI.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_bgsaver_model_choice(
+    ui: &ChatUi,
+    config: &mut Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    toggles: &FeatureToggles,
+    current_provider: &str,
+    current_model: &str,
+    provider: String,
+    model: String,
+) -> Result<(), HarnessError> {
+    let (memory, notes) = engines(agent).await;
+    let saver = build_saver_for(
+        config,
+        &memory,
+        notes,
+        &provider,
+        &model,
+        cred_manager.clone(),
+        discovery.clone(),
+    )?;
+
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    if let Err(error) = harness_core::config::set_in_file(&layers, PROVIDER_KEY, &provider) {
+        ui.emit_above(&format!(
+            "{} Background saver switched for this run, but saving the provider failed: {}",
+            "⚠".yellow().bold(),
+            error
+        ));
+    }
+    if let Err(error) = harness_core::config::set_in_file(&layers, MODEL_KEY, &model) {
+        ui.emit_above(&format!(
+            "{} Background saver switched for this run, but saving the model failed: {}",
+            "⚠".yellow().bold(),
+            error
+        ));
+    }
+
+    config.memory.background_provider = Some(provider.clone());
+    config.memory.background_model = Some(model.clone());
+
+    ui.clear_box_on_exit();
+    ui.draw_initial_box();
+
+    if config.memory.mode.is_background() {
+        attach(agent, saver, toggles).await;
+        ui.emit_above(&format!(
+            "{} Background saver → {} ({}) · next pass uses it",
+            "✔".green().bold(),
+            model.cyan(),
+            provider.dimmed()
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Background saver model saved: {} ({}). Enable {} to use it.",
+            "✔".green().bold(),
+            model.cyan(),
+            provider.dimmed(),
+            "memory.mode: background".yellow()
+        ));
+    }
+
+    let _ = (current_provider, current_model);
+    Ok(())
+}

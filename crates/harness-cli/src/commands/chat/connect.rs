@@ -129,8 +129,58 @@ async fn pick_action(
     ACTIONS.get(index).copied()
 }
 
+/// Ids of every provider that has at least one stored credential.
+pub(crate) async fn connected_providers(cred_manager: &CredentialManager) -> Vec<String> {
+    let mut connected = Vec::new();
+    for provider in get_provider_catalog() {
+        if !cred_manager.get_credentials(&provider.id).await.is_empty() {
+            connected.push(provider.id);
+        }
+    }
+    connected
+}
+
+/// A plain-text report of every stored credential, for the TUI's text modal.
+pub(crate) async fn list_keys_text(cred_manager: &CredentialManager) -> String {
+    let mut any = false;
+    let mut out = String::new();
+    for provider in get_provider_catalog() {
+        let creds = cred_manager.get_credentials(&provider.id).await;
+        if creds.is_empty() {
+            continue;
+        }
+        any = true;
+        out.push_str(&format!("{} ({})\n", provider.display_name, provider.id));
+        for cred in creds {
+            let flags = [
+                cred.is_priority.then_some("priority"),
+                cred.is_temporarily_disabled.then_some("cooldown"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+            let flags = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", flags)
+            };
+            out.push_str(&format!(
+                "    {} — used {} time(s){}\n",
+                cred.label, cred.usage_count, flags
+            ));
+        }
+    }
+
+    if any {
+        out.trim_end().to_string()
+    } else {
+        "No providers connected yet — add one above".to_string()
+    }
+}
+
 /// The providers a key can be added for, with the ones already connected marked.
-async fn provider_items(cred_manager: &CredentialManager) -> Vec<(String, bool)> {
+pub(crate) async fn provider_items(cred_manager: &CredentialManager) -> Vec<(String, bool)> {
     let loaded = cred_manager.get_loaded_providers().await;
     get_provider_catalog()
         .into_iter()
@@ -195,7 +245,7 @@ async fn add_key(
 }
 
 /// The provider id out of a rendered menu label like `NVIDIA NIM (nvidia)`.
-fn provider_id_of(label: &str) -> &str {
+pub(crate) fn provider_id_of(label: &str) -> &str {
     match label.rfind('(') {
         Some(open) => label[open + 1..].trim_end_matches(')'),
         None => label.trim(),
@@ -475,7 +525,7 @@ async fn set_priority(
 }
 
 /// Copy a local Antigravity login into the credential pool.
-async fn import_antigravity(
+pub(crate) async fn import_antigravity(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {
@@ -503,7 +553,7 @@ async fn import_antigravity(
 }
 
 /// Copy local OpenCode credentials into the credential pool.
-async fn import_opencode(
+pub(crate) async fn import_opencode(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {
@@ -547,7 +597,7 @@ async fn import_opencode(
 /// buys are reachable straight from the API — no `codex exec`, no local server. A machine whose
 /// Codex CLI is signed in with a plain OpenAI API key has no `tokens` object in that file, and it
 /// is named here instead of being imported as something it is not.
-async fn import_codex(
+pub(crate) async fn import_codex(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {

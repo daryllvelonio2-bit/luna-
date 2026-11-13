@@ -29,19 +29,25 @@ pub(crate) use features::{
     handle_feature_toggle, is_bare_feature_command, Feature, FeatureToggles,
 };
 pub(crate) use models::{
-    handle_compact_model_switch, handle_default_model_switch, handle_model_switch,
+    apply_compact_model_choice, apply_default_model_choice, handle_compact_model_switch,
+    handle_default_model_switch, handle_model_switch,
 };
 pub(crate) use reasoning::{handle_reasoning_switch, handle_thinking_switch};
 pub(super) use session_ops::draw_transcript;
 pub(crate) use session_ops::{
-    handle_auto_compact_command, handle_compact_command, handle_delete_command,
-    handle_diff_command, handle_fork_command, handle_name_command, handle_new_command,
-    handle_rewind_command, handle_sessions_switch, handle_summarize_and_new_command,
+    apply_auto_compact_values, handle_auto_compact_command, handle_compact_command,
+    handle_delete_command, handle_diff_command, handle_fork_command, handle_name_command,
+    handle_new_command, handle_rewind_command, handle_sessions_switch,
+    handle_summarize_and_new_command,
 };
 pub(crate) use settings::handle_settings_command;
 
-pub(crate) use bgsaver::handle_bgsaver_model_command;
-pub(crate) use dir::handle_dir_command;
+pub(crate) use super::connect::{
+    connected_providers, list_keys_text, provider_id_of, provider_items,
+};
+pub(crate) use bgsaver::{apply_bgsaver_model_choice, handle_bgsaver_model_command};
+pub(crate) use dir::{apply_dir_choice, handle_dir_command, parse_dir_args, reset_workspace};
 pub(crate) use goal::{emit_goal_status, handle_goal_command};
 pub(crate) use picker::{input_from_rx, select_from_rx, select_slash_command};
 pub(crate) use usage::handle_usage_command;
+pub(crate) use worker::RESERVED_COMMAND_NAMES;

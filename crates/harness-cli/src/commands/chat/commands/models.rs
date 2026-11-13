@@ -816,3 +816,143 @@ async fn persist_compaction_scope(
     }
     Ok(())
 }
+
+/// Apply a `/default_model` choice picked in the TUI.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_default_model_choice(
+    ui: &ChatUi,
+    config: &mut Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &SqliteSessionStore,
+    session_id: &str,
+    current_provider: &mut String,
+    current_model: &mut String,
+    compact_model: &Option<String>,
+    chosen_provider: String,
+    chosen_model: String,
+    is_global: bool,
+) -> Result<(), HarnessError> {
+    let layers = if is_global {
+        Some(harness_core::config::process_layers(
+            crate::commands::config::catalog_defaults(),
+        )?)
+    } else {
+        None
+    };
+
+    let new_provider = Arc::new(GenericProviderClient::new(
+        chosen_provider.clone(),
+        chosen_model.clone(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(&chosen_provider),
+    )?);
+
+    {
+        let mut ag = agent.lock().await;
+        ag.set_provider(new_provider);
+        ag.set_context_window(Some(context_window(
+            config,
+            discovery,
+            &chosen_provider,
+            &chosen_model,
+        ) as usize));
+    }
+
+    *current_provider = chosen_provider.clone();
+    *current_model = chosen_model.clone();
+
+    let persisted_globally = persist_default_model(
+        ui,
+        config,
+        store,
+        session_id,
+        chosen_provider.clone(),
+        chosen_model.clone(),
+        layers,
+    )
+    .await;
+
+    apply_default_model_live(
+        ui,
+        config,
+        cred_manager,
+        discovery,
+        agent,
+        compact_model,
+        chosen_provider.clone(),
+        chosen_model.clone(),
+    )
+    .await;
+
+    if persisted_globally {
+        ui.emit_above(&format!(
+            "{} Default model set globally: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    } else if is_global {
+        ui.emit_above(&format!(
+            "{} Default model switched for this session: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    } else {
+        ui.emit_above(&format!(
+            "{} Default model set for this session: {} ({})",
+            "✓".green(),
+            chosen_model,
+            chosen_provider
+        ));
+    }
+
+    Ok(())
+}
+
+/// Apply a `/compact-model` choice picked in the TUI.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_compact_model_choice(
+    ui: &ChatUi,
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    store: &SqliteSessionStore,
+    session_id: &str,
+    compact_provider: &mut Option<String>,
+    compact_model: &mut Option<String>,
+    chosen_provider: String,
+    chosen_model: String,
+    is_global: bool,
+) -> Result<(), HarnessError> {
+    apply_compaction_model(
+        agent,
+        config,
+        cred_manager,
+        discovery,
+        &chosen_provider,
+        &chosen_model,
+    )
+    .await?;
+
+    *compact_provider = Some(chosen_provider.clone());
+    *compact_model = Some(chosen_model.clone());
+
+    persist_compaction_scope(
+        ui,
+        store,
+        session_id,
+        &chosen_provider,
+        &chosen_model,
+        is_global,
+    )
+    .await?;
+
+    ui.clear_box_on_exit();
+    ui.draw_initial_box();
+    Ok(())
+}
