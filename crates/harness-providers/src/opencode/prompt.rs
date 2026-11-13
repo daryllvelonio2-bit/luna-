@@ -33,7 +33,11 @@ pub fn format_opencode_prompt(messages: &[Message]) -> OpencodePrompt {
             Role::User => "User",
             Role::Assistant => "Assistant",
             Role::Tool => {
-                if msg.tool_result.as_ref().is_some_and(|result| result.is_error) {
+                if msg
+                    .tool_result
+                    .as_ref()
+                    .is_some_and(|result| result.is_error)
+                {
                     "Tool Error"
                 } else {
                     "Tool Output"

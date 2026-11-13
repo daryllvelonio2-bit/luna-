@@ -56,17 +56,9 @@ pub const CODE_KEY: Color = Color::Rgb(86, 182, 194);
 /// `lu` in muted gray (`LOGO_GRAY`), `na` in crisp white (`TEXT_PRIMARY`).
 ///
 /// Each character is 6 cells wide (except `l` = 4 cells) with 1 space between letters.
-pub const LUNA_LOGO_LEFT: [&str; 3] = [
-    "█     █   █ ",
-    "█     █   █ ",
-    "▀▀▀▀  ▀███▀ ",
-];
+pub const LUNA_LOGO_LEFT: [&str; 3] = ["█     █   █ ", "█     █   █ ", "▀▀▀▀  ▀███▀ "];
 
-pub const LUNA_LOGO_RIGHT: [&str; 3] = [
-    "▄▀▀█▄  ▄▀▀▀█",
-    "█   █  █   █",
-    "▀   ▀  ▀▀▀▀▀",
-];
+pub const LUNA_LOGO_RIGHT: [&str; 3] = ["▄▀▀█▄  ▄▀▀▀█", "█   █  █   █", "▀   ▀  ▀▀▀▀▀"];
 
 /// Nicer display title for the active agent mode.
 pub fn mode_accent(mode_name: &str) -> Color {

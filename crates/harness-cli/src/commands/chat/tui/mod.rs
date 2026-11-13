@@ -36,7 +36,9 @@ use tokio_util::sync::CancellationToken;
 use super::helpers::IdleMemoryPass;
 use super::history::load_prompt_history;
 use super::interactive::state::{Env, Flow};
-use super::render::{background_job_resume_prompt, format_job_system_message, parse_turns_from_history};
+use super::render::{
+    background_job_resume_prompt, format_job_system_message, parse_turns_from_history,
+};
 use super::setup::ChatRuntime;
 use super::status::{
     refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed, QUOTA_REFRESH_INTERVAL,
@@ -44,16 +46,14 @@ use super::status::{
 use super::todo;
 use super::turn::{can_auto_resume, launch_internal_turn};
 use super::ui::ANIMATION_INTERVAL;
-use actions::{
-    drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs,
-};
+use crate::commands::context_window::context_window;
+use actions::{drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs};
 use render::{draw, FooterInfo};
 use state::{
     ActiveModal, AgentMode, BackgroundSession, ComposerState, LiveThinkingView, SlashPopupState,
     TuiState, TurnMeta,
 };
 use theme::shorten_cwd;
-use crate::commands::context_window::context_window;
 
 /// Ensures raw mode, mouse capture, bracketed paste, and the alternate screen are always restored.
 struct TuiTerminalGuard;
@@ -107,7 +107,8 @@ pub(crate) fn trace_event(label: &str) {
 }
 
 /// Run the full-screen OpenCode-style TUI until the user exits.
-pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {    runtime.ui.set_tui_mode(true);
+pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {
+    runtime.ui.set_tui_mode(true);
     // The system prompt is built per turn, so flipping this before the first turn is enough to
     // add the rich-output block for the full-screen renderer without touching inline/piped runs.
     runtime.agent.lock().await.set_tui_output(true);
@@ -160,8 +161,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             session_id: env.session_id,
             in_flight_tools: &tools_snapshot,
         };
-        terminal
-            .draw(|frame| draw(frame, &mut st, &snap, &info))?;
+        terminal.draw(|frame| draw(frame, &mut st, &snap, &info))?;
         trace_event(&format!("draw {:?}", t_draw.elapsed()));
 
         let has_bg_active = st

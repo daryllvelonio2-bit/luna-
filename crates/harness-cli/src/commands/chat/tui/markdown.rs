@@ -1217,11 +1217,19 @@ mod tests {
         let joined = text_of(&lines);
         let flat = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>();
 
         assert!(joined.contains("┌"), "missing table top border:\n{joined}");
-        assert!(joined.contains("└"), "missing table bottom border:\n{joined}");
+        assert!(
+            joined.contains("└"),
+            "missing table bottom border:\n{joined}"
+        );
         assert_eq!(
             flat.iter().filter(|line| line.starts_with('│')).count(),
             3,

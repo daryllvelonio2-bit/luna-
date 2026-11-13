@@ -533,11 +533,7 @@ fn push_process_turn(lines: &mut Vec<String>, turn: &TurnRecord, expanded: bool,
             .tool_items
             .iter()
             .any(|it| it.is_thinking() && !it.output.trim().is_empty());
-    let has_tools = !turn.tools.is_empty()
-        || turn
-            .tool_items
-            .iter()
-            .any(|it| !it.is_thinking());
+    let has_tools = !turn.tools.is_empty() || turn.tool_items.iter().any(|it| !it.is_thinking());
     if !(has_reasoning || has_tools) {
         return;
     }

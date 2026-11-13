@@ -228,9 +228,7 @@ async fn an_enabled_memory_tool_is_advertised_and_runs() {
     assert!(!outcome.tool_calls[0].is_error);
 }
 
-fn prompt_agent(
-    tui_output: bool,
-) -> Agent<AskingProvider, NoMemory, NoNotes, DefaultToolRegistry> {
+fn prompt_agent(tui_output: bool) -> Agent<AskingProvider, NoMemory, NoNotes, DefaultToolRegistry> {
     Agent::new(
         Arc::new(AskingProvider {
             answered: AtomicUsize::new(1),

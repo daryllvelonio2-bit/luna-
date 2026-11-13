@@ -229,9 +229,7 @@ impl StreamAccumulator {
                 let name_conflict = name
                     .as_deref()
                     .filter(|incoming| !incoming.is_empty())
-                    .is_some_and(|incoming| {
-                        !existing.name.is_empty() && existing.name != incoming
-                    });
+                    .is_some_and(|incoming| !existing.name.is_empty() && existing.name != incoming);
                 (!id_conflict && !name_conflict).then_some(pos)
             });
 

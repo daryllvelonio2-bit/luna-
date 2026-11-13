@@ -653,7 +653,8 @@ pub async fn load_model_items(
     if !def.is_empty() && !models.contains(&def) {
         models.insert(0, def);
     }
-    if provider.eq_ignore_ascii_case(current_provider) && !models.iter().any(|m| m == current_model) {
+    if provider.eq_ignore_ascii_case(current_provider) && !models.iter().any(|m| m == current_model)
+    {
         models.insert(0, current_model.to_string());
     }
 

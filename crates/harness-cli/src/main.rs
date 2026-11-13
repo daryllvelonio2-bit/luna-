@@ -9,9 +9,9 @@ use harness_telemetry::init_telemetry;
 
 mod commands;
 
+mod eval;
 #[cfg(test)]
 mod update_tests;
-mod eval;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::{run_inline_chat, run_interactive_chat};
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};

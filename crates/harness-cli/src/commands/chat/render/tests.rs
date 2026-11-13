@@ -2034,7 +2034,10 @@ fn parse_turns_from_history_preserves_interleaved_thinking_after_tools() {
         .map(|l| plain(&l))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(collapsed.contains("2 tools: list, read · thinking"), "{collapsed}");
+    assert!(
+        collapsed.contains("2 tools: list, read · thinking"),
+        "{collapsed}"
+    );
 
     let expanded = render_turn_lines(&turns, true, 100)
         .into_iter()

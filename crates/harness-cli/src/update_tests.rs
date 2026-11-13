@@ -101,9 +101,17 @@ mod update_tests {
     fn compare_status_never_offers_behind_or_identical_builds() {
         assert!(compare_status_means_newer("ahead", Some(100), Some(90)));
         assert!(!compare_status_means_newer("behind", Some(100), Some(200)));
-        assert!(!compare_status_means_newer("identical", Some(100), Some(200)));
+        assert!(!compare_status_means_newer(
+            "identical",
+            Some(100),
+            Some(200)
+        ));
         assert!(compare_status_means_newer("diverged", Some(100), Some(200)));
-        assert!(!compare_status_means_newer("diverged", Some(200), Some(100)));
+        assert!(!compare_status_means_newer(
+            "diverged",
+            Some(200),
+            Some(100)
+        ));
         assert!(!compare_status_means_newer("diverged", None, Some(200)));
     }
 }

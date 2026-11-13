@@ -59,19 +59,22 @@ pub(in crate::commands::chat) struct Env<'a> {
         harness_core::ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
-    pub(in crate::commands::chat) sudo_rx: &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+    pub(in crate::commands::chat) sudo_rx:
+        &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
     pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,
-    pub(in crate::commands::chat) job_rx: &'a mut mpsc::UnboundedReceiver<harness_core::tasks::JobCompletion>,
+    pub(in crate::commands::chat) job_rx:
+        &'a mut mpsc::UnboundedReceiver<harness_core::tasks::JobCompletion>,
     pub(in crate::commands::chat) config: &'a mut Config,
     pub(in crate::commands::chat) session_id: &'a mut String,
     pub(in crate::commands::chat) current_provider: &'a mut String,
     pub(in crate::commands::chat) current_model: &'a mut String,
     pub(in crate::commands::chat) compact_provider: &'a mut Option<String>,
     pub(in crate::commands::chat) compact_model: &'a mut Option<String>,
-    pub(in crate::commands::chat) display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
+    pub(in crate::commands::chat) display_settings:
+        Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 impl<'a> Env<'a> {
