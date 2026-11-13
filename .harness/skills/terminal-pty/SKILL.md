@@ -1,14 +1,14 @@
 ---
-name: luna-live
-description: "Run the real `luna` binary on a live pty and verify what a user actually sees: drive it with keystrokes, read the rendered screen, wait for output, assert on it, and capture PNG screenshots of the frame. Use to check a UI change, a slash command, a TUI panel, an onboarding flow, or any claim about user-visible behaviour that a unit test cannot see. Also exposed as MCP tools (`luna_*`) when registered in `mcp.servers`."
-command: "python3 {skill_dir}/scripts/luna_live.py"
+name: terminal-pty
+description: "Run any program on a real pseudo-terminal and verify what a user actually sees: drive it with keystrokes, read the rendered screen, wait for output, assert on it, and capture PNG screenshots of the frame. Use for any terminal work — a TUI/REPL/CLI check, a UI change, a slash command, a panel, an onboarding flow, or any claim about user-visible behaviour that a unit test cannot see. Also exposed as MCP tools (`pty_*`) when registered in `mcp.servers`."
+command: "python3 {skill_dir}/scripts/terminal_pty.py"
 timeout_secs: 180
 parameters:
   type: object
   properties:
     action:
       type: string
-      description: "What to do: 'start' (launch luna on a pty), 'send' (type text + Enter), 'keys' (named keys: Ctrl+C, Up, Escape), 'wait' (block until a pattern is on screen), 'idle' (wait for the screen to settle), 'assert' (gate on a pattern being present/absent), 'screen' (read the rendered viewport), 'screenshot' (render the screen to a PNG), 'run' (drive a whole multi-step workflow in one call), 'list', 'close'."
+      description: "What to do: 'start' (launch a program on a pty), 'send' (type text + Enter), 'keys' (named keys: Ctrl+C, Up, Escape), 'wait' (block until a pattern is on screen), 'idle' (wait for the screen to settle), 'assert' (gate on a pattern being present/absent), 'screen' (read the rendered viewport), 'screenshot' (render the screen to a PNG), 'run' (drive a whole multi-step workflow in one call), 'list', 'close'."
       enum: ["start", "send", "keys", "wait", "idle", "assert", "screen", "screenshot", "run", "list", "close"]
     session_id:
       type: string
@@ -32,7 +32,7 @@ parameters:
         type: object
     argv:
       type: array
-      description: "Command to launch (action 'start'/'run'), e.g. [\"luna\",\"--help\"] or [\"luna\"]. Defaults to [\"luna\"]."
+      description: "Command to launch (action 'start'/'run'), e.g. [\"luna\",\"--help\"], [\"htop\"], or [\"python3\",\"-i\"]. Defaults to $SHELL."
       items:
         type: string
     command:
@@ -55,7 +55,7 @@ parameters:
       description: "Human label for the session; also becomes its id when free."
     path:
       type: string
-      description: "Output .png path for 'screenshot' (default: a numbered file under ~/.luna/live/shots/)."
+      description: "Output .png path for 'screenshot' (default: a numbered file under ~/.terminal-pty/shots/)."
     scrollback:
       type: boolean
       description: "Include lines scrolled off the top (default false for 'screen')."
@@ -74,48 +74,59 @@ parameters:
   required: ["action"]
 ---
 
-# luna-live
+# terminal-pty
 
-Drive the real `luna` process on a live pseudo-terminal and verify what a user
-would see. Nothing here is simulated: `luna` runs for real, a terminal emulator
-model reconstructs the frame, and the screenshot is drawn from that frame.
+Drive any program on a live pseudo-terminal and verify what a user would see.
+Nothing here is simulated: the program runs for real, a terminal emulator model
+reconstructs the frame, and the screenshot is drawn from that frame. Use it for
+a TUI, a REPL, a plain interactive CLI, a shell, a prompt-driven installer — any
+surface whose truth is the screen rather than a unit test.
+
+`luna` (this repo's TUI) is the running example below, but every action is
+program-agnostic: pass the `argv` or `command` you want and drive it the same
+way.
 
 ## Two ways in
 
-**MCP** (preferred — full structured arguments). Registered in `~/.luna/config.yaml`:
+**MCP** (preferred — full structured arguments). Register it in the harness
+config (`~/.luna/config.yaml` for Luna):
 
 ```yaml
 mcp:
   enabled: true
   servers:
-    - name: luna-live
+    - name: terminal-pty
       command: python3
       args:
-        - /home/janelle/Downloads/rust-agent-harness/.harness/skills/luna-live/scripts/luna_live.py
+        - /path/to/repo/.harness/skills/terminal-pty/scripts/terminal_pty.py
         - mcp
       enabled: true
 ```
 
-The tools register as `mcp__luna-live__luna_start`, `..._luna_send`,
-`..._luna_screenshot`, `..._luna_assert`, `..._luna_run`, and so on. Confirm the
-harness can see them with `luna mcp tools`.
+The tools register as `mcp__terminal-pty__pty_start`,
+`..._pty_send`, `..._pty_screenshot`, `..._pty_assert`, `..._pty_run`, and so
+on. Confirm the harness can see them with `luna mcp tools`.
 
 **CLI** (same implementation, no MCP needed) — pass a JSON object on stdin or
 `SKILL_ARGS`, or use flags:
 
 ```bash
-python3 .harness/skills/luna-live/scripts/luna_live.py start --argv '["luna"]' --label chat
-python3 .harness/skills/luna-live/scripts/luna_live.py screenshot --session chat
-python3 .harness/skills/luna-live/scripts/luna_live.py close --session chat
+python3 .harness/skills/terminal-pty/scripts/terminal_pty.py start --argv '["luna"]' --label chat
+python3 .harness/skills/terminal-pty/scripts/terminal_pty.py screenshot --session chat
+python3 .harness/skills/terminal-pty/scripts/terminal_pty.py close --session chat
 ```
 
-Both talk to a background daemon over a unix socket (`~/.luna/live/live.sock`),
-which is what lets a session outlive the call that started it, and lets two
-agents watch the same terminal. `luna_live.py shutdown` stops it.
+Both talk to a background daemon over a unix socket
+(`~/.terminal-pty/live.sock`), which is what lets a session outlive the call
+that started it, and lets two agents watch the same terminal.
+`terminal_pty.py shutdown` stops it.
+
+Starting without `argv`/`command` launches `$SHELL`, so a bare `start` is a
+generic interactive terminal; pass an explicit command for a specific target.
 
 ## The workflow that matters
 
-One call, one verdict, one screenshot:
+One call, one verdict, one screenshot. Example: verify the Luna chat TUI:
 
 ```json
 {
@@ -136,6 +147,10 @@ One call, one verdict, one screenshot:
   ]
 }
 ```
+
+The same shape works for any target — swap `argv` for `["htop"]`, a Python
+REPL, or a `sh -lc` installer command, and change the patterns to that
+program's text.
 
 That is a verified run: 10/10 steps, ending in
 `lunaverify-002-<timestamp>.png`. Any `assert` or `wait` failure stops the run,
@@ -168,31 +183,34 @@ photographs a half-drawn frame. Use `wait` when a specific string is the signal.
   lacks (`⏵ ⏸ ⏩ ✔ ✖` from Adwaita Mono, `📷` from Noto Symbols) fall back to a
   font that has them, because a real terminal does the same and tofu would hide
   the thing being verified.
-- **Kitty keyboard sequences are filtered.** `luna` writes `ESC[>1u` /
-  `ESC[<u` to toggle the kitty keyboard protocol. The emulator used here would
-  paint a literal `u` for the second one — a character no user sees — so those
+- **Kitty keyboard sequences are filtered.** Programs using the kitty keyboard
+  protocol (Luna writes `ESC[>1u` / `ESC[<u`) would make the emulator paint a
+  literal `u` for the pop sequence — a character no user sees — so those
   sequences are stripped before they reach the model.
 - **Dialogs use the alternate screen**, so approval/sudo/clarify popups are
   modelled as such: the dialog shows while it is up, and the transcript returns
   when it closes.
-- Onboarding is skipped for driven sessions (`LUNA_FIRST_RUN=false`). A real
-  onboarding verification should pass `env: {"LUNA_FIRST_RUN": ""}` to leave it
-  on — and back up `~/.luna/credentials.json` first, because onboarding rewrites
-  it.
-- The interactive chat needs a provider; `luna --help`, `luna mcp tools`,
-  `luna config`, and `luna sessions` do not, which makes them cheap smoke tests.
+- **Luna-specific:** onboarding is skipped for driven sessions
+  (`LUNA_FIRST_RUN=false`). A real onboarding verification should pass
+  `env: {"LUNA_FIRST_RUN": ""}` to leave it on — and back up
+  `~/.luna/credentials.json` first, because onboarding rewrites it.
+- **Luna-specific:** the interactive chat needs a provider; `luna --help`,
+  `luna mcp tools`, `luna config`, and `luna sessions` do not, which makes them
+  cheap smoke tests.
 - Sessions are cheap but not free: `close` when done. `close --all` reaps every
   session if one is left behind.
-- Artifacts live under `~/.luna/live/` (`shots/`, `daemon.log`); override the
-  location with `LUNA_LIVE_DIR`.
+- Artifacts live under `~/.terminal-pty/` (`shots/`, `daemon.log`); override the
+  location with `TERMINAL_PTY_DIR` (or the socket with
+  `TERMINAL_PTY_SOCKET`).
 
 ## Verifying the tool itself
 
 ```bash
-python3 .harness/skills/luna-live/scripts/luna_live.py selftest
+python3 .harness/skills/terminal-pty/scripts/terminal_pty.py selftest
 ```
 
 16 checks over the whole path: daemon, pty spawn, UTF-8 box drawing, keystrokes,
 `wait`, PNG validity and content, ANSI reconstruction, assert pass/fail/absent,
 process reaping, and an MCP handshake (`initialize` → `tools/list` → `tools/call`,
-including the namespaced `mcp__luna-live__luna_list` spelling the harness sends).
+including the namespaced `mcp__terminal-pty__pty_list` spelling the harness
+sends).

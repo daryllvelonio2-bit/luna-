@@ -1,4 +1,4 @@
-"""PTY-backed terminal session for driving a live `luna` process.
+"""PTY-backed terminal session for driving a live program.
 
 The session owns a real pseudo-terminal, a child process attached to it, and a
 `pyte` screen model of everything the child has drawn. What the model holds is
@@ -186,7 +186,7 @@ def strip_ansi(text: str) -> str:
 # ---------------------------------------------------------------- screen model
 
 # Sequences pyte does not model faithfully, and what to do instead of letting
-# them reach it. Both were found by diffing luna's real output against the
+# them reach it. Both were found by diffing a real TUI's output against the
 # screen model: the kitty keyboard protocol's pop/set forms paint literal text
 # (`\x1b[<u` drew a stray "u"), and the alternate screen never restores what was
 # underneath it.
@@ -216,7 +216,7 @@ class _ScreenBuffer:
 class ScreenModel:
     """The terminal as the user sees it, including the alternate screen.
 
-    `luna` puts its dialogs — tool approval, sudo, clarify — on the alternate
+    TUIs put dialogs (approvals, confirmations, pickers) on the alternate
     screen, so a model with only one buffer cannot show a dialog and cannot
     restore the transcript when the dialog closes. Both buffers are kept and
     swapped on the DECSET/DECRST that a real terminal honors.
@@ -346,8 +346,10 @@ class PtySession:
         env.update(self._env)
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("COLORTERM", "truecolor")
-        # A verification run must never stop at an onboarding prompt.
-        env.setdefault("LUNA_FIRST_RUN", "false")
+        # A Luna verification run must never stop at its onboarding prompt;
+        # other programs ignore the variable.
+        if os.path.basename(self.argv[0]) == "luna":
+            env.setdefault("LUNA_FIRST_RUN", "false")
 
         slave_fd = slave
 
@@ -385,7 +387,7 @@ class PtySession:
         self._master = master
         self._started_at = time.time()
         self._thread = threading.Thread(
-            target=self._reader, name=f"luna-live-{self.id}", daemon=True
+            target=self._reader, name=f"terminal-pty-{self.id}", daemon=True
         )
         self._thread.start()
 

@@ -6,7 +6,7 @@ So the pixels are drawn here from the screen model — the same characters, the
 same true-colour foregrounds and backgrounds, the same box-drawing and Nerd
 Font glyphs a real terminal would show.
 
-The font is a monospaced Nerd Font when present, because `luna` draws its
+The font is a monospaced Nerd Font when present, because a TUI draws its
 panels with box-drawing characters and its status line with powerline glyphs:
 a plain proportional font would render those frames as a wall of tofu.
 """
@@ -26,7 +26,7 @@ CAPTION_FG = (150, 150, 150)
 CAPTION_BG = (38, 38, 38)
 
 # Tango-ish defaults: close to what a stock xterm-256color palette gives, so
-# the image reads the way the terminal the user runs `luna` in reads.
+# the image reads the way the user's real terminal reads.
 PALETTE: dict[str, tuple[int, int, int]] = {
     "black": (0, 0, 0),
     "red": (204, 0, 0),
@@ -70,7 +70,7 @@ _BASIC_16: tuple[tuple[int, int, int], ...] = (
 )
 
 # JetBrains Mono Nerd Font first: it carries both the box-drawing set and the
-# powerline separators `luna` uses in its status bar.
+# powerline separators TUIs use in status bars.
 FONT_CANDIDATES: tuple[str, ...] = (
     "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
     "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
@@ -186,7 +186,7 @@ def _style_of(cell: Any) -> tuple[tuple[int, int, int], tuple[int, int, int], bo
 class FontSet:
     """A font chain that resolves each glyph to the first font that has it.
 
-    `luna` draws its frames with a mixed glyph vocabulary — box drawing and
+    TUIs draw frames with a mixed glyph vocabulary — box drawing and
     powerline from the Nerd Font, media glyphs (⏵ ⏸ ⏩) and verdict marks
     (✔ ✖) that the Nerd Font simply does not carry. A real terminal falls back
     to another font for those; a renderer that does not prints tofu. So

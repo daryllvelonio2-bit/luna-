@@ -1,4 +1,4 @@
-"""A background daemon that owns live `luna` sessions, and a client for it.
+"""A background daemon that owns live pty sessions, and a client for it.
 
 A session has to outlive the call that made it: start a chat, type into it,
 screenshot it, close it — four separate tool calls, one process. So the
@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional
 import pngshot
 from terminals import DEFAULT_COLS, DEFAULT_ROWS, DEFAULT_SCROLLBACK, PtySession
 
-DEFAULT_DIR = "~/.luna/live"
+DEFAULT_DIR = "~/.terminal-pty"
 SOCKET_NAME = "live.sock"
 LOG_NAME = "daemon.log"
 SHOTS_DIRNAME = "shots"
@@ -44,12 +44,12 @@ class LiveError(RuntimeError):
 
 
 def live_dir() -> str:
-    override = os.environ.get("LUNA_LIVE_DIR")
+    override = os.environ.get("TERMINAL_PTY_DIR")
     return os.path.abspath(os.path.expanduser(override or DEFAULT_DIR))
 
 
 def socket_path() -> str:
-    override = os.environ.get("LUNA_LIVE_SOCKET")
+    override = os.environ.get("TERMINAL_PTY_SOCKET")
     if override:
         return os.path.abspath(os.path.expanduser(override))
     return os.path.join(live_dir(), SOCKET_NAME)
@@ -100,7 +100,7 @@ class Registry:
             if session_id is None and len(self._sessions) == 1:
                 return next(iter(self._sessions.values()))
             if session_id is None and not self._sessions:
-                raise LiveError("no live sessions; call luna_start first")
+                raise LiveError("no live sessions; call pty_start first")
             available = ", ".join(sorted(self._sessions)) or "none"
             raise LiveError(f"unknown session '{session_id}'; live sessions: {available}")
 
@@ -161,9 +161,9 @@ class Registry:
                 scope=str(params.get("scope") or "screen"),
             )
         else:
-            # Waiting out the first burst beats a fixed sleep: `luna` clears the
-            # screen and paints its box on startup, and a screenshot taken
-            # mid-paint is a screenshot of nothing.
+            # Waiting out the first burst beats a fixed sleep: TUIs clear the
+            # screen and paint their first frame on startup, and a screenshot
+            # taken mid-paint is a screenshot of nothing.
             wait = session.wait_idle(
                 quiet_ms=int(params.get("quiet_ms") or 400), timeout=timeout
             )
@@ -186,7 +186,7 @@ class Registry:
                 # still behaves the way the caller wrote it.
                 return ["sh", "-lc", command]
             return [str(a) for a in command]
-        return ["luna"]
+        return [os.environ.get("SHELL") or "/bin/sh"]
 
     def send(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.get(params.get("session_id"))
@@ -596,7 +596,7 @@ def ensure_daemon(path: Optional[str] = None, *, timeout: float = DAEMON_STARTUP
         return path
     _ensure_dir(os.path.dirname(path))
 
-    entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "luna_live.py")
+    entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "terminal_pty.py")
     log = open(log_path(), "ab")
     try:
         subprocess.Popen(
@@ -609,7 +609,7 @@ def ensure_daemon(path: Optional[str] = None, *, timeout: float = DAEMON_STARTUP
         )
     except OSError as exc:
         log.close()
-        raise LiveError(f"could not start the luna-live daemon: {exc}") from exc
+        raise LiveError(f"could not start the terminal-pty daemon: {exc}") from exc
     finally:
         log.close()
 
@@ -619,7 +619,7 @@ def ensure_daemon(path: Optional[str] = None, *, timeout: float = DAEMON_STARTUP
             return path
         time.sleep(0.05)
     raise LiveError(
-        f"luna-live daemon did not come up on {path} within {timeout:g}s; "
+        f"terminal-pty daemon did not come up on {path} within {timeout:g}s; "
         f"see {log_path()}"
     )
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Entrypoint for the luna-live skill: CLI, daemon, and MCP server.
+"""Entrypoint for the terminal-pty skill: CLI, daemon, and MCP server.
 
 Three ways in, one implementation:
 
-* ``luna_live.py mcp`` — MCP stdio server (what the harness spawns from config).
-* ``luna_live.py <action> [args]`` — one-shot CLI. Talks to the background
+* ``terminal_pty.py mcp`` — MCP stdio server (what the harness spawns from config).
+* ``terminal_pty.py <action> [args]`` — one-shot CLI. Talks to the background
   daemon over a unix socket and starts it if it is not up, so a skill with a
   shell command can drive a session that outlives the call.
-* ``luna_live.py serve`` — the daemon itself, in the foreground.
+* ``terminal_pty.py serve`` — the daemon itself, in the foreground.
 
 Parameters are gathered from the same three places the other skills use — a
 JSON object on stdin, ``SKILL_ARGS``, and argv — with argv winning, so an agent
@@ -116,24 +116,24 @@ TYPED_FLAGS: dict[str, str] = {
 
 BOOL_FLAGS = {name for name, kind in TYPED_FLAGS.items() if kind == "bool"}
 
-USAGE = """luna-live — drive a real `luna` process and verify what a user sees
+USAGE = """terminal-pty — drive a real program on a pty and verify what a user sees
 
 Usage:
-  luna_live.py mcp                          MCP stdio server (for mcp.servers)
-  luna_live.py serve [--socket PATH]        run the session daemon
-  luna_live.py selftest                     check the plumbing end to end
+  terminal_pty.py mcp                          MCP stdio server (for mcp.servers)
+  terminal_pty.py serve [--socket PATH]        run the session daemon
+  terminal_pty.py selftest                     check the plumbing end to end
 
-  luna_live.py start [command] [--cols N --rows N --label NAME --cwd DIR]
+  terminal_pty.py start [command] [--cols N --rows N --label NAME --cwd DIR]
                           [--env K=V] [--wait-for REGEX] [--timeout S]
-  luna_live.py send  <text>   [--session ID] [--no-enter] [--wait-for REGEX]
-  luna_live.py keys  <keys>   [--session ID]        e.g. "Ctrl+C" or "Down,Enter"
-  luna_live.py wait  <regex>  [--session ID] [--timeout S] [--scope screen|raw]
-  luna_live.py idle           [--session ID] [--quiet-ms N]
-  luna_live.py assert <regex> [--session ID] [--absent] [--timeout S]
-  luna_live.py screen         [--session ID] [--scrollback] [--ansi] [--json]
-  luna_live.py screenshot     [--session ID] [--path FILE.png] [--font-size N]
-  luna_live.py run            --steps '[{"action":"send","text":"/help"}]'
-  luna_live.py list | close [--session ID | --all] | ping | shutdown
+  terminal_pty.py send  <text>   [--session ID] [--no-enter] [--wait-for REGEX]
+  terminal_pty.py keys  <keys>   [--session ID]        e.g. "Ctrl+C" or "Down,Enter"
+  terminal_pty.py wait  <regex>  [--session ID] [--timeout S] [--scope screen|raw]
+  terminal_pty.py idle           [--session ID] [--quiet-ms N]
+  terminal_pty.py assert <regex> [--session ID] [--absent] [--timeout S]
+  terminal_pty.py screen         [--session ID] [--scrollback] [--ansi] [--json]
+  terminal_pty.py screenshot     [--session ID] [--path FILE.png] [--font-size N]
+  terminal_pty.py run            --steps '[{"action":"send","text":"/help"}]'
+  terminal_pty.py list | close [--session ID | --all] | ping | shutdown
 
 Output is JSON on stdout; `screen` prints the plain screen unless --json.
 Exit code is 1 when an assert, wait, or run step fails, with the report on
@@ -302,7 +302,7 @@ def _emit(action: str, result: Any, params: dict[str, Any]) -> int:
 
 def cmd_serve(params: dict[str, Any]) -> int:
     path = params.get("socket") or lived.socket_path()
-    sys.stderr.write(f"luna-live daemon listening on {path}\n")
+    sys.stderr.write(f"terminal-pty daemon listening on {path}\n")
     sys.stderr.flush()
     try:
         lived.serve(path)
@@ -424,7 +424,7 @@ def selftest(*, verbose: bool = False) -> int:
 
 
 def mcp_selftest() -> tuple[bool, str]:
-    entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "luna_live.py")
+    entry = os.path.join(os.path.dirname(os.path.abspath(__file__)), "terminal_pty.py")
     proc = subprocess.Popen(
         [sys.executable, entry, "mcp"],
         stdin=subprocess.PIPE,
@@ -460,18 +460,18 @@ def mcp_selftest() -> tuple[bool, str]:
             return False, "initialize returned no serverInfo"
         listed = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = [t["name"] for t in listed.get("result", {}).get("tools", [])]
-        if "luna_start" not in tools or len(tools) < 10:
+        if "pty_start" not in tools or len(tools) < 10:
             return False, f"tools/list returned {tools}"
         plain = exchange(
             {
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "luna_list", "arguments": {}},
+                "params": {"name": "pty_list", "arguments": {}},
             }
         )
         if plain.get("result", {}).get("isError"):
-            return False, "tools/call luna_list reported an error"
+            return False, "tools/call pty_list reported an error"
         # The harness registers tools as mcp__<server>__<tool>; the server has
         # to accept that spelling or every call fails on the real path.
         namespaced = exchange(
@@ -479,7 +479,7 @@ def mcp_selftest() -> tuple[bool, str]:
                 "jsonrpc": "2.0",
                 "id": 4,
                 "method": "tools/call",
-                "params": {"name": "mcp__luna-live__luna_list", "arguments": {}},
+                "params": {"name": "mcp__terminal-pty__pty_list", "arguments": {}},
             }
         )
         if namespaced.get("result", {}).get("isError"):
@@ -489,7 +489,7 @@ def mcp_selftest() -> tuple[bool, str]:
                 "jsonrpc": "2.0",
                 "id": 5,
                 "method": "tools/call",
-                "params": {"name": "luna_nope", "arguments": {}},
+                "params": {"name": "pty_nope", "arguments": {}},
             }
         )
         if not unknown.get("result", {}).get("isError"):
@@ -519,7 +519,7 @@ def main(argv: list[str]) -> int:
         print(USAGE)
         return 0
     if action == "version":
-        print(f"luna-live {VERSION}")
+        print(f"terminal-pty {VERSION}")
         return 0
     if action == "serve":
         return cmd_serve(params)

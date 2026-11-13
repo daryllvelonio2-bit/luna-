@@ -1,4 +1,4 @@
-"""MCP stdio server exposing live `luna` verification as tools.
+"""MCP stdio server exposing live terminal verification as tools.
 
 Speaks JSON-RPC 2.0 over stdin/stdout, one JSON object per line, and forwards
 each call to the session daemon. Two rules shape the whole file:
@@ -22,24 +22,24 @@ from typing import Any, Optional
 
 import lived
 
-SERVER_NAME = "luna-live"
+SERVER_NAME = "terminal-pty"
 SERVER_VERSION = "1.0.0"
 PROTOCOL_VERSION = "2024-11-05"
 MAX_INLINE_IMAGE_BYTES = 4_000_000
 
 SESSION_ARG = {
     "type": "string",
-    "description": "Target session id from luna_start (omit if exactly one is live).",
+    "description": "Target session id from pty_start (omit if exactly one is live).",
 }
 
 TOOLS: list[dict[str, Any]] = [
     {
-        "name": "luna_start",
+        "name": "pty_start",
         "description": (
-            "Start a live `luna` process on a real pty and return its first rendered "
-            "screen. Defaults to running `luna` (the interactive chat). Use argv for a "
-            "specific subcommand, e.g. [\"luna\",\"--help\"] or [\"luna\",\"app\"]. "
-            "Every other luna_* tool targets the session this returns."
+            "Start a program on a real pty and return its first rendered screen. "
+            "Defaults to $SHELL; use argv for a specific program, e.g. [\"luna\"], "
+            "[\"htop\"], or [\"luna\",\"--help\"]. Every other pty_* tool targets "
+            "the session this returns."
         ),
         "inputSchema": {
             "type": "object",
@@ -47,7 +47,7 @@ TOOLS: list[dict[str, Any]] = [
                 "argv": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": 'Command and arguments, e.g. ["luna","chat"]. Default ["luna"].',
+                    "description": 'Command and arguments, e.g. ["luna"] or ["htop"]. Default [$SHELL].',
                 },
                 "command": {
                     "type": "string",
@@ -74,7 +74,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_send",
+        "name": "pty_send",
         "description": (
             "Type text into the live session and press Enter (set enter=false to type "
             "without submitting). Returns the settled screen, so a prompt's effect is "
@@ -96,7 +96,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_keys",
+        "name": "pty_keys",
         "description": (
             "Send named keys to the live session: Enter, Tab, BackTab, Esc, Up/Down/Left/"
             "Right, Home, End, PageUp, PageDown, Delete, F1..F12, ctrl+<letter> (Ctrl+C, "
@@ -118,7 +118,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_screen",
+        "name": "pty_screen",
         "description": (
             "Read what the user's terminal is showing: the rendered viewport (and the "
             "scrollback above it when requested). This is the text a person sees, not "
@@ -134,7 +134,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_screenshot",
+        "name": "pty_screenshot",
         "description": (
             "Render the live screen to a PNG file with real colours, box-drawing and "
             "Nerd Font glyphs — the artefact to show a human. Returns the absolute path "
@@ -158,7 +158,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_wait",
+        "name": "pty_wait",
         "description": (
             "Wait until a pattern appears on the rendered screen (or the scrollback). "
             "Returns matched=true/false with the elapsed time, never raises — use it to "
@@ -182,7 +182,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_idle",
+        "name": "pty_idle",
         "description": (
             "Wait until the session has produced no output for a moment. The reliable way "
             "to let a redraw finish before screenshotting instead of guessing a sleep."
@@ -197,7 +197,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_assert",
+        "name": "pty_assert",
         "description": (
             "Gate a workflow on what is on screen: assert a pattern is present (or absent "
             "with present=false). Returns passed=true/false; a failure includes the screen "
@@ -218,13 +218,13 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_run",
+        "name": "pty_run",
         "description": (
             "Drive a whole workflow in one call: start a session (or reuse one), run a "
             "list of steps, assert along the way, and return a pass/fail report with a "
             "final screenshot. Steps use the same verbs — send, keys, wait, idle, "
             "screenshot, assert, sleep, screen — e.g. "
-            "[{\"action\":\"wait\",\"pattern\":\"luna\"},{\"action\":\"send\",\"text\":\"/help\"},"
+            "[{\"action\":\"wait\",\"pattern\":\"Resume\"},{\"action\":\"send\",\"text\":\"/help\"},"
             "{\"action\":\"assert\",\"pattern\":\"Available skills\"}]. Stops at the first "
             "failed step unless keep_going is set."
         ),
@@ -270,12 +270,12 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "luna_list",
+        "name": "pty_list",
         "description": "List live sessions with pid, size, age, and running state.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "luna_close",
+        "name": "pty_close",
         "description": "Close a live session (or every session with all=true) and reap the process.",
         "inputSchema": {
             "type": "object",
@@ -288,17 +288,17 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 TOOL_METHODS: dict[str, str] = {
-    "luna_start": "start",
-    "luna_send": "send",
-    "luna_keys": "keys",
-    "luna_screen": "screen",
-    "luna_screenshot": "screenshot",
-    "luna_wait": "wait",
-    "luna_idle": "idle",
-    "luna_assert": "assert",
-    "luna_run": "run",
-    "luna_list": "list",
-    "luna_close": "close",
+    "pty_start": "start",
+    "pty_send": "send",
+    "pty_keys": "keys",
+    "pty_screen": "screen",
+    "pty_screenshot": "screenshot",
+    "pty_wait": "wait",
+    "pty_idle": "idle",
+    "pty_assert": "assert",
+    "pty_run": "run",
+    "pty_list": "list",
+    "pty_close": "close",
 }
 
 
@@ -353,18 +353,18 @@ class Server:
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
         is_error = False
 
-        if tool == "luna_assert":
+        if tool == "pty_assert":
             is_error = not bool(result.get("passed", False))
-        elif tool == "luna_run":
+        elif tool == "pty_run":
             is_error = not bool(result.get("passed", False))
-        elif tool == "luna_wait":
+        elif tool == "pty_wait":
             is_error = not bool(result.get("matched", False))
 
-        if tool == "luna_screenshot" and arguments.get("inline_image", True):
+        if tool == "pty_screenshot" and arguments.get("inline_image", True):
             block = _image_block(result.get("screenshot") or {})
             if block is not None:
                 content.append(block)
-        if tool == "luna_run" and arguments.get("inline_image", False):
+        if tool == "pty_run" and arguments.get("inline_image", False):
             block = _image_block((result or {}).get("screenshot") or {})
             if block is not None:
                 content.append(block)
@@ -395,7 +395,7 @@ def format_result(tool: str, result: Any) -> str:
     if not isinstance(result, dict):
         return _json(result)
 
-    if tool == "luna_start":
+    if tool == "pty_start":
         info = result.get("info", {})
         return (
             f"session {result.get('session_id')} started "
@@ -405,13 +405,13 @@ def format_result(tool: str, result: Any) -> str:
             f"--- screen ---\n{result.get('screen', '')}"
         )
 
-    if tool == "luna_send":
+    if tool == "pty_send":
         return _json(result)
 
-    if tool == "luna_keys":
+    if tool == "pty_keys":
         return _json(result)
 
-    if tool == "luna_screen":
+    if tool == "pty_screen":
         header = (
             f"session {result.get('session_id')} "
             f"({'running' if result.get('running') else 'exited ' + str(result.get('exit_code'))}) "
@@ -419,7 +419,7 @@ def format_result(tool: str, result: Any) -> str:
         )
         return f"{header}\n--- screen ---\n{result.get('text', '')}"
 
-    if tool == "luna_screenshot":
+    if tool == "pty_screenshot":
         info = result.get("screenshot", {})
         return (
             f"screenshot: {info.get('path')}\n"
@@ -429,7 +429,7 @@ def format_result(tool: str, result: Any) -> str:
             f"--- screen ---\n{result.get('text', '')}"
         )
 
-    if tool == "luna_wait":
+    if tool == "pty_wait":
         if result.get("matched"):
             return (
                 f"matched '{result.get('pattern')}' after {result.get('elapsed_ms')}ms\n"
@@ -441,10 +441,10 @@ def format_result(tool: str, result: Any) -> str:
             f"--- screen tail ---\n{result.get('tail', '')}"
         )
 
-    if tool == "luna_idle":
+    if tool == "pty_idle":
         return _json(result)
 
-    if tool == "luna_assert":
+    if tool == "pty_assert":
         verdict = "PASS" if result.get("passed") else "FAIL"
         verb = "present" if result.get("present", True) else "absent"
         lines = [
@@ -458,7 +458,7 @@ def format_result(tool: str, result: Any) -> str:
         lines.append(result.get("screen", ""))
         return "\n".join(lines)
 
-    if tool == "luna_run":
+    if tool == "pty_run":
         lines = [
             f"{'PASS' if result.get('passed') else 'FAIL'}: "
             f"{len(result.get('steps') or [])} step(s) on session {result.get('session_id')}"
