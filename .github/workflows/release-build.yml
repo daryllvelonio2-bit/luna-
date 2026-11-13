@@ -4,17 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch, tag, or SHA to build'
+        description: 'Branch, tag, or SHA to build (defaults to the dispatched ref)'
         required: false
-        default: 'main'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # `gh workflow run --ref <branch>` selects the ref this workflow file comes from; build that
+      # same branch unless the caller named one explicitly. Defaulting to 'main' silently built
+      # main for a branch dispatch and shipped a binary without the branch's changes.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || 'main' }}
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
 
       - uses: dtolnay/rust-toolchain@stable
 
