@@ -212,6 +212,10 @@ impl ObserverState {
                 )
             }
         };
+        if self.ui.is_tui_mode() {
+            self.ui.notify_tui();
+            return;
+        }
         self.ui.emit_above(&line);
         let block_limit = self
             .display_settings
@@ -232,21 +236,25 @@ impl ObserverState {
         // The reasoning produced before the cut is already in the live region; settle it so
         // it stays on screen instead of disappearing when the next call starts.
         self.ui.finish_reasoning();
-        // Reply text is not streamed live, so the part the model had written would go
-        // unseen. Show it now, before the user's line that cut it off.
-        if !partial.trim().is_empty() {
-            self.ui.begin_block(OutputBlockKind::Reply);
-            self.ui.emit_above(&format!(
-                "{}\n{}",
-                LUNA_LABEL.bold().green(),
-                partial.trim_end()
-            ));
+        if !self.ui.is_tui_mode() {
+            // Reply text is not streamed live, so the part the model had written would go
+            // unseen. Show it now, before the user's line that cut it off.
+            if !partial.trim().is_empty() {
+                self.ui.begin_block(OutputBlockKind::Reply);
+                self.ui.emit_above(&format!(
+                    "{}\n{}",
+                    LUNA_LABEL.bold().green(),
+                    partial.trim_end()
+                ));
+            }
+            // The agent has already appended this as a user turn; echo it in the same place a
+            // normally submitted line appears.
+            self.ui.begin_block(OutputBlockKind::User);
+            self.ui
+                .emit_above(&right_aligned_user_message(&shown, get_terminal_width()));
+        } else {
+            self.ui.notify_tui();
         }
-        // The agent has already appended this as a user turn; echo it in the same place a
-        // normally submitted line appears.
-        self.ui.begin_block(OutputBlockKind::User);
-        self.ui
-            .emit_above(&right_aligned_user_message(&shown, get_terminal_width()));
         let tool_count = self
             .in_flight_tools
             .lock()

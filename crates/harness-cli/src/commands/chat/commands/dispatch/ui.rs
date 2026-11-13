@@ -5,7 +5,7 @@ use super::*;
 impl<'a> SlashContext<'a> {
     pub(super) async fn cmd_expand(&mut self) -> Result<SlashOutcome, HarnessError> {
         *self.process_expanded = true;
-        if self.ui.is_attended {
+        if self.ui.is_attended && !self.ui.is_tui_mode() {
             crate::commands::clear_screen();
             draw_transcript(self.turns, *self.process_expanded);
             self.ui.draw_initial_box();
@@ -15,7 +15,7 @@ impl<'a> SlashContext<'a> {
 
     pub(super) async fn cmd_collapse(&mut self) -> Result<SlashOutcome, HarnessError> {
         *self.process_expanded = false;
-        if self.ui.is_attended {
+        if self.ui.is_attended && !self.ui.is_tui_mode() {
             crate::commands::clear_screen();
             draw_transcript(self.turns, *self.process_expanded);
             self.ui.draw_initial_box();
@@ -35,8 +35,10 @@ impl<'a> SlashContext<'a> {
         self.turns.clear();
         let _ = std::fs::remove_file(self.todo_scope.path());
         self.ui.set_todo_panel(None);
-        crate::commands::clear_screen();
-        self.ui.draw_initial_box();
+        if !self.ui.is_tui_mode() {
+            crate::commands::clear_screen();
+            self.ui.draw_initial_box();
+        }
         Ok(SlashOutcome::Continue)
     }
 
@@ -55,7 +57,7 @@ impl<'a> SlashContext<'a> {
             self.turns,
         )
         .await;
-        if self.ui.is_attended {
+        if self.ui.is_attended && !self.ui.is_tui_mode() {
             self.ui.draw_initial_box();
         }
         Ok(SlashOutcome::Continue)

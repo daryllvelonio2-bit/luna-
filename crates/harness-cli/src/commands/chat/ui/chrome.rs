@@ -37,15 +37,15 @@ impl ChatUi {
         if !changed {
             return;
         }
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended {
             // A headless run has no box to redraw, so the list is simply printed.
             for row in self.todo_panel_rows(get_terminal_width()) {
                 println!("{}", row);
             }
-            return;
-        }
-        if self.is_tui_mode() {
-            self.notify_tui();
             return;
         }
         if self.box_drawn.load(Ordering::SeqCst) {

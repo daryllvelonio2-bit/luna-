@@ -13,10 +13,12 @@ use ratatui::Terminal;
 use super::super::interactive::state::{Env, Flow};
 use super::actions::{
     apply_agent_mode, apply_model_selection, apply_thinking_selection, create_new_session,
-    interrupt_turn, open_session_picker, run_palette_action, run_slash_command, submit_composer,
-    switch_to_session, sync_slash_popup,
+    interrupt_turn, open_models_for_provider, open_provider_picker, open_session_picker,
+    run_palette_action, run_slash_command, submit_composer, switch_to_session, sync_slash_popup,
 };
-use super::render::{filtered_models, filtered_palette_items, filtered_sessions};
+use super::render::{
+    filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
+};
 use super::state::{ActiveModal, AgentMode, TabHitTarget, TuiState};
 use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
 
@@ -57,6 +59,10 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
             *selected = 0;
         }
         ActiveModal::SessionPicker { query, selected, .. } => {
+            query.push_str(cleaned.trim());
+            *selected = 0;
+        }
+        ActiveModal::ProviderPicker { query, selected, .. } => {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
@@ -502,7 +508,78 @@ async fn handle_modal_key(
                 }
             }
         }
+        ActiveModal::ProviderPicker {
+            mut query,
+            items,
+            mut selected,
+        } => {
+            if key.code == KeyCode::Esc {
+                return Ok(Flow::Continue);
+            }
+            let filtered_ids: Vec<String> = filtered_providers(&items, &query)
+                .into_iter()
+                .map(|p| p.id.clone())
+                .collect();
+            match key.code {
+                KeyCode::Up => {
+                    if !filtered_ids.is_empty() {
+                        selected = if selected == 0 {
+                            filtered_ids.len() - 1
+                        } else {
+                            selected - 1
+                        };
+                    }
+                    st.modal = ActiveModal::ProviderPicker {
+                        query,
+                        items,
+                        selected,
+                    };
+                }
+                KeyCode::Down => {
+                    if !filtered_ids.is_empty() {
+                        selected = (selected + 1) % filtered_ids.len();
+                    }
+                    st.modal = ActiveModal::ProviderPicker {
+                        query,
+                        items,
+                        selected,
+                    };
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    if let Some(provider_id) = filtered_ids
+                        .get(selected.min(filtered_ids.len().saturating_sub(1)))
+                    {
+                        open_models_for_provider(env, st, provider_id, String::new()).await;
+                    }
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    st.modal = ActiveModal::ProviderPicker {
+                        query,
+                        items,
+                        selected: 0,
+                    };
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    query.push(c);
+                    st.modal = ActiveModal::ProviderPicker {
+                        query,
+                        items,
+                        selected: 0,
+                    };
+                }
+                _ => {
+                    st.modal = ActiveModal::ProviderPicker {
+                        query,
+                        items,
+                        selected,
+                    };
+                }
+            }
+        }
         ActiveModal::ModelPicker {
+            provider,
+            provider_display,
             mut query,
             items,
             mut selected,
@@ -524,6 +601,8 @@ async fn handle_modal_key(
                         };
                     }
                     st.modal = ActiveModal::ModelPicker {
+                        provider,
+                        provider_display,
                         query,
                         items,
                         selected,
@@ -534,10 +613,15 @@ async fn handle_modal_key(
                         selected = (selected + 1) % filtered_pairs.len();
                     }
                     st.modal = ActiveModal::ModelPicker {
+                        provider,
+                        provider_display,
                         query,
                         items,
                         selected,
                     };
+                }
+                KeyCode::Left => {
+                    open_provider_picker(env, st).await;
                 }
                 KeyCode::Enter => {
                     if let Some((prov, model)) = filtered_pairs
@@ -550,16 +634,24 @@ async fn handle_modal_key(
                     }
                 }
                 KeyCode::Backspace => {
-                    query.pop();
-                    st.modal = ActiveModal::ModelPicker {
-                        query,
-                        items,
-                        selected: 0,
-                    };
+                    if query.is_empty() {
+                        open_provider_picker(env, st).await;
+                    } else {
+                        query.pop();
+                        st.modal = ActiveModal::ModelPicker {
+                            provider,
+                            provider_display,
+                            query,
+                            items,
+                            selected: 0,
+                        };
+                    }
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     query.push(c);
                     st.modal = ActiveModal::ModelPicker {
+                        provider,
+                        provider_display,
                         query,
                         items,
                         selected: 0,
@@ -567,6 +659,8 @@ async fn handle_modal_key(
                 }
                 _ => {
                     st.modal = ActiveModal::ModelPicker {
+                        provider,
+                        provider_display,
                         query,
                         items,
                         selected,

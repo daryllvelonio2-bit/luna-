@@ -122,6 +122,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Switch provider and model",
     },
     SlashCommand {
+        name: "/models",
+        details: "Switch provider and model (alias: /model)",
+    },
+    SlashCommand {
         name: "/default_model",
         details: "Choose the default provider and model (this session or global)",
     },

@@ -312,6 +312,15 @@ pub enum PaletteAction {
     Quit,
 }
 
+/// Provider entry shown in the first step of `/models` / `/model`.
+#[derive(Debug, Clone)]
+pub struct ProviderPickerItem {
+    pub id: String,
+    pub display_name: String,
+    pub tag: String,
+    pub is_current: bool,
+}
+
 /// Model entry shown in the Model Picker modal.
 #[derive(Debug, Clone)]
 pub struct ModelPickerItem {
@@ -333,7 +342,14 @@ pub enum ActiveModal {
         sessions: Vec<SessionRecord>,
         selected: usize,
     },
+    ProviderPicker {
+        query: String,
+        items: Vec<ProviderPickerItem>,
+        selected: usize,
+    },
     ModelPicker {
+        provider: String,
+        provider_display: String,
         query: String,
         items: Vec<ModelPickerItem>,
         selected: usize,

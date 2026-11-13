@@ -118,7 +118,7 @@ pub(crate) fn finish_slash_command(
         duration: std::time::Duration::ZERO,
         reply,
     });
-    if redraw && ui.is_attended {
+    if redraw && ui.is_attended && !ui.is_tui_mode() {
         crate::commands::clear_screen();
         redraw_transcript(turns, process_expanded);
         ui.draw_initial_box();

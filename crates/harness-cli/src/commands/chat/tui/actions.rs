@@ -28,9 +28,11 @@ use super::super::turn::{
     turn_records, InterruptNotice,
 };
 use super::state::{
-    ActiveModal, AgentMode, ModelPickerItem, PaletteAction, SessionTab, TuiState, TurnMeta,
+    ActiveModal, AgentMode, ModelPickerItem, PaletteAction, ProviderPickerItem, SessionTab,
+    TuiState, TurnMeta,
 };
-use super::theme::friendly_model_name;
+use super::theme::{friendly_model_name, friendly_provider_name};
+use super::super::status::refresh_antigravity_status_if_needed;
 use crate::commands::context_window::context_window;
 use crate::commands::sessions::{resolve_session, SessionSelection};
 
@@ -272,40 +274,127 @@ pub async fn open_session_picker(env: &Env<'_>, st: &mut TuiState) {
     };
 }
 
-pub async fn open_model_picker(env: &Env<'_>, st: &mut TuiState) {
-    let mut providers = env.cred_manager.get_loaded_providers().await;
-    if !providers.iter().any(|p| p == env.current_provider) {
-        providers.insert(0, env.current_provider.clone());
-    }
+pub async fn open_provider_picker(env: &Env<'_>, st: &mut TuiState) {
+    open_provider_picker_with_query(env, st, String::new()).await;
+}
 
-    let mut items = Vec::new();
-    for prov in providers {
-        let mut models = env
-            .discovery
-            .get_models(&prov, &env.cred_manager, false)
-            .await
-            .unwrap_or_default();
-        let def = harness_providers::catalog::get_default_model(&prov).to_string();
-        if !def.is_empty() && !models.contains(&def) {
-            models.insert(0, def);
+pub async fn open_provider_picker_with_query(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    query: String,
+) {
+    let loaded = env.cred_manager.get_loaded_providers().await;
+    let has_opencode_daemon = harness_providers::read_opencode_service_info().is_some();
+    let has_opencode_cli = harness_providers::find_opencode_binary().is_ok();
+
+    let catalog = harness_providers::get_provider_catalog();
+    let configured: Vec<_> = catalog
+        .iter()
+        .filter(|p| {
+            loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
+                || p.id.eq_ignore_ascii_case(env.current_provider)
+                || (p.id == "opencode" && has_opencode_daemon)
+                || (p.id == "opencode-cli" && has_opencode_cli)
+        })
+        .cloned()
+        .collect();
+    let available = if configured.is_empty() {
+        catalog
+    } else {
+        configured
+    };
+
+    let mut items = Vec::with_capacity(available.len());
+    for p in available {
+        let is_current = p.id.eq_ignore_ascii_case(env.current_provider);
+        let mut tags = Vec::new();
+        if is_current {
+            tags.push("active".to_string());
         }
-        if prov == *env.current_provider && !models.contains(env.current_model) {
-            models.insert(0, env.current_model.clone());
+        if loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id)) {
+            tags.push("configured".to_string());
         }
-        for m in models {
-            let is_current = prov == *env.current_provider && m == *env.current_model;
-            items.push(ModelPickerItem {
-                display_name: friendly_model_name(&m),
-                provider: prov.clone(),
-                model: m,
-                is_current,
-            });
+        if p.id.eq_ignore_ascii_case("opencode") && has_opencode_daemon {
+            tags.push("daemon".to_string());
+        } else if p.id.eq_ignore_ascii_case("opencode-cli") && has_opencode_cli {
+            tags.push("cli".to_string());
+        } else if p.id.eq_ignore_ascii_case("antigravity") || p.id.eq_ignore_ascii_case("agy") {
+            let agy_creds = env.cred_manager.get_credentials("antigravity").await;
+            if let Some(primary) = agy_creds
+                .iter()
+                .find(|c| c.is_priority && !c.is_temporarily_disabled)
+                .or_else(|| agy_creds.iter().find(|c| !c.is_temporarily_disabled))
+            {
+                let acc = if !primary.label.is_empty() {
+                    primary.label.clone()
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key)
+                {
+                    val.get("email")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                if !acc.is_empty() {
+                    tags.push(acc);
+                }
+            }
         }
+        items.push(ProviderPickerItem {
+            id: p.id,
+            display_name: p.display_name,
+            tag: tags.join(" · "),
+            is_current,
+        });
     }
 
     let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
+    st.modal = ActiveModal::ProviderPicker {
+        query,
+        items,
+        selected,
+    };
+}
+
+pub async fn open_models_for_provider(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    provider: &str,
+    query: String,
+) {
+    let mut models = env
+        .discovery
+        .get_models(provider, &env.cred_manager, false)
+        .await
+        .unwrap_or_default();
+    let def = harness_providers::catalog::get_default_model(provider).to_string();
+    if !def.is_empty() && !models.contains(&def) {
+        models.insert(0, def);
+    }
+    if provider.eq_ignore_ascii_case(env.current_provider) && !models.contains(env.current_model) {
+        models.insert(0, env.current_model.clone());
+    }
+
+    let items: Vec<ModelPickerItem> = models
+        .into_iter()
+        .map(|m| {
+            let is_current =
+                provider.eq_ignore_ascii_case(env.current_provider) && m == *env.current_model;
+            ModelPickerItem {
+                display_name: friendly_model_name(&m),
+                provider: provider.to_string(),
+                model: m,
+                is_current,
+            }
+        })
+        .collect();
+
+    let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
     st.modal = ActiveModal::ModelPicker {
-        query: String::new(),
+        provider: provider.to_string(),
+        provider_display: friendly_provider_name(provider),
+        query,
         items,
         selected,
     };
@@ -366,6 +455,7 @@ pub async fn apply_model_selection(
     *env.current_model = model.to_string();
     let used = env.agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     env.ui.set_status(model, used, ctx_max);
+    refresh_antigravity_status_if_needed(&env.ui, provider, model, &env.cred_manager).await;
     if persist {
         let _ = env.store.set_model(env.session_id, provider, model).await;
     }
@@ -392,7 +482,7 @@ pub async fn run_palette_action(
             open_session_picker(env, st).await;
         }
         PaletteAction::SwitchModel => {
-            open_model_picker(env, st).await;
+            open_provider_picker(env, st).await;
         }
         PaletteAction::CycleAgentMode => {
             apply_agent_mode(env, st, st.mode.cycle());
@@ -531,8 +621,43 @@ pub async fn run_slash_command(
             open_session_picker(env, st).await;
             return Ok(Flow::Continue);
         }
-        "/model" | "/models" if arg.is_none() => {
-            open_model_picker(env, st).await;
+        "/model" | "/models" | "/provider" => {
+            if let Some(target) = arg {
+                if let Some((prov_prefix, model_rest)) = target.split_once('/') {
+                    if let Some(prov) = harness_providers::catalog::find_provider(prov_prefix) {
+                        if !model_rest.trim().is_empty() {
+                            if let Err(e) =
+                                apply_model_selection(env, st, &prov.id, model_rest.trim(), true)
+                                    .await
+                            {
+                                env.ui.set_transient_error(Some(format!(
+                                    "Model switch failed: {e}"
+                                )));
+                            }
+                            return Ok(Flow::Continue);
+                        }
+                    }
+                }
+                if let Some(prov) = harness_providers::catalog::find_provider(target) {
+                    open_models_for_provider(env, st, &prov.id, String::new()).await;
+                } else {
+                    open_provider_picker_with_query(env, st, target.to_string()).await;
+                }
+            } else {
+                open_provider_picker(env, st).await;
+            }
+            return Ok(Flow::Continue);
+        }
+        "/expand" if arg.is_none() => {
+            st.process_expanded = true;
+            return Ok(Flow::Continue);
+        }
+        "/collapse" if arg.is_none() => {
+            st.process_expanded = false;
+            return Ok(Flow::Continue);
+        }
+        "/new" if arg.is_none() => {
+            create_new_session(env, st).await?;
             return Ok(Flow::Continue);
         }
         "/thinking" | "/think" | "/reasoning" if arg.is_none() => {
@@ -616,7 +741,7 @@ pub async fn run_slash_command(
             | "/default_model"
             | "/auto-compact"
             | "/autocompact"
-    ) || (name == "/model" && arg.is_some() && !arg.unwrap().contains('/'));
+    );
 
     let skills_arc = env.skills_arc.clone();
     let skills: &[harness_plugins::Skill] = skills_arc

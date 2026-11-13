@@ -13,8 +13,8 @@ use super::super::render::{format_elapsed_secs, reply_for_display, SPINNER_FRAME
 use super::super::ui::TuiLiveSnapshot;
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
-    ActiveModal, ModelPickerItem, PaletteAction, PaletteItem, TabHitBox, TabHitTarget,
-    TuiState,
+    ActiveModal, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem, TabHitBox,
+    TabHitTarget, TuiState,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
@@ -1004,7 +1004,7 @@ fn build_transcript_lines(
                 ),
                 Span::styled(
                     truncate_str(
-                        &format!("{} {detail} ({secs:.1}s)", strip_ansi(call)),
+                        &format!("{}{detail} ({secs:.1}s)", strip_ansi(call)),
                         card_inner_w.saturating_sub(4),
                     ),
                     Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
@@ -1260,16 +1260,16 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
-        ActiveModal::ModelPicker {
+        ActiveModal::ProviderPicker {
             query,
             items,
             selected,
         } => {
-            let filtered = filtered_models(items, query);
+            let filtered = filtered_providers(items, query);
             let w = screen.width.saturating_sub(6).clamp(50, 78);
             let h = screen.height.saturating_sub(4).clamp(10, 22);
             let rect = centered_rect(screen, w, h);
-            let inner = draw_modal_frame(frame, rect, "Switch Model", "enter select · esc");
+            let inner = draw_modal_frame(frame, rect, "Select Provider", "enter models · esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
@@ -1286,10 +1286,16 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                 let is_sel = idx == sel;
                 let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
                 let marker = if item.is_current { "●" } else { " " };
-                let right = format!(" {} ", friendly_provider_name(&item.provider));
-                let max_name = (inner.width as usize).saturating_sub(right.width() + 4);
+                let right = if item.tag.is_empty() {
+                    format!(" {} ", item.id)
+                } else {
+                    format!(" {} · {} ", item.id, item.tag)
+                };
+                let max_right = (inner.width as usize) / 2;
+                let right_disp = truncate_str(&right, max_right.max(12));
+                let max_name = (inner.width as usize).saturating_sub(right_disp.width() + 4);
                 let left = format!(" {marker} {}", truncate_str(&item.display_name, max_name));
-                let pad = (inner.width as usize).saturating_sub(left.width() + right.width());
+                let pad = (inner.width as usize).saturating_sub(left.width() + right_disp.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         left,
@@ -1302,7 +1308,78 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                             .bg(bg),
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                    Span::styled(right, Style::default().fg(TEXT_MUTED).bg(bg)),
+                    Span::styled(right_disp, Style::default().fg(TEXT_MUTED).bg(bg)),
+                ]));
+            }
+            if filtered.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    " No providers match",
+                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        ActiveModal::ModelPicker {
+            provider_display,
+            query,
+            items,
+            selected,
+            ..
+        } => {
+            let filtered = filtered_models(items, query);
+            let w = screen.width.saturating_sub(6).clamp(50, 78);
+            let h = screen.height.saturating_sub(4).clamp(10, 22);
+            let rect = centered_rect(screen, w, h);
+            let title = format!("Models · {provider_display}");
+            let inner = draw_modal_frame(
+                frame,
+                rect,
+                &title,
+                "enter select · ← providers · esc",
+            );
+
+            let mut lines = Vec::new();
+            lines.push(search_input_line(query, inner.width as usize));
+            lines.push(Line::from(Span::styled(
+                "─".repeat(inner.width as usize),
+                Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+            )));
+
+            let list_h = (inner.height as usize).saturating_sub(2).max(1);
+            let sel = (*selected).min(filtered.len().saturating_sub(1));
+            let scroll = sel.saturating_sub(list_h.saturating_sub(1));
+
+            for (idx, item) in filtered.iter().enumerate().skip(scroll).take(list_h) {
+                let is_sel = idx == sel;
+                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let marker = if item.is_current { "●" } else { " " };
+                let right = if item.model != item.display_name {
+                    format!(" {} ", item.model)
+                } else {
+                    String::new()
+                };
+                let max_right = (inner.width as usize) / 2;
+                let right_disp = if right.is_empty() {
+                    String::new()
+                } else {
+                    truncate_str(&right, max_right.max(12))
+                };
+                let max_name = (inner.width as usize).saturating_sub(right_disp.width() + 4);
+                let left = format!(" {marker} {}", truncate_str(&item.display_name, max_name));
+                let pad = (inner.width as usize).saturating_sub(left.width() + right_disp.width());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        left,
+                        Style::default()
+                            .fg(if item.is_current {
+                                ACCENT_CORAL
+                            } else {
+                                TEXT_PRIMARY
+                            })
+                            .bg(bg),
+                    ),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                    Span::styled(right_disp, Style::default().fg(TEXT_MUTED).bg(bg)),
                 ]));
             }
             if filtered.is_empty() {
@@ -1719,6 +1796,22 @@ pub fn filtered_sessions<'a>(
                 || s.name.to_ascii_lowercase().contains(&q)
                 || s.title.to_ascii_lowercase().contains(&q)
                 || s.id.to_ascii_lowercase().contains(&q)
+        })
+        .collect()
+}
+
+pub fn filtered_providers<'a>(
+    items: &'a [ProviderPickerItem],
+    query: &str,
+) -> Vec<&'a ProviderPickerItem> {
+    let q = query.trim().to_ascii_lowercase();
+    items
+        .iter()
+        .filter(|p| {
+            q.is_empty()
+                || p.id.to_ascii_lowercase().contains(&q)
+                || p.display_name.to_ascii_lowercase().contains(&q)
+                || p.tag.to_ascii_lowercase().contains(&q)
         })
         .collect()
 }

@@ -170,21 +170,23 @@ pub(super) fn launch_turn(
     let display_query =
         crate::commands::prompt_images::strip_image_saved_paths(display.unwrap_or(query));
 
-    if ui.is_attended {
-        crate::commands::clear_screen();
-        redraw_transcript(turns, process_expanded);
-        println!();
-        println!(
-            "{}",
-            right_aligned_user_message(&display_query, get_terminal_width())
-        );
-        ui.draw_initial_box();
-    } else {
-        ui.begin_block(OutputBlockKind::User);
-        ui.emit_above(&right_aligned_user_message(
-            &display_query,
-            get_terminal_width(),
-        ));
+    if !ui.is_tui_mode() {
+        if ui.is_attended {
+            crate::commands::clear_screen();
+            redraw_transcript(turns, process_expanded);
+            println!();
+            println!(
+                "{}",
+                right_aligned_user_message(&display_query, get_terminal_width())
+            );
+            ui.draw_initial_box();
+        } else {
+            ui.begin_block(OutputBlockKind::User);
+            ui.emit_above(&right_aligned_user_message(
+                &display_query,
+                get_terminal_width(),
+            ));
+        }
     }
 
     *current_cancel = CancellationToken::new();
@@ -338,14 +340,16 @@ pub(super) async fn cancel_running_turn(
         "✖ Cancelled".to_string(),
     ));
 
-    if ui.is_attended {
-        if redraw {
-            crate::commands::clear_screen();
-            redraw_transcript(turns, process_expanded);
-            ui.draw_initial_box();
+    if !ui.is_tui_mode() {
+        if ui.is_attended {
+            if redraw {
+                crate::commands::clear_screen();
+                redraw_transcript(turns, process_expanded);
+                ui.draw_initial_box();
+            }
+        } else {
+            println!("{}", "✖ Cancelled".red());
         }
-    } else {
-        println!("{}", "✖ Cancelled".red());
     }
 
     if redraw {

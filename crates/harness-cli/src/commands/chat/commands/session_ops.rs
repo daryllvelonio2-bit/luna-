@@ -388,9 +388,11 @@ pub(crate) async fn handle_new_command(
     todo::refresh_panel(ui, todo_scope);
 
     if ui.is_attended {
-        crate::commands::clear_screen();
-        ui.draw_landing();
-        ui.draw_initial_box();
+        if !ui.is_tui_mode() {
+            crate::commands::clear_screen();
+            ui.draw_landing();
+            ui.draw_initial_box();
+        }
         if name.is_empty() {
             ui.emit_above(&format!(
                 "{} Started new session {}",
@@ -405,7 +407,7 @@ pub(crate) async fn handle_new_command(
                 session_id.dimmed()
             ));
         }
-    } else {
+    } else if !ui.is_tui_mode() {
         if name.is_empty() {
             println!(
                 "{} Started new session {}",
@@ -465,16 +467,18 @@ pub(crate) async fn handle_delete_command(
     };
 
     if ui.is_attended {
-        crate::commands::clear_screen();
-        ui.draw_landing();
-        ui.draw_initial_box();
+        if !ui.is_tui_mode() {
+            crate::commands::clear_screen();
+            ui.draw_landing();
+            ui.draw_initial_box();
+        }
         ui.emit_above(&format!(
             "{} Deleted session {} and started fresh session {}",
             "✔".green().bold(),
             desc,
             new_id.cyan()
         ));
-    } else {
+    } else if !ui.is_tui_mode() {
         println!(
             "{} Deleted session {} and started fresh session {}",
             "✔".green().bold(),
@@ -559,7 +563,7 @@ pub(crate) async fn handle_sessions_switch(
         .await?;
     *turns = parse_turns_from_history(&replayed.history);
 
-    if ui.is_attended {
+    if ui.is_attended && !ui.is_tui_mode() {
         crate::commands::clear_screen();
         if replayed.replayed > 0 {
             if replayed.truncated() {
@@ -902,8 +906,10 @@ pub(crate) async fn handle_summarize_and_new_command(
     todo::refresh_panel(ui, todo_scope);
 
     if ui.is_attended {
-        crate::commands::clear_screen();
-        ui.draw_initial_box();
+        if !ui.is_tui_mode() {
+            crate::commands::clear_screen();
+            ui.draw_initial_box();
+        }
         if name.is_empty() {
             ui.emit_above(&format!(
                 "{} Started new session {} with summary from {}",
@@ -921,7 +927,7 @@ pub(crate) async fn handle_summarize_and_new_command(
             ));
         }
         ui.emit_above(&format!("\n{}\n{}\n", "Summary:".bold(), summary.dimmed()));
-    } else {
+    } else if !ui.is_tui_mode() {
         if name.is_empty() {
             println!(
                 "{} Started new session {} with summary from {}",
