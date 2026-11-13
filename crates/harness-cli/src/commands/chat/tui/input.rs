@@ -8,6 +8,7 @@ use crossterm::event::{
 use harness_core::{ApprovalDecision, HarnessError, ReasoningEffort};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthChar;
 
 use super::super::interactive::state::{Env, Flow};
 use super::actions::{
@@ -20,7 +21,8 @@ use super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
 };
 use super::state::{
-    ActiveModal, AgentMode, LiveThinkingView, TabHitTarget, TranscriptClickTarget, TuiState,
+    ActiveModal, AgentMode, LiveThinkingView, TabHitTarget, TextSelection, TranscriptClickTarget,
+    TuiState,
 };
 use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
 
@@ -44,7 +46,13 @@ pub async fn handle_event(
             handle_paste(env, st, &text);
             Ok(Flow::Continue)
         }
-        Event::Resize(_, _) => Ok(Flow::Continue),
+        Event::Resize(_, _) => {
+            // Ratatui reallocates its buffers on resize, but the physical screen keeps the old
+            // frame in newly exposed columns (the vertical "ghost bands" at the window edges).
+            // Clear once so the next draw repaints every cell from scratch.
+            terminal.clear()?;
+            Ok(Flow::Continue)
+        }
         Event::FocusGained | Event::FocusLost => Ok(Flow::Continue),
     }
 }
@@ -114,11 +122,14 @@ async fn handle_mouse(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             st.scroll_from_bottom = (st.scroll_from_bottom + 3).min(st.max_scroll);
+            clear_selection(st);
         }
         MouseEventKind::ScrollDown => {
             st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(3);
+            clear_selection(st);
         }
         MouseEventKind::Down(MouseButton::Left) if mouse.row == 0 => {
+            clear_selection(st);
             let hit = st
                 .hit_boxes
                 .iter()
@@ -145,51 +156,237 @@ async fn handle_mouse(
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(target) = st
-                .transcript_hit_boxes
-                .iter()
-                .find(|hb| {
-                    hb.y == mouse.row && mouse.column >= hb.x_start && mouse.column < hb.x_end
-                })
-                .map(|hb| hb.target.clone())
-            {
-                match target {
-                    TranscriptClickTarget::ToggleTurnThinking(idx, step_idx) => {
-                        if !st.expanded_thinking.remove(&(idx, step_idx)) {
-                            st.expanded_thinking.insert((idx, step_idx));
-                        }
-                    }
-                    TranscriptClickTarget::ToggleTurnTools(idx, group_idx) => {
-                        if !st.expanded_tools.remove(&(idx, group_idx)) {
-                            st.expanded_tools.insert((idx, group_idx));
-                        }
-                    }
-                    TranscriptClickTarget::ToggleLiveThinkingStep(step_idx) => {
-                        if !st.expanded_live_thinking.remove(&step_idx) {
-                            st.expanded_live_thinking.insert(step_idx);
-                        }
-                    }
-                    TranscriptClickTarget::ToggleLiveToolStep(step_idx) => {
-                        if !st.expanded_live_tools.remove(&step_idx) {
-                            st.expanded_live_tools.insert(step_idx);
-                        }
-                    }
-                    TranscriptClickTarget::ToggleLiveThinking => {
-                        st.live_thinking_view = match st.live_thinking_view {
-                            LiveThinkingView::Tail => LiveThinkingView::Expanded,
-                            LiveThinkingView::Expanded => LiveThinkingView::Collapsed,
-                            LiveThinkingView::Collapsed => LiveThinkingView::Expanded,
-                        };
-                    }
-                    TranscriptClickTarget::JumpToLatest => {
-                        st.scroll_from_bottom = 0;
-                    }
-                }
-            }
+            begin_left_down(st, mouse);
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            extend_selection(st, mouse);
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            finish_left_up(env, st).await;
         }
         _ => {}
     }
     Ok(Flow::Continue)
+}
+
+fn clear_selection(st: &mut TuiState) {
+    st.selection = None;
+    st.pending_transcript_click = None;
+}
+
+/// Arm a selection at the pointer and remember any click target under it.
+///
+/// The click target is not fired yet: a press that turns into a drag is a text selection, not a
+/// toggle, so clicks are committed on button release.
+fn begin_left_down(st: &mut TuiState, mouse: MouseEvent) {
+    let (tx, ty, tw, th) = st.transcript_area;
+    let in_transcript = tw > 0
+        && th > 0
+        && mouse.column >= tx
+        && mouse.column < tx.saturating_add(tw)
+        && mouse.row >= ty
+        && mouse.row < ty.saturating_add(th);
+
+    let hit = st
+        .transcript_hit_boxes
+        .iter()
+        .find(|hb| hb.y == mouse.row && mouse.column >= hb.x_start && mouse.column < hb.x_end)
+        .map(|hb| hb.target.clone());
+
+    if in_transcript {
+        let line = st.transcript_start + (mouse.row - ty) as usize;
+        let column = (mouse.column - tx) as usize;
+        st.selection = Some(TextSelection {
+            anchor: (line, column),
+            cursor: (line, column),
+            dragging: true,
+        });
+        st.pending_transcript_click = hit;
+    } else {
+        st.selection = None;
+        // Badge clicks (and any future hit box outside the text area) still work.
+        st.pending_transcript_click = hit;
+        if st.pending_transcript_click.is_none() {
+            clear_selection(st);
+        }
+    }
+}
+
+fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
+    let (tx, ty, tw, th) = st.transcript_area;
+    if tw == 0 || th == 0 {
+        return;
+    }
+    let start = st.transcript_start;
+    let Some(selection) = st.selection.as_mut() else {
+        return;
+    };
+    if !selection.dragging {
+        return;
+    }
+    let row = mouse.row.clamp(ty, ty.saturating_add(th).saturating_sub(1));
+    let column = mouse
+        .column
+        .clamp(tx, tx.saturating_add(tw).saturating_sub(1));
+    selection.cursor = (start + (row - ty) as usize, (column - tx) as usize);
+    if selection.is_range() {
+        st.pending_transcript_click = None;
+    }
+}
+
+async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
+    let Some(selection) = st.selection else {
+        if let Some(target) = st.pending_transcript_click.take() {
+            apply_transcript_click(st, target);
+        }
+        return;
+    };
+
+    if !selection.dragging {
+        return;
+    }
+
+    if selection.is_range() {
+        let text = selection_text(st, selection);
+        if !text.is_empty() {
+            match crate::commands::clipboard_image::write_clipboard_text(&text) {
+                Ok(()) => {
+                    let chars = text.chars().count();
+                    let noun = if chars == 1 {
+                        "character"
+                    } else {
+                        "characters"
+                    };
+                    st.selection_notice = Some((
+                        format!("Copied {chars} {noun} to clipboard"),
+                        std::time::Instant::now(),
+                    ));
+                }
+                Err(e) => env
+                    .ui
+                    .set_transient_error(Some(format!("Copy failed: {e}"))),
+            }
+        }
+        st.selection = Some(TextSelection {
+            dragging: false,
+            ..selection
+        });
+        st.pending_transcript_click = None;
+    } else {
+        // A plain click: drop the one-cell selection and run the click target, if any.
+        st.selection = None;
+        if let Some(target) = st.pending_transcript_click.take() {
+            apply_transcript_click(st, target);
+        }
+    }
+}
+
+fn apply_transcript_click(st: &mut TuiState, target: TranscriptClickTarget) {
+    match target {
+        TranscriptClickTarget::ToggleTurnThinking(idx, step_idx) => {
+            if !st.expanded_thinking.remove(&(idx, step_idx)) {
+                st.expanded_thinking.insert((idx, step_idx));
+            }
+        }
+        TranscriptClickTarget::ToggleTurnTools(idx, group_idx) => {
+            if !st.expanded_tools.remove(&(idx, group_idx)) {
+                st.expanded_tools.insert((idx, group_idx));
+            }
+        }
+        TranscriptClickTarget::ToggleLiveThinkingStep(step_idx) => {
+            if !st.expanded_live_thinking.remove(&step_idx) {
+                st.expanded_live_thinking.insert(step_idx);
+            }
+        }
+        TranscriptClickTarget::ToggleLiveToolStep(step_idx) => {
+            if !st.expanded_live_tools.remove(&step_idx) {
+                st.expanded_live_tools.insert(step_idx);
+            }
+        }
+        TranscriptClickTarget::ToggleLiveThinking => {
+            st.live_thinking_view = match st.live_thinking_view {
+                LiveThinkingView::Tail => LiveThinkingView::Expanded,
+                LiveThinkingView::Expanded => LiveThinkingView::Collapsed,
+                LiveThinkingView::Collapsed => LiveThinkingView::Expanded,
+            };
+        }
+        TranscriptClickTarget::JumpToLatest => {
+            st.scroll_from_bottom = 0;
+            clear_selection(st);
+        }
+    }
+}
+
+/// Plain text covered by a selection, using the visible-line snapshot captured during the last
+/// draw. Columns are terminal cells, so wide glyphs are included whole.
+fn selection_text(st: &TuiState, selection: TextSelection) -> String {
+    selection_text_from(
+        &st.transcript_visible_text,
+        st.transcript_start,
+        st.transcript_area.2 as usize,
+        selection,
+    )
+}
+
+fn selection_text_from(
+    visible_text: &[String],
+    transcript_start: usize,
+    width: usize,
+    selection: TextSelection,
+) -> String {
+    let ((start_line, start_col), (end_line, end_col)) = selection.bounds();
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut first = true;
+
+    for line_idx in start_line..=end_line {
+        let Some(visible_idx) = line_idx.checked_sub(transcript_start) else {
+            continue;
+        };
+        let Some(line) = visible_text.get(visible_idx) else {
+            continue;
+        };
+        let from = if line_idx == start_line { start_col } else { 0 };
+        let to = if line_idx == end_line {
+            end_col.saturating_add(1)
+        } else {
+            width
+        }
+        .min(width);
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(&slice_cells(line, from, to));
+    }
+    out
+}
+
+fn slice_cells(text: &str, from_col: usize, to_col: usize) -> String {
+    if to_col <= from_col {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if width == 0 {
+            if col >= from_col && col <= to_col {
+                out.push(ch);
+            }
+            continue;
+        }
+        if col >= to_col {
+            break;
+        }
+        if col + width > from_col && col < to_col {
+            out.push(ch);
+        }
+        col += width;
+    }
+    out
 }
 
 async fn handle_key(
@@ -326,8 +523,12 @@ async fn handle_key(
         }
     }
 
-    // Escape interrupts active turn or clears transient error.
+    // Escape clears a text selection first, then interrupts or clears the transient error.
     if key.code == KeyCode::Esc {
+        if st.selection.is_some() {
+            clear_selection(st);
+            return Ok(Flow::Continue);
+        }
         if st.active_turn.is_some() {
             interrupt_turn(env, st).await;
         } else if env.ui.transient_error().is_some() {
@@ -341,11 +542,13 @@ async fn handle_key(
         KeyCode::PageUp => {
             let step = (st.last_rendered_rect.1 as usize / 2).max(4);
             st.scroll_from_bottom = (st.scroll_from_bottom + step).min(st.max_scroll);
+            clear_selection(st);
             return Ok(Flow::Continue);
         }
         KeyCode::PageDown => {
             let step = (st.last_rendered_rect.1 as usize / 2).max(4);
             st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(step);
+            clear_selection(st);
             return Ok(Flow::Continue);
         }
         _ => {}
@@ -1245,5 +1448,74 @@ fn close_modal_with_cancel(st: &mut TuiState) {
             let _ = resp_tx.send(None);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{selection_text_from, slice_cells, TextSelection};
+
+    #[test]
+    fn slice_cells_uses_terminal_columns() {
+        assert_eq!(slice_cells("abcdef", 1, 4), "bcd");
+        assert_eq!(slice_cells("abcdef", 0, usize::MAX), "abcdef");
+        assert_eq!(slice_cells("abcdef", 4, 4), "");
+    }
+
+    #[test]
+    fn slice_cells_keeps_wide_glyphs_whole() {
+        // `中` occupies cells 1-2, so selecting only its first cell still copies the glyph.
+        assert_eq!(slice_cells("a中b", 1, 2), "中");
+        assert_eq!(slice_cells("a中b", 2, 3), "中");
+        assert_eq!(slice_cells("a中b", 3, 4), "b");
+    }
+
+    fn selection(anchor: (usize, usize), cursor: (usize, usize)) -> TextSelection {
+        TextSelection {
+            anchor,
+            cursor,
+            dragging: true,
+        }
+    }
+
+    #[test]
+    fn selection_text_includes_the_cell_under_the_cursor() {
+        let lines = vec!["hello world".to_string()];
+        assert_eq!(
+            selection_text_from(&lines, 0, 20, selection((0, 0), (0, 4))),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn selection_text_normalizes_a_backwards_drag() {
+        let lines = vec!["hello world".to_string()];
+        assert_eq!(
+            selection_text_from(&lines, 0, 20, selection((0, 4), (0, 0))),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn selection_text_joins_multiple_visible_lines() {
+        let lines = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        // Lines 10..12 are visible; start mid-line 11 and end mid-line 12.
+        assert_eq!(
+            selection_text_from(&lines, 10, 20, selection((11, 1), (12, 2))),
+            "eta\ngam"
+        );
+    }
+
+    #[test]
+    fn selection_text_skips_lines_outside_the_visible_snapshot() {
+        let lines = vec!["only".to_string()];
+        assert_eq!(
+            selection_text_from(&lines, 5, 20, selection((4, 0), (5, 3))),
+            "only"
+        );
+        assert_eq!(
+            selection_text_from(&lines, 5, 0, selection((5, 0), (5, 3))),
+            ""
+        );
     }
 }

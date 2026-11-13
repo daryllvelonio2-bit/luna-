@@ -25,6 +25,15 @@ impl ClipboardImage {
     }
 }
 
+/// Write plain text to the system clipboard (used by transcript mouse selection).
+pub fn write_clipboard_text(text: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| format!("clipboard write failed: {e}"))
+}
+
 /// Read an image (screenshot) from the system clipboard, if one is present.
 /// Returns `Ok(None)` when the clipboard holds no image (text or empty).
 ///

@@ -21,8 +21,9 @@ use super::state::{
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
-    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SURFACE, BORDER_SUBTLE, GREEN_OK, LOGO_GRAY,
-    LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY, YELLOW_WARN,
+    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, GREEN_OK,
+    LOGO_GRAY, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
+    YELLOW_WARN,
 };
 use ratatui::style::Color;
 
@@ -83,6 +84,10 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
     let area = frame.area();
     st.last_rendered_rect = (area.width, area.height);
 
+    // Reset every cell first. `Block` only applies a style, so without this a shorter line leaves
+    // glyphs from the previous frame behind and the transcript looks like two frames are
+    // overlaid (the classic "stable system" ghosting).
+    frame.render_widget(Clear, area);
     // Paint the entire frame canvas `#0e0e0f`.
     frame.render_widget(Block::default().style(Style::default().bg(BG_CANVAS)), area);
 
@@ -121,6 +126,11 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
 
     let composer_rect = if show_landing {
         st.transcript_hit_boxes.clear();
+        st.transcript_area = (0, 0, 0, 0);
+        st.transcript_start = 0;
+        st.transcript_visible_text.clear();
+        st.selection = None;
+        st.pending_transcript_click = None;
         render_landing(frame, main_area, st, info)
     } else {
         render_conversation(frame, main_area, st, snap, info, terminal_area.is_some())
@@ -539,15 +549,37 @@ fn render_conversation(
     let active_len = active_lines.len();
     let total_lines = settled_len + notice_len + active_len;
 
-    let view_h = transcript_rect.height as usize;
+    // While scrolled up, reserve the last transcript row for the "Jump to latest" badge instead
+    // of drawing it over the final line of output.
+    let full_view_h = transcript_rect.height as usize;
+    let badge_room = full_view_h > 1 && transcript_rect.width > 18;
+    let mut view_h = if st.scroll_from_bottom > 0 && badge_room {
+        full_view_h - 1
+    } else {
+        full_view_h
+    };
     st.max_scroll = total_lines.saturating_sub(view_h);
     if st.scroll_from_bottom > st.max_scroll {
         st.scroll_from_bottom = st.max_scroll;
+    }
+    let show_badge = st.scroll_from_bottom > 0 && badge_room;
+    if !show_badge && view_h != full_view_h {
+        // Clamping consumed the scroll offset, so give the badge row back to the transcript.
+        view_h = full_view_h;
+        st.max_scroll = total_lines.saturating_sub(view_h);
     }
     let start = total_lines
         .saturating_sub(view_h)
         .saturating_sub(st.scroll_from_bottom);
     let end = (start + view_h).min(total_lines);
+
+    st.transcript_area = (
+        transcript_rect.x,
+        transcript_rect.y,
+        transcript_rect.width,
+        view_h as u16,
+    );
+    st.transcript_start = start;
 
     st.transcript_hit_boxes.clear();
     for (line_idx, target) in &st.settled_cache.hit_targets {
@@ -575,27 +607,49 @@ fn render_conversation(
         }
     }
 
+    let selection_bounds = st.selection.map(|sel| sel.bounds());
     let mut visible_slice: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
+    let mut visible_text: Vec<String> = Vec::with_capacity(end.saturating_sub(start));
     for i in start..end {
-        if i < settled_len {
-            visible_slice.push(st.settled_cache.lines[i].clone());
+        let source = if i < settled_len {
+            &st.settled_cache.lines[i]
         } else if i < settled_len + notice_len {
-            visible_slice.push(notice_lines[i - settled_len].clone());
+            &notice_lines[i - settled_len]
         } else {
-            let active_i = i - settled_len - notice_len;
-            visible_slice.push(active_lines[active_i].clone());
+            &active_lines[i - settled_len - notice_len]
+        };
+        visible_text.push(line_plain_text(source));
+        let mut line = source.clone();
+        if let Some(((sel_start_line, sel_start_col), (sel_end_line, sel_end_col))) =
+            selection_bounds
+        {
+            if i >= sel_start_line && i <= sel_end_line {
+                let from = if i == sel_start_line {
+                    sel_start_col
+                } else {
+                    0
+                };
+                let to = if i == sel_end_line {
+                    sel_end_col.saturating_add(1)
+                } else {
+                    usize::MAX
+                };
+                line = highlight_line_selection(line, from, to);
+            }
         }
+        visible_slice.push(line);
     }
+    st.transcript_visible_text = visible_text;
 
     frame.render_widget(Paragraph::new(visible_slice), transcript_rect);
 
-    // Scroll-to-latest badge right-aligned above composer when scrolled up
-    if st.scroll_from_bottom > 0 && transcript_rect.width > 18 && transcript_rect.height > 0 {
+    // Scroll-to-latest badge, on its own row just below the transcript when scrolled up.
+    if show_badge {
         let badge = " Jump to latest ↓ ";
         let bw = badge.width() as u16;
         if transcript_rect.width > bw {
             let badge_x = transcript_rect.x + transcript_rect.width - bw;
-            let badge_y = transcript_rect.y + transcript_rect.height - 1;
+            let badge_y = transcript_rect.y + view_h as u16;
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     badge,
@@ -1001,6 +1055,17 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
                 "Press Ctrl+C again to exit Luna",
                 Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
             )));
+        }
+    }
+    if let Some((message, at)) = &st.selection_notice {
+        if at.elapsed().as_secs() < 3 {
+            lines.push(Line::from(vec![
+                Span::styled("✓ ", Style::default().fg(GREEN_OK).bg(BG_CANVAS)),
+                Span::styled(
+                    truncate_str(message, width.saturating_sub(3)),
+                    Style::default().fg(GREEN_OK).bg(BG_CANVAS),
+                ),
+            ]));
         }
     }
     lines
@@ -3268,6 +3333,69 @@ fn wrap_composer_lines(text: &str, cursor_byte: usize, max_width: usize) -> Wrap
     }
 }
 
+/// Concatenate a rendered line's spans back into plain text (styles and ANSI already resolved).
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+/// Overlay the selection background on the cell range `[from_col, to_col)` of one line.
+///
+/// Spans are split at the selection boundaries so the original foreground colours survive and
+/// wide glyphs are selected as a whole.
+fn highlight_line_selection(line: Line<'static>, from_col: usize, to_col: usize) -> Line<'static> {
+    if to_col <= from_col {
+        return line;
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut col = 0usize;
+
+    for span in line.spans {
+        let span_style = span.style;
+        let mut run = String::new();
+        let mut run_selected: Option<bool> = None;
+
+        for ch in span.content.chars() {
+            let width = ch.width().unwrap_or(0);
+            let selected = if width == 0 {
+                run_selected.unwrap_or(false)
+            } else {
+                col < to_col && col + width > from_col
+            };
+            if run_selected != Some(selected) {
+                if let Some(previous) = run_selected {
+                    let style = if previous {
+                        span_style.bg(BG_SELECTION)
+                    } else {
+                        span_style
+                    };
+                    out.push(Span::styled(std::mem::take(&mut run), style));
+                }
+                run_selected = Some(selected);
+            }
+            run.push(ch);
+            col += width;
+        }
+
+        if let Some(previous) = run_selected {
+            let style = if previous {
+                span_style.bg(BG_SELECTION)
+            } else {
+                span_style
+            };
+            out.push(Span::styled(run, style));
+        }
+    }
+
+    Line {
+        style: line.style,
+        alignment: line.alignment,
+        spans: out,
+    }
+}
+
 fn truncate_str(s: &str, max_cells: usize) -> String {
     if s.width() <= max_cells {
         return s.to_string();
@@ -3302,6 +3430,42 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn highlight_line_selection_keeps_text_and_splits_spans() {
+        let line = Line::from(vec![
+            Span::styled("hello ", Style::default().fg(TEXT_PRIMARY)),
+            Span::styled("world", Style::default().fg(ACCENT_CORAL)),
+        ]);
+        let highlighted = highlight_line_selection(line, 4, 8);
+        assert_eq!(line_text(&highlighted), "hello world");
+
+        // Columns 4..8 (`o wo`) are selected; neighbouring cells keep their own styling.
+        let selected: String = highlighted
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(BG_SELECTION))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(selected, "o wo");
+        assert!(highlighted
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(ACCENT_CORAL) && s.style.bg.is_none()));
+    }
+
+    #[test]
+    fn highlight_line_selection_includes_wide_glyphs_whole() {
+        let line = Line::from("a中b");
+        let highlighted = highlight_line_selection(line, 1, 2);
+        let selected: String = highlighted
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(BG_SELECTION))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(selected, "中");
     }
 
     #[test]
@@ -3599,6 +3763,12 @@ mod tests {
             total_sessions_count: 1,
             hit_boxes: Vec::new(),
             transcript_hit_boxes: Vec::new(),
+            transcript_area: (0, 0, 0, 0),
+            transcript_start: 0,
+            transcript_visible_text: Vec::new(),
+            selection: None,
+            pending_transcript_click: None,
+            selection_notice: None,
             scroll_from_bottom: 0,
             max_scroll: 0,
             modal: ActiveModal::None,
@@ -3809,6 +3979,42 @@ mod tests {
             text.contains("running"),
             "the pane says the command is still running:\n{text}"
         );
+    }
+
+    #[test]
+    fn selection_highlight_keeps_text_and_splits_spans() {
+        let line = Line::from(vec![
+            Span::styled("abc", Style::default().fg(Color::Red)),
+            Span::styled("def", Style::default().fg(Color::Green)),
+        ]);
+        let highlighted = highlight_line_selection(line, 1, 5);
+
+        assert_eq!(line_text(&highlighted), "abcdef");
+        let selected: String = highlighted
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(BG_SELECTION))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(selected, "bcde");
+        // Original foreground colours survive the split.
+        assert!(highlighted
+            .spans
+            .iter()
+            .any(|span| span.content.contains('a') && span.style.fg == Some(Color::Red)));
+    }
+
+    #[test]
+    fn selection_highlight_selects_wide_glyphs_whole() {
+        let line = Line::from("a中b");
+        let highlighted = highlight_line_selection(line, 1, 2);
+        let selected: String = highlighted
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(BG_SELECTION))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(selected, "中");
     }
 
     #[test]

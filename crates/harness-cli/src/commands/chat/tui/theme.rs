@@ -14,6 +14,8 @@ pub const BG_ELEVATED: Color = Color::Rgb(38, 38, 42);
 pub const BG_CODE: Color = Color::Rgb(22, 22, 24);
 /// Selected row highlight inside modals / popups (`#2f2f35`).
 pub const BG_SELECTED: Color = Color::Rgb(47, 47, 53);
+/// Mouse text-selection highlight (`#3c3c46`), brighter than `BG_SELECTED` so it reads over cards.
+pub const BG_SELECTION: Color = Color::Rgb(60, 60, 70);
 
 /// Subtle border gray (`#34343a`).
 pub const BORDER_SUBTLE: Color = Color::Rgb(52, 52, 58);

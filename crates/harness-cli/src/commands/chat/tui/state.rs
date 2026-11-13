@@ -606,6 +606,36 @@ pub struct TranscriptHitBox {
     pub target: TranscriptClickTarget,
 }
 
+/// A text selection in the transcript.
+///
+/// Positions are absolute transcript coordinates: `line` is the index into the full transcript
+/// (settled turns + notices + active turn), `column` is a terminal cell offset from the left edge
+/// of the transcript viewport. Absolute line indices keep the highlight attached to the text when
+/// new output arrives and the viewport shifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+    /// True while the primary button is held and the pointer is being dragged.
+    pub dragging: bool,
+}
+
+impl TextSelection {
+    /// Anchor/cursor ordered top-to-bottom, left-to-right.
+    pub fn bounds(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// True when the pointer moved far enough to be a drag rather than a click.
+    pub fn is_range(&self) -> bool {
+        self.anchor != self.cursor
+    }
+}
+
 /// Display mode for the live streaming thinking block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LiveThinkingView {
@@ -835,6 +865,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn text_selection_bounds_order_a_backwards_drag() {
+        let forward = TextSelection {
+            anchor: (2, 3),
+            cursor: (4, 1),
+            dragging: true,
+        };
+        let backwards = TextSelection {
+            anchor: (4, 1),
+            cursor: (2, 3),
+            dragging: true,
+        };
+        assert_eq!(forward.bounds(), ((2, 3), (4, 1)));
+        assert_eq!(backwards.bounds(), ((2, 3), (4, 1)));
+        assert!(forward.is_range());
+        assert!(!TextSelection {
+            anchor: (2, 3),
+            cursor: (2, 3),
+            dragging: true,
+        }
+        .is_range());
+    }
+
+    #[test]
     fn attach_image_inserts_marker_and_submits_data_url() {
         let mut c = ComposerState::default();
         c.insert_str("check");
@@ -922,6 +975,18 @@ pub struct TuiState {
     pub total_sessions_count: usize,
     pub hit_boxes: Vec<TabHitBox>,
     pub transcript_hit_boxes: Vec<TranscriptHitBox>,
+    /// Viewport of the transcript as `(x, y, width, height)` in screen cells, refreshed each draw.
+    pub transcript_area: (u16, u16, u16, u16),
+    /// Absolute index of the first transcript line visible in the viewport.
+    pub transcript_start: usize,
+    /// Plain text of each visible transcript line, aligned with `transcript_start`.
+    pub transcript_visible_text: Vec<String>,
+    /// Active mouse text selection, if any.
+    pub selection: Option<TextSelection>,
+    /// Click target armed on mouse-down; fired on mouse-up only when no drag happened.
+    pub pending_transcript_click: Option<TranscriptClickTarget>,
+    /// Short confirmation shown in the chrome after a selection is copied.
+    pub selection_notice: Option<(String, std::time::Instant)>,
     pub scroll_from_bottom: usize,
     pub max_scroll: usize,
     pub modal: ActiveModal,
