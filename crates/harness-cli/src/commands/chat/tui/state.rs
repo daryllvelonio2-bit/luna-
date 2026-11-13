@@ -44,6 +44,7 @@ pub enum SelectAction {
     SettingsMain,
     SettingsBlockLimit,
     SettingsCollapse,
+    SettingsThinking,
     DirScope {
         path: String,
     },
@@ -906,6 +907,9 @@ pub struct TuiState {
     pub turn_meta: Vec<TurnMeta>,
     pub system_notices: Vec<String>,
     pub process_expanded: bool,
+    /// Collapse a thinking block as soon as the next tool call starts (mirrors
+    /// `display.auto_hide_thinking`; the settings modal keeps it in sync).
+    pub auto_hide_thinking: bool,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
     pub expanded_live_thinking: HashSet<usize>,

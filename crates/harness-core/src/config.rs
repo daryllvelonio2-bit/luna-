@@ -957,6 +957,9 @@ pub struct DisplaySettings {
     pub block_limit: Option<usize>,
     /// Whether process blocks collapse when a turn completes. Defaults to true.
     pub auto_collapse: bool,
+    /// Whether a thinking block collapses as soon as the next tool call starts running.
+    /// Defaults to true so the working view stays focused on the tool while it executes.
+    pub auto_hide_thinking: bool,
 }
 
 impl Default for DisplaySettings {
@@ -964,6 +967,7 @@ impl Default for DisplaySettings {
         Self {
             block_limit: None,
             auto_collapse: true,
+            auto_hide_thinking: true,
         }
     }
 }

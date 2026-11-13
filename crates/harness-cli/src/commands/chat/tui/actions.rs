@@ -1013,11 +1013,17 @@ fn open_settings_menu(st: &mut TuiState, config: &harness_core::Config) {
     } else {
         "off"
     };
+    let thinking = if config.display.auto_hide_thinking {
+        "on"
+    } else {
+        "off"
+    };
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
         items: vec![
             format!("Display block limit · {limit}"),
             format!("Auto-collapse on turn finish · {collapse}"),
+            format!("Auto-collapse thinking while a tool runs · {thinking}"),
             "View current settings summary".to_string(),
         ],
         selected: 0,
@@ -1375,6 +1381,18 @@ pub async fn run_select_action(
                     action: SelectAction::SettingsCollapse,
                 };
             }
+            2 => {
+                let enabled = env.config.display.auto_hide_thinking;
+                st.modal = ActiveModal::SelectModal {
+                    title: "Auto-collapse Thinking During Tool Calls".to_string(),
+                    items: vec![
+                        "Enabled (hide thinking while a tool runs)".to_string(),
+                        "Disabled (keep thinking visible)".to_string(),
+                    ],
+                    selected: if enabled { 0 } else { 1 },
+                    action: SelectAction::SettingsThinking,
+                };
+            }
             _ => {
                 if let Err(error) = handle_settings_command(
                     None,
@@ -1430,6 +1448,27 @@ pub async fn run_select_action(
                 env.ui
                     .set_transient_error(Some(format!("Settings failed: {error}")));
             }
+        }
+        SelectAction::SettingsThinking => {
+            let arg = if choice == 0 {
+                "thinking on"
+            } else {
+                "thinking off"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+            st.auto_hide_thinking = env.config.display.auto_hide_thinking;
         }
         SelectAction::DirScope { path } => {
             let is_global = choice == 1;

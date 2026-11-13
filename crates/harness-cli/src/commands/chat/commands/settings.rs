@@ -32,13 +32,18 @@ pub(crate) async fn handle_settings_command(
                 apply_auto_collapse(enabled, ui, config, display_settings, process_expanded)?;
                 return Ok(());
             }
+            ["thinking" | "auto-hide-thinking", val] => {
+                let enabled = parse_bool(val)?;
+                apply_auto_hide_thinking(enabled, ui, config, display_settings)?;
+                return Ok(());
+            }
             ["show"] => {
                 show_settings(ui, config);
                 return Ok(());
             }
             _ => {
                 ui.emit_above(&format!(
-                    "{} Unknown settings option: {}\nUsage: /settings [limit <1-10|all>] [collapse <on|off>] [show]",
+                    "{} Unknown settings option: {}\nUsage: /settings [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [show]",
                     "•".cyan(),
                     arg_str
                 ));
@@ -95,11 +100,17 @@ async fn run_settings_wizard(
     } else {
         "Disabled (keep expanded)"
     };
+    let current_thinking_desc = if config.display.auto_hide_thinking {
+        "Enabled (hide while a tool runs)"
+    } else {
+        "Disabled (keep thinking visible)"
+    };
 
     let main_items = vec![
         format!("1. Display Block Limit · [{current_limit_desc}]"),
         format!("2. Auto-collapse on Turn Finish · [{current_collapse_desc}]"),
-        "3. View Current Settings Summary".to_string(),
+        format!("3. Auto-collapse Thinking During Tool Calls · [{current_thinking_desc}]"),
+        "4. View Current Settings Summary".to_string(),
     ];
 
     let choice = select_from_rx(rx, ui, "CLI Settings", &main_items, 0, false, false).await;
@@ -156,6 +167,31 @@ async fn run_settings_wizard(
             }
         }
         Some(2) => {
+            let thinking_items = vec![
+                "Enabled (collapse thinking while a tool runs - Default)".to_string(),
+                "Disabled (keep thinking visible)".to_string(),
+            ];
+            let default_idx = if config.display.auto_hide_thinking {
+                0
+            } else {
+                1
+            };
+            let thinking_choice = select_from_rx(
+                rx,
+                ui,
+                "Auto-collapse Thinking During Tool Calls",
+                &thinking_items,
+                default_idx,
+                true,
+                false,
+            )
+            .await;
+            if let Some(idx) = thinking_choice {
+                let enabled = idx == 0;
+                apply_auto_hide_thinking(enabled, ui, config, display_settings)?;
+            }
+        }
+        Some(3) => {
             show_settings(ui, config);
         }
         _ => {}
@@ -233,6 +269,39 @@ fn apply_auto_collapse(
     Ok(())
 }
 
+fn apply_auto_hide_thinking(
+    enabled: bool,
+    ui: &ChatUi,
+    config: &mut Config,
+    display_settings: &Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
+) -> Result<(), HarnessError> {
+    config.display.auto_hide_thinking = enabled;
+    if let Ok(mut lock) = display_settings.write() {
+        lock.auto_hide_thinking = enabled;
+    }
+
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let _ = harness_core::config::set_in_file(
+        &layers,
+        "display.auto_hide_thinking",
+        if enabled { "true" } else { "false" },
+    );
+
+    let desc = if enabled {
+        "Enabled (hide thinking while a tool runs)"
+    } else {
+        "Disabled (keep thinking visible)"
+    };
+
+    ui.emit_above(&format!(
+        "{} Auto-collapse thinking during tool calls set to: {} (saved to config)",
+        "✔".green().bold(),
+        desc.bold()
+    ));
+
+    Ok(())
+}
+
 fn show_settings(ui: &ChatUi, config: &Config) {
     let limit_str = match config.display.block_limit {
         None => "Uncapped (display everything)".to_string(),
@@ -244,14 +313,21 @@ fn show_settings(ui: &ChatUi, config: &Config) {
     } else {
         "Disabled (keep expanded)"
     };
+    let thinking_str = if config.display.auto_hide_thinking {
+        "Enabled (hide while a tool runs)"
+    } else {
+        "Disabled (keep thinking visible)"
+    };
 
     let report = format!(
-        "\n{}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n",
+        "\n{}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n",
         "Current CLI Settings:".bold(),
         "Display Block Limit:".dimmed(),
         limit_str.cyan(),
         "Auto-collapse on Finish:".dimmed(),
         collapse_str.cyan(),
+        "Auto-collapse Thinking:".dimmed(),
+        thinking_str.cyan(),
         "Auto-compact Context:".dimmed(),
         if config.auto_compact_enabled {
             "Enabled".green()

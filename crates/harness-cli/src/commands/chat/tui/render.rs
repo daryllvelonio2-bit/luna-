@@ -1032,6 +1032,7 @@ fn build_active_and_notice_lines(
             snap,
             info.in_flight_tools,
             st.process_expanded,
+            st.auto_hide_thinking,
             &st.expanded_live_thinking,
             &st.expanded_live_tools,
             st.live_thinking_view,
@@ -1186,6 +1187,7 @@ fn render_active_turn_process(
     snap: &TuiLiveSnapshot,
     in_flight_tools: &[super::super::render::TurnProcessItem],
     process_expanded: bool,
+    auto_hide_thinking: bool,
     collapsed_live_thinking: &std::collections::HashSet<usize>,
     expanded_live_tools: &std::collections::HashSet<usize>,
     live_thinking_view: LiveThinkingView,
@@ -1194,6 +1196,15 @@ fn render_active_turn_process(
     width: usize,
     card_inner_w: usize,
 ) {
+    // A tool call is "active" while the live activity card is on screen or a recorded step has
+    // not produced a result yet. That is exactly the moment the preceding thinking block should
+    // fold away, so the working view stays on the tool.
+    let tool_active = snap.activity_call.is_some()
+        || in_flight_tools.iter().any(|item| {
+            !item.is_thinking() && !item.is_assistant_text() && item.result_formatted.is_empty()
+        });
+    let auto_hide_thinking = auto_hide_thinking && tool_active;
+
     // Chronological settled thinking blocks, prose, and tool cards executed so far in this turn
     let mut pending_explored: Vec<(usize, &super::super::render::TurnProcessItem)> = Vec::new();
     for (step_idx, item) in in_flight_tools.iter().enumerate() {
@@ -1216,7 +1227,8 @@ fn render_active_turn_process(
             }
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
-                let open = process_expanded || !collapsed_live_thinking.contains(&step_idx);
+                let open = process_expanded
+                    || (!auto_hide_thinking && !collapsed_live_thinking.contains(&step_idx));
                 push_settled_thinking_block(
                     out,
                     hit_targets,
@@ -1363,6 +1375,10 @@ fn render_active_turn_process(
         let secs = snap.reasoning_secs.unwrap_or(turn_secs);
         let view_mode = if process_expanded {
             LiveThinkingView::Expanded
+        } else if auto_hide_thinking && live_thinking_view != LiveThinkingView::Expanded {
+            // The next tool call is running: fold the finished thought away unless the reader
+            // explicitly expanded it.
+            LiveThinkingView::Collapsed
         } else {
             live_thinking_view
         };
@@ -3173,6 +3189,7 @@ mod tests {
             &snap,
             &in_flight,
             false,
+            false,
             &collapsed_steps,
             &expanded_tools,
             LiveThinkingView::Tail,
@@ -3225,6 +3242,57 @@ mod tests {
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveThinking)));
+    }
+
+    #[test]
+    fn active_tool_collapses_previous_thinking_only_when_auto_hide_is_on() {
+        let in_flight = vec![
+            TurnProcessItem::thinking_with_duration("plan the work", Some(1.2)),
+            TurnProcessItem {
+                tool_name: "grep".to_string(),
+                call_formatted: "grep(pattern: \"todo\")".to_string(),
+                result_formatted: String::new(),
+                diff_lines: Vec::new(),
+                output: String::new(),
+                output_dropped: 0,
+                arguments: Some(serde_json::json!({ "pattern": "todo" })),
+                duration_secs: None,
+                is_error: false,
+            },
+        ];
+        let snap = TuiLiveSnapshot::default();
+
+        let render = |auto_hide: bool| {
+            let mut out = Vec::new();
+            let mut hits = Vec::new();
+            let mut content_cache = super::super::state::LiveContentCache::default();
+            let mut reasoning_cache = super::super::state::LiveReasoningCache::default();
+            render_active_turn_process(
+                &mut out,
+                &mut hits,
+                &mut content_cache,
+                &mut reasoning_cache,
+                &snap,
+                &in_flight,
+                false,
+                auto_hide,
+                &HashSet::new(),
+                &HashSet::new(),
+                LiveThinkingView::Tail,
+                0,
+                3.0,
+                84,
+                80,
+            );
+            out.iter().map(line_text).collect::<Vec<_>>().join("\n")
+        };
+
+        let hidden = render(true);
+        assert!(hidden.contains("▸ Thought: 1.2s (1 line)"), "{hidden}");
+        assert!(!hidden.contains("plan the work"), "{hidden}");
+
+        let visible = render(false);
+        assert!(visible.contains("plan the work"), "{visible}");
     }
 
     #[test]
@@ -3351,6 +3419,7 @@ mod tests {
             }],
             system_notices: Vec::new(),
             process_expanded: false,
+            auto_hide_thinking: true,
             expanded_thinking: HashSet::new(),
             expanded_tools: HashSet::new(),
             expanded_live_thinking: HashSet::new(),

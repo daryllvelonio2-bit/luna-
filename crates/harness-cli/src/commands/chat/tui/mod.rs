@@ -141,6 +141,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     loop {
         let t_draw = std::time::Instant::now();
         // Render current frame (never await env.agent.lock() here — the running turn holds it!).
+        // Keep the thinking auto-collapse toggle in step with `/settings` changes.
+        st.auto_hide_thinking = env.config.display.auto_hide_thinking;
         let snap = {
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
             env.ui.tui_snapshot(w)
@@ -457,6 +459,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         turn_meta,
         system_notices: Vec::new(),
         process_expanded: false,
+        auto_hide_thinking: env.config.display.auto_hide_thinking,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
         expanded_live_thinking: HashSet::new(),

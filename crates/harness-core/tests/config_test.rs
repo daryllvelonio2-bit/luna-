@@ -636,6 +636,7 @@ fn display_defaults_are_uncapped_and_auto_collapse() {
     let cfg = Config::default();
     assert_eq!(cfg.display.block_limit, None);
     assert!(cfg.display.auto_collapse);
+    assert!(cfg.display.auto_hide_thinking);
     assert!(cfg.validate().is_ok());
 }
 
@@ -665,10 +666,12 @@ fn display_settings_round_trip_through_file() {
 
     set_in_file(&layers, "display.block_limit", "4").unwrap();
     set_in_file(&layers, "display.auto_collapse", "false").unwrap();
+    set_in_file(&layers, "display.auto_hide_thinking", "false").unwrap();
 
     let cfg = resolve(&layers).unwrap().into_config();
     assert_eq!(cfg.display.block_limit, Some(4));
     assert!(!cfg.display.auto_collapse);
+    assert!(!cfg.display.auto_hide_thinking);
 
     unset_in_file(&layers, "display.block_limit").unwrap();
     let cfg = resolve(&layers).unwrap().into_config();
