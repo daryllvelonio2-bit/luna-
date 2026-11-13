@@ -68,6 +68,33 @@ fn the_tool_tail_drops_ansi_and_keeps_the_newest_progress_update() {
 }
 
 #[test]
+fn the_terminal_pane_sees_the_whole_buffered_output_not_just_the_composer_tail() {
+    let ui = ChatUi::new(true);
+    ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));
+    for i in 0..30 {
+        ui.push_tool_output(&format!("line {i}\n"));
+    }
+    ui.push_tool_output("partial line");
+
+    let snap = ui.tui_snapshot(80);
+    assert_eq!(snap.activity_tool_name.as_deref(), Some("terminal"));
+    assert_eq!(snap.activity_tool_output_all.len(), 31);
+    assert!(
+        snap.activity_tool_output_all[0].contains("line 0"),
+        "the pane buffer keeps the oldest line it still holds"
+    );
+    assert_eq!(
+        snap.activity_tool_output_all.last().unwrap(),
+        "partial line",
+        "the line still being written is part of the live view"
+    );
+    assert!(
+        snap.tool_output_tail.len() < snap.activity_tool_output_all.len(),
+        "the composer tail stays short while the pane gets the full buffer"
+    );
+}
+
+#[test]
 fn expanding_the_tail_reveals_the_buffered_lines_until_the_call_ends() {
     let ui = ChatUi::new(true);
     ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));

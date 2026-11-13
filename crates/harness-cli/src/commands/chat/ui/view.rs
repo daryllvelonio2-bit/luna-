@@ -81,6 +81,11 @@ pub struct TuiLiveSnapshot {
     pub tool_output_tail: Vec<String>,
     pub activity_tool_output_hidden: usize,
     pub activity_tool_output_raw: Vec<String>,
+    /// Every buffered line of the running tool's output, newest last.
+    ///
+    /// The transcript keeps only a short tail; the side pane can use the full buffer, so a build
+    /// that has been running for a while still shows its recent history when the pane is tall.
+    pub activity_tool_output_all: Vec<String>,
     pub compacting: Option<(bool, f32)>,
     pub model: String,
     pub context_used: u32,
@@ -270,6 +275,7 @@ impl ChatUi {
                 let (hidden, raw_lines) = live.tool_output.raw_tail(limit);
                 snap.activity_tool_output_hidden = hidden;
                 snap.activity_tool_output_raw = raw_lines;
+                snap.activity_tool_output_all = live.tool_output.raw_all();
             }
             if let Some(comp) = &live.compaction {
                 snap.compacting = Some((comp.forced, comp.started.elapsed().as_secs_f32()));

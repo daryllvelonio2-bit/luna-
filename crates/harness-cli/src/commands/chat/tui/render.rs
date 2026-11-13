@@ -10,7 +10,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use harness_core::ReasoningEffort;
 
 use super::super::render::{
-    format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, SPINNER_FRAMES,
+    format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, truncate_to_cells,
+    SPINNER_FRAMES,
 };
 use super::super::ui::TuiLiveSnapshot;
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
@@ -31,6 +32,50 @@ pub struct FooterInfo<'a> {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub session_id: &'a str,
     pub in_flight_tools: &'a [super::super::render::TurnProcessItem],
+}
+
+/// Smallest window that still gets the live terminal pane.
+///
+/// The pane is a split, not a popup: below this the transcript and composer would be too narrow
+/// to use, so the output stays in the composer's tail instead. The threshold is about half of a
+/// roomy 160-column terminal, which is the point where a half-screen window still counts as
+/// large enough.
+const TERMINAL_PANE_MIN_WIDTH: u16 = 76;
+/// Below this the pane would show two or three lines, which is worse than the composer tail.
+const TERMINAL_PANE_MIN_HEIGHT: u16 = 14;
+/// Never squeeze the transcript/composer below this to make room for the pane.
+const TERMINAL_PANE_MIN_MAIN_WIDTH: u16 = 42;
+
+fn is_terminal_tool(name: Option<&str>) -> bool {
+    matches!(name, Some("terminal" | "shell" | "bash"))
+}
+
+/// Split `area` into (main, pane) while a terminal command runs, if the window is large enough.
+fn terminal_pane_rects(area: Rect, snap: &TuiLiveSnapshot) -> Option<(Rect, Rect)> {
+    if !is_terminal_tool(snap.activity_tool_name.as_deref()) {
+        return None;
+    }
+    if area.width < TERMINAL_PANE_MIN_WIDTH || area.height < TERMINAL_PANE_MIN_HEIGHT {
+        return None;
+    }
+    // Two fifths of the width, bounded so a very wide terminal doesn't get a half-empty pane and
+    // a merely-adequate one still fits a readable command line.
+    let pane_width = (area.width * 2 / 5).clamp(34, 90);
+    let main_width = area.width.saturating_sub(pane_width);
+    if main_width < TERMINAL_PANE_MIN_MAIN_WIDTH {
+        return None;
+    }
+    Some((
+        Rect {
+            width: main_width,
+            ..area
+        },
+        Rect {
+            x: area.x + main_width,
+            width: pane_width,
+            ..area
+        },
+    ))
 }
 
 /// Draw one complete TUI frame.
@@ -66,12 +111,24 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         && st.system_notices.is_empty()
         && snap.transient_error.is_none();
 
+    // While a terminal command runs, hand it the right side of the body and keep the
+    // transcript/composer in the remaining column. Both halves reflow to their own rect: this is
+    // the whole point of the split, so the composer never sits under the live output.
+    let (main_area, terminal_area) = match terminal_pane_rects(body_area, snap) {
+        Some((main, pane)) => (main, Some(pane)),
+        None => (body_area, None),
+    };
+
     let composer_rect = if show_landing {
         st.transcript_hit_boxes.clear();
-        render_landing(frame, body_area, st, info)
+        render_landing(frame, main_area, st, info)
     } else {
-        render_conversation(frame, body_area, st, snap, info)
+        render_conversation(frame, main_area, st, snap, info, terminal_area.is_some())
     };
+
+    if let Some(pane) = terminal_area {
+        render_terminal_pane(frame, pane, snap);
+    }
 
     // Slash autocomplete popup sits directly above the composer when typing `/...`.
     if matches!(st.modal, ActiveModal::None)
@@ -86,6 +143,94 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
 
     // Active modal overlay renders on top of everything.
     render_modal(frame, area, st, info);
+}
+
+/// The live terminal pane: the running command's real output, newest line at the bottom.
+///
+/// Output arrives through the same progress stream the composer tail uses, so what the pane shows
+/// is the child's actual stdout/stderr — not a replay or a re-run. Escape sequences and `\r`
+/// progress-bar overwrites are already resolved by the tail buffer, which is what makes a build
+/// log read like a terminal instead of raw control bytes.
+fn render_terminal_pane(frame: &mut Frame, rect: Rect, snap: &TuiLiveSnapshot) {
+    let command = snap
+        .activity_call
+        .as_deref()
+        .map(|call| call.trim().trim_start_matches("$ ").to_string())
+        .filter(|call| !call.is_empty())
+        .or_else(|| snap.activity_detail.clone())
+        .unwrap_or_else(|| "terminal".to_string());
+    let title = format!(
+        " terminal · {} ",
+        truncate_to_cells(&command, rect.width.saturating_sub(14) as usize)
+    );
+    let elapsed = snap.activity_elapsed_secs.unwrap_or(0.0);
+    let status = if elapsed >= 1.0 {
+        format!(" running · {} ", format_elapsed_secs(elapsed as u64))
+    } else {
+        " running ".to_string()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_SUBTLE).bg(BG_SURFACE))
+        .style(Style::default().bg(BG_SURFACE))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(ACCENT_CORAL)
+                .bg(BG_SURFACE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(Span::styled(
+                status,
+                Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+            ))
+            .right_aligned(),
+        );
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let width = inner.width as usize;
+    let avail = inner.height as usize;
+    if width == 0 || avail == 0 {
+        return;
+    }
+
+    let lines = &snap.activity_tool_output_all;
+    let mut rows: Vec<Line<'static>> = Vec::with_capacity(avail);
+    if lines.is_empty() {
+        rows.push(Line::from(Span::styled(
+            "waiting for output…",
+            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+        )));
+    } else if lines.len() > avail {
+        let shown = avail.saturating_sub(1).max(1);
+        let start = lines.len().saturating_sub(shown);
+        rows.push(Line::from(Span::styled(
+            format!("… {start} earlier lines"),
+            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+        )));
+        append_terminal_rows(&mut rows, &lines[start..], width);
+    } else {
+        // Pad the top so the newest line sits on the bottom row, where a terminal cursor would
+        // be: a pane that fills downward would leave a moving gap between text and status.
+        for _ in 0..avail.saturating_sub(lines.len()) {
+            rows.push(Line::from(""));
+        }
+        append_terminal_rows(&mut rows, lines, width);
+    }
+
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+fn append_terminal_rows(rows: &mut Vec<Line<'static>>, lines: &[String], width: usize) {
+    for line in lines {
+        rows.push(Line::from(Span::styled(
+            truncate_to_cells(line, width),
+            Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
+        )));
+    }
 }
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_session_id: &str) {
@@ -350,6 +495,7 @@ fn render_conversation(
     st: &mut TuiState,
     snap: &TuiLiveSnapshot,
     info: &FooterInfo<'_>,
+    terminal_pane_open: bool,
 ) -> Rect {
     let margin = if area.width >= 48 { 2 } else { 1 };
     let content_x = area.x + margin;
@@ -378,8 +524,14 @@ fn render_conversation(
     let card_inner_w = (content_w as usize).saturating_sub(4).max(12);
 
     // Build/update settled transcript cache and active turn lines
-    let (notice_lines, active_lines, active_hit_targets) =
-        build_active_and_notice_lines(st, snap, info, content_w as usize, card_inner_w);
+    let (notice_lines, active_lines, active_hit_targets) = build_active_and_notice_lines(
+        st,
+        snap,
+        info,
+        content_w as usize,
+        card_inner_w,
+        terminal_pane_open,
+    );
     ensure_settled_transcript(st, info, content_w as usize, card_inner_w);
 
     let settled_len = st.settled_cache.lines.len();
@@ -997,6 +1149,7 @@ fn build_active_and_notice_lines(
     info: &FooterInfo<'_>,
     width: usize,
     card_inner_w: usize,
+    terminal_pane_open: bool,
 ) -> (
     Vec<Line<'static>>,
     Vec<Line<'static>>,
@@ -1040,6 +1193,7 @@ fn build_active_and_notice_lines(
             st.turn_start.elapsed().as_secs_f32(),
             width,
             card_inner_w,
+            terminal_pane_open,
         );
         active_lines.push(Line::default());
     }
@@ -1195,6 +1349,7 @@ fn render_active_turn_process(
     turn_secs: f32,
     width: usize,
     card_inner_w: usize,
+    terminal_pane_open: bool,
 ) {
     // A tool call is "active" while the live activity card is on screen or a recorded step has
     // not produced a result yet. That is exactly the moment the preceding thinking block should
@@ -1354,6 +1509,16 @@ fn render_active_turn_process(
     if let Some(ref call) = snap.activity_call {
         let tool_name = snap.activity_tool_name.as_deref().unwrap_or("tool");
         let secs = snap.activity_elapsed_secs.unwrap_or(0.0);
+        // When the side pane owns the output, the running card keeps only its header: two live
+        // copies of the same lines would cost rows in a column that just got narrower.
+        let (hidden_lines, tail): (usize, &[String]) = if terminal_pane_open {
+            (0, &[])
+        } else {
+            (
+                snap.activity_tool_output_hidden,
+                &snap.activity_tool_output_raw,
+            )
+        };
         push_running_tool_card(
             out,
             tool_name,
@@ -1361,8 +1526,8 @@ fn render_active_turn_process(
             Some(call),
             snap.activity_detail.as_deref(),
             secs,
-            snap.activity_tool_output_hidden,
-            &snap.activity_tool_output_raw,
+            hidden_lines,
+            tail,
             spinner_tick,
             width,
             card_inner_w,
@@ -3197,6 +3362,7 @@ mod tests {
             4.2,
             84,
             80,
+            false,
         );
 
         let rendered: Vec<String> = out.iter().map(line_text).collect();
@@ -3283,6 +3449,7 @@ mod tests {
                 3.0,
                 84,
                 80,
+                false,
             );
             out.iter().map(line_text).collect::<Vec<_>>().join("\n")
         };
@@ -3526,5 +3693,134 @@ mod tests {
         ensure_settled_transcript(&mut st, &info, 84, 80);
         assert_eq!(st.settled_cache.turns_len, 2);
         assert!(st.settled_cache.lines.len() > initial_lines_len);
+    }
+
+    fn terminal_snap() -> TuiLiveSnapshot {
+        TuiLiveSnapshot {
+            activity_tool_name: Some("terminal".to_string()),
+            activity_call: Some("$ cargo build".to_string()),
+            activity_elapsed_secs: Some(3.2),
+            ..TuiLiveSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn terminal_pane_splits_the_body_only_for_terminal_tools() {
+        let body = Rect {
+            x: 0,
+            y: 1,
+            width: 120,
+            height: 30,
+        };
+        let snap = terminal_snap();
+        let (main, pane) =
+            terminal_pane_rects(body, &snap).expect("a running terminal gets a pane");
+
+        assert_eq!(main.width + pane.width, body.width);
+        assert_eq!(pane.x, main.x + main.width);
+        assert_eq!(pane.y, body.y);
+        assert_eq!(pane.height, body.height);
+        assert!(main.width >= TERMINAL_PANE_MIN_MAIN_WIDTH);
+        assert!(pane.width >= 34);
+
+        let mut other = snap.clone();
+        other.activity_tool_name = Some("read_file".to_string());
+        assert!(
+            terminal_pane_rects(body, &other).is_none(),
+            "only terminal commands get the pane"
+        );
+    }
+
+    #[test]
+    fn terminal_pane_hides_when_the_window_is_too_small_but_survives_half_screen() {
+        let snap = terminal_snap();
+
+        let narrow = Rect {
+            x: 0,
+            y: 1,
+            width: TERMINAL_PANE_MIN_WIDTH - 1,
+            height: 30,
+        };
+        assert!(terminal_pane_rects(narrow, &snap).is_none());
+
+        let short = Rect {
+            x: 0,
+            y: 1,
+            width: 120,
+            height: TERMINAL_PANE_MIN_HEIGHT - 1,
+        };
+        assert!(terminal_pane_rects(short, &snap).is_none());
+
+        // Half of a roomy 176-column window is still a pane-worthy 88 columns.
+        let half = Rect {
+            x: 0,
+            y: 1,
+            width: 88,
+            height: 24,
+        };
+        let (main, pane) =
+            terminal_pane_rects(half, &snap).expect("half screen is still large enough");
+        assert_eq!(main.width + pane.width, half.width);
+        assert!(main.width >= TERMINAL_PANE_MIN_MAIN_WIDTH);
+    }
+
+    #[test]
+    fn terminal_pane_draws_the_running_command_and_its_output() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut snap = terminal_snap();
+        snap.activity_tool_output_all = vec![
+            "Compiling harness-cli v0.1.8".to_string(),
+            "Finished `dev` profile [unoptimized]".to_string(),
+        ];
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_terminal_pane(frame, area, &snap);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("terminal · cargo build"),
+            "the pane names the command:\n{text}"
+        );
+        assert!(
+            text.contains("Compiling harness-cli"),
+            "the pane shows the child's real output:\n{text}"
+        );
+        assert!(
+            text.contains("Finished `dev` profile"),
+            "the newest lines are drawn:\n{text}"
+        );
+        assert!(
+            text.contains("running"),
+            "the pane says the command is still running:\n{text}"
+        );
+    }
+
+    #[test]
+    fn terminal_pane_width_is_bounded_on_very_wide_windows() {
+        let wide = Rect {
+            x: 0,
+            y: 1,
+            width: 320,
+            height: 40,
+        };
+        let (main, pane) = terminal_pane_rects(wide, &terminal_snap()).expect("pane");
+        assert_eq!(pane.width, 90, "a very wide terminal does not get a cavern");
+        assert_eq!(main.width, 230);
     }
 }
