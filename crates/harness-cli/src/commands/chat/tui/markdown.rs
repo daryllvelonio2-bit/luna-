@@ -1211,6 +1211,41 @@ mod tests {
     }
 
     #[test]
+    fn four_column_table_keeps_cells_on_their_own_rows() {
+        let md = "| Tool | Status | Duration | Tokens |\n|---|---|---|---|\n| luna | ok | 0.12s | 842 |\n| cargo test | fail | 45.33s | 1240 |";
+        let lines = render_markdown(md, 80);
+        let joined = text_of(&lines);
+        let flat = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>();
+
+        assert!(joined.contains("┌"), "missing table top border:\n{joined}");
+        assert!(joined.contains("└"), "missing table bottom border:\n{joined}");
+        assert_eq!(
+            flat.iter().filter(|line| line.starts_with('│')).count(),
+            3,
+            "expected a header row and two body rows:\n{joined}"
+        );
+        for row in ["luna", "cargo test"] {
+            let line = flat
+                .iter()
+                .find(|line| line.contains(row))
+                .unwrap_or_else(|| panic!("missing row {row}:\n{joined}"));
+            assert!(
+                line.contains("ok") || line.contains("fail"),
+                "row {row} lost its cells:\n{joined}"
+            );
+        }
+        assert!(
+            !flat
+                .iter()
+                .any(|line| line.contains("Tokensluna") || line.contains("Toolsluna")),
+            "cells ran together:\n{joined}"
+        );
+    }
+
+    #[test]
     fn wide_table_clips_cells_instead_of_wrapping_outside_the_frame() {
         let md = "| Key | Description |\n|---|---|\n| a_very_long_key_name | a very long description that cannot possibly fit |";
         let lines = render_markdown(md, 32);
