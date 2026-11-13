@@ -2726,8 +2726,8 @@ fn styled_composer_line_spans(line: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = line;
     while !rest.is_empty() {
-        let img_pos = rest.find("[image");
-        let paste_pos = rest.find("[pasted ~");
+        let img_pos = rest.find("[Image ").filter(|&p| rest[p..].contains(']'));
+        let paste_pos = rest.find("[Pasted ~").filter(|&p| rest[p..].contains(']'));
         let next = match (img_pos, paste_pos) {
             (Some(a), Some(b)) => Some((a.min(b), a <= b)),
             (Some(a), None) => Some((a, true)),
@@ -3057,13 +3057,13 @@ mod tests {
 
     #[test]
     fn composer_line_highlights_image_and_pasted_tokens() {
-        let spans = styled_composer_line_spans("fix [image: 293x400] and [pasted ~12 lines] now");
+        let spans = styled_composer_line_spans("fix [Image 1] and [Pasted ~12 lines] now");
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[0].content, "fix ");
-        assert_eq!(spans[1].content, "[image: 293x400]");
+        assert_eq!(spans[1].content, "[Image 1]");
         assert_eq!(spans[1].style.fg, Some(ACCENT_CORAL));
         assert_eq!(spans[2].content, " and ");
-        assert_eq!(spans[3].content, "[pasted ~12 lines]");
+        assert_eq!(spans[3].content, "[Pasted ~12 lines]");
         assert_eq!(spans[3].style.fg, Some(YELLOW_WARN));
         assert_eq!(spans[4].content, " now");
     }

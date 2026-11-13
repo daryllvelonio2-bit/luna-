@@ -107,8 +107,9 @@ impl ComposerState {
     }
 
     /// Insert an inline image token `[image: WxH]` at the cursor and track its data URL.
-    pub fn attach_image(&mut self, width: usize, height: usize, data_url: String) {
-        let base = format!("[image: {width}x{height}]");
+    pub fn attach_image(&mut self, _width: usize, _height: usize, data_url: String) {
+        let image_num = self.image_count() + 1;
+        let base = format!("[Image {image_num}]");
         let token = self.unique_token(&base);
         self.insert_token_with_spacing(&token);
         self.attachments.push(ComposerAttachment {
@@ -666,13 +667,13 @@ mod tests {
         let mut c = ComposerState::default();
         c.insert_str("check");
         c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
-        assert_eq!(c.text, "check [image: 293x400] ");
+        assert_eq!(c.text, "check [Image 1] ");
         assert_eq!(c.image_count(), 1);
 
         c.insert_str("please");
         let sub = c.take_for_submit();
-        assert_eq!(sub.display_text, "check [image: 293x400] please");
-        assert_eq!(sub.expanded_text, "check [image: 293x400] please");
+        assert_eq!(sub.display_text, "check [Image 1] please");
+        assert_eq!(sub.expanded_text, "check [Image 1] please");
         assert_eq!(sub.image_data_urls, vec!["data:image/png;base64,AAA"]);
         assert!(c.text.is_empty());
         assert_eq!(c.image_count(), 0);
@@ -703,10 +704,10 @@ mod tests {
     fn backspace_and_delete_remove_attachment_tokens_atomically() {
         let mut c = ComposerState::default();
         c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
-        assert_eq!(c.text, "[image: 293x400] ");
+        assert_eq!(c.text, "[Image 1] ");
         // First backspace deletes trailing space, second deletes whole token.
         c.backspace();
-        assert_eq!(c.text, "[image: 293x400]");
+        assert_eq!(c.text, "[Image 1]");
         assert_eq!(c.image_count(), 1);
         c.backspace();
         assert_eq!(c.text, "");
