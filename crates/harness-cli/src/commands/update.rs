@@ -39,6 +39,13 @@ use super::chat::ui::get_terminal_width;
 /// The commit `build.rs` stamped into this binary, or `unknown` without git metadata.
 pub const BUILD_SHA: &str = env!("LUNA_BUILD_SHA");
 
+fn build_commit_ts() -> Option<u64> {
+    env!("LUNA_BUILD_COMMIT_TS")
+        .parse::<u64>()
+        .ok()
+        .filter(|ts| *ts > 0)
+}
+
 /// A launch check may not feel like a stall. Two seconds is longer than a healthy request and
 /// shorter than the point where the user notices the screen has not settled.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -129,11 +136,12 @@ pub async fn check_at_launch(config: &Config) -> Option<UpdateStatus> {
     let previous = read_cache(&cache);
     let fresh = previous
         .as_ref()
-        .filter(|entry| !entry.latest.is_empty() && now.saturating_sub(entry.checked_at) < ttl);
+        .filter(|entry| cache_entry_is_fresh(entry, now, ttl, BUILD_SHA));
 
-    let (latest, latest_version, run_id, skipped) = match fresh {
+    let (latest, latest_commit_ts, latest_version, run_id, skipped) = match fresh {
         Some(entry) => (
             entry.latest.clone(),
+            entry.latest_commit_ts,
             entry.latest_version.clone(),
             entry.run_id,
             entry.skipped.clone(),
@@ -145,23 +153,40 @@ pub async fn check_at_launch(config: &Config) -> Option<UpdateStatus> {
                 &cache,
                 &CacheEntry {
                     checked_at: now,
+                    checked_for: BUILD_SHA.to_string(),
                     latest: build.sha.clone(),
+                    latest_commit_ts: build.commit_ts,
                     // Filled in below, and only when the question is actually going to be asked.
                     latest_version: String::new(),
                     run_id: Some(build.run_id),
                     skipped: skipped.clone(),
                 },
             );
-            (build.sha, String::new(), Some(build.run_id), skipped)
+            (
+                build.sha,
+                build.commit_ts,
+                String::new(),
+                Some(build.run_id),
+                skipped,
+            )
         }
     };
 
     if latest == BUILD_SHA || skipped.as_deref() == Some(latest.as_str()) {
         return None;
     }
-    // A check result can be stale (or copied with a newer cache file); never prompt to install
-    // the build already running, including when the cached SHA is abbreviated.
     if !cached_build_is_newer_than_running(BUILD_SHA, &latest) {
+        return None;
+    }
+    if !is_candidate_newer(
+        &config.update,
+        BUILD_SHA,
+        build_commit_ts(),
+        &latest,
+        latest_commit_ts,
+    )
+    .await
+    {
         return None;
     }
 
@@ -195,6 +220,7 @@ pub fn remind(status: &UpdateStatus) {
     let path = cache_path();
     let mut entry = read_cache(&path).unwrap_or_default();
     entry.checked_at = now_secs();
+    entry.checked_for = BUILD_SHA.to_string();
     entry.latest = status.latest.clone();
     entry.latest_version = status.latest_version.clone();
     entry.run_id = status.run_id.or(entry.run_id);
@@ -985,7 +1011,16 @@ async fn install(
     progress.set_stage(Stage::Extracting);
     let binary = extract_binary(&bytes)?;
     progress.set_stage(Stage::Installing);
-    install_binary(&binary)
+    let installed_path = install_binary(&binary)?;
+    let path = cache_path();
+    let mut entry = read_cache(&path).unwrap_or_default();
+    entry.checked_at = now_secs();
+    entry.checked_for = status.latest.clone();
+    entry.latest = status.latest.clone();
+    entry.latest_version = status.latest_version.clone();
+    entry.run_id = Some(run_id);
+    write_cache(&path, &entry);
+    Ok(installed_path)
 }
 
 fn extract_binary(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -1074,9 +1109,46 @@ fn github_token() -> Result<String, String> {
 
 // ---------------------------------------------------------------- GitHub and cache
 
-struct LatestBuild {
-    sha: String,
-    run_id: u64,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LatestBuild {
+    pub(crate) sha: String,
+    pub(crate) run_id: u64,
+    pub(crate) commit_ts: Option<u64>,
+}
+
+fn parse_rfc3339_secs(raw: Option<&str>) -> Option<u64> {
+    let ts = chrono::DateTime::parse_from_rfc3339(raw?).ok()?.timestamp();
+    u64::try_from(ts).ok().filter(|value| *value > 0)
+}
+
+pub(crate) fn select_latest_successful_run(body: &serde_json::Value) -> Option<LatestBuild> {
+    let runs = body.get("workflow_runs")?.as_array()?;
+    let run = runs
+        .iter()
+        .filter(|run| {
+            run.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                && run.get("conclusion").and_then(serde_json::Value::as_str) == Some("success")
+                && run
+                    .get("head_sha")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|sha| !sha.is_empty())
+        })
+        .max_by_key(|run| {
+            run.get("run_number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        })?;
+    let commit_ts = parse_rfc3339_secs(
+        run.get("head_commit")
+            .and_then(|commit| commit.get("timestamp"))
+            .and_then(serde_json::Value::as_str),
+    )
+    .or_else(|| parse_rfc3339_secs(run.get("created_at").and_then(serde_json::Value::as_str)));
+    Some(LatestBuild {
+        sha: run.get("head_sha")?.as_str()?.to_string(),
+        run_id: run.get("id")?.as_u64()?,
+        commit_ts,
+    })
 }
 
 /// The newest successful run of the release workflow.
@@ -1093,9 +1165,10 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         .get(url)
         .query(&[
             ("branch", settings.branch.as_str()),
-            ("status", "completed"),
-            ("per_page", "100"),
+            ("status", "success"),
+            ("per_page", "20"),
         ])
+        .header("Accept", GITHUB_ACCEPT)
         .header("User-Agent", USER_AGENT);
 
     let response = tokio::time::timeout(CHECK_TIMEOUT, request.send())
@@ -1106,22 +1179,52 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         return None;
     }
     let body: serde_json::Value = response.json().await.ok()?;
-    let runs = body.get("workflow_runs")?.as_array()?;
-    let run = runs
-        .iter()
-        .filter(|run| {
-            let sha = run.get("head_sha").and_then(serde_json::Value::as_str);
-            sha.is_some_and(|sha| cached_build_is_newer_than_running(BUILD_SHA, sha))
-        })
-        .max_by_key(|run| {
-            run.get("run_number")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        })?;
-    Some(LatestBuild {
-        sha: run.get("head_sha")?.as_str()?.to_string(),
-        run_id: run.get("id")?.as_u64()?,
-    })
+    select_latest_successful_run(&body)
+}
+
+pub(crate) fn compare_status_means_newer(
+    status: &str,
+    current_ts: Option<u64>,
+    candidate_ts: Option<u64>,
+) -> bool {
+    match status {
+        "ahead" => true,
+        "behind" | "identical" => false,
+        "diverged" => matches!((current_ts, candidate_ts), (Some(cur), Some(cand)) if cand > cur),
+        _ => false,
+    }
+}
+
+async fn is_candidate_newer(
+    settings: &config::UpdateSettings,
+    current_sha: &str,
+    current_ts: Option<u64>,
+    candidate_sha: &str,
+    candidate_ts: Option<u64>,
+) -> bool {
+    if !cached_build_is_newer_than_running(current_sha, candidate_sha) {
+        return false;
+    }
+    let url = format!(
+        "https://api.github.com/repos/{}/compare/{}...{}",
+        settings.repo, current_sha, candidate_sha
+    );
+    if let Ok(client) = reqwest::Client::builder().timeout(CHECK_TIMEOUT).build() {
+        let request = client
+            .get(url)
+            .header("Accept", GITHUB_ACCEPT)
+            .header("User-Agent", USER_AGENT);
+        if let Ok(Ok(response)) = tokio::time::timeout(CHECK_TIMEOUT, request.send()).await {
+            if response.status().is_success() {
+                if let Ok(body) = response.json::<serde_json::Value>().await {
+                    if let Some(status) = body.get("status").and_then(serde_json::Value::as_str) {
+                        return compare_status_means_newer(status, current_ts, candidate_ts);
+                    }
+                }
+            }
+        }
+    }
+    matches!((current_ts, candidate_ts), (Some(cur), Some(cand)) if cand > cur)
 }
 
 /// Read the newer commit's package version from its workspace manifest.
@@ -1179,22 +1282,39 @@ fn parse_workspace_version(manifest: &str) -> Option<String> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct CacheEntry {
+pub(crate) struct CacheEntry {
     /// Unix seconds when GitHub answered. `u64` because a clock before the epoch is not a reason
     /// to fail a launch.
     #[serde(default)]
-    checked_at: u64,
+    pub(crate) checked_at: u64,
+    /// The `BUILD_SHA` that wrote this cache entry; reinstalling a new binary invalidates it.
     #[serde(default)]
-    latest: String,
+    pub(crate) checked_for: String,
+    #[serde(default)]
+    pub(crate) latest: String,
+    #[serde(default)]
+    pub(crate) latest_commit_ts: Option<u64>,
     /// The newer commit's package version, learned lazily when the question is shown.
     #[serde(default)]
-    latest_version: String,
+    pub(crate) latest_version: String,
     /// The workflow run that produced `latest`, for the artifact download.
     #[serde(default)]
-    run_id: Option<u64>,
+    pub(crate) run_id: Option<u64>,
     /// A build the user asked not to be reminded about again.
     #[serde(default)]
-    skipped: Option<String>,
+    pub(crate) skipped: Option<String>,
+}
+
+pub(crate) fn cache_entry_is_fresh(
+    entry: &CacheEntry,
+    now: u64,
+    ttl: u64,
+    current_sha: &str,
+) -> bool {
+    !entry.latest.is_empty()
+        && !current_sha.is_empty()
+        && entry.checked_for == current_sha
+        && now.saturating_sub(entry.checked_at) < ttl
 }
 
 fn cache_path() -> PathBuf {
