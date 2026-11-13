@@ -94,7 +94,7 @@ def trigger_build(workflow_id):
     api_request(
         "POST",
         f"/repos/{GITHUB_REPO}/actions/workflows/{workflow_id}/dispatches",
-        data={"ref": GITHUB_REF},
+        data={"ref": GITHUB_REF, "inputs": {"ref": GITHUB_REF}},
     )
     # Wait a moment for the run to be created, then find the most recent run.
     time.sleep(5)
