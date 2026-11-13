@@ -167,6 +167,7 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         mode: st.mode,
         turns: std::mem::take(&mut st.turns),
         turn_meta: std::mem::take(&mut st.turn_meta),
+        settled_cache: std::mem::take(&mut st.settled_cache),
         system_notices: std::mem::take(&mut st.system_notices),
         expanded_thinking: std::mem::take(&mut st.expanded_thinking),
         expanded_tools: std::mem::take(&mut st.expanded_tools),
@@ -203,6 +204,9 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.mode = slot.mode;
     st.turns = slot.turns;
     st.turn_meta = slot.turn_meta;
+    st.settled_cache = slot.settled_cache;
+    st.live_content_cache = super::state::LiveContentCache::default();
+    st.live_reasoning_cache = super::state::LiveReasoningCache::default();
     st.system_notices = slot.system_notices;
     st.expanded_thinking = slot.expanded_thinking;
     st.expanded_tools = slot.expanded_tools;
@@ -462,6 +466,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
 
     st.turns.clear();
     st.turn_meta.clear();
+    st.settled_cache.clear();
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
@@ -2197,6 +2202,7 @@ pub async fn run_slash_command(
         "/clear" => {
             st.turns.clear();
             st.turn_meta.clear();
+            st.settled_cache.clear();
             st.system_notices.clear();
             st.scroll_from_bottom = 0;
             return Ok(Flow::Continue);

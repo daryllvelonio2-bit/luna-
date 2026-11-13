@@ -8,6 +8,7 @@ use harness_core::{
     ApprovalDecision, ApprovalRequest, HarnessError, InterruptHandle, ReasoningEffort,
     SessionRecord, TurnOutcome,
 };
+use ratatui::text::Line;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -613,6 +614,45 @@ pub enum LiveThinkingView {
     Collapsed,
 }
 
+/// Cached rendered lines for settled turns in the transcript.
+#[derive(Debug, Default, Clone)]
+pub struct SettledTranscriptCache {
+    pub session_id: String,
+    pub card_inner_w: usize,
+    pub turns_len: usize,
+    pub process_expanded: bool,
+    pub expanded_thinking: HashSet<(usize, usize)>,
+    pub expanded_tools: HashSet<(usize, usize)>,
+    pub lines: Vec<Line<'static>>,
+    pub hit_targets: Vec<(usize, TranscriptClickTarget)>,
+}
+
+impl SettledTranscriptCache {
+    pub fn clear(&mut self) {
+        self.session_id.clear();
+        self.card_inner_w = 0;
+        self.turns_len = 0;
+        self.lines.clear();
+        self.hit_targets.clear();
+    }
+}
+
+/// Cached rendered markdown lines for active streaming reply text.
+#[derive(Debug, Default, Clone)]
+pub struct LiveContentCache {
+    pub content: String,
+    pub card_inner_w: usize,
+    pub lines: Vec<Line<'static>>,
+}
+
+/// Cached rendered markdown lines for active live reasoning.
+#[derive(Debug, Default, Clone)]
+pub struct LiveReasoningCache {
+    pub reasoning: String,
+    pub card_inner_w: usize,
+    pub lines: Vec<Line<'static>>,
+}
+
 /// Parked state for a session that is not currently displayed (and may still be running a turn).
 pub struct BackgroundSession {
     pub session_id: String,
@@ -629,6 +669,7 @@ pub struct BackgroundSession {
     pub mode: AgentMode,
     pub turns: Vec<TurnRecord>,
     pub turn_meta: Vec<TurnMeta>,
+    pub settled_cache: SettledTranscriptCache,
     pub system_notices: Vec<String>,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
@@ -884,6 +925,9 @@ pub struct TuiState {
     pub version: String,
     pub update_notice: Option<String>,
     pub last_rendered_rect: (u16, u16),
+    pub settled_cache: SettledTranscriptCache,
+    pub live_content_cache: LiveContentCache,
+    pub live_reasoning_cache: LiveReasoningCache,
     /// Unlocked clone-only agent template used to instantiate independent per-session agents
     /// without waiting on a running turn's `env.agent` lock.
     pub template_agent: Arc<ChatAgent>,

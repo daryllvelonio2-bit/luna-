@@ -397,6 +397,9 @@ fn split_keep_spaces(s: &str) -> Vec<&str> {
 
 /// Strip ANSI escape codes from legacy command output so it renders cleanly in `ratatui`.
 pub fn strip_ansi(s: &str) -> String {
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
     dialoguer::console::strip_ansi_codes(s).to_string()
 }
 

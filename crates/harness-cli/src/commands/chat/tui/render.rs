@@ -16,7 +16,7 @@ use super::super::ui::TuiLiveSnapshot;
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
     ActiveModal, LiveThinkingView, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem,
-    TabHitBox, TabHitTarget, TranscriptClickTarget, TranscriptHitBox, TuiState,
+    TabHitBox, TabHitTarget, TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
@@ -375,9 +375,18 @@ fn render_conversation(
         height: transcript_h,
     };
 
-    // Build transcript lines + clickable line hit targets
-    let (mut lines, line_targets) = build_transcript_lines(st, snap, info, content_w as usize);
-    let total_lines = lines.len();
+    let card_inner_w = (content_w as usize).saturating_sub(4).max(12);
+
+    // Build/update settled transcript cache and active turn lines
+    let (notice_lines, active_lines, active_hit_targets) =
+        build_active_and_notice_lines(st, snap, info, content_w as usize, card_inner_w);
+    ensure_settled_transcript(st, info, content_w as usize, card_inner_w);
+
+    let settled_len = st.settled_cache.lines.len();
+    let notice_len = notice_lines.len();
+    let active_len = active_lines.len();
+    let total_lines = settled_len + notice_len + active_len;
+
     let view_h = transcript_rect.height as usize;
     st.max_scroll = total_lines.saturating_sub(view_h);
     if st.scroll_from_bottom > st.max_scroll {
@@ -389,7 +398,20 @@ fn render_conversation(
     let end = (start + view_h).min(total_lines);
 
     st.transcript_hit_boxes.clear();
-    for (line_idx, target) in line_targets {
+    for (line_idx, target) in &st.settled_cache.hit_targets {
+        if *line_idx >= start && *line_idx < end {
+            let screen_y = transcript_rect.y + (*line_idx - start) as u16;
+            st.transcript_hit_boxes.push(TranscriptHitBox {
+                y: screen_y,
+                x_start: transcript_rect.x,
+                x_end: transcript_rect.x + transcript_rect.width,
+                target: target.clone(),
+            });
+        }
+    }
+    let active_base = settled_len + notice_len;
+    for (rel_idx, target) in active_hit_targets {
+        let line_idx = active_base + rel_idx;
         if line_idx >= start && line_idx < end {
             let screen_y = transcript_rect.y + (line_idx - start) as u16;
             st.transcript_hit_boxes.push(TranscriptHitBox {
@@ -401,11 +423,17 @@ fn render_conversation(
         }
     }
 
-    let visible_slice: Vec<Line<'static>> = if start < end {
-        lines.drain(start..end).collect()
-    } else {
-        Vec::new()
-    };
+    let mut visible_slice: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
+    for i in start..end {
+        if i < settled_len {
+            visible_slice.push(st.settled_cache.lines[i].clone());
+        } else if i < settled_len + notice_len {
+            visible_slice.push(notice_lines[i - settled_len].clone());
+        } else {
+            let active_i = i - settled_len - notice_len;
+            visible_slice.push(active_lines[active_i].clone());
+        }
+    }
 
     frame.render_widget(Paragraph::new(visible_slice), transcript_rect);
 
@@ -826,109 +854,181 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
     lines
 }
 
-fn build_transcript_lines(
-    st: &TuiState,
-    snap: &TuiLiveSnapshot,
-    info: &FooterInfo<'_>,
+#[allow(clippy::too_many_arguments)]
+fn render_single_settled_turn(
+    out: &mut Vec<Line<'static>>,
+    hit_targets: &mut Vec<(usize, TranscriptClickTarget)>,
+    idx: usize,
+    turn: &super::super::render::TurnRecord,
+    meta: Option<&TurnMeta>,
+    process_expanded: bool,
+    expanded_thinking: &std::collections::HashSet<(usize, usize)>,
+    expanded_tools: &std::collections::HashSet<(usize, usize)>,
+    fallback_mode: &str,
+    fallback_model: &str,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<(usize, TranscriptClickTarget)>) {
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut hit_targets: Vec<(usize, TranscriptClickTarget)> = Vec::new();
-    let card_inner_w = width.saturating_sub(4).max(12);
-
-    for (idx, turn) in st.turns.iter().enumerate() {
-        // 1. User message card (`#1e1e20` + coral `▎` left bar)
-        if !turn.user_query.trim().is_empty() {
-            push_user_card(&mut out, &turn.user_query, width, card_inner_w);
-            out.push(Line::default());
-        }
-
-        // 2 & 3. Chronological reasoning, prose, & OpenCode tool cards (clickable, or Ctrl+O to toggle all)
-        render_completed_turn_process(
-            &mut out,
-            &mut hit_targets,
-            idx,
-            turn,
-            st.process_expanded,
-            &st.expanded_thinking,
-            &st.expanded_tools,
-            width,
-            card_inner_w,
-        );
-
-        // 4. Assistant reply (markdown)
-        let display_reply = reply_for_display(&turn.reply);
-        if !display_reply.trim().is_empty() {
-            if !turn.reasoning.as_deref().unwrap_or("").is_empty() || !turn.tool_items.is_empty() {
-                out.push(Line::default());
-            }
-            for mline in render_markdown(display_reply, card_inner_w) {
-                let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
-                spans.extend(mline.spans);
-                out.push(Line::from(spans));
-            }
-        }
-
-        // 5. Turn footer (`Build · Model Name · 2.2s · 5.6 tok/s`)
-        let meta = st.turn_meta.get(idx);
-        let mode_str = meta.map(|m| m.mode.as_str()).unwrap_or(st.mode.label());
-        let model_raw = meta.map(|m| m.model.as_str()).unwrap_or(info.model);
-        let model_disp = friendly_model_name(model_raw);
-        let dur_secs = turn.duration.as_secs_f64();
-        let dur_label = if dur_secs < 60.0 {
-            format!("{dur_secs:.1}s")
-        } else {
-            format_elapsed_secs(turn.duration.as_secs())
-        };
-
-        let mut footer_spans = vec![
-            Span::styled("  ", Style::default().bg(BG_CANVAS)),
-            Span::styled(
-                mode_str.to_string(),
-                Style::default().fg(mode_accent(mode_str)).bg(BG_CANVAS),
-            ),
-            Span::styled(
-                format!(" · {model_disp} · {dur_label}"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
-            ),
-        ];
-        if let Some(toks) = meta.and_then(|m| m.output_tokens) {
-            if dur_secs > 0.05 && toks > 0 {
-                let tps = toks as f64 / dur_secs;
-                footer_spans.push(Span::styled(
-                    format!(" · {tps:.1} tok/s"),
-                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
-                ));
-            }
-        }
-        out.push(Line::default());
-        out.push(Line::from(footer_spans));
+    card_inner_w: usize,
+) {
+    // 1. User message card (`#1e1e20` + coral `▎` left bar)
+    if !turn.user_query.trim().is_empty() {
+        push_user_card(out, &turn.user_query, width, card_inner_w);
         out.push(Line::default());
     }
 
-    // Inline system notices (e.g. from commands)
+    // 2 & 3. Chronological reasoning, prose, & OpenCode tool cards (clickable, or Ctrl+O to toggle all)
+    render_completed_turn_process(
+        out,
+        hit_targets,
+        idx,
+        turn,
+        process_expanded,
+        expanded_thinking,
+        expanded_tools,
+        width,
+        card_inner_w,
+    );
+
+    // 4. Assistant reply (markdown)
+    let display_reply = reply_for_display(&turn.reply);
+    if !display_reply.trim().is_empty() {
+        if !turn.reasoning.as_deref().unwrap_or("").is_empty() || !turn.tool_items.is_empty() {
+            out.push(Line::default());
+        }
+        for mline in render_markdown(display_reply, card_inner_w) {
+            let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+            spans.extend(mline.spans);
+            out.push(Line::from(spans));
+        }
+    }
+
+    // 5. Turn footer (`Build · Model Name · 2.2s · 5.6 tok/s`)
+    let mode_str = meta.map(|m| m.mode.as_str()).unwrap_or(fallback_mode);
+    let model_raw = meta.map(|m| m.model.as_str()).unwrap_or(fallback_model);
+    let model_disp = friendly_model_name(model_raw);
+    let dur_secs = turn.duration.as_secs_f64();
+    let dur_label = if dur_secs < 60.0 {
+        format!("{dur_secs:.1}s")
+    } else {
+        format_elapsed_secs(turn.duration.as_secs())
+    };
+
+    let mut footer_spans = vec![
+        Span::styled("  ", Style::default().bg(BG_CANVAS)),
+        Span::styled(
+            mode_str.to_string(),
+            Style::default().fg(mode_accent(mode_str)).bg(BG_CANVAS),
+        ),
+        Span::styled(
+            format!(" · {model_disp} · {dur_label}"),
+            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+        ),
+    ];
+    if let Some(toks) = meta.and_then(|m| m.output_tokens) {
+        if dur_secs > 0.05 && toks > 0 {
+            let tps = toks as f64 / dur_secs;
+            footer_spans.push(Span::styled(
+                format!(" · {tps:.1} tok/s"),
+                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            ));
+        }
+    }
+    out.push(Line::default());
+    out.push(Line::from(footer_spans));
+    out.push(Line::default());
+}
+
+fn ensure_settled_transcript(
+    st: &mut TuiState,
+    info: &FooterInfo<'_>,
+    width: usize,
+    card_inner_w: usize,
+) {
+    let cache_valid = st.settled_cache.session_id == info.session_id
+        && st.settled_cache.card_inner_w == card_inner_w
+        && st.settled_cache.process_expanded == st.process_expanded
+        && st.settled_cache.expanded_thinking == st.expanded_thinking
+        && st.settled_cache.expanded_tools == st.expanded_tools;
+
+    if cache_valid && st.settled_cache.turns_len == st.turns.len() {
+        return;
+    }
+
+    let start_idx = if cache_valid && st.turns.len() > st.settled_cache.turns_len {
+        st.settled_cache.turns_len
+    } else {
+        st.settled_cache.session_id = info.session_id.to_string();
+        st.settled_cache.card_inner_w = card_inner_w;
+        st.settled_cache.process_expanded = st.process_expanded;
+        st.settled_cache.expanded_thinking = st.expanded_thinking.clone();
+        st.settled_cache.expanded_tools = st.expanded_tools.clone();
+        st.settled_cache.lines.clear();
+        st.settled_cache.hit_targets.clear();
+        st.settled_cache.turns_len = 0;
+        0
+    };
+
+    let fallback_mode = st.mode.label().to_string();
+    let fallback_model = info.model.to_string();
+
+    for idx in start_idx..st.turns.len() {
+        let turn = &st.turns[idx];
+        let meta = st.turn_meta.get(idx).cloned();
+        render_single_settled_turn(
+            &mut st.settled_cache.lines,
+            &mut st.settled_cache.hit_targets,
+            idx,
+            turn,
+            meta.as_ref(),
+            st.process_expanded,
+            &st.expanded_thinking,
+            &st.expanded_tools,
+            &fallback_mode,
+            &fallback_model,
+            width,
+            card_inner_w,
+        );
+    }
+    st.settled_cache.turns_len = st.turns.len();
+}
+
+fn build_active_and_notice_lines(
+    st: &mut TuiState,
+    snap: &TuiLiveSnapshot,
+    info: &FooterInfo<'_>,
+    width: usize,
+    card_inner_w: usize,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Line<'static>>,
+    Vec<(usize, TranscriptClickTarget)>,
+) {
+    let mut notice_lines: Vec<Line<'static>> = Vec::new();
     for notice in &st.system_notices {
         for line in wrap_plain_text(&strip_ansi(notice), card_inner_w) {
-            out.push(Line::from(Span::styled(
+            notice_lines.push(Line::from(Span::styled(
                 format!("  {line}"),
                 Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
             )));
         }
     }
     if !st.system_notices.is_empty() {
-        out.push(Line::default());
+        notice_lines.push(Line::default());
     }
 
-    // Active streaming turn
+    let mut active_lines: Vec<Line<'static>> = Vec::new();
+    let mut active_hit_targets: Vec<(usize, TranscriptClickTarget)> = Vec::new();
+
     if st.active_turn.is_some() {
         if !st.current_query.trim().is_empty() {
-            push_user_card(&mut out, &st.current_query, width, card_inner_w);
-            out.push(Line::default());
+            push_user_card(&mut active_lines, &st.current_query, width, card_inner_w);
+            active_lines.push(Line::default());
         }
 
         render_active_turn_process(
-            &mut out,
-            &mut hit_targets,
+            &mut active_lines,
+            &mut active_hit_targets,
+            &mut st.live_content_cache,
+            &mut st.live_reasoning_cache,
             snap,
             info.in_flight_tools,
             st.process_expanded,
@@ -940,10 +1040,10 @@ fn build_transcript_lines(
             width,
             card_inner_w,
         );
-        out.push(Line::default());
+        active_lines.push(Line::default());
     }
 
-    (out, hit_targets)
+    (notice_lines, active_lines, active_hit_targets)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1081,6 +1181,8 @@ fn render_completed_turn_process(
 fn render_active_turn_process(
     out: &mut Vec<Line<'static>>,
     hit_targets: &mut Vec<(usize, TranscriptClickTarget)>,
+    live_content_cache: &mut super::state::LiveContentCache,
+    live_reasoning_cache: &mut super::state::LiveReasoningCache,
     snap: &TuiLiveSnapshot,
     in_flight_tools: &[super::super::render::TurnProcessItem],
     process_expanded: bool,
@@ -1282,20 +1384,27 @@ fn render_active_turn_process(
                     "  │",
                     Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
                 )));
-                let rlines = render_markdown(trimmed, card_inner_w.saturating_sub(2));
+                let reasoning_inner_w = card_inner_w.saturating_sub(2);
+                if live_reasoning_cache.reasoning != trimmed
+                    || live_reasoning_cache.card_inner_w != reasoning_inner_w
+                {
+                    live_reasoning_cache.reasoning = trimmed.to_string();
+                    live_reasoning_cache.card_inner_w = reasoning_inner_w;
+                    live_reasoning_cache.lines = render_markdown(trimmed, reasoning_inner_w);
+                }
                 let skip = if view_mode == LiveThinkingView::Expanded {
                     0
                 } else {
-                    rlines.len().saturating_sub(10)
+                    live_reasoning_cache.lines.len().saturating_sub(10)
                 };
-                for rline in rlines.into_iter().skip(skip) {
+                for rline in live_reasoning_cache.lines.iter().skip(skip) {
                     let mut spans = vec![Span::styled(
                         "  │ ",
                         Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
                     )];
-                    for s in rline.spans {
+                    for s in &rline.spans {
                         spans.push(Span::styled(
-                            s.content,
+                            s.content.clone(),
                             s.style.fg(TEXT_MUTED).bg(BG_CANVAS),
                         ));
                     }
@@ -1321,20 +1430,32 @@ fn render_active_turn_process(
 
     // Live streaming reply text
     if !snap.content.trim().is_empty() {
-        for mline in render_markdown(&snap.content, card_inner_w) {
-            let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
-            spans.extend(mline.spans);
-            out.push(Line::from(spans));
+        if live_content_cache.content != snap.content
+            || live_content_cache.card_inner_w != card_inner_w
+        {
+            live_content_cache.content = snap.content.clone();
+            live_content_cache.card_inner_w = card_inner_w;
+            live_content_cache.lines.clear();
+            for mline in render_markdown(&snap.content, card_inner_w) {
+                let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+                spans.extend(mline.spans);
+                live_content_cache.lines.push(Line::from(spans));
+            }
         }
-    } else if snap.reasoning.trim().is_empty() && snap.activity_call.is_none() {
-        let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-        out.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
-            Span::styled(
-                format!("{spinner} Thinking… {turn_secs:.1}s"),
-                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
-            ),
-        ]));
+        out.extend(live_content_cache.lines.iter().cloned());
+    } else {
+        live_content_cache.content.clear();
+        live_content_cache.lines.clear();
+        if snap.reasoning.trim().is_empty() && snap.activity_call.is_none() {
+            let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+            out.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+                Span::styled(
+                    format!("{spinner} Thinking… {turn_secs:.1}s"),
+                    Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                ),
+            ]));
+        }
     }
 }
 
@@ -1707,12 +1828,6 @@ fn push_completed_tool_card(
     }
 
     let has_diff = !item.diff_lines.is_empty() && !item.is_error;
-    let raw_lines: Vec<String> = item
-        .output
-        .lines()
-        .map(strip_ansi)
-        .filter(|l| !l.trim().is_empty())
-        .collect();
     let tail_cap = if open { 40 } else { 7 };
 
     if has_diff {
@@ -1758,36 +1873,23 @@ fn push_completed_tool_card(
                 )],
             );
         }
-    } else if !raw_lines.is_empty() {
-        push_card_blank_row(
-            out,
-            Some(hit_targets),
-            Some(&click_target),
-            border_color,
-            width,
-        );
-        let start = raw_lines.len().saturating_sub(tail_cap);
-        let hidden = item.output_dropped + start;
-        if hidden > 0 {
-            push_card_row(
+    } else if !item.output.trim().is_empty() {
+        let total_non_empty = item
+            .output
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        if total_non_empty > 0 {
+            push_card_blank_row(
                 out,
                 Some(hit_targets),
                 Some(&click_target),
                 border_color,
                 width,
-                vec![Span::styled(
-                    format!("({hidden} earlier lines)"),
-                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-                )],
             );
-        }
-        let body_color = if item.is_error && raw_lines.len() <= 6 {
-            RED_ERR
-        } else {
-            TEXT_MUTED
-        };
-        for oline in &raw_lines[start..] {
-            for wrapped in wrap_plain_text(oline, card_inner_w) {
+            let start = total_non_empty.saturating_sub(tail_cap);
+            let hidden = item.output_dropped + start;
+            if hidden > 0 {
                 push_card_row(
                     out,
                     Some(hit_targets),
@@ -1795,10 +1897,38 @@ fn push_completed_tool_card(
                     border_color,
                     width,
                     vec![Span::styled(
-                        wrapped,
-                        Style::default().fg(body_color).bg(BG_SURFACE),
+                        format!("({hidden} earlier lines)"),
+                        Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
                     )],
                 );
+            }
+            let body_color = if item.is_error && total_non_empty <= 6 {
+                RED_ERR
+            } else {
+                TEXT_MUTED
+            };
+            let tail_lines: Vec<&str> = item
+                .output
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .rev()
+                .take(tail_cap)
+                .collect();
+            for oline in tail_lines.into_iter().rev() {
+                let clean = strip_ansi(oline);
+                for wrapped in wrap_plain_text(&clean, card_inner_w) {
+                    push_card_row(
+                        out,
+                        Some(hit_targets),
+                        Some(&click_target),
+                        border_color,
+                        width,
+                        vec![Span::styled(
+                            wrapped,
+                            Style::default().fg(body_color).bg(BG_SURFACE),
+                        )],
+                    );
+                }
             }
         }
     } else if item.is_error && !item.result_formatted.is_empty() {
@@ -3022,9 +3152,14 @@ mod tests {
         collapsed_steps.insert(0);
         let expanded_tools = HashSet::new();
 
+        let mut content_cache = super::super::state::LiveContentCache::default();
+        let mut reasoning_cache = super::super::state::LiveReasoningCache::default();
+
         render_active_turn_process(
             &mut out,
             &mut hits,
+            &mut content_cache,
+            &mut reasoning_cache,
             &snap,
             &in_flight,
             false,
@@ -3185,5 +3320,127 @@ mod tests {
         assert_eq!(spans[3].content, "[Pasted ~12 lines]");
         assert_eq!(spans[3].style.fg, Some(YELLOW_WARN));
         assert_eq!(spans[4].content, " now");
+    }
+
+    #[test]
+    fn ensure_settled_transcript_caches_and_appends_incrementally() {
+        let mut st = TuiState {
+            turns: vec![TurnRecord {
+                user_query: "turn one".to_string(),
+                reasoning: None,
+                tools: Vec::new(),
+                tool_items: Vec::new(),
+                duration: Duration::from_secs(1),
+                reply: "reply one".to_string(),
+            }],
+            turn_meta: vec![TurnMeta {
+                mode: "Build".to_string(),
+                model: "gpt-4".to_string(),
+                output_tokens: Some(10),
+            }],
+            system_notices: Vec::new(),
+            process_expanded: false,
+            expanded_thinking: HashSet::new(),
+            expanded_tools: HashSet::new(),
+            expanded_live_thinking: HashSet::new(),
+            expanded_live_tools: HashSet::new(),
+            live_thinking_view: LiveThinkingView::Tail,
+            reasoning_effort: None,
+            mode: super::super::state::AgentMode::Build,
+            composer: super::super::state::ComposerState::default(),
+            tabs: Vec::new(),
+            total_sessions_count: 1,
+            hit_boxes: Vec::new(),
+            transcript_hit_boxes: Vec::new(),
+            scroll_from_bottom: 0,
+            max_scroll: 0,
+            modal: ActiveModal::None,
+            slash_popup: super::super::state::SlashPopupState::default(),
+            queue: std::collections::VecDeque::new(),
+            current_cancel: tokio_util::sync::CancellationToken::new(),
+            active_turn: None,
+            active_goal: None,
+            current_query: String::new(),
+            turn_start: std::time::Instant::now(),
+            quota_refreshed_at: std::time::Instant::now(),
+            idle_pass: super::super::super::helpers::IdleMemoryPass::new(1),
+            pending_job_turn: None,
+            pending_images: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            history_path: None,
+            ctrl_c_armed: None,
+            spinner_tick: 0,
+            cwd_label: "/workspace".to_string(),
+            version: "0.1.8".to_string(),
+            update_notice: None,
+            last_rendered_rect: (100, 30),
+            settled_cache: super::super::state::SettledTranscriptCache::default(),
+            live_content_cache: super::super::state::LiveContentCache::default(),
+            live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
+            template_agent: {
+                let tmp = tempfile::tempdir().unwrap();
+                let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
+                    harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
+                ));
+                let notes = std::sync::Arc::new(harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+                let registry = std::sync::Arc::new(harness_core::DefaultToolRegistry::new());
+                let creds = harness_providers::CredentialManager::new(None).unwrap();
+                let discovery = std::sync::Arc::new(harness_providers::ModelDiscovery::new(None, 0, Default::default()));
+                let provider = std::sync::Arc::new(
+                    harness_providers::GenericProviderClient::new(
+                        "openai".to_string(),
+                        "gpt-4o".to_string(),
+                        creds,
+                        discovery,
+                        None,
+                    )
+                    .unwrap(),
+                );
+                std::sync::Arc::new(harness_core::Agent::new(
+                    provider,
+                    memory,
+                    notes,
+                    registry,
+                    harness_core::AgentConfig::default(),
+                ))
+            },
+            background_sessions: std::collections::HashMap::new(),
+        };
+
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+        };
+
+        ensure_settled_transcript(&mut st, &info, 84, 80);
+        assert_eq!(st.settled_cache.turns_len, 1);
+        let initial_lines_len = st.settled_cache.lines.len();
+        assert!(initial_lines_len > 0);
+
+        // A second call with identical state does not rebuild lines
+        ensure_settled_transcript(&mut st, &info, 84, 80);
+        assert_eq!(st.settled_cache.lines.len(), initial_lines_len);
+
+        // Appending turn two incrementally adds only the second turn's lines
+        st.turns.push(TurnRecord {
+            user_query: "turn two".to_string(),
+            reasoning: None,
+            tools: Vec::new(),
+            tool_items: Vec::new(),
+            duration: Duration::from_secs(2),
+            reply: "reply two".to_string(),
+        });
+        st.turn_meta.push(TurnMeta {
+            mode: "Build".to_string(),
+            model: "gpt-4".to_string(),
+            output_tokens: Some(20),
+        });
+
+        ensure_settled_transcript(&mut st, &info, 84, 80);
+        assert_eq!(st.settled_cache.turns_len, 2);
+        assert!(st.settled_cache.lines.len() > initial_lines_len);
     }
 }

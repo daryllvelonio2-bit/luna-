@@ -466,6 +466,9 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         update_notice: None,
         last_rendered_rect: (120, 34),
+        settled_cache: state::SettledTranscriptCache::default(),
+        live_content_cache: state::LiveContentCache::default(),
+        live_reasoning_cache: state::LiveReasoningCache::default(),
         template_agent,
         background_sessions: HashMap::new(),
     };
