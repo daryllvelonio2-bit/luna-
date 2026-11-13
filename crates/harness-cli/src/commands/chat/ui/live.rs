@@ -2,7 +2,7 @@ use super::super::render::{
     needs_separator, reasoning_rows, tool_activity_detail, OutputBlockKind,
 };
 use super::metrics::finished_reasoning_text;
-use super::panels::Compaction;
+use super::panels::{Compaction, PtyPane};
 use super::tail::Activity;
 use super::terminal::get_terminal_width;
 use super::view::ChatUi;
@@ -126,6 +126,11 @@ impl ChatUi {
         live.activity = None;
         live.tool_output.clear();
         live.tool_output_expanded = false;
+        // A call that ends without reporting a screen (an interrupt, say) must not leave the mirror
+        // claiming to be busy forever: clearing the flag starts its idle countdown.
+        if let Some(pane) = live.pty_pane.as_mut() {
+            pane.running = false;
+        }
         drop(live);
         self.notify_tui();
     }
@@ -207,4 +212,147 @@ impl ChatUi {
             .compaction
             .is_some()
     }
+    /// A pty tool has started: open the mirror, or mark the one already on screen as busy.
+    ///
+    /// This is deliberately separate from [`Self::start_activity`]: the activity row lives only as
+    /// long as the call, while a pty session outlives it. `close` and `list` are bookkeeping, not
+    /// screen updates, so neither opens a pane.
+    pub fn begin_pty_activity(&self, name: &str, arguments: &serde_json::Value) {
+        let action = pty_action(name, arguments);
+        if action == "close" || action == "list" {
+            return;
+        }
+        let now = std::time::Instant::now();
+        {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            match live.pty_pane.as_mut() {
+                Some(pane) => {
+                    pane.running = true;
+                    pane.last_activity = now;
+                }
+                None => {
+                    live.pty_pane = Some(PtyPane {
+                        title: pty_title(name, arguments),
+                        lines: Vec::new(),
+                        last_activity: now,
+                        running: true,
+                    });
+                }
+            }
+        }
+        self.notify_tui();
+    }
+    /// A pty tool finished: show the screen it reported, and close the mirror on a real `close`.
+    ///
+    /// The pane is not dropped when the call ends — the session it mirrors usually does not. Only a
+    /// successful close, or the idle cutoff in [`ChatUi::tui_snapshot`], takes it away.
+    pub fn record_pty_output(&self, name: &str, is_error: bool, output: &str) {
+        if !is_error && output_closes_pty(name, output) {
+            let had = {
+                let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+                live.pty_pane.take().is_some()
+            };
+            if had {
+                self.notify_tui();
+            }
+            return;
+        }
+        let lines = pty_screen_lines(output, !is_error);
+        {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(pane) = live.pty_pane.as_mut() else {
+                return;
+            };
+            pane.running = false;
+            pane.last_activity = std::time::Instant::now();
+            if let Some(lines) = lines {
+                pane.lines = lines;
+            }
+        }
+        self.notify_tui();
+    }
+}
+
+/// How many screen lines the mirror keeps. A pty viewport is dozens of rows; this only bounds
+/// what a scrollback read can hand us, and the pane draws the newest rows that fit.
+const PTY_PANE_MAX_LINES: usize = 300;
+
+/// The action a pty call names, lowercased, or the tool name's own tail when it passes none.
+fn pty_action(name: &str, arguments: &serde_json::Value) -> String {
+    if let Some(action) = arguments.get("action").and_then(|v| v.as_str()) {
+        return action.to_ascii_lowercase();
+    }
+    let tail = name.rsplit("__").next().unwrap_or(name);
+    tail.trim_start_matches("pty_").to_ascii_lowercase()
+}
+
+/// A short label for the pane's title: `send · chat`, `start · luna --help`.
+fn pty_title(name: &str, arguments: &serde_json::Value) -> String {
+    let action = pty_action(name, arguments);
+    let non_empty = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let argv = arguments
+        .get("argv")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|s| !s.is_empty());
+    let target = non_empty("label")
+        .or(argv)
+        .or_else(|| non_empty("command"))
+        .or_else(|| non_empty("session_id"));
+    match target {
+        Some(target) => format!("{action} · {target}"),
+        None => action,
+    }
+}
+
+/// Whether a finished call closed its pty session, which is the one event that removes the mirror.
+fn output_closes_pty(name: &str, output: &str) -> bool {
+    if pty_action(name, &serde_json::Value::Null) == "close" {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(output.trim())
+        .ok()
+        .is_some_and(|value| value.get("closed").is_some())
+}
+
+/// The rendered screen inside a pty tool's JSON result, or the raw text when it is not JSON.
+///
+/// A failed call's raw text is an error message, not a screen, so `allow_raw` is off in that case.
+fn pty_screen_lines(output: &str, allow_raw: bool) -> Option<Vec<String>> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => value
+            .get("screen")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("text").and_then(|v| v.as_str()))?
+            .to_string(),
+        Err(_) if !allow_raw => return None,
+        Err(_) => trimmed.to_string(),
+    };
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    if lines.len() > PTY_PANE_MAX_LINES {
+        lines.drain(..lines.len() - PTY_PANE_MAX_LINES);
+    }
+    Some(lines)
 }

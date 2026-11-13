@@ -51,7 +51,7 @@ pub use results::{
     format_approval_verdict, format_live_tool_output, format_process_header, format_tool_result,
     format_tool_result_for,
 };
-pub use tools::{format_tool_call, tool_activity_detail};
+pub use tools::{format_tool_call, is_pty_tool, tool_activity_detail};
 pub use transcript::{
     bounded_tool_output, clean_user_query_for_transcript, has_verdict, is_non_tool_event,
     parse_turns_from_history, render_all_turns, render_transcript, render_turn_lines,

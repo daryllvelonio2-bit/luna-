@@ -3,6 +3,20 @@ use colored::Colorize;
 use super::blocks::{truncate_visible, MAX_TOOL_ARG_CHARS};
 use super::paths::{lookup_memory_from_db, lookup_note_title, shorten_path, shorten_paths_in_text};
 
+/// Whether a tool owns a real terminal screen, and therefore the live pty mirror.
+///
+/// Only the pty bridge qualifies: `mcp__terminal-pty__pty_start` and the rest of the `pty_*`
+/// family, plus the skill command `terminal-pty`. An ordinary `terminal`/`shell`/`bash` call
+/// already streams its tail into the running card, so a pane for it would only cost the
+/// transcript space.
+pub fn is_pty_tool(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    lowered.contains("terminal-pty")
+        || lowered.contains("terminal_pty")
+        || lowered.starts_with("pty_")
+        || lowered.contains("__pty_")
+}
+
 /// What the activity line can say about a call beyond "still running": the size of the edit a
 /// mutating tool is about to make, so a patch shows its shape while it is applied.
 pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option<String> {
@@ -565,4 +579,24 @@ fn format_fallback_call(glyph: &str, name: &str, arguments: &serde_json::Value) 
         verb_column(&display_name),
         args_str.dimmed()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pty_tool;
+
+    #[test]
+    fn only_the_pty_bridge_owns_a_live_screen() {
+        for pty in [
+            "mcp__terminal-pty__pty_start",
+            "mcp__terminal-pty__pty_run",
+            "terminal-pty",
+            "pty_keys",
+        ] {
+            assert!(is_pty_tool(pty), "{pty} drives a pty");
+        }
+        for other in ["terminal", "shell", "bash", "read_file", "todo_list"] {
+            assert!(!is_pty_tool(other), "{other} must not open the pty pane");
+        }
+    }
 }

@@ -13,7 +13,7 @@ use super::super::render::{
     format_elapsed_secs, reply_for_display, shorten_path, shorten_paths_in_text, truncate_to_cells,
     SPINNER_FRAMES,
 };
-use super::super::ui::TuiLiveSnapshot;
+use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
     ActiveModal, LiveThinkingView, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem,
@@ -35,67 +35,42 @@ pub struct FooterInfo<'a> {
     pub in_flight_tools: &'a [super::super::render::TurnProcessItem],
 }
 
-/// Smallest window that still gets the live pty pane.
+/// Smallest transcript that still gets the live pty pane.
 ///
-/// The pane docks under the transcript, so it costs rows rather than columns: below this width
-/// a command line no longer fits, and below this height the transcript would shrink to a couple
-/// of rows.
-const TERMINAL_PANE_MIN_WIDTH: u16 = 40;
-const TERMINAL_PANE_MIN_BODY_HEIGHT: u16 = 16;
-/// The transcript keeps at least this many rows no matter how short the window is.
-const TERMINAL_PANE_MIN_MAIN_HEIGHT: u16 = 6;
-/// Rows the pty pane occupies at the bottom of the body, borders included.
-///
-/// The pane is a monitor, not a workspace. A pty screen stretched over the whole window pushes
-/// the conversation out of sight; ten rows still show the newest output and the status line, and
-/// the transcript above keeps its full width.
-const TERMINAL_PANE_ROWS: u16 = 10;
+/// The pane is an overlay in the transcript's bottom-right corner, so it hides text rather than
+/// shrinking the conversation. Below this size it would hide most of the visible lines, and the
+/// small screen is not worth the cost.
+const PTY_PANE_MIN_TRANSCRIPT_WIDTH: u16 = 56;
+const PTY_PANE_MIN_TRANSCRIPT_HEIGHT: u16 = 16;
+/// The pane stays a monitor, not a workspace: one third of the transcript, within these bounds.
+const PTY_PANE_MIN_WIDTH: u16 = 30;
+const PTY_PANE_MAX_WIDTH: u16 = 38;
+/// Rows the pty pane occupies, borders included.
+const PTY_PANE_ROWS: u16 = 12;
 
-/// Tools that own a real terminal screen, and therefore the live pane.
+/// Where the live pty mirror sits: the bottom-right corner of the visible transcript.
 ///
-/// Only the pty bridge qualifies: `mcp__terminal-pty__pty_start` and the rest of the `pty_*`
-/// family, plus the skill command `terminal-pty`. An ordinary `terminal`/`shell`/`bash` call
-/// already streams its tail into the running card, so a pane for it would only cost the
-/// transcript space.
-fn is_pty_tool(name: Option<&str>) -> bool {
-    let Some(name) = name else {
-        return false;
-    };
-    let lowered = name.to_ascii_lowercase();
-    lowered.contains("terminal-pty")
-        || lowered.contains("terminal_pty")
-        || lowered.starts_with("pty_")
-        || lowered.contains("__pty_")
-}
-
-/// Split `area` into (main, pane) while a pty tool runs, if the window is large enough.
-///
-/// The pane is a short, full-width strip at the bottom of the body: the transcript and composer
-/// above it keep every column they had, and the pane never grows past a few rows.
-fn terminal_pane_rects(area: Rect, snap: &TuiLiveSnapshot) -> Option<(Rect, Rect)> {
-    if !is_pty_tool(snap.activity_tool_name.as_deref()) {
+/// `None` when the transcript is too small to spare the corner, which keeps a narrow window's
+/// conversation readable instead of covering it with a terminal.
+fn pty_pane_rect(transcript: Rect) -> Option<Rect> {
+    if transcript.width < PTY_PANE_MIN_TRANSCRIPT_WIDTH
+        || transcript.height < PTY_PANE_MIN_TRANSCRIPT_HEIGHT
+    {
         return None;
     }
-    if area.width < TERMINAL_PANE_MIN_WIDTH || area.height < TERMINAL_PANE_MIN_BODY_HEIGHT {
+    let width = (transcript.width / 3)
+        .clamp(PTY_PANE_MIN_WIDTH, PTY_PANE_MAX_WIDTH)
+        .min(transcript.width.saturating_sub(2));
+    let height = PTY_PANE_ROWS.min(transcript.height.saturating_sub(2));
+    if width < 20 || height < 5 {
         return None;
     }
-    let pane_height =
-        TERMINAL_PANE_ROWS.min(area.height.saturating_sub(TERMINAL_PANE_MIN_MAIN_HEIGHT));
-    if pane_height < 4 {
-        return None;
-    }
-    let main_height = area.height.saturating_sub(pane_height);
-    Some((
-        Rect {
-            height: main_height,
-            ..area
-        },
-        Rect {
-            y: area.y + main_height,
-            height: pane_height,
-            ..area
-        },
-    ))
+    Some(Rect {
+        x: transcript.x + transcript.width - width,
+        y: transcript.y + transcript.height - height,
+        width,
+        height,
+    })
 }
 
 /// Draw one complete TUI frame.
@@ -135,12 +110,9 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         && st.system_notices.is_empty()
         && snap.transient_error.is_none();
 
-    // While a pty tool runs, dock a short terminal monitor under the body. The transcript and
-    // composer above it keep the full width; the pane costs a few rows, not a column.
-    let (main_area, terminal_area) = match terminal_pane_rects(body_area, snap) {
-        Some((main, pane)) => (main, Some(pane)),
-        None => (body_area, None),
-    };
+    // The pty mirror is an overlay in the transcript corner, so the conversation keeps the whole
+    // body and the composer never moves when a session opens.
+    let pty_pane_open = snap.pty_pane.is_some();
 
     let composer_rect = if show_landing {
         st.transcript_hit_boxes.clear();
@@ -149,13 +121,24 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         st.transcript_visible_text.clear();
         st.selection = None;
         st.pending_transcript_click = None;
-        render_landing(frame, main_area, st, info)
+        render_landing(frame, body_area, st, info)
     } else {
-        render_conversation(frame, main_area, st, snap, info, terminal_area.is_some())
+        render_conversation(frame, body_area, st, snap, info, pty_pane_open)
     };
 
-    if let Some(pane) = terminal_area {
-        render_terminal_pane(frame, pane, snap);
+    if let Some(pane) = &snap.pty_pane {
+        let transcript = Rect {
+            x: st.transcript_area.0,
+            y: st.transcript_area.1,
+            width: st.transcript_area.2,
+            height: st.transcript_area.3,
+        };
+        if let Some(rect) = pty_pane_rect(transcript) {
+            // The pane covers this corner: a click there must not toggle the text underneath.
+            st.transcript_hit_boxes
+                .retain(|hit| hit.y < rect.y || hit.y >= rect.y + rect.height);
+            render_pty_pane(frame, rect, pane);
+        }
     }
 
     // Slash autocomplete popup sits directly above the composer when typing `/...`.
@@ -173,29 +156,22 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
     render_modal(frame, area, st, info);
 }
 
-/// The live terminal pane: the running command's real output, newest line at the bottom.
+/// The live pty mirror: the last screen the agent's pty session reported.
 ///
-/// Output arrives through the same progress stream the composer tail uses, so what the pane shows
-/// is the child's actual stdout/stderr — not a replay or a re-run. Escape sequences and `\r`
-/// progress-bar overwrites are already resolved by the tail buffer, which is what makes a build
-/// log read like a terminal instead of raw control bytes.
-fn render_terminal_pane(frame: &mut Frame, rect: Rect, snap: &TuiLiveSnapshot) {
-    let command = snap
-        .activity_call
-        .as_deref()
-        .map(|call| call.trim().trim_start_matches("$ ").to_string())
-        .filter(|call| !call.is_empty())
-        .or_else(|| snap.activity_detail.clone())
-        .unwrap_or_else(|| "terminal".to_string());
+/// The session survives the call that opened it, so this pane is drawn from its own snapshot, not
+/// from the running tool. Escape sequences and `\r` overwrites are already resolved by the pty
+/// bridge, which is what makes a TUI read like a screen instead of raw control bytes.
+fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
     let title = format!(
-        " terminal · {} ",
-        truncate_to_cells(&command, rect.width.saturating_sub(14) as usize)
+        " pty · {} ",
+        truncate_to_cells(&pane.title, rect.width.saturating_sub(12) as usize)
     );
-    let elapsed = snap.activity_elapsed_secs.unwrap_or(0.0);
-    let status = if elapsed >= 1.0 {
-        format!(" running · {} ", format_elapsed_secs(elapsed as u64))
-    } else {
+    let status = if pane.running {
         " running ".to_string()
+    } else if pane.idle_secs >= 60 {
+        format!(" idle {} ", format_elapsed_secs(pane.idle_secs))
+    } else {
+        " idle ".to_string()
     };
 
     let block = Block::default()
@@ -225,11 +201,15 @@ fn render_terminal_pane(frame: &mut Frame, rect: Rect, snap: &TuiLiveSnapshot) {
         return;
     }
 
-    let lines = &snap.activity_tool_output_all;
+    let lines = &pane.lines;
     let mut rows: Vec<Line<'static>> = Vec::with_capacity(avail);
     if lines.is_empty() {
         rows.push(Line::from(Span::styled(
-            "waiting for output…",
+            if pane.running {
+                "waiting for screen…"
+            } else {
+                "no screen captured"
+            },
             Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
         )));
     } else if lines.len() > avail {
@@ -523,7 +503,7 @@ fn render_conversation(
     st: &mut TuiState,
     snap: &TuiLiveSnapshot,
     info: &FooterInfo<'_>,
-    terminal_pane_open: bool,
+    pty_pane_open: bool,
 ) -> Rect {
     let margin = if area.width >= 48 { 2 } else { 1 };
     let content_x = area.x + margin;
@@ -558,7 +538,7 @@ fn render_conversation(
         info,
         content_w as usize,
         card_inner_w,
-        terminal_pane_open,
+        pty_pane_open,
     );
     ensure_settled_transcript(st, info, content_w as usize, card_inner_w);
 
@@ -1232,7 +1212,7 @@ fn build_active_and_notice_lines(
     info: &FooterInfo<'_>,
     width: usize,
     card_inner_w: usize,
-    terminal_pane_open: bool,
+    pty_pane_open: bool,
 ) -> (
     Vec<Line<'static>>,
     Vec<Line<'static>>,
@@ -1276,7 +1256,7 @@ fn build_active_and_notice_lines(
             st.turn_start.elapsed().as_secs_f32(),
             width,
             card_inner_w,
-            terminal_pane_open,
+            pty_pane_open,
         );
         active_lines.push(Line::default());
     }
@@ -1432,7 +1412,7 @@ fn render_active_turn_process(
     turn_secs: f32,
     width: usize,
     card_inner_w: usize,
-    terminal_pane_open: bool,
+    pty_pane_open: bool,
 ) {
     // A tool call is "active" while the live activity card is on screen or a recorded step has
     // not produced a result yet. That is exactly the moment the preceding thinking block should
@@ -1594,7 +1574,7 @@ fn render_active_turn_process(
         let secs = snap.activity_elapsed_secs.unwrap_or(0.0);
         // When the side pane owns the output, the running card keeps only its header: two live
         // copies of the same lines would cost rows in a column that just got narrower.
-        let (hidden_lines, tail): (usize, &[String]) = if terminal_pane_open {
+        let (hidden_lines, tail): (usize, &[String]) = if pty_pane_open {
             (0, &[])
         } else {
             (
@@ -2138,11 +2118,7 @@ fn push_completed_tool_card(
             );
         }
     } else if !item.output.trim().is_empty() {
-        let total_non_empty = item
-            .output
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .count();
+        let total_non_empty = item.output.lines().filter(|l| !l.trim().is_empty()).count();
         if total_non_empty > 0 {
             push_card_blank_row(
                 out,
@@ -3820,10 +3796,16 @@ mod tests {
                 let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
                     harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
                 ));
-                let notes = std::sync::Arc::new(harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap());
+                let notes = std::sync::Arc::new(
+                    harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap(),
+                );
                 let registry = std::sync::Arc::new(harness_core::DefaultToolRegistry::new());
                 let creds = harness_providers::CredentialManager::new(None).unwrap();
-                let discovery = std::sync::Arc::new(harness_providers::ModelDiscovery::new(None, 0, Default::default()));
+                let discovery = std::sync::Arc::new(harness_providers::ModelDiscovery::new(
+                    None,
+                    0,
+                    Default::default(),
+                ));
                 let provider = std::sync::Arc::new(
                     harness_providers::GenericProviderClient::new(
                         "openai".to_string(),
@@ -3883,118 +3865,94 @@ mod tests {
         assert!(st.settled_cache.lines.len() > initial_lines_len);
     }
 
-    fn terminal_snap() -> TuiLiveSnapshot {
-        TuiLiveSnapshot {
-            activity_tool_name: Some("mcp__terminal-pty__pty_start".to_string()),
-            activity_call: Some("$ terminal_pty.py start".to_string()),
-            activity_elapsed_secs: Some(3.2),
-            ..TuiLiveSnapshot::default()
+    fn pty_pane(title: &str, lines: &[&str]) -> TuiPtyPane {
+        TuiPtyPane {
+            title: title.to_string(),
+            lines: lines.iter().map(|line| line.to_string()).collect(),
+            running: true,
+            idle_secs: 0,
         }
     }
 
     #[test]
-    fn terminal_pane_is_a_short_bottom_strip_only_for_pty_tools() {
-        let body = Rect {
-            x: 0,
-            y: 1,
+    fn pty_pane_is_a_small_box_in_the_transcript_corner() {
+        let transcript = Rect {
+            x: 2,
+            y: 3,
             width: 120,
             height: 30,
         };
-        let snap = terminal_snap();
-        let (main, pane) = terminal_pane_rects(body, &snap).expect("a running pty gets a pane");
+        let pane = pty_pane_rect(transcript).expect("a roomy transcript gets the mirror");
 
-        assert_eq!(main.width, body.width, "the transcript keeps its columns");
-        assert_eq!(pane.width, body.width, "the pane is a full-width strip");
-        assert_eq!(main.height + pane.height, body.height);
-        assert_eq!(pane.y, main.y + main.height, "the pane sits under the body");
-        assert_eq!(pane.y + pane.height, body.y + body.height);
-        assert_eq!(pane.height, TERMINAL_PANE_ROWS, "the pane stays small");
+        assert_eq!(pane.width, PTY_PANE_MAX_WIDTH, "the pane stays a monitor");
+        assert_eq!(pane.height, PTY_PANE_ROWS);
         assert!(
-            main.height > pane.height,
-            "the transcript still owns most of the window"
+            pane.width < transcript.width / 2,
+            "the conversation keeps most of its width"
         );
-
-        for other_tool in [
-            "terminal",
-            "shell",
-            "bash",
-            "read_file",
-            "mcp__filesystem__read_file",
-        ] {
-            let mut other = snap.clone();
-            other.activity_tool_name = Some(other_tool.to_string());
-            assert!(
-                terminal_pane_rects(body, &other).is_none(),
-                "{other_tool} must not open the pty pane"
-            );
-        }
-
-        for pty_tool in [
-            "mcp__terminal-pty__pty_run",
-            "mcp__terminal-pty__pty_screenshot",
-            "terminal-pty",
-            "pty_keys",
-        ] {
-            let mut pty = snap.clone();
-            pty.activity_tool_name = Some(pty_tool.to_string());
-            assert!(
-                terminal_pane_rects(body, &pty).is_some(),
-                "{pty_tool} runs a pty and gets the pane"
-            );
-        }
+        assert_eq!(
+            pane.x + pane.width,
+            transcript.x + transcript.width,
+            "the pane hugs the right edge"
+        );
+        assert_eq!(
+            pane.y + pane.height,
+            transcript.y + transcript.height,
+            "the pane hugs the bottom edge"
+        );
+        assert_eq!(pane.y, transcript.y + transcript.height - pane.height);
     }
 
     #[test]
-    fn terminal_pane_hides_when_the_window_is_too_small_but_survives_half_screen() {
-        let snap = terminal_snap();
-
+    fn pty_pane_hides_on_a_small_transcript_but_survives_half_screen() {
         let narrow = Rect {
             x: 0,
             y: 1,
-            width: TERMINAL_PANE_MIN_WIDTH - 1,
+            width: PTY_PANE_MIN_TRANSCRIPT_WIDTH - 1,
             height: 30,
         };
-        assert!(terminal_pane_rects(narrow, &snap).is_none());
+        assert!(pty_pane_rect(narrow).is_none());
 
         let short = Rect {
             x: 0,
             y: 1,
             width: 120,
-            height: TERMINAL_PANE_MIN_BODY_HEIGHT - 1,
+            height: PTY_PANE_MIN_TRANSCRIPT_HEIGHT - 1,
         };
-        assert!(terminal_pane_rects(short, &snap).is_none());
+        assert!(pty_pane_rect(short).is_none());
 
-        // Half of a roomy 176-column window is still wide enough for the strip.
+        // Half of a roomy 176-column window is still wide enough for the overlay.
         let half = Rect {
             x: 0,
             y: 1,
-            width: 88,
+            width: 84,
             height: 24,
         };
-        let (main, pane) = terminal_pane_rects(half, &snap).expect("half screen is still enough");
-        assert_eq!(main.width, half.width);
-        assert_eq!(main.height + pane.height, half.height);
-        assert_eq!(pane.height, TERMINAL_PANE_ROWS);
-        assert!(main.height >= TERMINAL_PANE_MIN_MAIN_HEIGHT);
+        let pane = pty_pane_rect(half).expect("half screen is still enough");
+        assert_eq!(pane.width, PTY_PANE_MIN_WIDTH);
+        assert_eq!(pane.height, PTY_PANE_ROWS);
+        assert_eq!(pane.x + pane.width, half.width);
     }
 
     #[test]
-    fn terminal_pane_draws_the_running_command_and_its_output() {
+    fn pty_pane_draws_its_title_and_screen() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let backend = TestBackend::new(60, 12);
+        let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut snap = terminal_snap();
-        snap.activity_tool_output_all = vec![
-            "Compiling harness-cli v0.1.8".to_string(),
-            "Finished `dev` profile [unoptimized]".to_string(),
-        ];
+        let pane = pty_pane(
+            "start · chat",
+            &[
+                "Compiling harness-cli v0.1.8",
+                "Finished `dev` profile [unoptimized]",
+            ],
+        );
 
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_terminal_pane(frame, area, &snap);
+                render_pty_pane(frame, area, &pane);
             })
             .unwrap();
 
@@ -4008,12 +3966,12 @@ mod tests {
         }
 
         assert!(
-            text.contains("terminal · terminal_pty.py start"),
-            "the pane names the command:\n{text}"
+            text.contains("pty · start · chat"),
+            "the pane names the session:\n{text}"
         );
         assert!(
             text.contains("Compiling harness-cli"),
-            "the pane shows the child's real output:\n{text}"
+            "the pane shows the reported screen:\n{text}"
         );
         assert!(
             text.contains("Finished `dev` profile"),
@@ -4021,8 +3979,25 @@ mod tests {
         );
         assert!(
             text.contains("running"),
-            "the pane says the command is still running:\n{text}"
+            "the pane says the session is still live:\n{text}"
         );
+    }
+
+    #[test]
+    fn pty_pane_does_not_stretch_on_very_wide_windows() {
+        let wide = Rect {
+            x: 0,
+            y: 1,
+            width: 320,
+            height: 40,
+        };
+        let pane = pty_pane_rect(wide).expect("pane");
+        assert_eq!(
+            pane.width, PTY_PANE_MAX_WIDTH,
+            "a wide window keeps the pane small instead of widening it"
+        );
+        assert_eq!(pane.height, PTY_PANE_ROWS);
+        assert_eq!(pane.x + pane.width, wide.width);
     }
 
     #[test]
@@ -4059,22 +4034,5 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(selected, "中");
-    }
-
-    #[test]
-    fn terminal_pane_stays_a_short_strip_on_very_wide_windows() {
-        let wide = Rect {
-            x: 0,
-            y: 1,
-            width: 320,
-            height: 40,
-        };
-        let (main, pane) = terminal_pane_rects(wide, &terminal_snap()).expect("pane");
-        assert_eq!(
-            pane.width, 320,
-            "a wide window widens the strip, not its height"
-        );
-        assert_eq!(pane.height, TERMINAL_PANE_ROWS);
-        assert_eq!(main.height, 30);
     }
 }

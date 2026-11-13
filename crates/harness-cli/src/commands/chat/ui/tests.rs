@@ -68,33 +68,6 @@ fn the_tool_tail_drops_ansi_and_keeps_the_newest_progress_update() {
 }
 
 #[test]
-fn the_terminal_pane_sees_the_whole_buffered_output_not_just_the_composer_tail() {
-    let ui = ChatUi::new(true);
-    ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));
-    for i in 0..30 {
-        ui.push_tool_output(&format!("line {i}\n"));
-    }
-    ui.push_tool_output("partial line");
-
-    let snap = ui.tui_snapshot(80);
-    assert_eq!(snap.activity_tool_name.as_deref(), Some("terminal"));
-    assert_eq!(snap.activity_tool_output_all.len(), 31);
-    assert!(
-        snap.activity_tool_output_all[0].contains("line 0"),
-        "the pane buffer keeps the oldest line it still holds"
-    );
-    assert_eq!(
-        snap.activity_tool_output_all.last().unwrap(),
-        "partial line",
-        "the line still being written is part of the live view"
-    );
-    assert!(
-        snap.tool_output_tail.len() < snap.activity_tool_output_all.len(),
-        "the composer tail stays short while the pane gets the full buffer"
-    );
-}
-
-#[test]
 fn expanding_the_tail_reveals_the_buffered_lines_until_the_call_ends() {
     let ui = ChatUi::new(true);
     ui.start_activity("$ cargo build", "terminal", &serde_json::json!({}));
@@ -1269,4 +1242,87 @@ fn take_live_reasoning_clears_buffer_between_rounds() {
 
     ui.push_reasoning("round two thought");
     assert_eq!(ui.tui_snapshot(80).reasoning, "round two thought");
+}
+
+#[test]
+fn a_pty_pane_outlives_the_call_that_opened_it() {
+    let ui = ChatUi::new(true);
+    ui.begin_pty_activity(
+        "mcp__terminal-pty__pty_start",
+        &serde_json::json!({"action": "start", "label": "chat", "argv": ["luna"]}),
+    );
+    ui.start_activity(
+        "$ pty_start",
+        "mcp__terminal-pty__pty_start",
+        &serde_json::json!({}),
+    );
+
+    let snap = ui.tui_snapshot(80);
+    let pane = snap.pty_pane.expect("starting a pty opens the mirror");
+    assert_eq!(pane.title, "start · chat");
+    assert!(pane.running);
+
+    ui.stop_activity();
+    ui.record_pty_output(
+        "mcp__terminal-pty__pty_start",
+        false,
+        &serde_json::json!({"session_id": "chat", "screen": "luna> "}).to_string(),
+    );
+    let pane = ui
+        .tui_snapshot(80)
+        .pty_pane
+        .expect("the mirror survives the tool call ending");
+    assert!(!pane.running, "the call is over, the session may not be");
+}
+
+#[test]
+fn a_pty_result_paints_the_reported_screen() {
+    let ui = ChatUi::new(true);
+    ui.begin_pty_activity(
+        "mcp__terminal-pty__pty_start",
+        &serde_json::json!({"action": "start", "label": "chat"}),
+    );
+    ui.record_pty_output(
+        "mcp__terminal-pty__pty_start",
+        false,
+        &serde_json::json!({"session_id": "chat", "screen": "hello\nworld\n"}).to_string(),
+    );
+
+    let pane = ui.tui_snapshot(80).pty_pane.expect("pane");
+    assert_eq!(pane.lines, vec!["hello".to_string(), "world".to_string()]);
+    assert!(!pane.running);
+}
+
+#[test]
+fn closing_the_pty_session_removes_the_mirror() {
+    let ui = ChatUi::new(true);
+    ui.begin_pty_activity(
+        "mcp__terminal-pty__pty_start",
+        &serde_json::json!({"action": "start", "label": "chat"}),
+    );
+    ui.record_pty_output(
+        "mcp__terminal-pty__pty_close",
+        false,
+        &serde_json::json!({"closed": [{"session_id": "chat"}]}).to_string(),
+    );
+
+    assert!(
+        ui.tui_snapshot(80).pty_pane.is_none(),
+        "a successful close takes the pane down"
+    );
+}
+
+#[test]
+fn a_failed_close_keeps_the_pty_mirror_on_screen() {
+    let ui = ChatUi::new(true);
+    ui.begin_pty_activity(
+        "mcp__terminal-pty__pty_start",
+        &serde_json::json!({"action": "start", "label": "chat"}),
+    );
+    ui.record_pty_output("mcp__terminal-pty__pty_close", true, "no such session");
+
+    assert!(
+        ui.tui_snapshot(80).pty_pane.is_some(),
+        "the session is still there when close fails"
+    );
 }

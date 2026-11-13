@@ -15,8 +15,8 @@ use super::render::{
     bounded_tool_output, clean_user_query_for_transcript, compaction_report, extract_patch_diff,
     format_delegate_duration, format_delegate_notification, format_delegate_title,
     format_live_tool_output, format_tool_call, format_tool_result, format_tool_result_for,
-    has_verdict, is_non_tool_event, right_aligned_user_message, OutputBlockKind, TurnProcessItem,
-    LUNA_LABEL,
+    has_verdict, is_non_tool_event, is_pty_tool, right_aligned_user_message, OutputBlockKind,
+    TurnProcessItem, LUNA_LABEL,
 };
 use super::todo;
 use super::turn;
@@ -171,6 +171,9 @@ impl ObserverState {
             // visible while it runs; `ToolExecuted` below finalizes the same line into the
             // transcript with its verdict.
             self.ui.start_activity(&call_fmt, &name, &arguments);
+            if is_pty_tool(&name) {
+                self.ui.begin_pty_activity(&name, &arguments);
+            }
             self.in_flight_tools
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -201,6 +204,9 @@ impl ObserverState {
         }
         let elapsed_secs = self.ui.activity_elapsed_secs();
         self.ui.stop_activity();
+        if is_pty_tool(&name) {
+            self.ui.record_pty_output(&name, is_error, &output);
+        }
         let status = if is_error {
             " (failed)".red().to_string()
         } else {

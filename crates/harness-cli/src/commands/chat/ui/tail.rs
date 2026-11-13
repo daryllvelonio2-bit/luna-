@@ -191,24 +191,6 @@ impl ToolTail {
         rows
     }
 
-    /// Every buffered line, in order, for a pane that can show more than a short tail.
-    ///
-    /// Like [`Self::raw_tail`] this is display text: escape sequences and the trailing blank
-    /// lines a command emits are already gone, and a `\r` progress bar is one line.
-    pub(super) fn raw_all(&self) -> Vec<String> {
-        let mut all: Vec<String> = self
-            .lines
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .cloned()
-            .collect();
-        let current = self.current.trim_end();
-        if !current.is_empty() {
-            all.push(current.to_string());
-        }
-        all
-    }
-
     /// Raw tail lines (plus count of earlier lines hidden before the tail) for TUI cards.
     pub(super) fn raw_tail(&self, limit: usize) -> (usize, Vec<String>) {
         let mut all: Vec<String> = self

@@ -45,6 +45,23 @@ pub(super) struct Compaction {
     pub(super) frame: usize,
 }
 
+/// The live pty mirror: the last terminal screen the agent's pty bridge reported.
+///
+/// Unlike [`Activity`], this outlives the call that produced it. A pty session is a window the
+/// agent keeps using across tool calls, so the mirror stays on screen until the agent closes the
+/// session or the screen has sat untouched for [`PTY_PANE_IDLE_SECS`](super::view::PTY_PANE_IDLE_SECS).
+#[derive(Clone)]
+pub(super) struct PtyPane {
+    /// `pty_start · chat`, shown in the pane's title.
+    pub(super) title: String,
+    /// The rendered screen, oldest line first.
+    pub(super) lines: Vec<String>,
+    /// When the agent last drove this pty.
+    pub(super) last_activity: std::time::Instant,
+    /// Whether a pty call is running right now, so the pane can say so.
+    pub(super) running: bool,
+}
+
 /// The in-place region between the transcript and the composer: the tail of the reasoning as it
 /// streams in, the animated line for a running tool, and the sweep shown while the transcript is
 /// being folded.
@@ -58,6 +75,8 @@ pub(super) struct LiveRegion {
     pub(super) tool_output: ToolTail,
     /// Whether Ctrl+O asked for the whole buffered tail instead of the default eight rows.
     pub(super) tool_output_expanded: bool,
+    /// The screen of the pty session the agent is driving, if any.
+    pub(super) pty_pane: Option<PtyPane>,
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     pub(super) compaction: Option<Compaction>,

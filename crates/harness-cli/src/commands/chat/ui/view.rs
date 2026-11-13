@@ -69,6 +69,25 @@ pub struct ChatUi {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct TuiPtyPane {
+    /// `pty_start · chat`: what the mirror is showing.
+    pub title: String,
+    /// The terminal screen, oldest line first.
+    pub lines: Vec<String>,
+    /// Whether a pty call is running right now.
+    pub running: bool,
+    /// Seconds since the agent last drove this pty.
+    pub idle_secs: u64,
+}
+
+/// How long a pty mirror stays on screen after the agent stops driving it.
+///
+/// A pty session is a long-lived window, so the mirror must survive a finished call. It should not
+/// survive forever: a pane left from an abandoned session would cover the transcript for the rest
+/// of the run. Ten minutes of quiet is the cutoff.
+pub const PTY_PANE_IDLE_SECS: u64 = 600;
+
+#[derive(Clone, Debug, Default)]
 pub struct TuiLiveSnapshot {
     pub reasoning: String,
     pub reasoning_secs: Option<f32>,
@@ -81,11 +100,8 @@ pub struct TuiLiveSnapshot {
     pub tool_output_tail: Vec<String>,
     pub activity_tool_output_hidden: usize,
     pub activity_tool_output_raw: Vec<String>,
-    /// Every buffered line of the running tool's output, newest last.
-    ///
-    /// The transcript keeps only a short tail; the side pane can use the full buffer, so a build
-    /// that has been running for a while still shows its recent history when the pane is tall.
-    pub activity_tool_output_all: Vec<String>,
+    /// The pty session the agent is driving, if one is open and recent enough to show.
+    pub pty_pane: Option<TuiPtyPane>,
     pub compacting: Option<(bool, f32)>,
     pub model: String,
     pub context_used: u32,
@@ -108,10 +124,7 @@ impl ChatUi {
         Self::new_with_tui_notify(is_attended, Arc::new(tokio::sync::Notify::new()))
     }
 
-    pub fn new_with_tui_notify(
-        is_attended: bool,
-        tui_notify: Arc<tokio::sync::Notify>,
-    ) -> Self {
+    pub fn new_with_tui_notify(is_attended: bool, tui_notify: Arc<tokio::sync::Notify>) -> Self {
         Self {
             input_buf: Arc::new(Mutex::new(String::new())),
             status: Arc::new(Mutex::new(None)),
@@ -256,7 +269,7 @@ impl ChatUi {
     pub fn tui_snapshot(&self, width: usize) -> TuiLiveSnapshot {
         let mut snap = TuiLiveSnapshot::default();
         {
-            let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             snap.reasoning = live.reasoning.clone();
             snap.reasoning_secs = live
                 .reasoning_started
@@ -269,19 +282,38 @@ impl ChatUi {
                 snap.activity_detail = act.detail.clone();
                 snap.activity_elapsed_secs = Some(act.started.elapsed().as_secs_f32());
                 let limit = if live.tool_output_expanded { 40 } else { 7 };
-                snap.tool_output_tail = live
-                    .tool_output
-                    .rows(width.max(20), if live.tool_output_expanded { 40 } else { 8 });
+                snap.tool_output_tail = live.tool_output.rows(
+                    width.max(20),
+                    if live.tool_output_expanded { 40 } else { 8 },
+                );
                 let (hidden, raw_lines) = live.tool_output.raw_tail(limit);
                 snap.activity_tool_output_hidden = hidden;
                 snap.activity_tool_output_raw = raw_lines;
-                snap.activity_tool_output_all = live.tool_output.raw_all();
             }
             if let Some(comp) = &live.compaction {
                 snap.compacting = Some((comp.forced, comp.started.elapsed().as_secs_f32()));
             }
+            let pty_expired = live.pty_pane.as_ref().is_some_and(|pane| {
+                !pane.running && pane.last_activity.elapsed().as_secs() >= PTY_PANE_IDLE_SECS
+            });
+            if pty_expired {
+                live.pty_pane = None;
+            }
+            if let Some(pane) = &live.pty_pane {
+                snap.pty_pane = Some(TuiPtyPane {
+                    title: pane.title.clone(),
+                    lines: pane.lines.clone(),
+                    running: pane.running,
+                    idle_secs: pane.last_activity.elapsed().as_secs(),
+                });
+            }
         }
-        if let Some(st) = self.status.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(st) = self
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             snap.model = st.model.clone();
             snap.context_used = st.context_used;
             snap.context_max = st.context_max;
@@ -299,14 +331,20 @@ impl ChatUi {
             .clone();
         snap.todo_collapsed = self.todo_collapsed.load(Ordering::SeqCst);
         {
-            let tasks = self.delegate_tasks.lock().unwrap_or_else(|e| e.into_inner());
+            let tasks = self
+                .delegate_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             snap.delegate_count = tasks.len();
             if let Some(last) = tasks.last() {
                 snap.delegate_last = Some((last.goal.clone(), last.activity.clone()));
             }
         }
         {
-            let notices = self.memory_notices.lock().unwrap_or_else(|e| e.into_inner());
+            let notices = self
+                .memory_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             snap.memory_notices = notices
                 .iter()
                 .map(|n| {
