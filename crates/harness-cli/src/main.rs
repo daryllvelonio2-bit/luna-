@@ -8,6 +8,9 @@ use harness_providers::{CredentialManager, ModelDiscovery};
 use harness_telemetry::init_telemetry;
 
 mod commands;
+
+#[cfg(test)]
+mod update_tests;
 mod eval;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::run_interactive_chat;

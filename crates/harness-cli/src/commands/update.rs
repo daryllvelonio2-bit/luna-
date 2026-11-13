@@ -159,6 +159,11 @@ pub async fn check_at_launch(config: &Config) -> Option<UpdateStatus> {
     if latest == BUILD_SHA || skipped.as_deref() == Some(latest.as_str()) {
         return None;
     }
+    // A check result can be stale (or copied with a newer cache file); never prompt to install
+    // the build already running, including when the cached SHA is abbreviated.
+    if !cached_build_is_newer_than_running(BUILD_SHA, &latest) {
+        return None;
+    }
 
     // Only a launch that is about to show the question pays for this; a normal launch never does.
     // The answer is written back to the cache so repeated "Later"s do not refetch it.
@@ -1209,9 +1214,36 @@ pub(crate) fn short(sha: &str) -> &str {
     }
 }
 
+pub(crate) fn cached_build_is_newer_than_running(current: &str, latest: &str) -> bool {
+    !current.is_empty()
+        && !latest.is_empty()
+        && !current.starts_with(latest)
+        && !latest.starts_with(current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_update_cache_does_not_offer_the_already_installed_build() {
+        let latest_installed = "678037df1d9d29c3f7b311b953e68a1cb4cf8095";
+        let previous_running_build = "c2d3ecdd8f884cd98c9f8b7011e5de8ff25a8395";
+
+        assert!(!cached_build_is_newer_than_running(
+            latest_installed,
+            latest_installed
+        ));
+        assert!(!cached_build_is_newer_than_running(
+            latest_installed,
+            &latest_installed[..8]
+        ));
+        assert!(cached_build_is_newer_than_running(
+            previous_running_build,
+            latest_installed
+        ));
+        assert!(!cached_build_is_newer_than_running("", latest_installed));
+    }
 
     #[test]
     fn short_sha_cuts_at_eight_characters() {
