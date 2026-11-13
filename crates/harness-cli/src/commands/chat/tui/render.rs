@@ -35,45 +35,64 @@ pub struct FooterInfo<'a> {
     pub in_flight_tools: &'a [super::super::render::TurnProcessItem],
 }
 
-/// Smallest window that still gets the live terminal pane.
+/// Smallest window that still gets the live pty pane.
 ///
-/// The pane is a split, not a popup: below this the transcript and composer would be too narrow
-/// to use, so the output stays in the composer's tail instead. The threshold is about half of a
-/// roomy 160-column terminal, which is the point where a half-screen window still counts as
-/// large enough.
-const TERMINAL_PANE_MIN_WIDTH: u16 = 76;
-/// Below this the pane would show two or three lines, which is worse than the composer tail.
-const TERMINAL_PANE_MIN_HEIGHT: u16 = 14;
-/// Never squeeze the transcript/composer below this to make room for the pane.
-const TERMINAL_PANE_MIN_MAIN_WIDTH: u16 = 42;
+/// The pane docks under the transcript, so it costs rows rather than columns: below this width
+/// a command line no longer fits, and below this height the transcript would shrink to a couple
+/// of rows.
+const TERMINAL_PANE_MIN_WIDTH: u16 = 40;
+const TERMINAL_PANE_MIN_BODY_HEIGHT: u16 = 16;
+/// The transcript keeps at least this many rows no matter how short the window is.
+const TERMINAL_PANE_MIN_MAIN_HEIGHT: u16 = 6;
+/// Rows the pty pane occupies at the bottom of the body, borders included.
+///
+/// The pane is a monitor, not a workspace. A pty screen stretched over the whole window pushes
+/// the conversation out of sight; ten rows still show the newest output and the status line, and
+/// the transcript above keeps its full width.
+const TERMINAL_PANE_ROWS: u16 = 10;
 
-fn is_terminal_tool(name: Option<&str>) -> bool {
-    matches!(name, Some("terminal" | "shell" | "bash"))
+/// Tools that own a real terminal screen, and therefore the live pane.
+///
+/// Only the pty bridge qualifies: `mcp__terminal-pty__pty_start` and the rest of the `pty_*`
+/// family, plus the skill command `terminal-pty`. An ordinary `terminal`/`shell`/`bash` call
+/// already streams its tail into the running card, so a pane for it would only cost the
+/// transcript space.
+fn is_pty_tool(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let lowered = name.to_ascii_lowercase();
+    lowered.contains("terminal-pty")
+        || lowered.contains("terminal_pty")
+        || lowered.starts_with("pty_")
+        || lowered.contains("__pty_")
 }
 
-/// Split `area` into (main, pane) while a terminal command runs, if the window is large enough.
+/// Split `area` into (main, pane) while a pty tool runs, if the window is large enough.
+///
+/// The pane is a short, full-width strip at the bottom of the body: the transcript and composer
+/// above it keep every column they had, and the pane never grows past a few rows.
 fn terminal_pane_rects(area: Rect, snap: &TuiLiveSnapshot) -> Option<(Rect, Rect)> {
-    if !is_terminal_tool(snap.activity_tool_name.as_deref()) {
+    if !is_pty_tool(snap.activity_tool_name.as_deref()) {
         return None;
     }
-    if area.width < TERMINAL_PANE_MIN_WIDTH || area.height < TERMINAL_PANE_MIN_HEIGHT {
+    if area.width < TERMINAL_PANE_MIN_WIDTH || area.height < TERMINAL_PANE_MIN_BODY_HEIGHT {
         return None;
     }
-    // Two fifths of the width, bounded so a very wide terminal doesn't get a half-empty pane and
-    // a merely-adequate one still fits a readable command line.
-    let pane_width = (area.width * 2 / 5).clamp(34, 90);
-    let main_width = area.width.saturating_sub(pane_width);
-    if main_width < TERMINAL_PANE_MIN_MAIN_WIDTH {
+    let pane_height =
+        TERMINAL_PANE_ROWS.min(area.height.saturating_sub(TERMINAL_PANE_MIN_MAIN_HEIGHT));
+    if pane_height < 4 {
         return None;
     }
+    let main_height = area.height.saturating_sub(pane_height);
     Some((
         Rect {
-            width: main_width,
+            height: main_height,
             ..area
         },
         Rect {
-            x: area.x + main_width,
-            width: pane_width,
+            y: area.y + main_height,
+            height: pane_height,
             ..area
         },
     ))
@@ -116,9 +135,8 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         && st.system_notices.is_empty()
         && snap.transient_error.is_none();
 
-    // While a terminal command runs, hand it the right side of the body and keep the
-    // transcript/composer in the remaining column. Both halves reflow to their own rect: this is
-    // the whole point of the split, so the composer never sits under the live output.
+    // While a pty tool runs, dock a short terminal monitor under the body. The transcript and
+    // composer above it keep the full width; the pane costs a few rows, not a column.
     let (main_area, terminal_area) = match terminal_pane_rects(body_area, snap) {
         Some((main, pane)) => (main, Some(pane)),
         None => (body_area, None),
@@ -3867,15 +3885,15 @@ mod tests {
 
     fn terminal_snap() -> TuiLiveSnapshot {
         TuiLiveSnapshot {
-            activity_tool_name: Some("terminal".to_string()),
-            activity_call: Some("$ cargo build".to_string()),
+            activity_tool_name: Some("mcp__terminal-pty__pty_start".to_string()),
+            activity_call: Some("$ terminal_pty.py start".to_string()),
             activity_elapsed_secs: Some(3.2),
             ..TuiLiveSnapshot::default()
         }
     }
 
     #[test]
-    fn terminal_pane_splits_the_body_only_for_terminal_tools() {
+    fn terminal_pane_is_a_short_bottom_strip_only_for_pty_tools() {
         let body = Rect {
             x: 0,
             y: 1,
@@ -3883,22 +3901,47 @@ mod tests {
             height: 30,
         };
         let snap = terminal_snap();
-        let (main, pane) =
-            terminal_pane_rects(body, &snap).expect("a running terminal gets a pane");
+        let (main, pane) = terminal_pane_rects(body, &snap).expect("a running pty gets a pane");
 
-        assert_eq!(main.width + pane.width, body.width);
-        assert_eq!(pane.x, main.x + main.width);
-        assert_eq!(pane.y, body.y);
-        assert_eq!(pane.height, body.height);
-        assert!(main.width >= TERMINAL_PANE_MIN_MAIN_WIDTH);
-        assert!(pane.width >= 34);
-
-        let mut other = snap.clone();
-        other.activity_tool_name = Some("read_file".to_string());
+        assert_eq!(main.width, body.width, "the transcript keeps its columns");
+        assert_eq!(pane.width, body.width, "the pane is a full-width strip");
+        assert_eq!(main.height + pane.height, body.height);
+        assert_eq!(pane.y, main.y + main.height, "the pane sits under the body");
+        assert_eq!(pane.y + pane.height, body.y + body.height);
+        assert_eq!(pane.height, TERMINAL_PANE_ROWS, "the pane stays small");
         assert!(
-            terminal_pane_rects(body, &other).is_none(),
-            "only terminal commands get the pane"
+            main.height > pane.height,
+            "the transcript still owns most of the window"
         );
+
+        for other_tool in [
+            "terminal",
+            "shell",
+            "bash",
+            "read_file",
+            "mcp__filesystem__read_file",
+        ] {
+            let mut other = snap.clone();
+            other.activity_tool_name = Some(other_tool.to_string());
+            assert!(
+                terminal_pane_rects(body, &other).is_none(),
+                "{other_tool} must not open the pty pane"
+            );
+        }
+
+        for pty_tool in [
+            "mcp__terminal-pty__pty_run",
+            "mcp__terminal-pty__pty_screenshot",
+            "terminal-pty",
+            "pty_keys",
+        ] {
+            let mut pty = snap.clone();
+            pty.activity_tool_name = Some(pty_tool.to_string());
+            assert!(
+                terminal_pane_rects(body, &pty).is_some(),
+                "{pty_tool} runs a pty and gets the pane"
+            );
+        }
     }
 
     #[test]
@@ -3917,21 +3960,22 @@ mod tests {
             x: 0,
             y: 1,
             width: 120,
-            height: TERMINAL_PANE_MIN_HEIGHT - 1,
+            height: TERMINAL_PANE_MIN_BODY_HEIGHT - 1,
         };
         assert!(terminal_pane_rects(short, &snap).is_none());
 
-        // Half of a roomy 176-column window is still a pane-worthy 88 columns.
+        // Half of a roomy 176-column window is still wide enough for the strip.
         let half = Rect {
             x: 0,
             y: 1,
             width: 88,
             height: 24,
         };
-        let (main, pane) =
-            terminal_pane_rects(half, &snap).expect("half screen is still large enough");
-        assert_eq!(main.width + pane.width, half.width);
-        assert!(main.width >= TERMINAL_PANE_MIN_MAIN_WIDTH);
+        let (main, pane) = terminal_pane_rects(half, &snap).expect("half screen is still enough");
+        assert_eq!(main.width, half.width);
+        assert_eq!(main.height + pane.height, half.height);
+        assert_eq!(pane.height, TERMINAL_PANE_ROWS);
+        assert!(main.height >= TERMINAL_PANE_MIN_MAIN_HEIGHT);
     }
 
     #[test]
@@ -3964,7 +4008,7 @@ mod tests {
         }
 
         assert!(
-            text.contains("terminal · cargo build"),
+            text.contains("terminal · terminal_pty.py start"),
             "the pane names the command:\n{text}"
         );
         assert!(
@@ -4018,7 +4062,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_pane_width_is_bounded_on_very_wide_windows() {
+    fn terminal_pane_stays_a_short_strip_on_very_wide_windows() {
         let wide = Rect {
             x: 0,
             y: 1,
@@ -4026,7 +4070,11 @@ mod tests {
             height: 40,
         };
         let (main, pane) = terminal_pane_rects(wide, &terminal_snap()).expect("pane");
-        assert_eq!(pane.width, 90, "a very wide terminal does not get a cavern");
-        assert_eq!(main.width, 230);
+        assert_eq!(
+            pane.width, 320,
+            "a wide window widens the strip, not its height"
+        );
+        assert_eq!(pane.height, TERMINAL_PANE_ROWS);
+        assert_eq!(main.height, 30);
     }
 }
