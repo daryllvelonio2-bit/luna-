@@ -198,6 +198,10 @@ impl StreamAccumulator {
     }
 
     /// Stitch one `ToolCallDelta` onto the fragment slot its index names.
+    ///
+    /// If a provider omits per-call indices (reporting every call at `0`) and sends a second call
+    /// whose `id` or `name` differs from the slot already at `index`, open a fresh slot rather than
+    /// overwriting the name onto the previous call's arguments.
     fn merge_call_delta(
         &mut self,
         index: usize,
@@ -206,11 +210,41 @@ impl StreamAccumulator {
         arguments_delta: Option<String>,
         signature: Option<String>,
     ) {
-        let slot = match self.calls.iter_mut().find(|(i, _)| *i == index) {
-            Some((_, call)) => call,
+        let pos = id
+            .as_deref()
+            .filter(|incoming| !incoming.is_empty())
+            .and_then(|incoming| self.calls.iter().position(|(_, call)| call.id == incoming))
+            .or_else(|| {
+                let pos = self.calls.iter().position(|(i, _)| *i == index)?;
+                let existing = &self.calls[pos].1;
+                let id_conflict = id
+                    .as_deref()
+                    .filter(|incoming| !incoming.is_empty())
+                    .is_some_and(|incoming| !existing.id.is_empty() && existing.id != incoming);
+                let name_conflict = name
+                    .as_deref()
+                    .filter(|incoming| !incoming.is_empty())
+                    .is_some_and(|incoming| {
+                        !existing.name.is_empty() && existing.name != incoming
+                    });
+                (!id_conflict && !name_conflict).then_some(pos)
+            });
+
+        let slot = match pos {
+            Some(pos) => &mut self.calls[pos].1,
             None => {
+                let slot_index = if self.calls.iter().any(|(i, _)| *i == index) {
+                    self.calls
+                        .iter()
+                        .map(|(i, _)| *i)
+                        .max()
+                        .map_or(0, |m| m + 1)
+                        .max(index + 1)
+                } else {
+                    index
+                };
                 self.calls.push((
-                    index,
+                    slot_index,
                     ToolCall {
                         id: String::new(),
                         name: String::new(),
@@ -1537,5 +1571,43 @@ where
                 result.map(Streamed::done)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_accumulator_merges_fragments_and_separates_colliding_calls() {
+        let mut acc = StreamAccumulator::default();
+        // Normal OpenAI-style streamed call at index 0.
+        acc.merge_call_delta(
+            0,
+            Some("call_1".to_string()),
+            Some("skill_view".to_string()),
+            Some("{\"name\":".to_string()),
+            None,
+        );
+        acc.merge_call_delta(0, None, None, Some("\"brainstorming\"}".to_string()), None);
+        // Second call emitted at index 0 by a provider that omits per-call indices.
+        acc.merge_call_delta(
+            0,
+            Some("call_2".to_string()),
+            Some("read_file".to_string()),
+            Some("{\"path\":\"Cargo.toml\"}".to_string()),
+            None,
+        );
+
+        let calls = acc
+            .assemble_tool_calls("test")
+            .expect("both calls should parse cleanly");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "skill_view");
+        assert_eq!(calls[0].arguments, json!({ "name": "brainstorming" }));
+        assert_eq!(calls[1].id, "call_2");
+        assert_eq!(calls[1].name, "read_file");
+        assert_eq!(calls[1].arguments, json!({ "path": "Cargo.toml" }));
     }
 }

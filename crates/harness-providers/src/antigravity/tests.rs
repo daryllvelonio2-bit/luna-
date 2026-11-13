@@ -1206,3 +1206,74 @@ fn only_a_version_reaches_the_user_agent() {
     assert!(!is_version_like("1.5.3\n"));
     assert!(!is_version_like("1.5.3-beta"));
 }
+
+/// Parallel `functionCall` parts — whether in one SSE frame or spread across frames of the same
+/// turn — must receive sequential call indices so `StreamAccumulator` keeps each tool's name
+/// paired with its own arguments instead of colliding them all into index 0.
+#[test]
+fn parallel_function_calls_get_sequential_indices_across_chunks() {
+    let chunk_one = json!({
+        "candidates": [{
+            "content": {
+                "parts": [
+                    {
+                        "functionCall": {
+                            "id": "call_1",
+                            "name": "skill_view",
+                            "args": { "name": "brainstorming" }
+                        }
+                    },
+                    {
+                        "functionCall": {
+                            "id": "call_2",
+                            "name": "read_file",
+                            "args": { "path": "Cargo.toml" }
+                        }
+                    }
+                ]
+            }
+        }]
+    });
+    let chunk_two = json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "functionCall": {
+                        "id": "call_3",
+                        "name": "list_files",
+                        "args": { "path": "src" }
+                    }
+                }]
+            }
+        }]
+    });
+
+    let mut next_index = 0usize;
+    let mut events = parse_antigravity_chunk_indexed(&chunk_one, &mut next_index);
+    events.extend(parse_antigravity_chunk_indexed(&chunk_two, &mut next_index));
+
+    let calls: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+                ..
+            } => Some((index, id, name, arguments_delta)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].0, 0);
+    assert_eq!(calls[0].1.as_deref(), Some("call_1"));
+    assert_eq!(calls[0].2.as_deref(), Some("skill_view"));
+    assert_eq!(calls[1].0, 1);
+    assert_eq!(calls[1].1.as_deref(), Some("call_2"));
+    assert_eq!(calls[1].2.as_deref(), Some("read_file"));
+    assert_eq!(calls[2].0, 2);
+    assert_eq!(calls[2].1.as_deref(), Some("call_3"));
+    assert_eq!(calls[2].2.as_deref(), Some("list_files"));
+}

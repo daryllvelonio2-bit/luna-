@@ -10,7 +10,15 @@ use super::*;
 /// Translate one Code Assist SSE payload into stream events. Both the streaming path and the
 /// buffered `execute_antigravity_completion` go through here, so a thought chunk is classified
 /// identically either way.
-pub(super) fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
+///
+/// Code Assist omits an OpenAI-style `index` on `functionCall` parts, so `next_call_index`
+/// tracks the call counter across the whole stream. Without it, a turn with two tool calls —
+/// whether in one chunk or across frames — stamps every call with `0` and `StreamAccumulator`
+/// merges the second tool's name onto the first tool's arguments.
+pub(super) fn parse_antigravity_chunk_indexed(
+    event: &serde_json::Value,
+    next_call_index: &mut usize,
+) -> Vec<StreamEvent> {
     let resp_data = event.get("response").unwrap_or(event);
     let mut events = Vec::new();
 
@@ -78,8 +86,10 @@ pub(super) fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEv
             }
 
             if let Some(call) = part.get("functionCall") {
+                let index = *next_call_index;
+                *next_call_index += 1;
                 events.push(StreamEvent::ToolCallDelta {
-                    index: 0,
+                    index,
                     id: call
                         .get("id")
                         .and_then(|i| i.as_str())
@@ -106,6 +116,12 @@ pub(super) fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEv
     }
 
     events
+}
+
+#[cfg(test)]
+pub(super) fn parse_antigravity_chunk(event: &serde_json::Value) -> Vec<StreamEvent> {
+    let mut next_call_index = 0usize;
+    parse_antigravity_chunk_indexed(event, &mut next_call_index)
 }
 
 /// One piece of a user turn's content: prose, or an image that was embedded as a data URL.

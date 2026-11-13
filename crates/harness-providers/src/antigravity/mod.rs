@@ -151,7 +151,9 @@ pub use credentials::{
     detect_antigravity_credentials, extract_bearer_token, refresh_antigravity_token,
     resolve_antigravity_email_strict, AntigravityCredentials,
 };
-use payload::{build_antigravity_payload, parse_antigravity_chunk};
+#[cfg(test)]
+use payload::parse_antigravity_chunk;
+use payload::{build_antigravity_payload, parse_antigravity_chunk_indexed};
 pub use quota::{
     antigravity_model_supports_thinking, fetch_antigravity_models, resolve_antigravity_model,
     retrieve_antigravity_quota, AntigravityModelQuotaInfo, AntigravityQuotaBucket,
@@ -297,7 +299,8 @@ pub async fn stream_antigravity_completion(
     let payload = build_antigravity_payload(messages, tools, options, model);
     let resp = post_antigravity_turn(http_client, raw_secret, cred_manager, &payload).await?;
 
-    let stream = resp.bytes_stream().eventsource().flat_map(|event_result| {
+    let mut next_call_index = 0usize;
+    let stream = resp.bytes_stream().eventsource().flat_map(move |event_result| {
         let events: Vec<Result<StreamEvent, HarnessError>> = match event_result {
             Ok(event) => {
                 if event.data.trim().is_empty() || event.data == "[DONE]" {
@@ -349,10 +352,13 @@ pub async fn stream_antigravity_completion(
                                              request will not change that; the content it objects to has to go."
                                         ),
                                     })],
-                                    None => parse_antigravity_chunk(&parsed)
-                                        .into_iter()
-                                        .map(Ok)
-                                        .collect(),
+                                    None => parse_antigravity_chunk_indexed(
+                                        &parsed,
+                                        &mut next_call_index,
+                                    )
+                                    .into_iter()
+                                    .map(Ok)
+                                    .collect(),
                                 }
                             }
                         }
