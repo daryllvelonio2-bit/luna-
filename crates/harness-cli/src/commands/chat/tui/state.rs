@@ -734,6 +734,20 @@ pub struct ProviderPickerItem {
     pub is_current: bool,
 }
 
+/// Data a picker modal asked for on a background task and is waiting to receive.
+///
+/// The modals open instantly with whatever is cached and the event loop fills them in when one of
+/// these lands, so `/model` never stalls the loop on a credential file read or a `/models` HTTP
+/// call.
+#[derive(Debug, Clone)]
+pub enum PickerLoad {
+    Providers(Vec<ProviderPickerItem>),
+    Models {
+        provider: String,
+        items: Vec<ModelPickerItem>,
+    },
+}
+
 /// Model entry shown in the Model Picker modal.
 #[derive(Debug, Clone)]
 pub struct ModelPickerItem {
@@ -925,6 +939,15 @@ pub struct TuiState {
     pub version: String,
     pub update_notice: Option<String>,
     pub last_rendered_rect: (u16, u16),
+    /// Provider list shown by the first step of `/models`. Refreshed off-loop so the modal never
+    /// waits on credential disk I/O.
+    pub provider_items: Vec<ProviderPickerItem>,
+    /// Provider whose model list is still being fetched, if a `ModelPicker` is open.
+    pub picker_loading: Option<String>,
+    /// Sender handed to picker background tasks.
+    pub picker_tx: tokio::sync::mpsc::UnboundedSender<PickerLoad>,
+    /// Receiver polled by the event loop to fill picker modals in place.
+    pub picker_rx: tokio::sync::mpsc::UnboundedReceiver<PickerLoad>,
     pub settled_cache: SettledTranscriptCache,
     pub live_content_cache: LiveContentCache,
     pub live_reasoning_cache: LiveReasoningCache,

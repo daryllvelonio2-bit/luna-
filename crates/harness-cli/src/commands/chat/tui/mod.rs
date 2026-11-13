@@ -87,9 +87,27 @@ impl Drop for TuiTerminalGuard {
     }
 }
 
+/// Append a timestamped line to `$LUNA_TUI_TRACE` when tracing is enabled.
+///
+/// Diagnostics only: it lets a pty probe separate time spent inside a key handler from time spent
+/// drawing, which a screenshot alone cannot show.
+pub(crate) fn trace_event(label: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("LUNA_TUI_TRACE") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{:?} {label}", std::time::SystemTime::now());
+}
+
 /// Run the full-screen OpenCode-style TUI until the user exits.
-pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {
-    runtime.ui.set_tui_mode(true);
+pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {    runtime.ui.set_tui_mode(true);
     // The system prompt is built per turn, so flipping this before the first turn is enough to
     // add the rich-output block for the full-screen renderer without touching inline/piped runs.
     runtime.agent.lock().await.set_tui_output(true);
@@ -121,6 +139,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        let t_draw = std::time::Instant::now();
         // Render current frame (never await env.agent.lock() here — the running turn holds it!).
         let snap = {
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
@@ -141,6 +160,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         };
         terminal
             .draw(|frame| draw(frame, &mut st, &snap, &info))?;
+        trace_event(&format!("draw {:?}", t_draw.elapsed()));
 
         let has_bg_active = st
             .background_sessions
@@ -163,6 +183,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             _ = tui_notifier.notified() => {
                 drain_tui_notices(&env, &mut st);
+            }
+
+            maybe_picker = st.picker_rx.recv() => {
+                if let Some(load) = maybe_picker {
+                    actions::apply_picker_load(&mut st, load);
+                }
             }
 
             _ = animation.tick(), if st.active_turn.is_some()
@@ -425,6 +451,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
     let cwd_label = shorten_cwd(&env.config.paths.workspace_root);
 
     let initial_turns_len = turns.len();
+    let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut st = TuiState {
         turns,
         turn_meta,
@@ -466,6 +493,14 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         update_notice: None,
         last_rendered_rect: (120, 34),
+        provider_items: actions::build_provider_items(
+            env.cred_manager.clone(),
+            env.current_provider.as_str(),
+        )
+        .await,
+        picker_loading: None,
+        picker_tx: picker_tx.clone(),
+        picker_rx,
         settled_cache: state::SettledTranscriptCache::default(),
         live_content_cache: state::LiveContentCache::default(),
         live_reasoning_cache: state::LiveReasoningCache::default(),

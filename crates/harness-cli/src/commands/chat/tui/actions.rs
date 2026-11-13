@@ -518,22 +518,49 @@ pub async fn open_provider_picker_with_query(env: &Env<'_>, st: &mut TuiState, q
     open_provider_picker_with_target(env, st, ModelTarget::Session, query).await;
 }
 
-pub async fn open_provider_picker_with_target(
-    env: &Env<'_>,
-    st: &mut TuiState,
-    target: ModelTarget,
-    query: String,
-) {
-    let loaded = env.cred_manager.get_loaded_providers().await;
-    let has_opencode_daemon = harness_providers::read_opencode_service_info().is_some();
-    let has_opencode_cli = harness_providers::find_opencode_binary().is_ok();
+/// Snapshot of the provider rows for the first `/models` step.
+///
+/// Kept separate from the modal so it can run on a background task: it reads the credential file
+/// and probes the OpenCode daemon/binary, neither of which belongs on the render loop.
+pub async fn build_provider_items(
+    cred_manager: Arc<harness_providers::CredentialManager>,
+    current_provider: &str,
+) -> Vec<ProviderPickerItem> {
+    let loaded = cred_manager.get_loaded_providers().await;
+    let (has_opencode_daemon, has_opencode_cli) = tokio::task::spawn_blocking(|| {
+        (
+            harness_providers::read_opencode_service_info().is_some(),
+            harness_providers::find_opencode_binary().is_ok(),
+        )
+    })
+    .await
+    .unwrap_or((false, false));
+
+    let agy_creds = cred_manager.get_credentials("antigravity").await;
+    let agy_primary = agy_creds
+        .iter()
+        .find(|c| c.is_priority && !c.is_temporarily_disabled)
+        .or_else(|| agy_creds.iter().find(|c| !c.is_temporarily_disabled));
+    let antigravity_account: Option<String> = agy_primary.and_then(|primary| {
+        if !primary.label.is_empty() {
+            return Some(primary.label.clone());
+        }
+        serde_json::from_str::<serde_json::Value>(&primary.api_key)
+            .ok()
+            .and_then(|val| {
+                val.get("email")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            })
+            .filter(|email| !email.is_empty())
+    });
 
     let catalog = harness_providers::get_provider_catalog();
     let configured: Vec<_> = catalog
         .iter()
         .filter(|p| {
             loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
-                || p.id.eq_ignore_ascii_case(env.current_provider)
+                || p.id.eq_ignore_ascii_case(current_provider)
                 || (p.id == "opencode" && has_opencode_daemon)
                 || (p.id == "opencode-cli" && has_opencode_cli)
         })
@@ -547,7 +574,7 @@ pub async fn open_provider_picker_with_target(
 
     let mut items = Vec::with_capacity(available.len());
     for p in available {
-        let is_current = p.id.eq_ignore_ascii_case(env.current_provider);
+        let is_current = p.id.eq_ignore_ascii_case(current_provider);
         let mut tags = Vec::new();
         if is_current {
             tags.push("active".to_string());
@@ -560,26 +587,8 @@ pub async fn open_provider_picker_with_target(
         } else if p.id.eq_ignore_ascii_case("opencode-cli") && has_opencode_cli {
             tags.push("cli".to_string());
         } else if p.id.eq_ignore_ascii_case("antigravity") || p.id.eq_ignore_ascii_case("agy") {
-            let agy_creds = env.cred_manager.get_credentials("antigravity").await;
-            if let Some(primary) = agy_creds
-                .iter()
-                .find(|c| c.is_priority && !c.is_temporarily_disabled)
-                .or_else(|| agy_creds.iter().find(|c| !c.is_temporarily_disabled))
-            {
-                let acc = if !primary.label.is_empty() {
-                    primary.label.clone()
-                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&primary.api_key)
-                {
-                    val.get("email")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                } else {
-                    String::new()
-                };
-                if !acc.is_empty() {
-                    tags.push(acc);
-                }
+            if let Some(account) = antigravity_account.clone() {
+                tags.push(account);
             }
         }
         items.push(ProviderPickerItem {
@@ -589,14 +598,34 @@ pub async fn open_provider_picker_with_target(
             is_current,
         });
     }
+    items
+}
 
+/// Open the provider picker immediately from the cached rows, then refresh them off-loop.
+pub async fn open_provider_picker_with_target(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    target: ModelTarget,
+    query: String,
+) {
+    let items = st.provider_items.clone();
     let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
+    st.picker_loading = None;
     st.modal = ActiveModal::ProviderPicker {
         target,
         query,
         items,
         selected,
     };
+    super::trace_event("provider picker shown");
+
+    let tx = st.picker_tx.clone();
+    let cred_manager = env.cred_manager.clone();
+    let current_provider = env.current_provider.clone();
+    tokio::spawn(async move {
+        let items = build_provider_items(cred_manager, &current_provider).await;
+        let _ = tx.send(super::state::PickerLoad::Providers(items));
+    });
 }
 
 pub async fn open_models_for_provider(
@@ -608,31 +637,30 @@ pub async fn open_models_for_provider(
     open_models_for_target(env, st, ModelTarget::Session, provider, query).await;
 }
 
-pub async fn open_models_for_target(
-    env: &Env<'_>,
-    st: &mut TuiState,
-    target: ModelTarget,
+/// Load the model rows for one provider. Pure data, so it can run off the render loop.
+pub async fn load_model_items(
+    discovery: &harness_providers::ModelDiscovery,
+    cred_manager: &harness_providers::CredentialManager,
     provider: &str,
-    query: String,
-) {
-    let mut models = env
-        .discovery
-        .get_models(provider, &env.cred_manager, false)
+    current_provider: &str,
+    current_model: &str,
+) -> Vec<ModelPickerItem> {
+    let mut models = discovery
+        .get_models(provider, cred_manager, false)
         .await
         .unwrap_or_default();
     let def = harness_providers::catalog::get_default_model(provider).to_string();
     if !def.is_empty() && !models.contains(&def) {
         models.insert(0, def);
     }
-    if provider.eq_ignore_ascii_case(env.current_provider) && !models.contains(env.current_model) {
-        models.insert(0, env.current_model.clone());
+    if provider.eq_ignore_ascii_case(current_provider) && !models.iter().any(|m| m == current_model) {
+        models.insert(0, current_model.to_string());
     }
 
-    let items: Vec<ModelPickerItem> = models
+    models
         .into_iter()
         .map(|m| {
-            let is_current =
-                provider.eq_ignore_ascii_case(env.current_provider) && m == *env.current_model;
+            let is_current = provider.eq_ignore_ascii_case(current_provider) && m == current_model;
             ModelPickerItem {
                 display_name: friendly_model_name(&m),
                 provider: provider.to_string(),
@@ -640,17 +668,90 @@ pub async fn open_models_for_target(
                 is_current,
             }
         })
-        .collect();
+        .collect()
+}
 
-    let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
+/// Open the model picker on the first keystroke and fill it in when discovery answers.
+pub async fn open_models_for_target(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    target: ModelTarget,
+    provider: &str,
+    query: String,
+) {
+    let provider_owned = provider.to_string();
+    st.picker_loading = Some(provider_owned.clone());
     st.modal = ActiveModal::ModelPicker {
         target,
-        provider: provider.to_string(),
+        provider: provider_owned.clone(),
         provider_display: friendly_provider_name(provider),
         query,
-        items,
-        selected,
+        items: Vec::new(),
+        selected: 0,
     };
+
+    let tx = st.picker_tx.clone();
+    let discovery = env.discovery.clone();
+    let cred_manager = env.cred_manager.clone();
+    let current_provider = env.current_provider.clone();
+    let current_model = env.current_model.clone();
+    tokio::spawn(async move {
+        let items = load_model_items(
+            discovery.as_ref(),
+            cred_manager.as_ref(),
+            &provider_owned,
+            &current_provider,
+            &current_model,
+        )
+        .await;
+        let _ = tx.send(super::state::PickerLoad::Models {
+            provider: provider_owned,
+            items,
+        });
+    });
+}
+
+/// Fold a background picker load into the modal that asked for it, preserving the user's query.
+pub fn apply_picker_load(st: &mut TuiState, load: super::state::PickerLoad) {
+    use super::state::PickerLoad;
+
+    match load {
+        PickerLoad::Providers(items) => {
+            st.provider_items = items.clone();
+            if let ActiveModal::ProviderPicker {
+                items: current,
+                selected,
+                ..
+            } = &mut st.modal
+            {
+                let keep = *selected;
+                *current = items;
+                *selected = keep.min(current.len().saturating_sub(1));
+            }
+        }
+        PickerLoad::Models { provider, items } => {
+            if st.picker_loading.as_deref() == Some(provider.as_str()) {
+                st.picker_loading = None;
+            }
+            if let ActiveModal::ModelPicker {
+                provider: open_provider,
+                items: current,
+                selected,
+                ..
+            } = &mut st.modal
+            {
+                if open_provider == &provider {
+                    let keep = *selected;
+                    *current = items;
+                    *selected = if keep == 0 {
+                        current.iter().position(|i| i.is_current).unwrap_or(0)
+                    } else {
+                        keep.min(current.len().saturating_sub(1))
+                    };
+                }
+            }
+        }
+    }
 }
 
 pub async fn open_thinking_picker(_env: &Env<'_>, st: &mut TuiState) {
@@ -2019,6 +2120,7 @@ pub async fn run_slash_command(
         .filter(|s| !s.is_empty());
 
     // Handle native TUI routes first so there's zero screen flash.
+    super::trace_event(&format!("slash start {name}"));
     match name {
         "/help" | "/?" if arg.is_none() => {
             st.modal = ActiveModal::Help { scroll: 0 };

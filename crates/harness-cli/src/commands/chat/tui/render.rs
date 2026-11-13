@@ -2348,6 +2348,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::ModelPicker {
+            provider,
             provider_display,
             query,
             items,
@@ -2406,9 +2407,18 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                 ]));
             }
             if filtered.is_empty() {
+                let (msg, fg) = if st
+                    .picker_loading
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(provider))
+                {
+                    (" Loading models…", ACCENT_CORAL)
+                } else {
+                    (" No models match", TEXT_MUTED)
+                };
                 lines.push(Line::from(Span::styled(
-                    " No models match",
-                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                    msg,
+                    Style::default().fg(fg).bg(BG_ELEVATED),
                 )));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3324,6 +3334,7 @@ mod tests {
 
     #[test]
     fn ensure_settled_transcript_caches_and_appends_incrementally() {
+        let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut st = TuiState {
             turns: vec![TurnRecord {
                 user_query: "turn one".to_string(),
@@ -3373,6 +3384,10 @@ mod tests {
             version: "0.1.8".to_string(),
             update_notice: None,
             last_rendered_rect: (100, 30),
+            provider_items: Vec::new(),
+            picker_loading: None,
+            picker_tx,
+            picker_rx,
             settled_cache: super::super::state::SettledTranscriptCache::default(),
             live_content_cache: super::super::state::LiveContentCache::default(),
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
