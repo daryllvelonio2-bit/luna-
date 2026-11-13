@@ -14,12 +14,15 @@ use super::super::interactive::state::{Env, Flow};
 use super::actions::{
     apply_agent_mode, apply_model_selection, apply_thinking_selection, create_new_session,
     interrupt_turn, open_models_for_provider, open_provider_picker, open_session_picker,
-    run_palette_action, run_slash_command, submit_composer, switch_to_session, sync_slash_popup,
+    run_palette_action, run_slash_command, set_all_process_expanded, submit_composer,
+    switch_to_session, sync_slash_popup,
 };
 use super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
 };
-use super::state::{ActiveModal, AgentMode, TabHitTarget, TuiState};
+use super::state::{
+    ActiveModal, AgentMode, LiveThinkingView, TabHitTarget, TranscriptClickTarget, TuiState,
+};
 use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
 
 /// Dispatch one terminal event (`Key`, `Mouse`, `Paste`, `Resize`).
@@ -123,6 +126,36 @@ async fn handle_mouse(
                 }
             }
         }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(target) = st
+                .transcript_hit_boxes
+                .iter()
+                .find(|hb| {
+                    hb.y == mouse.row && mouse.column >= hb.x_start && mouse.column < hb.x_end
+                })
+                .map(|hb| hb.target.clone())
+            {
+                match target {
+                    TranscriptClickTarget::ToggleTurnThinking(idx) => {
+                        if !st.expanded_thinking.remove(&idx) {
+                            st.expanded_thinking.insert(idx);
+                        }
+                    }
+                    TranscriptClickTarget::ToggleTurnTools(idx) => {
+                        if !st.expanded_tools.remove(&idx) {
+                            st.expanded_tools.insert(idx);
+                        }
+                    }
+                    TranscriptClickTarget::ToggleLiveThinking => {
+                        st.live_thinking_view = match st.live_thinking_view {
+                            LiveThinkingView::Tail => LiveThinkingView::Expanded,
+                            LiveThinkingView::Expanded => LiveThinkingView::Collapsed,
+                            LiveThinkingView::Collapsed => LiveThinkingView::Expanded,
+                        };
+                    }
+                }
+            }
+        }
         _ => {}
     }
     Ok(Flow::Continue)
@@ -190,7 +223,7 @@ async fn handle_key(
         if env.ui.has_live_activity() {
             env.ui.toggle_live_expanded();
         } else {
-            st.process_expanded = !st.process_expanded;
+            set_all_process_expanded(st, !st.process_expanded);
         }
         return Ok(Flow::Continue);
     }
@@ -692,7 +725,7 @@ async fn handle_modal_key(
                     st.modal = ActiveModal::ThinkingPicker { current, selected };
                 }
                 KeyCode::Enter => {
-                    apply_thinking_selection(env, options[selected]).await;
+                    apply_thinking_selection(env, st, options[selected]).await;
                 }
                 _ => {
                     st.modal = ActiveModal::ThinkingPicker { current, selected };

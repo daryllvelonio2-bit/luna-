@@ -45,12 +45,15 @@ impl ChatUi {
             if live.reasoning.is_empty() {
                 return;
             }
-            let text = std::mem::take(&mut live.reasoning);
             if self.is_tui_mode() {
+                if !live.reasoning.ends_with('\n') {
+                    live.reasoning.push_str("\n\n");
+                }
                 drop(live);
                 self.notify_tui();
                 return;
             }
+            let text = std::mem::take(&mut live.reasoning);
             reasoning_rows(&text, get_terminal_width())
         };
         if !rows.is_empty() {

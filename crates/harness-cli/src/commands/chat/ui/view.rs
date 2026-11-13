@@ -95,6 +95,13 @@ pub struct TuiLiveSnapshot {
 
 impl ChatUi {
     pub fn new(is_attended: bool) -> Self {
+        Self::new_with_tui_notify(is_attended, Arc::new(tokio::sync::Notify::new()))
+    }
+
+    pub fn new_with_tui_notify(
+        is_attended: bool,
+        tui_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
         Self {
             input_buf: Arc::new(Mutex::new(String::new())),
             status: Arc::new(Mutex::new(None)),
@@ -115,7 +122,7 @@ impl ChatUi {
             pending_above: Arc::new(Mutex::new(Vec::new())),
             command_capture: Arc::new(Mutex::new(None)),
             tui_mode: Arc::new(AtomicBool::new(false)),
-            tui_notify: Arc::new(tokio::sync::Notify::new()),
+            tui_notify,
             tui_notices: Arc::new(Mutex::new(Vec::new())),
             is_attended,
         }

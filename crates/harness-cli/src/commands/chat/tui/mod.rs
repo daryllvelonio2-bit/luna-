@@ -15,7 +15,8 @@ mod render;
 mod state;
 mod theme;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -27,7 +28,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
-use harness_core::{HarnessError, SessionStore};
+use harness_core::{HarnessError, SessionBinding, SessionStore, TurnOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio_util::sync::CancellationToken;
@@ -44,10 +45,13 @@ use super::todo;
 use super::turn::{can_auto_resume, launch_internal_turn};
 use super::ui::ANIMATION_INTERVAL;
 use actions::{
-    drain_tui_notices, handle_turn_end, refresh_tabs,
+    drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs,
 };
 use render::{draw, FooterInfo};
-use state::{ActiveModal, AgentMode, ComposerState, SlashPopupState, TuiState, TurnMeta};
+use state::{
+    ActiveModal, AgentMode, BackgroundSession, ComposerState, LiveThinkingView, SlashPopupState,
+    TuiState, TurnMeta,
+};
 use theme::shorten_cwd;
 use crate::commands::context_window::context_window;
 
@@ -114,12 +118,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        // Render current frame
+        // Render current frame (never await env.agent.lock() here — the running turn holds it!).
         let snap = {
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
             env.ui.tui_snapshot(w)
         };
-        let reasoning_effort = env.agent.lock().await.reasoning_effort();
+        let reasoning_effort = st.reasoning_effort;
         let tools_snapshot = env
             .in_flight_tools
             .lock()
@@ -134,6 +138,11 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         };
         terminal
             .draw(|frame| draw(frame, &mut st, &snap, &info))?;
+
+        let has_bg_active = st
+            .background_sessions
+            .values()
+            .any(|s| s.active_turn.is_some());
 
         tokio::select! {
             biased;
@@ -154,6 +163,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             }
 
             _ = animation.tick(), if st.active_turn.is_some()
+                || has_bg_active
                 || env.compacting.load(Ordering::SeqCst)
                 || snap.delegate_count > 0 => {
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
@@ -284,12 +294,23 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             } => {
                 handle_turn_end(&env, &mut st, turn_res).await;
             }
+
+            bg_done = poll_any_background_turn(&mut st.background_sessions), if has_bg_active => {
+                if let Some((bg_id, turn_res)) = bg_done {
+                    handle_background_turn_end(&env, &mut st, &bg_id, turn_res).await;
+                }
+            }
         }
     }
 
+    // Cancel any running turns cleanly so exit does not hang on a held agent mutex.
+    st.current_cancel.cancel();
+    for slot in st.background_sessions.values() {
+        slot.current_cancel.cancel();
+    }
+
     // Emit SessionEnd hook cleanly
-    {
-        let ag = env.agent.lock().await;
+    if let Ok(ag) = env.agent.try_lock() {
         if let Err(error) = ag
             .emit_hook_event(harness_core::HookEvent::SessionEnd, None)
             .await
@@ -343,13 +364,23 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         env.current_provider.as_str(),
         env.current_model.as_str(),
     );
-    let ctx_used = env
-        .agent
-        .lock()
-        .await
-        .estimate_session_tokens()
-        .await
-        .unwrap_or(0);
+    let (ctx_used, reasoning_effort, template_agent) = {
+        let ag = env.agent.lock().await;
+        let used = ag.estimate_session_tokens().await.unwrap_or(0);
+        let effort = ag.reasoning_effort();
+        let tmpl = ag.fork_for_session(
+            ag.provider().clone(),
+            SessionBinding {
+                store: env.store.clone(),
+                session_id: env.session_id.clone(),
+                resume_max_messages: env.config.session.resume_max_messages,
+            },
+            Arc::new(|_| {}),
+            effort,
+            ag.config().context_window,
+        );
+        (used, effort, Arc::new(tmpl))
+    };
     env.ui
         .set_status(env.current_model.as_str(), ctx_used, ctx_max);
     refresh_antigravity_status_if_needed(
@@ -395,6 +426,10 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         turn_meta,
         system_notices: Vec::new(),
         process_expanded: false,
+        expanded_thinking: HashSet::new(),
+        expanded_tools: HashSet::new(),
+        live_thinking_view: LiveThinkingView::Tail,
+        reasoning_effort,
         mode,
         composer: ComposerState {
             prompt_history,
@@ -403,6 +438,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         tabs: Vec::new(),
         total_sessions_count: 0,
         hit_boxes: Vec::new(),
+        transcript_hit_boxes: Vec::new(),
         scroll_from_bottom: 0,
         max_scroll: 0,
         modal: ActiveModal::None,
@@ -424,7 +460,39 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         update_notice: None,
         last_rendered_rect: (120, 34),
+        template_agent,
+        background_sessions: HashMap::new(),
     };
     refresh_tabs(env, &mut st).await;
     Ok(st)
+}
+
+async fn poll_any_background_turn(
+    bg: &mut HashMap<String, BackgroundSession>,
+) -> Option<(
+    String,
+    Result<Result<TurnOutcome, HarnessError>, tokio::task::JoinError>,
+)> {
+    std::future::poll_fn(|cx| {
+        let mut finished_id: Option<String> = None;
+        let mut finished_res = None;
+        for (id, slot) in bg.iter_mut() {
+            if let Some(ref mut handle) = slot.active_turn {
+                if let std::task::Poll::Ready(res) = std::pin::Pin::new(handle).poll(cx) {
+                    finished_id = Some(id.clone());
+                    finished_res = Some(res);
+                    break;
+                }
+            }
+        }
+        if let (Some(id), Some(res)) = (finished_id, finished_res) {
+            if let Some(slot) = bg.get_mut(&id) {
+                slot.active_turn = None;
+            }
+            std::task::Poll::Ready(Some((id, res)))
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }

@@ -1,8 +1,9 @@
 //! Session actions, slash-command execution, turn lifecycle, and tab management for the TUI.
 
+use std::collections::{HashSet, VecDeque};
 use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -17,22 +18,24 @@ use tokio::sync::mpsc;
 use super::super::commands::{
     command_entries, execute_slash_command, looks_like_path, SlashOutcome,
 };
-use super::super::helpers::finish_slash_command;
+use super::super::helpers::{finish_slash_command, IdleMemoryPass};
 use super::super::history::append_prompt_history;
 use super::super::interactive::state::{Env, Flow};
 use super::super::keys::{self, AppKey};
+use super::super::observers::agent_observer;
 use super::super::render::{parse_turns_from_history, TurnProcessItem};
+use super::super::status::refresh_antigravity_status_if_needed;
 use super::super::todo;
 use super::super::turn::{
     cancel_running_turn, drain_queue, handle_composer_command, launch_internal_turn, launch_turn,
     turn_records, InterruptNotice,
 };
+use super::super::ui::ChatUi;
 use super::state::{
-    ActiveModal, AgentMode, ModelPickerItem, PaletteAction, ProviderPickerItem, SessionTab,
-    TuiState, TurnMeta,
+    ActiveModal, AgentMode, BackgroundSession, LiveThinkingView, ModelPickerItem, PaletteAction,
+    ProviderPickerItem, SessionTab, TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
-use super::super::status::refresh_antigravity_status_if_needed;
 use crate::commands::context_window::context_window;
 use crate::commands::sessions::{resolve_session, SessionSelection};
 
@@ -148,7 +151,176 @@ pub fn apply_agent_mode(env: &Env<'_>, st: &mut TuiState, mode: AgentMode) {
     }
 }
 
+/// Park the currently displayed session into `st.background_sessions` so we can switch away
+/// without interrupting an active turn or losing its live state.
+fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
+    let old_id = env.session_id.clone();
+    let fresh_idle = IdleMemoryPass::new(0);
+    let slot = BackgroundSession {
+        session_id: old_id.clone(),
+        agent: env.agent.clone(),
+        ui: env.ui.clone(),
+        in_flight_tools: env.in_flight_tools.clone(),
+        interruptions: env.interruptions.clone(),
+        steer_handle: env.steer_handle.clone(),
+        interrupt_handle: env.interrupt_handle.clone(),
+        compacting: env.compacting.clone(),
+        provider: env.current_provider.clone(),
+        model: env.current_model.clone(),
+        reasoning_effort: st.reasoning_effort,
+        mode: st.mode,
+        turns: std::mem::take(&mut st.turns),
+        turn_meta: std::mem::take(&mut st.turn_meta),
+        system_notices: std::mem::take(&mut st.system_notices),
+        expanded_thinking: std::mem::take(&mut st.expanded_thinking),
+        expanded_tools: std::mem::take(&mut st.expanded_tools),
+        live_thinking_view: st.live_thinking_view,
+        process_expanded: st.process_expanded,
+        scroll_from_bottom: st.scroll_from_bottom,
+        queue: std::mem::take(&mut st.queue),
+        current_cancel: std::mem::take(&mut st.current_cancel),
+        active_turn: st.active_turn.take(),
+        active_goal: st.active_goal.take(),
+        current_query: std::mem::take(&mut st.current_query),
+        turn_start: st.turn_start,
+        idle_pass: std::mem::replace(&mut st.idle_pass, fresh_idle),
+        pending_images: st.pending_images.clone(),
+        pending_job_turn: st.pending_job_turn.take(),
+    };
+    st.background_sessions.insert(old_id, slot);
+}
+
+fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: BackgroundSession) {
+    *env.session_id = slot.session_id;
+    env.agent = slot.agent;
+    env.ui = slot.ui;
+    env.in_flight_tools = slot.in_flight_tools;
+    env.interruptions = slot.interruptions;
+    env.steer_handle = slot.steer_handle;
+    env.interrupt_handle = slot.interrupt_handle;
+    env.compacting = slot.compacting;
+    *env.current_provider = slot.provider;
+    *env.current_model = slot.model;
+    st.reasoning_effort = slot.reasoning_effort;
+    st.mode = slot.mode;
+    st.turns = slot.turns;
+    st.turn_meta = slot.turn_meta;
+    st.system_notices = slot.system_notices;
+    st.expanded_thinking = slot.expanded_thinking;
+    st.expanded_tools = slot.expanded_tools;
+    st.live_thinking_view = slot.live_thinking_view;
+    st.process_expanded = slot.process_expanded;
+    st.scroll_from_bottom = slot.scroll_from_bottom;
+    st.queue = slot.queue;
+    st.current_cancel = slot.current_cancel;
+    st.active_turn = slot.active_turn;
+    st.active_goal = slot.active_goal;
+    st.current_query = slot.current_query;
+    st.turn_start = slot.turn_start;
+    st.idle_pass = slot.idle_pass;
+    st.pending_images = slot.pending_images;
+    st.pending_job_turn = slot.pending_job_turn;
+
+    env.todo_scope.set_session(env.session_id.as_str());
+    todo::refresh_panel(&env.ui, &env.todo_scope);
+    apply_agent_mode(env, st, st.mode);
+}
+
+/// Build an independent `ChatAgent` + `ChatUi` bundle for a newly-activated session without
+/// touching any currently running session's `agent` lock.
+fn instantiate_session_runtime(
+    env: &Env<'_>,
+    st: &TuiState,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<
+    (
+        Arc<tokio::sync::Mutex<super::super::ChatAgent>>,
+        Arc<ChatUi>,
+        Arc<Mutex<Vec<TurnProcessItem>>>,
+        Arc<Mutex<Vec<InterruptNotice>>>,
+        Arc<Mutex<VecDeque<String>>>,
+        Arc<harness_core::InterruptHandle>,
+        Arc<AtomicBool>,
+        u32,
+    ),
+    HarnessError,
+> {
+    let client = Arc::new(GenericProviderClient::new(
+        provider.to_string(),
+        model.to_string(),
+        env.cred_manager.clone(),
+        env.discovery.clone(),
+        env.config.providers.get(provider),
+    )?);
+    let ctx_max = context_window(env.config, env.discovery.as_ref(), provider, model);
+
+    let ui = Arc::new(ChatUi::new_with_tui_notify(
+        env.ui.is_attended,
+        env.ui.tui_notifier(),
+    ));
+    ui.set_tui_mode(true);
+    ui.set_display_block_limit(env.config.display.block_limit);
+
+    let in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>> = Arc::new(Mutex::new(Vec::new()));
+    let interruptions: Arc<Mutex<Vec<InterruptNotice>>> = Arc::new(Mutex::new(Vec::new()));
+    let compacting = Arc::new(AtomicBool::new(false));
+    let todo_scope =
+        harness_core::tools::TodoScope::new(env.config.paths.todos_dir.clone(), session_id);
+    let observer = agent_observer(
+        ui.clone(),
+        in_flight_tools.clone(),
+        interruptions.clone(),
+        todo_scope,
+        compacting.clone(),
+        env.display_settings.clone(),
+    );
+
+    let mut ag = st.template_agent.fork_for_session(
+        client,
+        SessionBinding {
+            store: env.store.clone(),
+            session_id: session_id.to_string(),
+            resume_max_messages: env.config.session.resume_max_messages,
+        },
+        observer,
+        reasoning_effort,
+        Some(ctx_max as usize),
+    );
+    if env.compact_model.is_none() {
+        if let Ok(comp_client) = GenericProviderClient::new(
+            provider.to_string(),
+            model.to_string(),
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+            env.config.providers.get(provider),
+        ) {
+            ag.set_compaction(Some(CompactionSetup {
+                provider: Arc::new(comp_client),
+                model: model.to_string(),
+            }));
+        }
+    }
+
+    let steer_handle = ag.steer_handle();
+    let interrupt_handle = ag.interrupt_handle();
+    let agent = Arc::new(tokio::sync::Mutex::new(ag));
+    Ok((
+        agent,
+        ui,
+        in_flight_tools,
+        interruptions,
+        steer_handle,
+        interrupt_handle,
+        compacting,
+        ctx_max,
+    ))
+}
+
 /// Switch the active TUI session in-place without leaving the alternate screen.
+/// Works even while the current session is running a turn in the background.
 pub async fn switch_to_session(
     env: &mut Env<'_>,
     st: &mut TuiState,
@@ -157,96 +329,137 @@ pub async fn switch_to_session(
     if target_id == *env.session_id {
         return Ok(());
     }
-    if st.active_turn.is_some() {
-        env.ui
-            .set_transient_error(Some("Wait for or interrupt the active turn before switching sessions.".into()));
+
+    if let Some(existing) = st.background_sessions.remove(target_id) {
+        park_current_session(env, st);
+        restore_background_session(env, st, existing);
+        refresh_tabs(env, st).await;
         return Ok(());
     }
 
     let record = env.store.get(target_id).await?;
-    *env.session_id = target_id.to_string();
-    env.todo_scope.set_session(target_id);
-    todo::refresh_panel(&env.ui, &env.todo_scope);
-
-    if let Some((provider, model)) = record.model.clone() {
-        if !provider.is_empty() && !model.is_empty() {
-            let _ = apply_model_selection(env, st, &provider, &model, false).await;
-        }
-    }
+    let (target_provider, target_model) = match record.model.clone() {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (p, m),
+        _ => (env.current_provider.clone(), env.current_model.clone()),
+    };
 
     let replayed = env
         .store
         .replay_transcript(target_id, env.config.session.resume_max_messages)
         .await?;
-    let mut ag = env.agent.lock().await;
-    ag.set_session(SessionBinding {
-        store: env.store.clone(),
-        session_id: target_id.to_string(),
-        resume_max_messages: env.config.session.resume_max_messages,
-    });
-    let used = ag.estimate_session_tokens().await.unwrap_or(0);
-    drop(ag);
 
-    st.turns = parse_turns_from_history(&replayed.history);
-    st.turn_meta = st
-        .turns
+    let (
+        agent,
+        ui,
+        in_flight_tools,
+        interruptions,
+        steer_handle,
+        interrupt_handle,
+        compacting,
+        ctx_max,
+    ) = instantiate_session_runtime(
+        env,
+        st,
+        target_id,
+        &target_provider,
+        &target_model,
+        st.reasoning_effort,
+    )?;
+
+    let used = agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
+    let turns = parse_turns_from_history(&replayed.history);
+    let turn_meta: Vec<TurnMeta> = turns
         .iter()
         .map(|_| TurnMeta {
             mode: st.mode.label().to_string(),
-            model: env.current_model.clone(),
+            model: target_model.clone(),
             output_tokens: None,
         })
         .collect();
-    st.system_notices.clear();
-    st.scroll_from_bottom = 0;
+    let initial_len = turns.len();
 
-    let ctx_max = context_window(
-        env.config,
-        env.discovery.as_ref(),
-        env.current_provider,
-        env.current_model,
-    );
-    env.ui.set_status(env.current_model, used, ctx_max);
+    park_current_session(env, st);
+
+    *env.session_id = target_id.to_string();
+    env.agent = agent;
+    env.ui = ui;
+    env.in_flight_tools = in_flight_tools;
+    env.interruptions = interruptions;
+    env.steer_handle = steer_handle;
+    env.interrupt_handle = interrupt_handle;
+    env.compacting = compacting;
+    *env.current_provider = target_provider.clone();
+    *env.current_model = target_model.clone();
+
+    env.todo_scope.set_session(target_id);
+    todo::refresh_panel(&env.ui, &env.todo_scope);
+    apply_agent_mode(env, st, st.mode);
+
+    st.turns = turns;
+    st.turn_meta = turn_meta;
+    st.system_notices.clear();
+    st.expanded_thinking.clear();
+    st.expanded_tools.clear();
+    st.live_thinking_view = LiveThinkingView::Tail;
+    st.process_expanded = false;
+    st.scroll_from_bottom = 0;
+    st.idle_pass = IdleMemoryPass::new(initial_len);
+    st.pending_images = Arc::new(Mutex::new(Vec::new()));
+
+    env.ui.set_status(&target_model, used, ctx_max);
     env.ui.set_session_name(&record.name);
     env.ui.clear_live_state();
     env.ui.clear_transient_error();
+    refresh_antigravity_status_if_needed(&env.ui, &target_provider, &target_model, &env.cred_manager).await;
     refresh_tabs(env, st).await;
     Ok(())
 }
 
-/// Open a brand new session tab and switch into it.
+/// Open a brand new session tab and switch into it (works even while another session is busy).
 pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<(), HarnessError> {
-    if st.active_turn.is_some() {
-        env.ui
-            .set_transient_error(Some("Interrupt or finish the current turn before starting a new session.".into()));
-        return Ok(());
-    }
     let new_id = resolve_session(env.store.as_ref(), SessionSelection::New).await?;
-    let _ = env
-        .store
-        .set_model(&new_id, env.current_provider, env.current_model)
-        .await;
+    let provider = env.current_provider.clone();
+    let model = env.current_model.clone();
+    let _ = env.store.set_model(&new_id, &provider, &model).await;
+
+    let (
+        agent,
+        ui,
+        in_flight_tools,
+        interruptions,
+        steer_handle,
+        interrupt_handle,
+        compacting,
+        ctx_max,
+    ) = instantiate_session_runtime(env, st, &new_id, &provider, &model, st.reasoning_effort)?;
+
+    park_current_session(env, st);
+
     *env.session_id = new_id.clone();
+    env.agent = agent;
+    env.ui = ui;
+    env.in_flight_tools = in_flight_tools;
+    env.interruptions = interruptions;
+    env.steer_handle = steer_handle;
+    env.interrupt_handle = interrupt_handle;
+    env.compacting = compacting;
+
     env.todo_scope.set_session(&new_id);
     env.ui.set_todo_panel(None);
-    env.agent.lock().await.set_session(SessionBinding {
-        store: env.store.clone(),
-        session_id: new_id,
-        resume_max_messages: env.config.session.resume_max_messages,
-    });
+    apply_agent_mode(env, st, st.mode);
 
     st.turns.clear();
     st.turn_meta.clear();
     st.system_notices.clear();
+    st.expanded_thinking.clear();
+    st.expanded_tools.clear();
+    st.live_thinking_view = LiveThinkingView::Tail;
+    st.process_expanded = false;
     st.scroll_from_bottom = 0;
+    st.idle_pass = IdleMemoryPass::new(0);
+    st.pending_images = Arc::new(Mutex::new(Vec::new()));
 
-    let ctx_max = context_window(
-        env.config,
-        env.discovery.as_ref(),
-        env.current_provider,
-        env.current_model,
-    );
-    env.ui.set_status(env.current_model, 0, ctx_max);
+    env.ui.set_status(&model, 0, ctx_max);
     env.ui.set_session_name("");
     env.ui.clear_live_state();
     env.ui.clear_transient_error();
@@ -400,8 +613,8 @@ pub async fn open_models_for_provider(
     };
 }
 
-pub async fn open_thinking_picker(env: &Env<'_>, st: &mut TuiState) {
-    let cur = env.agent.lock().await.reasoning_effort();
+pub async fn open_thinking_picker(_env: &Env<'_>, st: &mut TuiState) {
+    let cur = st.reasoning_effort;
     let selected = match cur {
         None => 0,
         Some(ReasoningEffort::Minimal) => 1,
@@ -424,6 +637,12 @@ pub async fn apply_model_selection(
     model: &str,
     persist: bool,
 ) -> Result<(), HarnessError> {
+    if st.active_turn.is_some() {
+        env.ui.set_transient_error(Some(
+            "Wait for or interrupt the active turn in this session before changing models.".into(),
+        ));
+        return Ok(());
+    }
     let client = Arc::new(GenericProviderClient::new(
         provider.to_string(),
         model.to_string(),
@@ -432,28 +651,32 @@ pub async fn apply_model_selection(
         env.config.providers.get(provider),
     )?);
     let ctx_max = context_window(env.config, env.discovery.as_ref(), provider, model);
-    {
-        let mut ag = env.agent.lock().await;
-        ag.set_provider(client);
-        ag.set_context_window(Some(ctx_max as usize));
-        if env.compact_model.is_none() {
-            if let Ok(comp_client) = GenericProviderClient::new(
-                provider.to_string(),
-                model.to_string(),
-                env.cred_manager.clone(),
-                env.discovery.clone(),
-                env.config.providers.get(provider),
-            ) {
-                ag.set_compaction(Some(CompactionSetup {
-                    provider: Arc::new(comp_client),
-                    model: model.to_string(),
-                }));
-            }
+    let Ok(mut ag) = env.agent.try_lock() else {
+        env.ui.set_transient_error(Some(
+            "Session agent is busy; wait for the turn to finish before changing models.".into(),
+        ));
+        return Ok(());
+    };
+    ag.set_provider(client);
+    ag.set_context_window(Some(ctx_max as usize));
+    if env.compact_model.is_none() {
+        if let Ok(comp_client) = GenericProviderClient::new(
+            provider.to_string(),
+            model.to_string(),
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+            env.config.providers.get(provider),
+        ) {
+            ag.set_compaction(Some(CompactionSetup {
+                provider: Arc::new(comp_client),
+                model: model.to_string(),
+            }));
         }
     }
+    let used = ag.estimate_session_tokens().await.unwrap_or(0);
+    drop(ag);
     *env.current_provider = provider.to_string();
     *env.current_model = model.to_string();
-    let used = env.agent.lock().await.estimate_session_tokens().await.unwrap_or(0);
     env.ui.set_status(model, used, ctx_max);
     refresh_antigravity_status_if_needed(&env.ui, provider, model, &env.cred_manager).await;
     if persist {
@@ -463,8 +686,35 @@ pub async fn apply_model_selection(
     Ok(())
 }
 
-pub async fn apply_thinking_selection(env: &Env<'_>, effort: Option<ReasoningEffort>) {
-    env.agent.lock().await.set_reasoning_effort(effort);
+pub async fn apply_thinking_selection(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    effort: Option<ReasoningEffort>,
+) {
+    if st.active_turn.is_some() {
+        env.ui.set_transient_error(Some(
+            "Wait for or interrupt the active turn in this session before changing thinking level."
+                .into(),
+        ));
+        return;
+    }
+    if let Ok(mut ag) = env.agent.try_lock() {
+        ag.set_reasoning_effort(effort);
+        st.reasoning_effort = effort;
+    }
+}
+
+pub fn set_all_process_expanded(st: &mut TuiState, expanded: bool) {
+    st.process_expanded = expanded;
+    if expanded {
+        st.expanded_thinking = (0..st.turns.len()).collect();
+        st.expanded_tools = (0..st.turns.len()).collect();
+        st.live_thinking_view = LiveThinkingView::Expanded;
+    } else {
+        st.expanded_thinking.clear();
+        st.expanded_tools.clear();
+        st.live_thinking_view = LiveThinkingView::Collapsed;
+    }
 }
 
 /// Execute a `ctrl+p` Command Palette action.
@@ -491,7 +741,7 @@ pub async fn run_palette_action(
             open_thinking_picker(env, st).await;
         }
         PaletteAction::ToggleProcessDetails => {
-            st.process_expanded = !st.process_expanded;
+            set_all_process_expanded(st, !st.process_expanded);
         }
         PaletteAction::ToggleTodoPanel => {
             env.ui.toggle_todo_collapsed();
@@ -649,11 +899,11 @@ pub async fn run_slash_command(
             return Ok(Flow::Continue);
         }
         "/expand" if arg.is_none() => {
-            st.process_expanded = true;
+            set_all_process_expanded(st, true);
             return Ok(Flow::Continue);
         }
         "/collapse" if arg.is_none() => {
-            st.process_expanded = false;
+            set_all_process_expanded(st, false);
             return Ok(Flow::Continue);
         }
         "/new" if arg.is_none() => {
@@ -1036,8 +1286,9 @@ pub async fn handle_turn_end(
                 st.idle_pass.mark_passed(st.turns.len());
             }
             if env.config.display.auto_collapse {
-                st.process_expanded = false;
+                set_all_process_expanded(st, false);
             }
+            st.live_thinking_view = LiveThinkingView::Tail;
             if st.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
@@ -1115,6 +1366,213 @@ pub async fn handle_turn_end(
     refresh_tabs(env, st).await;
     drain_tui_notices(env, st);
     st.scroll_from_bottom = 0;
+}
+
+/// Handle completion of a turn running in a background session (not currently viewed).
+pub async fn handle_background_turn_end(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    bg_session_id: &str,
+    turn_res: Result<Result<TurnOutcome, HarnessError>, tokio::task::JoinError>,
+) {
+    let Some(slot) = st.background_sessions.get_mut(bg_session_id) else {
+        return;
+    };
+    slot.active_turn = None;
+    if slot
+        .pending_job_turn
+        .as_ref()
+        .is_some_and(|(pending_session, at)| {
+            pending_session == bg_session_id && slot.turn_start > *at
+        })
+    {
+        slot.pending_job_turn = None;
+    }
+    slot.ui.set_turn_active(false);
+    slot.ui.stop_activity();
+    slot.ui.clear_live_state();
+    slot.live_thinking_view = LiveThinkingView::Tail;
+
+    let current_tools: Vec<TurnProcessItem> = std::mem::take(
+        &mut *slot
+            .in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let interruptions: Vec<InterruptNotice> = std::mem::take(
+        &mut *slot
+            .interruptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+
+    let turn_dur = slot.turn_start.elapsed();
+    let mut goal_reply: Option<String> = None;
+
+    match turn_res {
+        Ok(Ok(outcome)) => {
+            env.usage
+                .record_chat(
+                    &slot.provider,
+                    &slot.model,
+                    Some(bg_session_id),
+                    &outcome,
+                )
+                .await;
+            let out_tokens = outcome.usage.as_ref().map(|u| u.completion_tokens);
+            let added = turn_records(
+                &slot.current_query,
+                interruptions,
+                slot.turn_start,
+                turn_dur,
+                outcome.reasoning.clone(),
+                outcome.tool_calls.clone(),
+                current_tools,
+                outcome.reply.clone(),
+            );
+            let count = added.len();
+            slot.turns.extend(added);
+            for i in 0..count {
+                slot.turn_meta.push(TurnMeta {
+                    mode: slot.mode.label().to_string(),
+                    model: slot.model.clone(),
+                    output_tokens: if i + 1 == count { out_tokens } else { None },
+                });
+            }
+            if env.config.memory.mode == harness_core::MemoryMode::Background
+                && env.config.memory.background_every_turns > 0
+                && slot
+                    .turns
+                    .len()
+                    .is_multiple_of(env.config.memory.background_every_turns)
+            {
+                slot.idle_pass.mark_passed(slot.turns.len());
+            }
+            if env.config.display.auto_collapse {
+                slot.process_expanded = false;
+                slot.expanded_thinking.clear();
+                slot.expanded_tools.clear();
+            }
+            if slot.active_goal.is_some() {
+                goal_reply = Some(outcome.reply);
+            }
+        }
+        Ok(Err(HarnessError::Cancelled)) => {
+            let added = turn_records(
+                &slot.current_query,
+                interruptions,
+                slot.turn_start,
+                turn_dur,
+                None,
+                Vec::new(),
+                current_tools,
+                "✖ Cancelled".to_string(),
+            );
+            let count = added.len();
+            slot.turns.extend(added);
+            for _ in 0..count {
+                slot.turn_meta.push(TurnMeta {
+                    mode: slot.mode.label().to_string(),
+                    model: slot.model.clone(),
+                    output_tokens: None,
+                });
+            }
+            if slot.active_goal.take().is_some() {
+                slot.ui.set_goal_status(None);
+            }
+        }
+        Ok(Err(e)) => {
+            slot.ui.set_transient_error(Some(format!("Error: {e}")));
+            if slot.active_goal.take().is_some() {
+                slot.ui.set_goal_status(None);
+            }
+        }
+        Err(e) => {
+            slot.ui
+                .set_transient_error(Some(format!("Turn task panicked: {e}")));
+            if slot.active_goal.take().is_some() {
+                slot.ui.set_goal_status(None);
+            }
+        }
+    }
+
+    let used = slot
+        .agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
+    let ctx_max = context_window(
+        env.config,
+        env.discovery.as_ref(),
+        &slot.provider,
+        &slot.model,
+    );
+    slot.ui.update_status(used, ctx_max);
+
+    if let Some(reply) = goal_reply {
+        if let Some(ref mut goal) = slot.active_goal {
+            match harness_core::GoalRunState::evaluate_reply(&reply) {
+                harness_core::GoalVerdict::Complete(_) => {
+                    slot.system_notices
+                        .push(format!("✔ Goal achieved in {} iteration(s).", goal.iteration));
+                    slot.active_goal = None;
+                    slot.ui.set_goal_status(None);
+                }
+                harness_core::GoalVerdict::Blocked(reason) => {
+                    slot.system_notices.push(format!(
+                        "✖ Goal blocked ({}/{}): {reason}",
+                        goal.iteration, goal.max_iterations
+                    ));
+                    slot.active_goal = None;
+                    slot.ui.set_goal_status(None);
+                }
+                harness_core::GoalVerdict::Continue => {
+                    if !goal.advance() {
+                        slot.system_notices.push(format!(
+                            "■ Goal stopped: max iterations ({}) reached",
+                            goal.max_iterations
+                        ));
+                        slot.active_goal = None;
+                        slot.ui.set_goal_status(None);
+                    } else if let Ok(prompt) = goal.prompt_for_current_iteration() {
+                        slot.ui
+                            .set_goal_status(Some((goal.iteration, goal.max_iterations)));
+                        launch_internal_turn(
+                            &prompt,
+                            &slot.ui,
+                            &slot.agent,
+                            &slot.in_flight_tools,
+                            &mut slot.current_cancel,
+                            &mut slot.current_query,
+                            &mut slot.turn_start,
+                            &mut slot.active_turn,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if slot.active_turn.is_none() && !slot.compacting.load(Ordering::SeqCst) {
+        drain_queue(
+            &mut slot.queue,
+            &slot.ui,
+            &slot.turns,
+            slot.process_expanded,
+            &slot.pending_images,
+            &env.plan_mode,
+            &slot.agent,
+            &slot.in_flight_tools,
+            &mut slot.current_cancel,
+            &mut slot.current_query,
+            &mut slot.turn_start,
+            &mut slot.active_turn,
+        );
+    }
+
+    refresh_tabs(env, st).await;
 }
 
 fn advance_goal_tui(env: &Env<'_>, st: &mut TuiState, reply: &str) {

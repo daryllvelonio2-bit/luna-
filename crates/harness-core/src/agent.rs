@@ -300,6 +300,7 @@ pub(super) struct FoldPolicy {
 
 /// The provider and model that write summaries. A separate provider is what makes a failing
 /// compaction reachable (point `agent.compaction_provider` at a provider with no credentials).
+#[derive(Clone)]
 pub struct CompactionSetup {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
@@ -885,6 +886,46 @@ where
 
     pub fn compaction(&self) -> Option<&CompactionSetup> {
         self.compaction.as_ref()
+    }
+
+    /// Build a sibling [`Agent`] sharing this instance's shared runtime infrastructure (`memory`,
+    /// `notes`, `registry`, `approver`, `permissions`, `approval`, `compaction`, `hooks`,
+    /// `checkpoints`, `saver`) but bound to an independent session, provider, observer, steer
+    /// queue, and interrupt handle.
+    pub fn fork_for_session(
+        &self,
+        provider: Arc<P>,
+        binding: SessionBinding,
+        observer: AgentObserver,
+        reasoning_effort: Option<ReasoningEffort>,
+        context_window: Option<usize>,
+    ) -> Self {
+        let mut config = self.config.clone();
+        config.context_window = context_window;
+        Self {
+            provider,
+            memory: self.memory.clone(),
+            notes: self.notes.clone(),
+            registry: self.registry.clone(),
+            config,
+            approver: self.approver.clone(),
+            permissions: self.permissions.clone(),
+            approval: self.approval.clone(),
+            compaction: self.compaction.clone(),
+            session: Some(binding),
+            hooks: self.hooks.clone(),
+            checkpoints: self.checkpoints.clone(),
+            observer: Some(observer),
+            reasoning_effort,
+            steer_queue: Arc::new(Mutex::new(VecDeque::new())),
+            interrupt: Arc::new(InterruptHandle::new()),
+            saver: self.saver.clone(),
+            turns_completed: AtomicUsize::new(0),
+            saver_fingerprint: Arc::new(Mutex::new(None)),
+            fold_in_flight: Arc::new(AtomicBool::new(false)),
+            fold_disabled_this_turn: Arc::new(AtomicBool::new(false)),
+            completed_fold: Arc::new(Mutex::new(None)),
+        }
     }
 }
 

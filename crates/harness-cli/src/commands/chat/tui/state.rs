@@ -1,17 +1,22 @@
 //! State structures for the full-screen OpenCode-style TUI.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use harness_core::{
-    ApprovalDecision, ApprovalRequest, HarnessError, ReasoningEffort, SessionRecord, TurnOutcome,
+    ApprovalDecision, ApprovalRequest, HarnessError, InterruptHandle, ReasoningEffort,
+    SessionRecord, TurnOutcome,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::super::commands::CommandEntry;
 use super::super::helpers::IdleMemoryPass;
-use super::super::render::TurnRecord;
+use super::super::render::{TurnProcessItem, TurnRecord};
+use super::super::turn::InterruptNotice;
+use super::super::ui::ChatUi;
+use super::super::ChatAgent;
 use crate::commands::clarify::{ClarifyRequest, ClarifyResponse};
 
 /// Agent execution mode toggled by `Shift+Tab` (shown in coral/accent on composer footer).
@@ -276,6 +281,64 @@ pub struct TabHitBox {
     pub target: TabHitTarget,
 }
 
+/// Clickable target inside the rendered transcript viewport.
+#[derive(Debug, Clone)]
+pub enum TranscriptClickTarget {
+    ToggleTurnThinking(usize),
+    ToggleTurnTools(usize),
+    ToggleLiveThinking,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptHitBox {
+    pub y: u16,
+    pub x_start: u16,
+    pub x_end: u16,
+    pub target: TranscriptClickTarget,
+}
+
+/// Display mode for the live streaming thinking block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveThinkingView {
+    #[default]
+    Tail,
+    Expanded,
+    Collapsed,
+}
+
+/// Parked state for a session that is not currently displayed (and may still be running a turn).
+pub struct BackgroundSession {
+    pub session_id: String,
+    pub agent: Arc<tokio::sync::Mutex<ChatAgent>>,
+    pub ui: Arc<ChatUi>,
+    pub in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>>,
+    pub interruptions: Arc<Mutex<Vec<InterruptNotice>>>,
+    pub steer_handle: Arc<Mutex<VecDeque<String>>>,
+    pub interrupt_handle: Arc<InterruptHandle>,
+    pub compacting: Arc<AtomicBool>,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub mode: AgentMode,
+    pub turns: Vec<TurnRecord>,
+    pub turn_meta: Vec<TurnMeta>,
+    pub system_notices: Vec<String>,
+    pub expanded_thinking: HashSet<usize>,
+    pub expanded_tools: HashSet<usize>,
+    pub live_thinking_view: LiveThinkingView,
+    pub process_expanded: bool,
+    pub scroll_from_bottom: usize,
+    pub queue: VecDeque<String>,
+    pub current_cancel: CancellationToken,
+    pub active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+    pub active_goal: Option<harness_core::GoalRunState>,
+    pub current_query: String,
+    pub turn_start: std::time::Instant,
+    pub idle_pass: IdleMemoryPass,
+    pub pending_images: Arc<Mutex<Vec<String>>>,
+    pub pending_job_turn: Option<(String, std::time::Instant)>,
+}
+
 /// Per-turn metadata stored alongside `TurnRecord` for rendering OpenCode-style footers
 /// (`Build · Model · 2.2s · 5.6 tok/s`).
 #[derive(Debug, Clone)]
@@ -396,11 +459,16 @@ pub struct TuiState {
     pub turn_meta: Vec<TurnMeta>,
     pub system_notices: Vec<String>,
     pub process_expanded: bool,
+    pub expanded_thinking: HashSet<usize>,
+    pub expanded_tools: HashSet<usize>,
+    pub live_thinking_view: LiveThinkingView,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub mode: AgentMode,
     pub composer: ComposerState,
     pub tabs: Vec<SessionTab>,
     pub total_sessions_count: usize,
     pub hit_boxes: Vec<TabHitBox>,
+    pub transcript_hit_boxes: Vec<TranscriptHitBox>,
     pub scroll_from_bottom: usize,
     pub max_scroll: usize,
     pub modal: ActiveModal,
@@ -422,4 +490,9 @@ pub struct TuiState {
     pub version: String,
     pub update_notice: Option<String>,
     pub last_rendered_rect: (u16, u16),
+    /// Unlocked clone-only agent template used to instantiate independent per-session agents
+    /// without waiting on a running turn's `env.agent` lock.
+    pub template_agent: Arc<ChatAgent>,
+    /// Other sessions kept live in memory (including any running background turns).
+    pub background_sessions: HashMap<String, BackgroundSession>,
 }

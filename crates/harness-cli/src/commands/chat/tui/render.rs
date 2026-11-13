@@ -13,8 +13,8 @@ use super::super::render::{format_elapsed_secs, reply_for_display, SPINNER_FRAME
 use super::super::ui::TuiLiveSnapshot;
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
-    ActiveModal, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem, TabHitBox,
-    TabHitTarget, TuiState,
+    ActiveModal, LiveThinkingView, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem,
+    TabHitBox, TabHitTarget, TranscriptClickTarget, TranscriptHitBox, TuiState,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
@@ -72,6 +72,7 @@ pub fn draw(
         && snap.transient_error.is_none();
 
     let composer_rect = if show_landing {
+        st.transcript_hit_boxes.clear();
         render_landing(frame, body_area, st, info)
     } else {
         render_conversation(frame, body_area, st, snap, info)
@@ -128,13 +129,22 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
         .position(|(_, t)| t.id == active_session_id)
         .unwrap_or(visible_tabs.len().saturating_sub(1));
 
+    let tab_is_busy = |tab_id: &str| -> bool {
+        (tab_id == active_session_id && st.active_turn.is_some())
+            || st
+                .background_sessions
+                .get(tab_id)
+                .is_some_and(|s| s.active_turn.is_some())
+    };
+
     // Estimate widths and drop earliest tabs if overflowing.
-    let tab_display_width = |title: &str, is_active: bool| -> u16 {
-        let truncated = truncate_str(title, 18);
+    let tab_display_width = |tab: &super::state::SessionTab, is_active: bool| -> u16 {
+        let truncated = truncate_str(&tab.title, 18);
+        let busy_w = if tab_is_busy(&tab.id) { 2 } else { 0 };
         if is_active {
-            (truncated.width() + 4) as u16
+            (truncated.width() + busy_w + 4) as u16
         } else {
-            (truncated.width() + 3) as u16
+            (truncated.width() + busy_w + 3) as u16
         }
     };
 
@@ -142,7 +152,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
     loop {
         let total_w: u16 = visible_tabs[start_idx..]
             .iter()
-            .map(|(_, t)| tab_display_width(&t.title, t.id == active_session_id))
+            .map(|(_, t)| tab_display_width(t, t.id == active_session_id))
             .sum();
         if cursor_x + total_w <= max_tabs_x || start_idx >= active_pos {
             break;
@@ -150,17 +160,14 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
         start_idx += 1;
     }
 
+    let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
     let slice = &visible_tabs[start_idx..];
     let slice_len = slice.len();
     for (rel_idx, (_, tab)) in slice.iter().enumerate() {
         let is_active = tab.id == active_session_id;
+        let busy = tab_is_busy(&tab.id);
         let truncated = truncate_str(&tab.title, 18);
-        let label = if is_active {
-            format!("  {truncated}  ")
-        } else {
-            format!(" {truncated}  ")
-        };
-        let w = label.width() as u16;
+        let w = tab_display_width(tab, is_active);
         if cursor_x + w > max_tabs_x {
             break;
         }
@@ -175,13 +182,22 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
         } else {
             Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)
         };
+        let bg = if is_active { BG_SURFACE } else { BG_CANVAS };
 
         st.hit_boxes.push(TabHitBox {
             x_start: cursor_x,
             x_end: cursor_x + w,
             target: TabHitTarget::Session(tab.id.clone()),
         });
-        spans.push(Span::styled(label, style));
+        let lead = if is_active { "  " } else { " " };
+        spans.push(Span::styled(lead, style));
+        if busy {
+            spans.push(Span::styled(
+                format!("{spinner} "),
+                Style::default().fg(ACCENT_CORAL).bg(bg),
+            ));
+        }
+        spans.push(Span::styled(format!("{truncated}  "), style));
         cursor_x += w;
     }
 
@@ -371,8 +387,8 @@ fn render_conversation(
         height: transcript_h,
     };
 
-    // Build transcript lines
-    let mut lines = build_transcript_lines(st, snap, info, content_w as usize);
+    // Build transcript lines + clickable line hit targets
+    let (mut lines, line_targets) = build_transcript_lines(st, snap, info, content_w as usize);
     let total_lines = lines.len();
     let view_h = transcript_rect.height as usize;
     st.max_scroll = total_lines.saturating_sub(view_h);
@@ -383,6 +399,20 @@ fn render_conversation(
         .saturating_sub(view_h)
         .saturating_sub(st.scroll_from_bottom);
     let end = (start + view_h).min(total_lines);
+
+    st.transcript_hit_boxes.clear();
+    for (line_idx, target) in line_targets {
+        if line_idx >= start && line_idx < end {
+            let screen_y = transcript_rect.y + (line_idx - start) as u16;
+            st.transcript_hit_boxes.push(TranscriptHitBox {
+                y: screen_y,
+                x_start: transcript_rect.x,
+                x_end: transcript_rect.x + transcript_rect.width,
+                target,
+            });
+        }
+    }
+
     let visible_slice: Vec<Line<'static>> = if start < end {
         lines.drain(start..end).collect()
     } else {
@@ -769,8 +799,9 @@ fn build_transcript_lines(
     snap: &TuiLiveSnapshot,
     info: &FooterInfo<'_>,
     width: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<(usize, TranscriptClickTarget)>) {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut hit_targets: Vec<(usize, TranscriptClickTarget)> = Vec::new();
     let card_inner_w = width.saturating_sub(4).max(12);
 
     for (idx, turn) in st.turns.iter().enumerate() {
@@ -780,11 +811,20 @@ fn build_transcript_lines(
             out.push(Line::default());
         }
 
-        // 2. Reasoning (collapsible with Ctrl+O)
+        // 2. Reasoning (click row to toggle, or Ctrl+O to toggle all)
         if let Some(ref reasoning) = turn.reasoning {
             let trimmed = reasoning.trim();
             if !trimmed.is_empty() {
-                if st.process_expanded {
+                let line_count = trimmed.lines().count().max(1);
+                let unit = if line_count == 1 { "line" } else { "lines" };
+                let thinking_open = st.process_expanded || st.expanded_thinking.contains(&idx);
+                if thinking_open {
+                    let header_idx = out.len();
+                    out.push(Line::from(Span::styled(
+                        format!("  ▾ Thinking ({line_count} {unit} · click to collapse)"),
+                        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                    )));
+                    hit_targets.push((header_idx, TranscriptClickTarget::ToggleTurnThinking(idx)));
                     for rline in render_markdown(trimmed, card_inner_w) {
                         let mut spans = vec![Span::styled(
                             "  │ ",
@@ -796,22 +836,32 @@ fn build_transcript_lines(
                                 s.style.fg(TEXT_MUTED).add_modifier(Modifier::ITALIC),
                             ));
                         }
+                        let row_idx = out.len();
                         out.push(Line::from(spans));
+                        hit_targets.push((row_idx, TranscriptClickTarget::ToggleTurnThinking(idx)));
                     }
                     out.push(Line::default());
                 } else {
-                    let line_count = trimmed.lines().count();
+                    let row_idx = out.len();
                     out.push(Line::from(Span::styled(
-                        format!("  ▸ Thinking ({line_count} lines · ctrl+o to expand)"),
+                        format!("  ▸ Thinking ({line_count} {unit} · click to expand)"),
                         Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
                     )));
+                    hit_targets.push((row_idx, TranscriptClickTarget::ToggleTurnThinking(idx)));
                 }
             }
         }
 
-        // 3. Tool calls
+        // 3. Tool calls (click row to toggle, or Ctrl+O to toggle all)
         if !turn.tool_items.is_empty() {
-            if st.process_expanded {
+            let tools_open = st.process_expanded || st.expanded_tools.contains(&idx);
+            if tools_open {
+                let header_idx = out.len();
+                out.push(Line::from(Span::styled(
+                    format!("  ▾ {} tool(s) (click to collapse)", turn.tool_items.len()),
+                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                )));
+                hit_targets.push((header_idx, TranscriptClickTarget::ToggleTurnTools(idx)));
                 for item in &turn.tool_items {
                     let call_clean = strip_ansi(&item.call_formatted);
                     out.push(Line::from(Span::styled(
@@ -863,10 +913,12 @@ fn build_transcript_lines(
                 } else {
                     format!("{}, +{} more", names[..3].join(", "), names.len() - 3)
                 };
+                let row_idx = out.len();
                 out.push(Line::from(Span::styled(
-                    format!("  ▸ {} tool(s): {preview} (ctrl+o to expand)", names.len()),
+                    format!("  ▸ {} tool(s): {preview} (click to expand)", names.len()),
                     Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
                 )));
+                hit_targets.push((row_idx, TranscriptClickTarget::ToggleTurnTools(idx)));
             }
         }
 
@@ -940,10 +992,41 @@ fn build_transcript_lines(
             out.push(Line::default());
         }
 
-        // Streaming reasoning tail
+        // Streaming reasoning block (animated, live, and clickable to expand/collapse)
         if !snap.reasoning.trim().is_empty() {
-            let rlines = render_markdown(snap.reasoning.trim(), card_inner_w);
-            let skip = rlines.len().saturating_sub(8);
+            let trimmed = snap.reasoning.trim();
+            let rlines = render_markdown(trimmed, card_inner_w);
+            let line_count = trimmed.lines().count().max(1);
+            let unit = if line_count == 1 { "line" } else { "lines" };
+            let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
+            let secs = st.turn_start.elapsed().as_secs_f32();
+            let view_mode = if st.process_expanded {
+                LiveThinkingView::Expanded
+            } else {
+                st.live_thinking_view
+            };
+            let (arrow, hint) = match view_mode {
+                LiveThinkingView::Expanded => ("▾", "click to collapse"),
+                LiveThinkingView::Tail | LiveThinkingView::Collapsed => ("▸", "click to expand"),
+            };
+            let header_idx = out.len();
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("  {spinner} "),
+                    Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                ),
+                Span::styled(
+                    format!("{arrow} Thinking… ({line_count} {unit}, {secs:.1}s · {hint})"),
+                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                ),
+            ]));
+            hit_targets.push((header_idx, TranscriptClickTarget::ToggleLiveThinking));
+
+            let skip = match view_mode {
+                LiveThinkingView::Expanded => 0,
+                LiveThinkingView::Tail => rlines.len().saturating_sub(6),
+                LiveThinkingView::Collapsed => rlines.len(),
+            };
             for rline in rlines.into_iter().skip(skip) {
                 let mut spans = vec![Span::styled(
                     "  │ ",
@@ -955,7 +1038,9 @@ fn build_transcript_lines(
                         s.style.fg(TEXT_MUTED).add_modifier(Modifier::ITALIC),
                     ));
                 }
+                let row_idx = out.len();
                 out.push(Line::from(spans));
+                hit_targets.push((row_idx, TranscriptClickTarget::ToggleLiveThinking));
             }
             out.push(Line::default());
         }
@@ -1042,7 +1127,7 @@ fn build_transcript_lines(
         out.push(Line::default());
     }
 
-    out
+    (out, hit_targets)
 }
 
 fn push_user_card(

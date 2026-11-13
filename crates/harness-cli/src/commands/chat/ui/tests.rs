@@ -1213,3 +1213,15 @@ fn delegate_task_notification_format_contains_title_tool_and_running_time() {
     );
     assert!(notification.contains("> read_file (14s)"), "{notification}");
 }
+
+#[test]
+fn finish_reasoning_preserves_live_reasoning_in_tui_mode() {
+    let ui = ChatUi::new(true);
+    ui.set_tui_mode(true);
+    ui.push_reasoning("step one");
+    ui.finish_reasoning();
+    ui.push_reasoning("step two");
+    let snap = ui.tui_snapshot(80);
+    assert!(snap.reasoning.contains("step one"), "{}", snap.reasoning);
+    assert!(snap.reasoning.contains("step two"), "{}", snap.reasoning);
+}
