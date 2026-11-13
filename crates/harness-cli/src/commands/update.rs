@@ -1082,8 +1082,8 @@ struct LatestBuild {
 /// The newest successful run of the release workflow.
 async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> {
     let url = format!(
-        "https://api.github.com/repos/{}/actions/workflows/{}/runs?branch={}&status=success&per_page=1",
-        settings.repo, settings.workflow, settings.branch
+        "https://api.github.com/repos/{}/actions/workflows/{}/runs",
+        settings.repo, settings.workflow
     );
     let client = reqwest::Client::builder()
         .timeout(CHECK_TIMEOUT)
@@ -1091,7 +1091,11 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         .ok()?;
     let request = client
         .get(url)
-        .header("Accept", GITHUB_ACCEPT)
+        .query(&[
+            ("branch", settings.branch.as_str()),
+            ("status", "completed"),
+            ("per_page", "100"),
+        ])
         .header("User-Agent", USER_AGENT);
 
     let response = tokio::time::timeout(CHECK_TIMEOUT, request.send())
@@ -1102,7 +1106,18 @@ async fn fetch_latest(settings: &config::UpdateSettings) -> Option<LatestBuild> 
         return None;
     }
     let body: serde_json::Value = response.json().await.ok()?;
-    let run = body.get("workflow_runs")?.get(0)?;
+    let runs = body.get("workflow_runs")?.as_array()?;
+    let run = runs
+        .iter()
+        .filter(|run| {
+            let sha = run.get("head_sha").and_then(serde_json::Value::as_str);
+            sha.is_some_and(|sha| cached_build_is_newer_than_running(BUILD_SHA, sha))
+        })
+        .max_by_key(|run| {
+            run.get("run_number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        })?;
     Some(LatestBuild {
         sha: run.get("head_sha")?.as_str()?.to_string(),
         run_id: run.get("id")?.as_u64()?,
