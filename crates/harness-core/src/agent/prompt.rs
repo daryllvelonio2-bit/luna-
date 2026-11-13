@@ -56,6 +56,13 @@ where
             String::new()
         };
         let memory_instruction = self.memory_instruction()?;
+        // The rich-output invitation belongs only to the renderer that can honor it. Piped runs,
+        // the inline CLI and headless execs must not be told to emit tables or ANSI color.
+        let rich_output = if self.config.tui_output {
+            crate::prompts::section(crate::prompts::TUI_RENDER_PROMPT)?
+        } else {
+            String::new()
+        };
 
         let base = self.fill_base_prompt(
             &persona,
@@ -65,6 +72,7 @@ where
             skills_protocol,
             &mcp_protocol,
             &memory_instruction,
+            &rich_output,
         )?;
         let env_info = self.runtime_environment();
 
@@ -170,12 +178,14 @@ where
         skills_protocol: &str,
         mcp_protocol: &str,
         memory_instruction: &str,
+        rich_output: &str,
     ) -> Result<String, HarnessError> {
         Ok(crate::prompts::section(crate::prompts::SYSTEM_PROMPT)?
             .replace("{{PERSISTENT_MEMORY_TAG}}", persistent_memory_tag)
             .replace("{{ACTIVE_MEMORIES_BLOCK}}", active_memories_block)
             .replace("{{SKILLS_PROTOCOL}}", skills_protocol)
             .replace("{{MCP_PROTOCOL}}", mcp_protocol)
+            .replace("{{RICH_OUTPUT_PROTOCOL}}", rich_output)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}\n\n", memory_instruction)
             .replace("{{MEMORY_AND_NOTE_PROTOCOL}}", memory_instruction)
             .replace(

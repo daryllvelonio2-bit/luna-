@@ -376,7 +376,7 @@ pub(crate) async fn select_slash_command(
     // otherwise pasting a screenshot after typing `/worker` silently does nothing.
     pending_images: &Arc<Mutex<Vec<String>>>,
 ) -> Option<String> {
-    if !ui.is_attended {
+    if !ui.is_attended || ui.is_tui_mode() {
         return None;
     }
 
@@ -634,6 +634,12 @@ pub(crate) async fn select_from_rx(
     leave_open: bool,
 ) -> Option<usize> {
     if items.is_empty() {
+        return None;
+    }
+
+    // The TUI owns the alternate screen and reads its own events; a picker drawn with raw
+    // stdout writes would corrupt that screen and wait on a channel nobody feeds.
+    if ui.is_tui_mode() {
         return None;
     }
 

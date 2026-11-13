@@ -51,7 +51,7 @@ impl<'a> SlashContext<'a> {
         // The wizard reads the composer's own keys, so it is handed the channel the menu and
         // this dispatch already drained.
         if let Err(e) =
-            handle_auto_compact_command(self.ui, self.agent, arg, Some(&mut *self.key_rx)).await
+            handle_auto_compact_command(self.ui, self.agent, arg, self.key_rx.as_deref_mut()).await
         {
             self.ui.emit_above(&format!(
                 "{} Failed to update auto-compact: {}",

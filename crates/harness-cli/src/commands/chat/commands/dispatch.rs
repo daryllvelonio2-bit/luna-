@@ -57,7 +57,9 @@ pub(crate) enum SlashOutcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_slash_command(
     cmd: &str,
-    key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
+    // `None` means no key channel is wired to a composer (the TUI owns the terminal and reads its
+    // own events). Interactive arms then report instead of waiting on a channel nobody writes to.
+    key_rx: Option<&mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &ChatUi,
     config: &mut Config,
     cred_manager: &Arc<CredentialManager>,
@@ -128,7 +130,7 @@ pub(crate) async fn execute_slash_command(
 
 /// Everything one slash command may touch, borrowed for the duration of the command.
 struct SlashContext<'a> {
-    key_rx: &'a mut mpsc::UnboundedReceiver<AppKey>,
+    key_rx: Option<&'a mut mpsc::UnboundedReceiver<AppKey>>,
     ui: &'a ChatUi,
     config: &'a mut Config,
     cred_manager: &'a Arc<CredentialManager>,

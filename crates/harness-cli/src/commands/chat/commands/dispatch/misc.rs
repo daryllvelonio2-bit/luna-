@@ -5,11 +5,18 @@ use super::*;
 impl<'a> SlashContext<'a> {
     pub(super) async fn cmd_connect(&mut self) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
+        // Provider setup needs the composer's key channel. Without one (the TUI routes `/connect`
+        // to its own modal) there is nothing to read from, so report instead of blocking.
+        let Some(key_rx) = self.key_rx.as_deref_mut() else {
+            self.ui.emit_above(&format!(
+                "{} Provider setup needs an interactive terminal",
+                "•".cyan()
+            ));
+            return Ok(SlashOutcome::Continue);
+        };
         // handle_connect_command restores the composer on every exit path; drawing it again
         // here would print a second box below the first.
-        if let Err(e) =
-            connect::handle_connect_command(self.key_rx, self.ui, self.cred_manager).await
-        {
+        if let Err(e) = connect::handle_connect_command(key_rx, self.ui, self.cred_manager).await {
             self.ui.emit_above(&format!(
                 "{} Failed to open provider setup: {}",
                 "✖".red().bold(),
@@ -30,8 +37,14 @@ impl<'a> SlashContext<'a> {
         &mut self,
         arg: Option<&str>,
     ) -> Result<SlashOutcome, HarnessError> {
-        if let Err(e) = handle_dir_command(self.key_rx, self.ui, self.config, self.agent, arg).await
-        {
+        let Some(key_rx) = self.key_rx.as_deref_mut() else {
+            self.ui.emit_above(&format!(
+                "{} Workspace setup needs an interactive terminal",
+                "•".cyan()
+            ));
+            return Ok(SlashOutcome::Continue);
+        };
+        if let Err(e) = handle_dir_command(key_rx, self.ui, self.config, self.agent, arg).await {
             self.ui.emit_above(&format!(
                 "{} Failed to switch workspace: {}",
                 "✖".red().bold(),
@@ -42,8 +55,15 @@ impl<'a> SlashContext<'a> {
     }
 
     pub(super) async fn cmd_tasks(&mut self) -> Result<SlashOutcome, HarnessError> {
+        let Some(key_rx) = self.key_rx.as_deref_mut() else {
+            self.ui.emit_above(&format!(
+                "{} Task viewer needs an interactive terminal",
+                "•".cyan()
+            ));
+            return Ok(SlashOutcome::Continue);
+        };
         viewer::show_background_task_viewer(
-            self.key_rx,
+            key_rx,
             self.bg_queue,
             self.delegate_tool,
             self.store.as_ref(),
@@ -81,19 +101,28 @@ impl<'a> SlashContext<'a> {
         // Attend an interactive chat with the chat's own modal wizard: it reads the same key
         // channel as approvals and pickers, so the terminal stays in raw mode and no second
         // reader can race the first for a keystroke.
-        let result = if self.ui.is_attended {
-            profile_wizard::handle_profile_command(
-                command,
-                self.config,
-                &global,
-                self.key_rx,
-                self.ui,
-            )
-            .await
+        let result = if self.ui.is_attended && !self.ui.is_tui_mode() {
+            match self.key_rx.as_deref_mut() {
+                Some(rx) => {
+                    profile_wizard::handle_profile_command(
+                        command,
+                        self.config,
+                        &global,
+                        rx,
+                        self.ui,
+                    )
+                    .await
+                }
+                None => {
+                    crate::commands::profile::handle_profile_command(command, self.config, &global)
+                }
+            }
         } else {
             // Non-interactive fallback: the plain CLI flow. The reader is paused because
             // `dialoguer` reads stdin directly whenever a terminal is attached.
-            while self.key_rx.try_recv().is_ok() {}
+            if let Some(rx) = self.key_rx.as_deref_mut() {
+                while rx.try_recv().is_ok() {}
+            }
             let _pause = keys::pause_input();
             let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
             if raw {
@@ -122,7 +151,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = worker::handle_worker_command(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,

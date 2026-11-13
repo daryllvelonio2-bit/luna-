@@ -11,6 +11,7 @@ const PROMPTS_FILE: &str = include_str!("../prompts.md");
 
 /// The section names available in `prompts.md`.
 pub const SYSTEM_PROMPT: &str = "SYSTEM_PROMPT";
+pub const TUI_RENDER_PROMPT: &str = "TUI_RENDER_PROMPT";
 pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
 pub const MEMORY_SESSION_PROMPT: &str = "MEMORY_SESSION_PROMPT";
 pub const NOTES_SESSION_PROMPT: &str = "NOTES_SESSION_PROMPT";
@@ -50,6 +51,7 @@ mod tests {
     fn every_declared_section_loads() {
         for name in [
             SYSTEM_PROMPT,
+            TUI_RENDER_PROMPT,
             COMPACTION_INSTRUCTION,
             MEMORY_SESSION_PROMPT,
             NOTES_SESSION_PROMPT,
@@ -113,6 +115,18 @@ mod tests {
             body.contains("{{PROFILE_BEHAVIOR}}"),
             "profile behavior marker missing"
         );
+        assert!(
+            body.contains("{{RICH_OUTPUT_PROTOCOL}}"),
+            "rich output marker missing"
+        );
+    }
+
+    #[test]
+    fn the_tui_render_prompt_covers_tables_and_color() {
+        let body = section(TUI_RENDER_PROMPT).expect("TUI render prompt loads");
+        assert!(body.contains("Markdown tables"), "{body}");
+        assert!(body.contains("ANSI SGR"), "{body}");
+        assert!(body.contains("reset"), "{body}");
     }
 
     #[test]

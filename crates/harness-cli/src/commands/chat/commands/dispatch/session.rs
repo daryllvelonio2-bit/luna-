@@ -33,7 +33,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = handle_sessions_switch(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,

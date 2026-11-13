@@ -90,6 +90,9 @@ impl Drop for TuiTerminalGuard {
 /// Run the full-screen OpenCode-style TUI until the user exits.
 pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {
     runtime.ui.set_tui_mode(true);
+    // The system prompt is built per turn, so flipping this before the first turn is enough to
+    // add the rich-output block for the full-screen renderer without touching inline/piped runs.
+    runtime.agent.lock().await.set_tui_output(true);
     let _term_guard = TuiTerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;

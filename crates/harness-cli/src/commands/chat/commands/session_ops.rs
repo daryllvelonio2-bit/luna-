@@ -684,10 +684,11 @@ async fn pick_session_target(
                 }
             }
         } else {
-            println!("Available sessions:");
+            let mut listing = String::from("Available sessions:");
             for (i, item) in items.iter().enumerate() {
-                println!("  {}. {}", i + 1, item);
+                listing.push_str(&format!("\n  {}. {}", i + 1, item));
             }
+            ui.emit_above(&listing);
             return Ok(None);
         };
 

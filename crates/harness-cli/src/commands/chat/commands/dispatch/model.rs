@@ -9,7 +9,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = handle_default_model_switch(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,
@@ -36,7 +36,7 @@ impl<'a> SlashContext<'a> {
     pub(super) async fn cmd_model(&mut self) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = handle_model_switch(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,
@@ -65,7 +65,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = handle_compact_model_switch(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,
@@ -96,7 +96,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) = handle_bgsaver_model_command(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.cred_manager,
@@ -124,7 +124,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) =
-            handle_reasoning_switch(Some(&mut *self.key_rx), self.ui, self.agent, arg).await
+            handle_reasoning_switch(self.key_rx.as_deref_mut(), self.ui, self.agent, arg).await
         {
             self.ui.emit_above(&format!(
                 "{} Failed to set reasoning effort: {}",
@@ -141,7 +141,7 @@ impl<'a> SlashContext<'a> {
     ) -> Result<SlashOutcome, HarnessError> {
         self.ui.redraw_input_line();
         if let Err(e) =
-            handle_thinking_switch(Some(&mut *self.key_rx), self.ui, self.agent, arg).await
+            handle_thinking_switch(self.key_rx.as_deref_mut(), self.ui, self.agent, arg).await
         {
             self.ui.emit_above(&format!(
                 "{} Failed to set thinking level: {}",

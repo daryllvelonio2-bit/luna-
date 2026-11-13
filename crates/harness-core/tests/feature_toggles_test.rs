@@ -227,3 +227,43 @@ async fn an_enabled_memory_tool_is_advertised_and_runs() {
     assert_eq!(outcome.tool_calls.len(), 1);
     assert!(!outcome.tool_calls[0].is_error);
 }
+
+fn prompt_agent(
+    tui_output: bool,
+) -> Agent<AskingProvider, NoMemory, NoNotes, DefaultToolRegistry> {
+    Agent::new(
+        Arc::new(AskingProvider {
+            answered: AtomicUsize::new(1),
+            seen_tools: Mutex::new(Vec::new()),
+        }),
+        Arc::new(NoMemory),
+        Arc::new(NoNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        AgentConfig {
+            tui_output,
+            ..Default::default()
+        },
+    )
+}
+
+/// The rich-output invitation is for the full-screen renderer only. Headless, piped and inline CLI
+/// prompts must stay free of table/ANSI instructions they cannot render.
+#[tokio::test]
+async fn the_tui_render_block_is_only_present_for_the_tui() {
+    let plain = prompt_agent(false)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(!plain.contains("full-screen terminal"), "{plain}");
+    assert!(!plain.contains("ANSI SGR"), "{plain}");
+    assert!(!plain.contains("{{RICH_OUTPUT_PROTOCOL}}"), "{plain}");
+
+    let tui = prompt_agent(true)
+        .build_system_prompt("hello")
+        .await
+        .expect("prompt builds");
+    assert!(tui.contains("full-screen terminal"), "{tui}");
+    assert!(tui.contains("Markdown tables"), "{tui}");
+    assert!(tui.contains("ANSI SGR"), "{tui}");
+    assert!(!tui.contains("{{RICH_OUTPUT_PROTOCOL}}"), "{tui}");
+}

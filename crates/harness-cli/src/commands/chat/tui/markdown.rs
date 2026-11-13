@@ -1,7 +1,7 @@
 //! Markdown and plain-text wrapping into `ratatui` styled lines.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -25,6 +25,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut blockquote_depth: usize = 0;
     let mut pending_prefix: Option<Vec<Span<'static>>> = None;
+    let mut ansi = AnsiLexer::default();
 
     let flush_line = |out: &mut Vec<Line<'static>>,
                       cur_spans: &mut Vec<Span<'static>>,
@@ -217,15 +218,15 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
             },
             Event::Text(text) => {
                 if in_code_block {
-                    code_buf.push_str(&text);
+                    code_buf.push_str(&strip_ansi(&text));
                 } else {
                     let style = *style_stack.last().unwrap_or(&Style::default());
-                    cur_spans.push(Span::styled(text.into_string(), style));
+                    ansi.feed(&text, style, &mut cur_spans);
                 }
             }
             Event::Code(code) => {
                 cur_spans.push(Span::styled(
-                    format!("`{code}`"),
+                    format!("`{}`", strip_ansi(&code)),
                     Style::default().fg(TEXT_PRIMARY).bg(BG_CODE),
                 ));
             }
@@ -397,4 +398,244 @@ fn split_keep_spaces(s: &str) -> Vec<&str> {
 /// Strip ANSI escape codes from legacy command output so it renders cleanly in `ratatui`.
 pub fn strip_ansi(s: &str) -> String {
     dialoguer::console::strip_ansi_codes(s).to_string()
+}
+
+/// The SGR state carried by an ANSI escape sequence in model prose.
+#[derive(Debug, Clone, Copy, Default)]
+struct AnsiStyle {
+    fg: Option<Color>,
+    bg: Option<Color>,
+    modifiers: Modifier,
+}
+
+impl AnsiStyle {
+    fn apply_to(self, base: Style) -> Style {
+        let mut style = base;
+        if let Some(fg) = self.fg {
+            style = style.fg(fg);
+        }
+        if let Some(bg) = self.bg {
+            style = style.bg(bg);
+        }
+        style.add_modifier(self.modifiers)
+    }
+
+    fn apply_sgr(&mut self, params: &str) {
+        let values: Vec<u32> = if params.is_empty() {
+            vec![0]
+        } else {
+            params
+                .split(';')
+                .map(|value| value.parse().unwrap_or(0))
+                .collect()
+        };
+        let mut index = 0;
+        while index < values.len() {
+            match values[index] {
+                0 => *self = Self::default(),
+                1 => self.modifiers.insert(Modifier::BOLD),
+                2 => self.modifiers.insert(Modifier::DIM),
+                3 => self.modifiers.insert(Modifier::ITALIC),
+                4 => self.modifiers.insert(Modifier::UNDERLINED),
+                7 => self.modifiers.insert(Modifier::REVERSED),
+                9 => self.modifiers.insert(Modifier::CROSSED_OUT),
+                22 => {
+                    self.modifiers.remove(Modifier::BOLD);
+                    self.modifiers.remove(Modifier::DIM);
+                }
+                23 => self.modifiers.remove(Modifier::ITALIC),
+                24 => self.modifiers.remove(Modifier::UNDERLINED),
+                27 => self.modifiers.remove(Modifier::REVERSED),
+                29 => self.modifiers.remove(Modifier::CROSSED_OUT),
+                30..=37 => self.fg = Some(basic_color(values[index] - 30)),
+                39 => self.fg = None,
+                40..=47 => self.bg = Some(basic_color(values[index] - 40)),
+                49 => self.bg = None,
+                90..=97 => self.fg = Some(bright_color(values[index] - 90)),
+                100..=107 => self.bg = Some(bright_color(values[index] - 100)),
+                38 | 48 => {
+                    if let Some((color, consumed)) = extended_color(&values[index + 1..]) {
+                        if values[index] == 38 {
+                            self.fg = Some(color);
+                        } else {
+                            self.bg = Some(color);
+                        }
+                        index += consumed;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+}
+
+fn basic_color(index: u32) -> Color {
+    match index {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        _ => Color::Gray,
+    }
+}
+
+fn bright_color(index: u32) -> Color {
+    match index {
+        0 => Color::DarkGray,
+        1 => Color::LightRed,
+        2 => Color::LightGreen,
+        3 => Color::LightYellow,
+        4 => Color::LightBlue,
+        5 => Color::LightMagenta,
+        6 => Color::LightCyan,
+        _ => Color::White,
+    }
+}
+
+/// Parse the parameters after `38`/`48`: `5;n` for a palette index or `2;r;g;b` for true color.
+fn extended_color(values: &[u32]) -> Option<(Color, usize)> {
+    match values.first().copied()? {
+        5 => {
+            let index = *values.get(1)?;
+            Some((Color::Indexed(u8::try_from(index).ok()?), 2))
+        }
+        2 => {
+            let red = u8::try_from(*values.get(1)?).ok()?;
+            let green = u8::try_from(*values.get(2)?).ok()?;
+            let blue = u8::try_from(*values.get(3)?).ok()?;
+            Some((Color::Rgb(red, green, blue), 4))
+        }
+        _ => None,
+    }
+}
+
+/// Split model prose on ANSI escapes, keeping SGR color and dropping every other control sequence.
+///
+/// The lexer is stateful because the Markdown parser splits text at the escape bytes: a sequence
+/// such as `\x1b[31m` can arrive as three separate text events, so the half-read sequence and the
+/// current color have to survive across them.
+#[derive(Debug, Default)]
+struct AnsiLexer {
+    state: AnsiStyle,
+    escape: EscapeState,
+}
+
+#[derive(Debug, Default)]
+enum EscapeState {
+    #[default]
+    None,
+    /// Saw ESC and need the next character to know which sequence this is.
+    Started,
+    /// Inside `ESC [ ...`; the collected parameters, without the introducer.
+    Csi(String),
+    /// Inside `ESC ] ...`, skipped until BEL or ST.
+    Osc { previous_is_esc: bool },
+}
+
+impl AnsiLexer {
+    fn feed(&mut self, text: &str, base: Style, spans: &mut Vec<Span<'static>>) {
+        let mut plain = String::new();
+        for ch in text.chars() {
+            match &mut self.escape {
+                EscapeState::None => {
+                    if ch == '\x1b' {
+                        if !plain.is_empty() {
+                            spans.push(Span::styled(
+                                std::mem::take(&mut plain),
+                                self.state.apply_to(base),
+                            ));
+                        }
+                        self.escape = EscapeState::Started;
+                    } else {
+                        plain.push(ch);
+                    }
+                }
+                EscapeState::Started => {
+                    self.escape = match ch {
+                        '[' => EscapeState::Csi(String::new()),
+                        ']' => EscapeState::Osc {
+                            previous_is_esc: false,
+                        },
+                        _ => EscapeState::None,
+                    };
+                }
+                EscapeState::Csi(params) => {
+                    if ('\u{40}'..='\u{7e}').contains(&ch) {
+                        if ch == 'm' {
+                            self.state.apply_sgr(params);
+                        }
+                        self.escape = EscapeState::None;
+                    } else {
+                        params.push(ch);
+                    }
+                }
+                EscapeState::Osc { previous_is_esc } => {
+                    if ch == '\u{7}' || (*previous_is_esc && ch == '\\') {
+                        self.escape = EscapeState::None;
+                    } else {
+                        *previous_is_esc = ch == '\x1b';
+                    }
+                }
+            }
+        }
+        if !plain.is_empty() {
+            spans.push(Span::styled(plain, self.state.apply_to(base)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed_all(input: &str) -> Vec<Span<'static>> {
+        let mut lexer = AnsiLexer::default();
+        let mut spans = Vec::new();
+        for event in Parser::new(input) {
+            if let Event::Text(text) = event {
+                lexer.feed(&text, Style::default(), &mut spans);
+            }
+        }
+        spans
+    }
+
+    #[test]
+    fn ansi_color_becomes_a_ratatui_span_and_disappears_from_the_text() {
+        let spans = feed_all("a \x1b[31mred\x1b[0m word");
+        let content: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(content, "a red word");
+        assert!(
+            spans.iter().any(|span| span.style.fg == Some(Color::Red)),
+            "the red run must keep its color"
+        );
+    }
+
+    #[test]
+    fn ansi_styles_combine_with_markdown_styles() {
+        let mut lexer = AnsiLexer::default();
+        let mut spans = Vec::new();
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        for event in Parser::new("**\x1b[32mgreen\x1b[0m**") {
+            if let Event::Text(text) = event {
+                lexer.feed(&text, bold, &mut spans);
+            }
+        }
+        let green = spans
+            .iter()
+            .find(|span| span.style.fg == Some(Color::Green))
+            .expect("green span");
+        assert!(green.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn unknown_escape_sequences_do_not_reach_the_transcript() {
+        let spans = feed_all("ok \x1b[2Kdone\x1b]8;;https://example.com\x07 link\x1b]8;;\x07");
+        let content: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(content, "ok done link");
+        assert!(!content.contains('\x1b'), "escape bytes leaked: {content:?}");
+    }
 }

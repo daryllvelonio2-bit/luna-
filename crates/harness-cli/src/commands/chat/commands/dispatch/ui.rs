@@ -122,7 +122,7 @@ impl<'a> SlashContext<'a> {
         arg: Option<&str>,
     ) -> Result<SlashOutcome, HarnessError> {
         handle_settings_command(
-            Some(&mut *self.key_rx),
+            self.key_rx.as_deref_mut(),
             self.ui,
             self.config,
             self.display_settings,

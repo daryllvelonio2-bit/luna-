@@ -11,7 +11,6 @@ use harness_core::{
 use harness_providers::{GenericProviderClient, RotationStrategy};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use tokio::sync::mpsc;
 
 use super::super::commands::{
     apply_auto_compact_values, apply_dir_choice, command_entries, connected_providers,
@@ -22,7 +21,6 @@ use super::super::commands::{
 use super::super::helpers::{finish_slash_command, IdleMemoryPass};
 use super::super::history::append_prompt_history;
 use super::super::interactive::state::{Env, Flow};
-use super::super::keys::AppKey;
 use super::super::observers::agent_observer;
 use super::super::render::{parse_turns_from_history, TurnProcessItem};
 use super::super::status::refresh_antigravity_status_if_needed;
@@ -2247,7 +2245,7 @@ pub async fn run_slash_command(
     env.ui.begin_command_capture();
     let outcome = execute_slash_command(
         cmd,
-        &mut mpsc::unbounded_channel::<AppKey>().1,
+        None,
         &env.ui,
         env.config,
         &env.cred_manager,

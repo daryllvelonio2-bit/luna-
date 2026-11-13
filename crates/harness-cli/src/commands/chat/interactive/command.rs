@@ -112,7 +112,7 @@ pub(super) async fn run_tail(
     ui.begin_command_capture();
     let outcome = execute_slash_command(
         cmd,
-        key_rx,
+        Some(key_rx),
         ui,
         config,
         cred_manager,

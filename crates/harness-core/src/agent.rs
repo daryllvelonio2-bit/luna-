@@ -110,6 +110,10 @@ pub struct AgentConfig {
     /// Runtime-only behavior text from the active profile. See [`Self::profile_persona`].
     #[serde(skip)]
     pub profile_behavior: Option<String>,
+    /// Runtime-only: this session is rendered by the full-screen TUI, which understands Markdown
+    /// tables and a small ANSI SGR palette. Never read from the config file.
+    #[serde(skip)]
+    pub tui_output: bool,
     /// Estimated transcript size at which the oldest turns are summarised.
     pub compact_at_tokens: usize,
     /// Trailing user turns kept verbatim when compacting.
@@ -230,6 +234,7 @@ impl Default for AgentConfig {
             system_prompt_override: None,
             profile_persona: None,
             profile_behavior: None,
+            tui_output: false,
             compact_at_tokens: 500_000,
             keep_recent_turns: 8,
             compaction_model: None,
@@ -719,6 +724,14 @@ where
     /// Update the reasoning effort setting dynamically during a session.
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
+    }
+
+    /// Tell the system prompt that this session is rendered by the full-screen TUI.
+    ///
+    /// Only the TUI sets this: the inline CLI, piped runs and headless execs have no rich renderer,
+    /// so they must not be invited to emit tables or ANSI color.
+    pub fn set_tui_output(&mut self, enabled: bool) {
+        self.config.tui_output = enabled;
     }
 
     /// Update the context window bound when the model changes mid-session.

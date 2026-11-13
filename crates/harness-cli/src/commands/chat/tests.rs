@@ -654,7 +654,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     assert!(!plan_mode.load(Ordering::SeqCst));
     let res = execute_slash_command(
         "/plan",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
@@ -687,7 +687,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     // /plan again toggles it off
     let _ = execute_slash_command(
         "/plan",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
@@ -719,7 +719,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     // 2. /help returns Ok(false)
     let help_res = execute_slash_command(
         "/help",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
@@ -751,7 +751,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     // 3. Unrecognized command returns Ok(false) without breaking
     let unrec_res = execute_slash_command(
         "/unrecognized_foo_command",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
@@ -784,7 +784,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     assert!(feature_toggles.enabled(Feature::Memory));
     let memory_res = execute_slash_command(
         "/memory off",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
@@ -818,7 +818,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
     // And the same command turns it back on.
     let _ = execute_slash_command(
         "/memory on",
-        &mut rx,
+        Some(&mut rx),
         &ui,
         &mut config,
         &cred_manager,
