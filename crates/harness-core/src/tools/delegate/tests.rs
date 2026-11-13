@@ -430,3 +430,76 @@ fn a_short_subagent_reply_is_not_rewritten() {
 
     assert_eq!(clip_subagent_reply(reply, log), reply);
 }
+
+/// A finished child reports itself in one line: the parent gets the id and a way to fetch the
+/// report, not a second copy of the report.
+#[test]
+fn a_completed_subagent_notice_does_not_inline_the_reply() {
+    let status = SubagentStatus::Completed {
+        reply: "a very long investigation report".to_string(),
+        finished_at: Utc::now(),
+    };
+
+    let notice = subagent_steer_notice("sub_1", "explore the repo", &status, FinishNotice::Summary);
+
+    assert!(!notice.contains('\n'), "the notice stays on one line");
+    assert!(notice.contains("sub_1"));
+    assert!(notice.contains("completed"));
+    assert!(
+        notice.contains("delegate_task(action: \"poll\", task_id: \"sub_1\")"),
+        "the parent is told how to fetch the output: {notice}"
+    );
+    assert!(
+        !notice.contains("investigation report"),
+        "the reply is not pasted into the parent turn: {notice}"
+    );
+}
+
+/// A failure keeps the reason, but clipped, so a stack trace cannot flood the transcript.
+#[test]
+fn a_failed_subagent_notice_keeps_a_short_reason() {
+    let status = SubagentStatus::Failed {
+        error: format!("boom\n{}", "stack ".repeat(500)),
+        finished_at: Utc::now(),
+    };
+
+    let notice = subagent_steer_notice("sub_2", "build it", &status, FinishNotice::Summary);
+
+    assert!(!notice.contains('\n'), "newlines are flattened");
+    assert!(notice.starts_with("[SUBAGENT NOTIFICATION] Subagent [sub_2]"));
+    assert!(notice.contains("failed: boom"));
+    assert!(
+        notice.chars().count() < SUBAGENT_NOTICE_ERROR_CHARS + 120,
+        "the error is clipped"
+    );
+}
+
+/// A very long goal does not turn the one-line notice back into a paragraph.
+#[test]
+fn a_long_goal_is_clipped_in_the_notice() {
+    let status = SubagentStatus::Completed {
+        reply: "done".to_string(),
+        finished_at: Utc::now(),
+    };
+    let goal = "g".repeat(5_000);
+
+    let notice = subagent_steer_notice("sub_3", &goal, &status, FinishNotice::Summary);
+
+    assert!(!notice.contains('\n'));
+    assert!(notice.chars().count() < 400, "notice stays short");
+}
+
+/// Workers are read by the user rather than fed back to the parent agent, so their notice keeps
+/// the report body exactly as before.
+#[test]
+fn a_worker_notice_keeps_the_full_report() {
+    let status = SubagentStatus::Completed {
+        reply: "the full worker report".to_string(),
+        finished_at: Utc::now(),
+    };
+
+    let notice = subagent_steer_notice("worker_1", "review it", &status, FinishNotice::Full);
+
+    assert!(notice.contains("[/SUBAGENT NOTIFICATION]"));
+    assert!(notice.contains("the full worker report"));
+}

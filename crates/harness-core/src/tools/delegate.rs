@@ -56,6 +56,12 @@ const SUBAGENT_WAIT_POLL_MS: u64 = 150;
 /// the parent's context.
 const SUBAGENT_REPLY_CHARS: usize = 24_000;
 
+/// Goal text kept in the one-line finish notice. The full goal stays on the task record.
+const SUBAGENT_NOTICE_GOAL_CHARS: usize = 120;
+
+/// Failure text kept in the one-line finish notice. The full error stays on the task record.
+const SUBAGENT_NOTICE_ERROR_CHARS: usize = 200;
+
 /// What a delegated child is doing right now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -411,6 +417,71 @@ fn current_event_notifier(
     slot.try_read().ok().and_then(|guard| guard.clone())
 }
 
+/// How much of a finished child's report travels with its steer notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishNotice {
+    /// A delegated subagent: the parent agent already has the report in the task record, so the
+    /// notice is one line and names the `poll` call that fetches the body.
+    Summary,
+    /// A worker: the user reads this notice themselves, so it carries the report body.
+    Full,
+}
+
+/// Notice dropped into the parent conversation when a subagent finishes.
+///
+/// A delegated child's full reply is deliberately not inlined: it is already on the completion
+/// card and in the task record, and pasting it into the parent turn doubles the transcript and
+/// burns context. The parent can fetch it explicitly with
+/// `delegate_task(action: "poll", task_id: "...")`.
+fn subagent_steer_notice(
+    id: &str,
+    goal: &str,
+    status: &SubagentStatus,
+    notice: FinishNotice,
+) -> String {
+    if notice == FinishNotice::Full {
+        let (status_label, output_text) = match status {
+            SubagentStatus::Completed { reply, .. } => ("completed", reply.as_str()),
+            SubagentStatus::Failed { error, .. } => ("failed", error.as_str()),
+            _ => ("finished", ""),
+        };
+        return format!(
+            "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
+            id, goal, status_label, output_text
+        );
+    }
+
+    match status {
+        SubagentStatus::Failed { error, .. } => format!(
+            "[SUBAGENT NOTIFICATION] Subagent [{}] (Goal: {}) failed: {}",
+            id,
+            truncate_chars(goal, SUBAGENT_NOTICE_GOAL_CHARS),
+            truncate_chars(error, SUBAGENT_NOTICE_ERROR_CHARS)
+        ),
+        SubagentStatus::Completed { .. } => format!(
+            "[SUBAGENT NOTIFICATION] Subagent [{}] (Goal: {}) completed. Use delegate_task(action: \"poll\", task_id: \"{}\") if you need its output.",
+            id,
+            truncate_chars(goal, SUBAGENT_NOTICE_GOAL_CHARS),
+            id
+        ),
+        _ => format!(
+            "[SUBAGENT NOTIFICATION] Subagent [{}] (Goal: {}) finished.",
+            id,
+            truncate_chars(goal, SUBAGENT_NOTICE_GOAL_CHARS)
+        ),
+    }
+}
+
+/// Keep a subagent notice readable on one line; the full text stays in the task record.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let flat = text.trim().replace('\n', " ");
+    if flat.chars().count() <= max_chars {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// Publish a finished child: store the record, emit the lifecycle event, call the completion
 /// notifier, and drop a notice into the main conversation's steer queue.
 ///
@@ -422,6 +493,7 @@ async fn record_subagent_finish(
     event_notifier: Option<&SubagentTaskEventNotifier>,
     steer_handle: &SteerQueueHandle,
     record: SubagentTaskRecord,
+    notice: FinishNotice,
 ) {
     let status = record.status.clone();
     let id = record.id.clone();
@@ -441,17 +513,8 @@ async fn record_subagent_finish(
     }
 
     if let Some(ref steer) = *steer_handle.read().await {
-        let (status_label, output_text) = match &status {
-            SubagentStatus::Completed { reply, .. } => ("completed", reply.as_str()),
-            SubagentStatus::Failed { error, .. } => ("failed", error.as_str()),
-            _ => ("finished", ""),
-        };
-        let steer_notice = format!(
-            "[SUBAGENT NOTIFICATION]\nSubagent [{}] (Goal: {}) {}.\nOutput:\n{}\n[/SUBAGENT NOTIFICATION]",
-            id, goal, status_label, output_text
-        );
         if let Ok(mut steer_q) = steer.lock() {
-            steer_q.push_back(steer_notice);
+            steer_q.push_back(subagent_steer_notice(&id, &goal, &status, notice));
         }
     }
 }
@@ -701,6 +764,7 @@ impl DelegateTaskTool {
                 event_notifier.as_ref(),
                 &steer_handle,
                 finished_record,
+                FinishNotice::Full,
             )
             .await;
         });
@@ -1518,6 +1582,7 @@ impl DelegateTaskTool {
                 finish_event_notifier.as_ref(),
                 &steer_handle,
                 finished_record,
+                FinishNotice::Summary,
             )
             .await;
         });
