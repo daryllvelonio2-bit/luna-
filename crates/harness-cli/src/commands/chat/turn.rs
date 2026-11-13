@@ -412,6 +412,10 @@ pub(super) enum ComposerCommand {
     Steer(String),
     /// `/interrupt`: abort the model request in flight.
     Interrupt,
+    /// `/goal stop|cancel|off`: stop an active autonomous goal loop (and cancel its running turn).
+    GoalStop,
+    /// `/goal` or `/goal status`: inspect active autonomous goal loop status without waiting on turns.
+    GoalStatus,
     /// `/queue` with no message: say how to use it.
     QueueUsage,
     /// `/steer` with no guidance: say how to use it.
@@ -440,6 +444,16 @@ pub(super) fn composer_command(line: &str) -> Option<ComposerCommand> {
             ComposerCommand::Steer(arg.to_string())
         }),
         "/interrupt" => Some(ComposerCommand::Interrupt),
+        "/goal"
+            if arg.eq_ignore_ascii_case("stop")
+                || arg.eq_ignore_ascii_case("cancel")
+                || arg.eq_ignore_ascii_case("off") =>
+        {
+            Some(ComposerCommand::GoalStop)
+        }
+        "/goal" if arg.is_empty() || arg.eq_ignore_ascii_case("status") => {
+            Some(ComposerCommand::GoalStatus)
+        }
         _ => None,
     }
 }
@@ -457,6 +471,7 @@ pub(super) async fn handle_composer_command(
     steer_handle: &Arc<Mutex<VecDeque<String>>>,
     ui: &ChatUi,
     active_turn: &mut Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+    active_goal: &mut Option<harness_core::GoalRunState>,
     current_cancel: &CancellationToken,
     interrupt_handle: &InterruptHandle,
     turns: &mut Vec<TurnRecord>,
@@ -519,6 +534,9 @@ pub(super) async fn handle_composer_command(
             }
         }
         ComposerCommand::Interrupt => {
+            if active_goal.take().is_some() {
+                ui.set_goal_status(None);
+            }
             let cancelled = cancel_running_turn(
                 active_turn,
                 current_cancel,
@@ -542,6 +560,40 @@ pub(super) async fn handle_composer_command(
                     "•".dimmed()
                 ));
             }
+        }
+        ComposerCommand::GoalStop => {
+            if let Some(goal) = active_goal.take() {
+                ui.set_goal_status(None);
+                let _ = cancel_running_turn(
+                    active_turn,
+                    current_cancel,
+                    ui,
+                    turns,
+                    in_flight_tools,
+                    interruptions,
+                    interrupt_handle,
+                    queue,
+                    turn_start,
+                    current_query,
+                    process_expanded,
+                    agent,
+                    context_max,
+                    true,
+                )
+                .await;
+                ui.emit_above(&format!(
+                    "{} Goal loop stopped after iteration {}/{}: {}",
+                    "✔".green().bold(),
+                    goal.iteration,
+                    goal.max_iterations,
+                    goal.objective.dimmed()
+                ));
+            } else {
+                ui.emit_above(&format!("{} No active goal loop.", "•".dimmed()));
+            }
+        }
+        ComposerCommand::GoalStatus => {
+            super::commands::emit_goal_status(ui, active_goal.as_ref());
         }
         ComposerCommand::QueueUsage => {
             ui.emit_above(&format!(

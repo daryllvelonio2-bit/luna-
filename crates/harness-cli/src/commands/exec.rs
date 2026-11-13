@@ -52,20 +52,20 @@ pub struct ExecOptions {
 }
 
 /// One JSON line, written and flushed immediately so a consumer can read as it happens.
-fn emit(line: &serde_json::Value) {
+pub(crate) fn emit(line: &serde_json::Value) {
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{line}");
     let _ = stdout.flush();
 }
 
-struct ExecTools {
-    memory: Arc<harness_memory::MemoryEngineKind>,
-    notes: Arc<FileNotesEngine>,
-    registry: Arc<DefaultToolRegistry>,
-    checkpoints: Arc<harness_core::CheckpointController>,
+pub(crate) struct ExecTools {
+    pub(crate) memory: Arc<harness_memory::MemoryEngineKind>,
+    pub(crate) notes: Arc<FileNotesEngine>,
+    pub(crate) registry: Arc<DefaultToolRegistry>,
+    pub(crate) checkpoints: Arc<harness_core::CheckpointController>,
 }
 
-async fn resolve_exec_session(
+pub(crate) async fn resolve_exec_session(
     config: &Config,
     selection: SessionSelection,
 ) -> Result<
@@ -100,7 +100,10 @@ async fn resolve_exec_session(
 
 /// The tool surface matches the interactive chat: a headless run that could do less than the chat
 /// could would be a different agent wearing the same name.
-async fn build_exec_tools(config: &Config, session_id: &str) -> Result<ExecTools, HarnessError> {
+pub(crate) async fn build_exec_tools(
+    config: &Config,
+    session_id: &str,
+) -> Result<ExecTools, HarnessError> {
     let memory = build_memory_engine(config)?;
     let notes = Arc::new(FileNotesEngine::new(
         config.paths.notes_dir.clone(),
@@ -245,7 +248,7 @@ async fn register_exec_core_tools(
     Ok(checkpoints)
 }
 
-fn install_exec_observer(agent: &mut ChatAgent, json: bool) {
+pub(crate) fn install_exec_observer(agent: &mut ChatAgent, json: bool) {
     if json {
         let observer: harness_core::AgentObserver = Arc::new(|event| {
             let line = match event {
@@ -418,6 +421,69 @@ fn report_exec_success(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_headless_agent(
+    config: &Config,
+    cred_manager: &Arc<CredentialManager>,
+    discovery: &Arc<ModelDiscovery>,
+    store: &Arc<harness_core::SqliteSessionStore>,
+    session_id: &str,
+    provider_id: &str,
+    model_id: &str,
+    yes: bool,
+) -> Result<ChatAgent, HarnessError> {
+    let provider = Arc::new(GenericProviderClient::new(
+        provider_id.to_string(),
+        model_id.to_string(),
+        cred_manager.clone(),
+        discovery.clone(),
+        config.providers.get(provider_id),
+    )?);
+
+    let ExecTools {
+        memory,
+        notes,
+        registry,
+        checkpoints,
+    } = build_exec_tools(config, session_id).await?;
+
+    let permissions = PermissionEngine::validate(config.tools.permissions.clone())?;
+    let approver = headless_approver(config, yes);
+
+    let mut agent_cfg = AgentConfig {
+        require_hitl_for_mutation: config.agent.require_hitl_for_mutation,
+        ..AgentConfig::default()
+    };
+    agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
+    agent_cfg.profile_persona = config.agent.profile_persona.clone();
+    agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
+    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
+    agent_cfg.memory_mode = config.memory.mode;
+    // Follow the model's real window rather than the config's fixed bar; a headless run must fold
+    // before the provider rejects the request, not after.
+    agent_cfg.context_window =
+        Some(super::context_window::context_window_for(config, provider_id, model_id) as usize);
+
+    // Hooks are part of the agent, not part of the REPL: `luna exec` and `luna goal` are the paths
+    // CI and scripts take, and a guardrail that only arms in an interactive session is a guardrail
+    // that is off exactly where nobody is watching. Same fail-closed loader as `chat`.
+    let hooks = Arc::new(harness_core::HookRunner::load(
+        &config.paths.workspace_root,
+        &config.hooks,
+    )?);
+
+    Ok(Agent::new(provider, memory, notes, registry, agent_cfg)
+        .with_permissions(permissions)
+        .with_hooks(hooks)
+        .with_checkpoints(checkpoints)
+        .with_approval(approver, approval_settings(config))
+        .with_session(SessionBinding {
+            store: store.clone(),
+            session_id: session_id.to_string(),
+            resume_max_messages: config.session.resume_max_messages,
+        }))
+}
+
 pub async fn run_exec(
     config: Config,
     cred_manager: Arc<CredentialManager>,
@@ -434,57 +500,18 @@ pub async fn run_exec(
     let (store, session_id, provider_id, model_id) =
         resolve_exec_session(&config, options.selection).await?;
 
-    let provider = Arc::new(GenericProviderClient::new(
-        provider_id.clone(),
-        model_id.clone(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(&provider_id),
-    )?);
-
-    let ExecTools {
-        memory,
-        notes,
-        registry,
-        checkpoints,
-    } = build_exec_tools(&config, &session_id).await?;
-
+    let mut agent = build_headless_agent(
+        &config,
+        &cred_manager,
+        &discovery,
+        &store,
+        &session_id,
+        &provider_id,
+        &model_id,
+        options.yes,
+    )
+    .await?;
     let usage = Arc::new(super::usage::UsageRecorder::from_config(&config));
-    let permissions = PermissionEngine::validate(config.tools.permissions.clone())?;
-    let approver = headless_approver(&config, options.yes);
-
-    let mut agent_cfg = AgentConfig {
-        require_hitl_for_mutation: config.agent.require_hitl_for_mutation,
-        ..AgentConfig::default()
-    };
-    agent_cfg.system_prompt_prefix = config.agent.system_prompt_prefix.clone();
-    agent_cfg.profile_persona = config.agent.profile_persona.clone();
-    agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
-    agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
-    agent_cfg.memory_mode = config.memory.mode;
-    // Follow the model's real window rather than the config's fixed bar; a headless run must fold
-    // before the provider rejects the request, not after.
-    agent_cfg.context_window =
-        Some(super::context_window::context_window_for(&config, &provider_id, &model_id) as usize);
-
-    // Hooks are part of the agent, not part of the REPL: `luna exec` is the path CI and scripts
-    // take, and a guardrail that only arms in an interactive session is a guardrail that is off
-    // exactly where nobody is watching. Same fail-closed loader as `chat`.
-    let hooks = Arc::new(harness_core::HookRunner::load(
-        &config.paths.workspace_root,
-        &config.hooks,
-    )?);
-
-    let mut agent: ChatAgent = Agent::new(provider, memory, notes, registry, agent_cfg)
-        .with_permissions(permissions)
-        .with_hooks(hooks)
-        .with_checkpoints(checkpoints)
-        .with_approval(approver, approval_settings(&config))
-        .with_session(SessionBinding {
-            store: store.clone(),
-            session_id: session_id.clone(),
-            resume_max_messages: config.session.resume_max_messages,
-        });
 
     if options.json {
         emit(&serde_json::json!({
@@ -526,7 +553,7 @@ fn headless_approver(config: &Config, yes: bool) -> Arc<dyn Approver> {
     }
 }
 
-fn read_prompt(prompt: Option<String>) -> Result<String, HarnessError> {
+pub(crate) fn read_prompt(prompt: Option<String>) -> Result<String, HarnessError> {
     match prompt.as_deref() {
         Some("-") | None => {
             let mut buffer = String::new();

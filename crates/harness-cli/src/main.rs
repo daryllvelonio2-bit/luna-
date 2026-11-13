@@ -117,6 +117,33 @@ enum Commands {
         #[arg(long = "continue")]
         continue_session: bool,
     },
+    /// Run an autonomous multi-turn loop until an objective is achieved or stopped
+    Goal {
+        /// The objective; `-` or omitted reads it from stdin
+        #[arg(value_name = "OBJECTIVE")]
+        objective: Option<String>,
+        /// Maximum iterations before stopping (default: `goal.max_iterations`)
+        #[arg(short = 'n', long)]
+        max_iterations: Option<usize>,
+        /// Emit NDJSON events on stdout instead of plain output
+        #[arg(long)]
+        json: bool,
+        /// Approve every mutating tool call without asking (headless default is deny)
+        #[arg(long)]
+        yes: bool,
+        /// Exit non-zero if any tool call failed or the goal did not complete
+        #[arg(long)]
+        strict: bool,
+        /// Resume a stored session by id or name; without it each run starts a fresh session
+        #[arg(long, conflicts_with_all = ["fork", "continue_session"])]
+        session: Option<String>,
+        /// Fork an existing session and run in the copy
+        #[arg(long, conflicts_with_all = ["session", "continue_session"])]
+        fork: Option<String>,
+        /// Continue the most recently updated session
+        #[arg(long = "continue")]
+        continue_session: bool,
+    },
     /// Show which lifecycle hooks are loaded (and which are ignored)
     Hooks {
         /// One JSON object on stdout
@@ -327,7 +354,9 @@ fn apply_model_flags(cli: &Cli, layers: &mut harness_core::config::Layers) -> bo
             model.as_ref().or(cli.model.as_ref()),
             *yes || cli.yes,
         ),
-        Some(Commands::Exec { yes, .. }) | Some(Commands::Gateway { yes, .. }) => {
+        Some(Commands::Exec { yes, .. })
+        | Some(Commands::Goal { yes, .. })
+        | Some(Commands::Gateway { yes, .. }) => {
             (cli.provider.as_ref(), cli.model.as_ref(), *yes || cli.yes)
         }
         None => (cli.provider.as_ref(), cli.model.as_ref(), cli.yes),
@@ -650,6 +679,31 @@ async fn dispatch_command(
             )
             .await?;
         }
+        Some(Commands::Goal {
+            objective,
+            max_iterations,
+            json,
+            yes,
+            strict,
+            session,
+            fork,
+            continue_session,
+        }) => {
+            run_goal_command(
+                config,
+                cred_manager,
+                discovery,
+                objective,
+                max_iterations,
+                json,
+                yes,
+                strict,
+                session.or(cli.session),
+                fork.or(cli.fork),
+                continue_session || cli.continue_session,
+            )
+            .await?;
+        }
         Some(Commands::Auth { subcommand }) => {
             run_auth_selection(subcommand, cred_manager).await?;
         }
@@ -771,6 +825,32 @@ async fn run_exec_command(
         strict,
     };
     commands::exec::run_exec(config, cred_manager, discovery, options).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_goal_command(
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+    objective: Option<String>,
+    max_iterations: Option<usize>,
+    json: bool,
+    yes: bool,
+    strict: bool,
+    session: Option<String>,
+    fork: Option<String>,
+    continue_session: bool,
+) -> Result<(), HarnessError> {
+    let selection = session_selection(session, fork, continue_session);
+    let options = commands::goal::GoalOptions {
+        objective,
+        max_iterations,
+        json,
+        selection,
+        yes,
+        strict,
+    };
+    commands::goal::run_goal(config, cred_manager, discovery, options).await
 }
 
 async fn run_auth_selection(
@@ -1156,4 +1236,42 @@ fn build_command(resolved: &config::Resolved) -> clap::Command {
                     refresh.mut_arg("provider", |arg| arg.help(provider_help.clone()))
                 })
         })
+}
+
+#[cfg(test)]
+mod goal_cli_tests {
+    use super::*;
+
+    #[test]
+    fn goal_subcommand_parses_flags_and_objective() {
+        let cli = Cli::try_parse_from([
+            "luna",
+            "goal",
+            "--max-iterations",
+            "8",
+            "--yes",
+            "--strict",
+            "--json",
+            "ship the /goal command",
+        ])
+        .expect("luna goal parses");
+
+        match cli.command {
+            Some(Commands::Goal {
+                objective,
+                max_iterations,
+                json,
+                yes,
+                strict,
+                ..
+            }) => {
+                assert_eq!(objective.as_deref(), Some("ship the /goal command"));
+                assert_eq!(max_iterations, Some(8));
+                assert!(json);
+                assert!(yes);
+                assert!(strict);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

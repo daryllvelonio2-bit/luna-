@@ -9,6 +9,7 @@ mod catalog;
 mod dir;
 mod dispatch;
 mod features;
+mod goal;
 mod models;
 mod picker;
 mod profile_wizard;
@@ -41,5 +42,6 @@ pub(crate) use settings::handle_settings_command;
 
 pub(crate) use bgsaver::handle_bgsaver_model_command;
 pub(crate) use dir::handle_dir_command;
+pub(crate) use goal::{emit_goal_status, handle_goal_command};
 pub(crate) use picker::{input_from_rx, select_from_rx, select_slash_command};
 pub(crate) use usage::handle_usage_command;

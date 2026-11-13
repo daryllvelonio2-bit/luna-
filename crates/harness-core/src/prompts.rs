@@ -15,6 +15,8 @@ pub const COMPACTION_INSTRUCTION: &str = "COMPACTION_INSTRUCTION";
 pub const MEMORY_SESSION_PROMPT: &str = "MEMORY_SESSION_PROMPT";
 pub const NOTES_SESSION_PROMPT: &str = "NOTES_SESSION_PROMPT";
 pub const MEMORY_BACKGROUND_PROMPT: &str = "MEMORY_BACKGROUND_PROMPT";
+pub const GOAL_START_PROMPT: &str = "GOAL_START_PROMPT";
+pub const GOAL_CONTINUE_PROMPT: &str = "GOAL_CONTINUE_PROMPT";
 
 /// The body of the `name` section, with surrounding blank lines trimmed.
 ///
@@ -52,9 +54,27 @@ mod tests {
             MEMORY_SESSION_PROMPT,
             NOTES_SESSION_PROMPT,
             MEMORY_BACKGROUND_PROMPT,
+            GOAL_START_PROMPT,
+            GOAL_CONTINUE_PROMPT,
         ] {
             let body = section(name).expect("declared section is present");
             assert!(!body.is_empty(), "{name} loaded empty");
+        }
+    }
+
+    #[test]
+    fn goal_prompts_expose_their_substitution_points() {
+        for name in [GOAL_START_PROMPT, GOAL_CONTINUE_PROMPT] {
+            let body = section(name).expect("goal prompt loads");
+            for marker in [
+                "{{GOAL_OBJECTIVE}}",
+                "{{ITERATION}}",
+                "{{MAX_ITERATIONS}}",
+                "{{GOAL_COMPLETE_TAG}}",
+                "{{GOAL_BLOCKED_EXAMPLE}}",
+            ] {
+                assert!(body.contains(marker), "{name} missing marker {marker}");
+            }
         }
     }
 

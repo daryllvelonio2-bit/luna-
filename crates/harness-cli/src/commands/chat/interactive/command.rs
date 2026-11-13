@@ -1,6 +1,7 @@
 //! One tail for every way a slash command can be chosen: the menu, the `/` help menu and the
 //! typed line all execute it the same way.
 
+use colored::Colorize;
 use harness_core::HarnessError;
 
 use super::super::commands::{execute_slash_command, SlashOutcome};
@@ -50,6 +51,7 @@ pub(super) async fn run_tail(
         process_expanded,
         queue,
         active_turn,
+        active_goal,
         current_cancel,
         current_query,
         turn_start,
@@ -66,6 +68,7 @@ pub(super) async fn run_tail(
         steer_handle,
         ui,
         active_turn,
+        active_goal,
         current_cancel,
         interrupt_handle,
         turns,
@@ -79,6 +82,16 @@ pub(super) async fn run_tail(
     )
     .await
     {
+        return Ok(Flow::Continue);
+    }
+
+    if (cmd == "/goal" || cmd.starts_with("/goal ")) && active_turn.is_some() {
+        ui.emit_above(&format!(
+            "{} A turn is currently running. Use {} or {} first.",
+            "✖".red().bold(),
+            "/goal stop".cyan(),
+            "/interrupt".cyan()
+        ));
         return Ok(Flow::Continue);
     }
 
@@ -118,6 +131,7 @@ pub(super) async fn run_tail(
         skills,
         feature_toggles,
         plan_mode,
+        active_goal.as_ref(),
         Some(bg_queue.as_ref()),
         Some(delegate_tool.as_ref()),
         Some(pending_images),
@@ -128,6 +142,30 @@ pub(super) async fn run_tail(
     match outcome {
         SlashOutcome::Exit => Ok(Flow::Break),
         SlashOutcome::Turn { prompt, display } => {
+            launch_turn(
+                &prompt,
+                Some(&display),
+                ui,
+                turns,
+                *process_expanded,
+                pending_images,
+                plan_mode,
+                agent,
+                in_flight_tools,
+                current_cancel,
+                current_query,
+                turn_start,
+                active_turn,
+            );
+            Ok(Flow::Continue)
+        }
+        SlashOutcome::StartGoal {
+            state,
+            prompt,
+            display,
+        } => {
+            ui.set_goal_status(Some((state.iteration, state.max_iterations)));
+            *active_goal = Some(state);
             launch_turn(
                 &prompt,
                 Some(&display),

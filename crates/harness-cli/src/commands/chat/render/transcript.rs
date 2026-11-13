@@ -106,8 +106,25 @@ pub fn clean_user_query_for_transcript(raw: &str) -> String {
 
     // A turn the harness started for itself is not something the user said. The prompt exists
     // only to carry the completion to the model; the transcript already has the notification.
-    if raw.trim_start().starts_with(BACKGROUND_JOB_RESUME_PREFIX) {
+    let trimmed_start = raw.trim_start();
+    if trimmed_start.starts_with(BACKGROUND_JOB_RESUME_PREFIX)
+        || trimmed_start.starts_with(harness_core::GOAL_ITERATION_PREFIX)
+    {
         return String::new();
+    }
+
+    // Collapse the structured iteration-1 goal prompt back to `/goal <objective>` on replay.
+    if trimmed_start.starts_with("Autonomous Goal Mode (iteration 1/") {
+        if let Some(after_obj) = trimmed_start.split("\n\nObjective:\n").nth(1) {
+            let objective = after_obj
+                .split("\n\nExecution contract:")
+                .next()
+                .unwrap_or(after_obj)
+                .trim();
+            if !objective.is_empty() {
+                return format!("/goal {objective}");
+            }
+        }
     }
 
     // 1. Strip plan mode instruction prefix if present

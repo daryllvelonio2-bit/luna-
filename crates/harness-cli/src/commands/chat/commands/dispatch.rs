@@ -25,8 +25,8 @@ use super::{
     command_entries, draw_transcript, handle_auto_compact_command, handle_bgsaver_model_command,
     handle_compact_command, handle_compact_model_switch, handle_default_model_switch,
     handle_delete_command, handle_diff_command, handle_dir_command, handle_feature_toggle,
-    handle_fork_command, handle_model_switch, handle_name_command, handle_new_command,
-    handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
+    handle_fork_command, handle_goal_command, handle_model_switch, handle_name_command,
+    handle_new_command, handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
     handle_settings_command, handle_summarize_and_new_command, handle_thinking_switch,
     handle_usage_command, parse_profile_command, profile_wizard, worker, Feature, FeatureToggles,
 };
@@ -46,6 +46,12 @@ pub(crate) enum SlashOutcome {
     Exit,
     /// A skill invocation: run this prompt as a normal turn, echoing `display` in the transcript.
     Turn { prompt: String, display: String },
+    /// A `/goal` invocation: start an autonomous loop at iteration 1 and run the first turn.
+    StartGoal {
+        state: harness_core::GoalRunState,
+        prompt: String,
+        display: String,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -74,6 +80,7 @@ pub(crate) async fn execute_slash_command(
     // Runtime on/off state for memory, notes, skills, and MCP.
     toggles: &FeatureToggles,
     plan_mode: &Arc<std::sync::atomic::AtomicBool>,
+    active_goal: Option<&harness_core::GoalRunState>,
     bg_queue: Option<&harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
     // Clipboard images waiting to ride the next prompt. Worker invocations consume them the same
@@ -109,6 +116,7 @@ pub(crate) async fn execute_slash_command(
         skills,
         toggles,
         plan_mode,
+        active_goal,
         bg_queue,
         delegate_tool,
         pending_images,
@@ -139,6 +147,7 @@ struct SlashContext<'a> {
     skills: &'a [harness_plugins::Skill],
     toggles: &'a FeatureToggles,
     plan_mode: &'a Arc<std::sync::atomic::AtomicBool>,
+    active_goal: Option<&'a harness_core::GoalRunState>,
     bg_queue: Option<&'a harness_core::tasks::BackgroundTaskQueue>,
     delegate_tool: Option<&'a harness_core::tools::DelegateTaskTool>,
     pending_images: Option<&'a Arc<std::sync::Mutex<Vec<String>>>>,
@@ -183,6 +192,7 @@ impl<'a> SlashContext<'a> {
             "/usage" => self.cmd_usage().await,
             "/delete" => self.cmd_delete().await,
             "/plan" => self.cmd_plan().await,
+            "/goal" => self.cmd_goal(arg).await,
             "/tasks" | "/jobs" | "/subagents" => self.cmd_tasks().await,
             "/help" | "/commands" | "/?" => self.cmd_help().await,
             "/profile" | "/profiles" => self.cmd_profile(arg).await,

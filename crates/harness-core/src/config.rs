@@ -110,6 +110,9 @@ pub struct Config {
     /// CLI display preferences (live block limit, turn completion collapse).
     #[serde(default)]
     pub display: DisplaySettings,
+    /// Autonomous `/goal` and `luna goal` loop defaults.
+    #[serde(default)]
+    pub goal: GoalSettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -163,6 +166,7 @@ impl Default for Config {
             mcp: McpSettings::default(),
             workers: BTreeMap::new(),
             display: DisplaySettings::default(),
+            goal: GoalSettings::default(),
         }
     }
 }
@@ -236,6 +240,7 @@ impl Config {
                 )));
             }
         }
+        crate::goal::validate_max_iterations(self.goal.max_iterations)?;
         Ok(())
     }
 }
@@ -959,6 +964,22 @@ impl Default for DisplaySettings {
         Self {
             block_limit: None,
             auto_collapse: true,
+        }
+    }
+}
+
+/// Autonomous `/goal` and `luna goal` loop defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GoalSettings {
+    /// Maximum iterations per autonomous goal run (`1..=50`).
+    pub max_iterations: usize,
+}
+
+impl Default for GoalSettings {
+    fn default() -> Self {
+        Self {
+            max_iterations: crate::goal::DEFAULT_GOAL_MAX_ITERATIONS,
         }
     }
 }

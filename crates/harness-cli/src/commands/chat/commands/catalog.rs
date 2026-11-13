@@ -210,6 +210,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         details: "Toggle read-only plan mode (or Tab key)",
     },
     SlashCommand {
+        name: "/goal",
+        details:
+            "Run an autonomous loop until a goal is achieved (/goal <objective>, status, stop)",
+    },
+    SlashCommand {
         name: "/fork",
         details: "Fork current session into a new branch session",
     },

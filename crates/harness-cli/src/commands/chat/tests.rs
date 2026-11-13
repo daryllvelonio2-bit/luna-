@@ -676,6 +676,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        None,
         &display_settings,
     )
     .await
@@ -705,6 +706,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &[],
         &feature_toggles,
         &plan_mode,
+        None,
         None,
         None,
         None,
@@ -739,6 +741,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        None,
         &display_settings,
     )
     .await
@@ -767,6 +770,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &[],
         &feature_toggles,
         &plan_mode,
+        None,
         None,
         None,
         None,
@@ -802,6 +806,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         None,
         None,
         None,
+        None,
         &display_settings,
     )
     .await
@@ -832,6 +837,7 @@ async fn execute_slash_command_plan_toggle_and_unrecognized() {
         &[],
         &feature_toggles,
         &plan_mode,
+        None,
         None,
         None,
         None,
@@ -983,4 +989,42 @@ fn a_cancelled_turn_requeues_the_line_it_was_holding() {
         2,
         "nothing held, nothing added"
     );
+}
+
+#[test]
+fn goal_command_is_registered_reserved_and_mid_turn_stoppable() {
+    assert!(
+        super::commands::SLASH_COMMANDS
+            .iter()
+            .any(|cmd| cmd.name == "/goal"),
+        "/goal must be listed in SLASH_COMMANDS"
+    );
+    assert_eq!(
+        composer_command("/goal stop"),
+        Some(ComposerCommand::GoalStop)
+    );
+    assert_eq!(
+        composer_command("/goal cancel"),
+        Some(ComposerCommand::GoalStop)
+    );
+    assert_eq!(composer_command("/goal"), Some(ComposerCommand::GoalStatus));
+    assert_eq!(
+        composer_command("/goal status"),
+        Some(ComposerCommand::GoalStatus)
+    );
+    assert_eq!(composer_command("/goal fix failing tests"), None);
+}
+
+#[test]
+fn goal_internal_iterations_are_hidden_and_start_prompt_collapses_on_replay() {
+    let mut state = harness_core::GoalRunState::new("fix failing tests", 4).unwrap();
+    let first = state.prompt_for_current_iteration().unwrap();
+    assert_eq!(
+        super::render::clean_user_query_for_transcript(&first),
+        "/goal fix failing tests"
+    );
+
+    assert!(state.advance());
+    let second = state.prompt_for_current_iteration().unwrap();
+    assert_eq!(super::render::clean_user_query_for_transcript(&second), "");
 }

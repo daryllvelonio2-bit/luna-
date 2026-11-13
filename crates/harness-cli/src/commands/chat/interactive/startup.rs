@@ -275,6 +275,7 @@ fn build_repl_state(
         queue,
         current_cancel,
         active_turn,
+        active_goal: None,
         current_query,
         turn_start,
         prompt_history,

@@ -122,6 +122,7 @@ pub(super) struct ReplState {
     pub(super) queue: VecDeque<String>,
     pub(super) current_cancel: CancellationToken,
     pub(super) active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
+    pub(super) active_goal: Option<harness_core::GoalRunState>,
     pub(super) current_query: String,
     pub(super) turn_start: std::time::Instant,
     pub(super) prompt_history: Vec<String>,

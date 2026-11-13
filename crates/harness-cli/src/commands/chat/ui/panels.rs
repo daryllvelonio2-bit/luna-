@@ -86,6 +86,7 @@ pub(super) struct ChatStatus {
     pub(super) allow_context_drop: bool,
     pub(super) yolo: bool,
     pub(super) plan_mode: bool,
+    pub(super) goal_progress: Option<(usize, usize)>,
     pub(super) session_name: String,
 }
 

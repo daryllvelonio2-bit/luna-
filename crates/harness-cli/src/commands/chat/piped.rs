@@ -64,6 +64,9 @@ pub(super) async fn run(rt: &mut ChatRuntime) -> Result<(), HarnessError> {
         if handle_session_reset_commands(rt, &query).await? {
             continue;
         }
+        if handle_goal_command_piped(rt, &query, &cancel_token).await? {
+            continue;
+        }
         run_piped_turn(rt, query, &cancel_token).await?;
     }
     Ok(())
@@ -630,6 +633,114 @@ async fn handle_session_reset_commands(
         return Ok(true);
     }
     Ok(false)
+}
+
+/// `/goal [--max N] <objective>` in non-interactive chat.
+async fn handle_goal_command_piped(
+    rt: &mut ChatRuntime,
+    query: &str,
+    cancel_token: &CancellationToken,
+) -> Result<bool, HarnessError> {
+    let Some(arg) = query
+        .strip_prefix("/goal")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    else {
+        return Ok(false);
+    };
+    let raw = arg.trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("status")
+        || raw.eq_ignore_ascii_case("stop")
+        || raw.eq_ignore_ascii_case("cancel")
+        || raw.eq_ignore_ascii_case("off")
+    {
+        println!("Usage: /goal [--max N] <objective>");
+        return Ok(true);
+    }
+    if rt.plan_mode.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!(
+            "{} Disable plan mode (/plan) before starting an autonomous /goal loop.",
+            "✖".red().bold()
+        );
+        return Ok(true);
+    }
+    let (max_iterations, objective) =
+        match harness_core::parse_goal_args(raw, rt.config.goal.max_iterations) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                eprintln!("{} {}", "✖".red().bold(), error);
+                return Ok(true);
+            }
+        };
+    let mut goal = harness_core::GoalRunState::new(objective, max_iterations)?;
+    loop {
+        println!(
+            "{} Goal iteration {}/{}",
+            "↻".cyan().bold(),
+            goal.iteration,
+            goal.max_iterations
+        );
+        let prompt = goal.prompt_for_current_iteration()?;
+        let ag_ref = rt.agent.clone();
+        let cancel_child = cancel_token.child_token();
+        let outcome = {
+            let ag = ag_ref.lock().await;
+            ag.run_turn(&prompt, cancel_child).await
+        };
+        match outcome {
+            Ok(outcome) => {
+                rt.usage
+                    .record_chat(
+                        &rt.current_provider,
+                        &rt.current_model,
+                        Some(rt.session_id.as_str()),
+                        &outcome,
+                    )
+                    .await;
+                println!(
+                    "\n{}\n{}\n",
+                    LUNA_LABEL.bold().green(),
+                    reply_for_display(&outcome.reply)
+                );
+                match harness_core::GoalRunState::evaluate_reply(&outcome.reply) {
+                    harness_core::GoalVerdict::Complete(_) => {
+                        println!(
+                            "{} Goal achieved in {} iteration(s).",
+                            "✔".green().bold(),
+                            goal.iteration
+                        );
+                        break;
+                    }
+                    harness_core::GoalVerdict::Blocked(reason) => {
+                        eprintln!(
+                            "{} Goal blocked (iteration {}/{}): {}",
+                            "✖".red().bold(),
+                            goal.iteration,
+                            goal.max_iterations,
+                            reason
+                        );
+                        break;
+                    }
+                    harness_core::GoalVerdict::Continue => {
+                        if !goal.advance() {
+                            println!(
+                                "{} Goal stopped after reaching max iterations ({}/{}).",
+                                "⏸".yellow().bold(),
+                                goal.iteration,
+                                goal.max_iterations
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("\n{} Error: {}\n", "✖".red().bold(), error);
+                break;
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Expand a skill invocation, reject unknown commands, and run one agent turn.

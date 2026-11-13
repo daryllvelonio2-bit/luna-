@@ -280,6 +280,7 @@ pub(crate) const RESERVED_COMMAND_NAMES: &[&str] = &[
     "/skills",
     "/mcp",
     "/plan",
+    "/goal",
     "/fork",
     "/tasks",
     "/jobs",

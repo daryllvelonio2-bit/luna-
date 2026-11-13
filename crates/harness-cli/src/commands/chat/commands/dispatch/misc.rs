@@ -139,6 +139,20 @@ impl<'a> SlashContext<'a> {
         Ok(SlashOutcome::Continue)
     }
 
+    pub(super) async fn cmd_goal(
+        &mut self,
+        arg: Option<&str>,
+    ) -> Result<SlashOutcome, HarnessError> {
+        let plan_mode = self.plan_mode.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(handle_goal_command(
+            self.ui,
+            self.config,
+            plan_mode,
+            self.active_goal,
+            arg,
+        ))
+    }
+
     pub(super) async fn cmd_exit(&mut self) -> Result<SlashOutcome, HarnessError> {
         self.ui.clear_box_on_exit();
         clear_on_exit();

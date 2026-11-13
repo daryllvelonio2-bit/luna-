@@ -9,6 +9,7 @@ pub mod desktop;
 pub mod diff;
 pub mod exec;
 pub mod gateway;
+pub mod goal;
 pub mod heartbeat;
 pub mod hooks;
 pub mod mcp;

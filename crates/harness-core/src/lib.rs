@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod fsutil;
 pub mod glob;
+pub mod goal;
 pub mod hooks;
 pub mod json;
 pub mod permission;
@@ -35,11 +36,16 @@ pub use checkpoint::{
     TurnSnapshot, DEFAULT_KEEP_TURNS,
 };
 pub use config::{
-    resolve, CheckpointSettings, Config, DisplaySettings, HooksSettings, Layers, MemoryMode,
-    MemorySettings, ModelSettings, PathsSettings, ProviderOverride, Resolved, SessionSettings,
-    Source, ToolsSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
+    resolve, CheckpointSettings, Config, DisplaySettings, GoalSettings, HooksSettings, Layers,
+    MemoryMode, MemorySettings, ModelSettings, PathsSettings, ProviderOverride, Resolved,
+    SessionSettings, Source, ToolsSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
 };
 pub use error::HarnessError;
+pub use goal::{
+    parse_goal_args, validate_max_iterations, GoalOutcome, GoalRunState, GoalVerdict,
+    DEFAULT_GOAL_MAX_ITERATIONS, GOAL_COMPLETE_TAG, GOAL_ITERATION_PREFIX,
+    MAX_GOAL_ITERATIONS_CEILING,
+};
 pub use hooks::{
     HookContext, HookEvent, HookOutcome, HookRunner, HookSpec, HookVerdict,
     DEFAULT_HOOK_TIMEOUT_SECS,

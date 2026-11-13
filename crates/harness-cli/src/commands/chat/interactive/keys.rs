@@ -336,7 +336,7 @@ async fn handle_escape(env: &mut Env<'_>, st: &mut ReplState) {
 }
 
 async fn cancel_turn(env: &mut Env<'_>, st: &mut ReplState) -> bool {
-    cancel_running_turn(
+    let cancelled = cancel_running_turn(
         &mut st.active_turn,
         &st.current_cancel,
         &env.ui,
@@ -357,7 +357,13 @@ async fn cancel_turn(env: &mut Env<'_>, st: &mut ReplState) -> bool {
         ),
         true,
     )
-    .await
+    .await;
+    if cancelled && st.active_goal.take().is_some() {
+        env.ui.set_goal_status(None);
+        env.ui
+            .emit_above(&format!("{} Goal loop stopped.", "•".dimmed()));
+    }
+    cancelled
 }
 
 fn handle_resize(env: &mut Env<'_>, st: &mut ReplState) {

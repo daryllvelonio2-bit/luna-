@@ -109,3 +109,29 @@ Rules:
 - Preserve exact paths, symbols, commands, flags, versions, exit codes, error strings, and numbers.
 - One bullet per fact, one line when possible. The whole checkpoint stays under 500 words.
 - Start directly with `## Objective`. No preamble, code fences, or conversational framing.
+
+===== GOAL_START_PROMPT =====
+Autonomous Goal Mode (iteration {{ITERATION}}/{{MAX_ITERATIONS}}).
+
+Objective:
+{{GOAL_OBJECTIVE}}
+
+Execution contract:
+- Work autonomously step by step until the objective is complete and verified, using tools directly rather than asking the user to run steps or confirm routine choices.
+- Track multi-step work with `todo_list` when helpful, and run verification checks (tests, builds, or state checks) before declaring completion.
+- If the objective is completely finished and verified, end your response with `{{GOAL_COMPLETE_TAG}}` on its own line after your summary.
+- If you hit a hard blocker you cannot resolve without user intervention or missing external access, end your response with `{{GOAL_BLOCKED_EXAMPLE}}` on its own line (replacing `reason` with a short explanation).
+- Otherwise, summarize the progress made in this iteration and leave out both tags so the next iteration continues automatically.
+
+===== GOAL_CONTINUE_PROMPT =====
+Autonomous Goal Mode (iteration {{ITERATION}}/{{MAX_ITERATIONS}}).
+
+Objective:
+{{GOAL_OBJECTIVE}}
+
+Continue working toward the objective from the current workspace and conversation state:
+- Inspect what has been completed and what remains, resolve any failures or remaining steps, and verify results before finishing.
+- Do not stop early or ask for routine confirmation.
+- If the objective is completely finished and verified, end your response with `{{GOAL_COMPLETE_TAG}}` on its own line after your final summary.
+- If you hit an unresolvable blocker, end your response with `{{GOAL_BLOCKED_EXAMPLE}}` on its own line (replacing `reason` with a short explanation).
+- Otherwise, leave out both tags and the loop will continue to the next iteration.

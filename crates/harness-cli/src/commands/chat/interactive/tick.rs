@@ -85,6 +85,7 @@ pub(super) fn animation(env: &mut Env<'_>, st: &mut ReplState) {
         queue,
         current_cancel,
         active_turn,
+        active_goal,
         current_query,
         turn_start,
         quota_refreshed_at,
@@ -148,15 +149,17 @@ pub(super) fn animation(env: &mut Env<'_>, st: &mut ReplState) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .len();
-            if can_auto_resume(
-                active_turn.is_some(),
-                compacting.load(std::sync::atomic::Ordering::SeqCst),
-                queue.len(),
-                &draft,
-                images,
-                ui.modal_active(),
-                plan_mode.load(std::sync::atomic::Ordering::SeqCst),
-            ) {
+            if active_goal.is_none()
+                && can_auto_resume(
+                    active_turn.is_some(),
+                    compacting.load(std::sync::atomic::Ordering::SeqCst),
+                    queue.len(),
+                    &draft,
+                    images,
+                    ui.modal_active(),
+                    plan_mode.load(std::sync::atomic::Ordering::SeqCst),
+                )
+            {
                 launch_internal_turn(
                     &background_job_resume_prompt(),
                     ui,
@@ -318,6 +321,7 @@ pub(super) async fn job(
         queue,
         current_cancel,
         active_turn,
+        active_goal,
         current_query,
         turn_start,
         pending_job_turn,
@@ -368,15 +372,17 @@ pub(super) async fn job(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len();
-        if can_auto_resume(
-            active_turn.is_some(),
-            compacting.load(std::sync::atomic::Ordering::SeqCst),
-            queue.len(),
-            &draft,
-            images,
-            ui.modal_active(),
-            plan_mode.load(std::sync::atomic::Ordering::SeqCst),
-        ) {
+        if active_goal.is_none()
+            && can_auto_resume(
+                active_turn.is_some(),
+                compacting.load(std::sync::atomic::Ordering::SeqCst),
+                queue.len(),
+                &draft,
+                images,
+                ui.modal_active(),
+                plan_mode.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        {
             launch_internal_turn(
                 &background_job_resume_prompt(),
                 ui,

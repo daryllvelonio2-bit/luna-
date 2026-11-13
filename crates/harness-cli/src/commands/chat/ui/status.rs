@@ -9,17 +9,26 @@ use super::view::ChatUi;
 impl ChatUi {
     pub fn set_status(&self, model: &str, context_used: u32, context_max: u32) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        let (yolo, plan_mode, session_name, account_name, quota, quota_drawn) =
+        let (yolo, plan_mode, goal_progress, session_name, account_name, quota, quota_drawn) =
             match status.as_ref() {
                 Some(s) => (
                     s.yolo,
                     s.plan_mode,
+                    s.goal_progress,
                     s.session_name.clone(),
                     s.account_name.clone(),
                     s.quota.clone(),
                     s.quota_drawn.clone(),
                 ),
-                None => (false, false, String::new(), None, Vec::new(), String::new()),
+                None => (
+                    false,
+                    false,
+                    None,
+                    String::new(),
+                    None,
+                    Vec::new(),
+                    String::new(),
+                ),
             };
         *status = Some(ChatStatus {
             model: model.to_string(),
@@ -31,6 +40,7 @@ impl ChatUi {
             allow_context_drop: false,
             yolo,
             plan_mode,
+            goal_progress,
             session_name,
         });
     }
@@ -187,6 +197,15 @@ impl ChatUi {
         }
         self.redraw_status_line();
     }
+    pub fn set_goal_status(&self, progress: Option<(usize, usize)>) {
+        {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref mut s) = *status {
+                s.goal_progress = progress;
+            }
+        }
+        self.redraw_status_line();
+    }
 }
 
 impl ChatUi {
@@ -284,6 +303,9 @@ fn status_right(s: &ChatStatus) -> String {
     } else {
         format!("ctx: {}/{}", s.context_used, s.context_max)
     };
+    if let Some((iter, max)) = s.goal_progress {
+        right = format!("{} {}", format!("goal {iter}/{max}").green().bold(), right);
+    }
     if s.plan_mode {
         right = format!("{} {}", "plan".cyan().bold(), right);
     }

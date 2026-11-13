@@ -143,6 +143,7 @@ pub const SOURCE_CHAT: &str = "chat";
 pub const SOURCE_EXEC: &str = "exec";
 pub const SOURCE_VOICE: &str = "voice";
 pub const SOURCE_DELEGATE: &str = "delegate";
+pub const SOURCE_GOAL: &str = "goal";
 
 /// One row: one turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
