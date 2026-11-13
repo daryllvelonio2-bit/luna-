@@ -9,18 +9,77 @@ use super::notices::BACKGROUND_JOB_RESUME_PREFIX;
 use super::results::{format_process_header, format_tool_result_for};
 use super::tools::format_tool_call;
 
-/// Formatted tool execution lines for a single tool call within a turn's process.
+/// Synthetic `tool_name` for settled reasoning segments stored chronologically in `tool_items`.
+pub const THINKING_TOOL_NAME: &str = "__thinking__";
+
+/// Synthetic `tool_name` for intermediate assistant prose emitted before a tool call.
+pub const ASSISTANT_TEXT_TOOL_NAME: &str = "__assistant_text__";
+
+/// Formatted tool execution lines for a single tool call (or chronological process event) within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnProcessItem {
     pub tool_name: String,
     pub call_formatted: String,
     pub result_formatted: String,
     pub diff_lines: Vec<String>,
-    /// A bounded copy of what the call printed, kept so Ctrl+O can show it after the live tail
-    /// is gone. Bounded because a transcript lives for the whole session.
+    /// A bounded copy of what the call printed, kept so Ctrl+O / TUI cards can show it after the
+    /// live tail is gone. Bounded because a transcript lives for the whole session.
     pub output: String,
     /// Lines dropped from the front of `output` when it was bounded.
     pub output_dropped: usize,
+    /// Raw structured tool arguments when known (used by the TUI card renderer).
+    pub arguments: Option<serde_json::Value>,
+    /// Elapsed seconds for this thinking phase or tool execution when measured live.
+    pub duration_secs: Option<f32>,
+    /// Whether the tool execution returned an error.
+    pub is_error: bool,
+}
+
+impl TurnProcessItem {
+    /// Construct a chronological reasoning segment stored inline alongside tool calls.
+    pub fn thinking(text: impl Into<String>) -> Self {
+        Self::thinking_with_duration(text, None)
+    }
+
+    /// Construct a chronological reasoning segment with its measured elapsed duration.
+    pub fn thinking_with_duration(text: impl Into<String>, duration_secs: Option<f32>) -> Self {
+        Self {
+            tool_name: THINKING_TOOL_NAME.to_string(),
+            call_formatted: "💭 Thinking".to_string(),
+            result_formatted: String::new(),
+            diff_lines: Vec::new(),
+            output: text.into(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs,
+            is_error: false,
+        }
+    }
+
+    /// Construct an intermediate assistant prose segment emitted before a tool call.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self {
+            tool_name: ASSISTANT_TEXT_TOOL_NAME.to_string(),
+            call_formatted: "💭 Reply".to_string(),
+            result_formatted: String::new(),
+            diff_lines: Vec::new(),
+            output: text.into(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: None,
+            is_error: false,
+        }
+    }
+
+    /// Whether this item represents an inline reasoning segment rather than a tool call.
+    pub fn is_thinking(&self) -> bool {
+        self.tool_name == THINKING_TOOL_NAME
+    }
+
+    /// Whether this item represents intermediate assistant prose rather than a tool call.
+    pub fn is_assistant_text(&self) -> bool {
+        self.tool_name == ASSISTANT_TEXT_TOOL_NAME
+    }
 }
 
 /// How many lines of a finished tool's output the transcript retains for Ctrl+O.
@@ -340,10 +399,13 @@ fn steer_item(content: &str) -> Option<TurnProcessItem> {
         diff_lines: Vec::new(),
         output: String::new(),
         output_dropped: 0,
+        arguments: None,
+        duration_secs: None,
+        is_error: false,
     })
 }
 
-/// Fold an assistant message into the turn: reasoning, tool calls, then reply text.
+/// Fold an assistant message into the turn: reasoning, intermediate prose, tool calls, then reply text.
 fn apply_assistant_message(
     msg: &Message,
     current_reasoning: &mut Option<String>,
@@ -351,17 +413,27 @@ fn apply_assistant_message(
     current_reply: &mut Option<String>,
 ) {
     if let Some(r) = &msg.reasoning {
-        if let Some(cur_r) = current_reasoning {
-            cur_r.push('\n');
-            cur_r.push_str(r);
-        } else {
-            *current_reasoning = Some(r.clone());
+        if !r.trim().is_empty() {
+            if !current_tools.is_empty() {
+                current_tools.push(TurnProcessItem::thinking(r.clone()));
+            } else if let Some(cur_r) = current_reasoning {
+                cur_r.push('\n');
+                cur_r.push_str(r);
+            } else {
+                *current_reasoning = Some(r.clone());
+            }
         }
     }
-    for call in &msg.tool_calls {
-        current_tools.push(tool_call_item(call));
-    }
-    if let Some(content) = &msg.content {
+    if !msg.tool_calls.is_empty() {
+        if let Some(content) = &msg.content {
+            if !content.trim().is_empty() {
+                current_tools.push(TurnProcessItem::assistant_text(content.trim().to_string()));
+            }
+        }
+        for call in &msg.tool_calls {
+            current_tools.push(tool_call_item(call));
+        }
+    } else if let Some(content) = &msg.content {
         if !content.trim().is_empty() {
             if let Some(cur_reply) = current_reply {
                 cur_reply.push_str("\n\n");
@@ -387,6 +459,9 @@ fn tool_call_item(call: &ToolCall) -> TurnProcessItem {
         diff_lines,
         output: String::new(),
         output_dropped: 0,
+        arguments: Some(call.arguments.clone()),
+        duration_secs: None,
+        is_error: false,
     }
 }
 
@@ -408,6 +483,7 @@ fn apply_tool_message(msg: &Message, current_tools: &mut [TurnProcessItem]) {
         target.result_formatted =
             format_tool_result_for(Some(&target.tool_name), res.is_error, &res.content);
         (target.output, target.output_dropped) = bounded_tool_output(&res.content);
+        target.is_error = res.is_error;
     }
 }
 
@@ -452,8 +528,16 @@ fn push_process_turn(lines: &mut Vec<String>, turn: &TurnRecord, expanded: bool,
         .reasoning
         .as_ref()
         .map(|r| !r.trim().is_empty())
-        .unwrap_or(false);
-    let has_tools = !turn.tools.is_empty() || !turn.tool_items.is_empty();
+        .unwrap_or(false)
+        || turn
+            .tool_items
+            .iter()
+            .any(|it| it.is_thinking() && !it.output.trim().is_empty());
+    let has_tools = !turn.tools.is_empty()
+        || turn
+            .tool_items
+            .iter()
+            .any(|it| !it.is_thinking());
     if !(has_reasoning || has_tools) {
         return;
     }
@@ -490,9 +574,13 @@ fn turn_tool_names(turn: &TurnRecord) -> Vec<String> {
     } else {
         turn.tool_items
             .iter()
+            .filter(|it| !it.is_thinking())
             .filter_map(|it| {
                 let plain = dialoguer::console::strip_ansi_codes(&it.call_formatted);
-                if plain.starts_with('⏩') || plain.starts_with('✖') || plain.starts_with('✔')
+                if plain.starts_with('⏩')
+                    || plain.starts_with('✖')
+                    || plain.starts_with('✔')
+                    || plain.starts_with('💭')
                 {
                     None
                 } else {
@@ -513,7 +601,19 @@ fn push_expanded_process(lines: &mut Vec<String>, turn: &TurnRecord, width: usiz
         }
     }
     for item in &turn.tool_items {
-        push_tool_item(lines, item, width);
+        if item.is_thinking() {
+            if !item.output.trim().is_empty() {
+                for row in reasoning_rows(&item.output, width) {
+                    push_rows(lines, &row);
+                }
+            }
+        } else if item.is_assistant_text() {
+            if !item.output.trim().is_empty() {
+                push_rows(lines, item.output.trim());
+            }
+        } else {
+            push_tool_item(lines, item, width);
+        }
     }
 }
 
@@ -596,10 +696,13 @@ pub fn reply_for_display(reply: &str) -> &str {
     }
 }
 
-/// Whether a formatted line is a non-tool event (steer, approval rejection, etc.)
+/// Whether a formatted line is a non-tool event (steer, approval rejection, thinking, etc.)
 pub fn is_non_tool_event(call: &str) -> bool {
     let plain = dialoguer::console::strip_ansi_codes(call);
-    plain.starts_with('⏩') || plain.starts_with('✖') || plain.starts_with('✔')
+    plain.starts_with('⏩')
+        || plain.starts_with('✖')
+        || plain.starts_with('✔')
+        || plain.starts_with('💭')
 }
 
 /// Whether a formatted call already carries a verdict.

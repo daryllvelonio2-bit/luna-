@@ -1941,3 +1941,110 @@ fn the_no_text_placeholder_gets_the_host_hint_only_at_render_time() {
     );
     assert_eq!(reply_for_display("a real answer"), "a real answer");
 }
+
+#[test]
+fn parse_turns_from_history_preserves_interleaved_thinking_after_tools() {
+    use harness_core::{Message, Role, ToolCall, ToolResult};
+
+    let history = vec![
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message::user("what is this repo about"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 2,
+            seq: 2,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("round 1 thought".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "list_files".to_string(),
+                    arguments: json!({ "path": "" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 3,
+            seq: 3,
+            message: Message::tool(ToolResult::success("c1", "Cargo.toml")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 4,
+            seq: 4,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: Some("round 2 thought".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "c2".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 5,
+            seq: 5,
+            message: Message::tool(ToolResult::success("c2", "[workspace]")),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 6,
+            seq: 6,
+            message: Message {
+                role: Role::Assistant,
+                content: Some("It is a Rust workspace.".to_string()),
+                reasoning: Some("round 3 thought".to_string()),
+                tool_calls: Vec::new(),
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].reasoning.as_deref(), Some("round 1 thought"));
+    assert_eq!(turns[0].tool_items.len(), 4);
+    assert!(!turns[0].tool_items[0].is_thinking());
+    assert_eq!(turns[0].tool_items[0].tool_name, "list_files");
+    assert!(turns[0].tool_items[1].is_thinking());
+    assert_eq!(turns[0].tool_items[1].output, "round 2 thought");
+    assert!(!turns[0].tool_items[2].is_thinking());
+    assert_eq!(turns[0].tool_items[2].tool_name, "read_file");
+    assert!(turns[0].tool_items[3].is_thinking());
+    assert_eq!(turns[0].tool_items[3].output, "round 3 thought");
+
+    let collapsed = render_turn_lines(&turns, false, 100)
+        .into_iter()
+        .map(|l| plain(&l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(collapsed.contains("2 tools: list, read · thinking"), "{collapsed}");
+
+    let expanded = render_turn_lines(&turns, true, 100)
+        .into_iter()
+        .map(|l| plain(&l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let p1 = expanded.find("round 1 thought").unwrap();
+    let t1 = expanded.find("📂 list").unwrap();
+    let p2 = expanded.find("round 2 thought").unwrap();
+    let t2 = expanded.find("📖 read").unwrap();
+    let p3 = expanded.find("round 3 thought").unwrap();
+    assert!(p1 < t1 && t1 < p2 && p2 < t2 && t2 < p3, "{expanded}");
+}

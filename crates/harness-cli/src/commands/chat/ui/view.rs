@@ -71,11 +71,16 @@ pub struct ChatUi {
 #[derive(Clone, Debug, Default)]
 pub struct TuiLiveSnapshot {
     pub reasoning: String,
+    pub reasoning_secs: Option<f32>,
     pub content: String,
     pub activity_call: Option<String>,
+    pub activity_tool_name: Option<String>,
+    pub activity_args: Option<serde_json::Value>,
     pub activity_detail: Option<String>,
     pub activity_elapsed_secs: Option<f32>,
     pub tool_output_tail: Vec<String>,
+    pub activity_tool_output_hidden: usize,
+    pub activity_tool_output_raw: Vec<String>,
     pub compacting: Option<(bool, f32)>,
     pub model: String,
     pub context_used: u32,
@@ -233,6 +238,7 @@ impl ChatUi {
     pub fn clear_live_state(&self) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.reasoning.clear();
+        live.reasoning_started = None;
         live.content.clear();
         live.rows.clear();
         live.activity = None;
@@ -247,14 +253,23 @@ impl ChatUi {
         {
             let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             snap.reasoning = live.reasoning.clone();
+            snap.reasoning_secs = live
+                .reasoning_started
+                .map(|started| started.elapsed().as_secs_f32());
             snap.content = live.content.clone();
             if let Some(act) = &live.activity {
                 snap.activity_call = Some(act.call.clone());
+                snap.activity_tool_name = Some(act.tool_name.clone());
+                snap.activity_args = Some(act.arguments.clone());
                 snap.activity_detail = act.detail.clone();
                 snap.activity_elapsed_secs = Some(act.started.elapsed().as_secs_f32());
+                let limit = if live.tool_output_expanded { 40 } else { 7 };
                 snap.tool_output_tail = live
                     .tool_output
                     .rows(width.max(20), if live.tool_output_expanded { 40 } else { 8 });
+                let (hidden, raw_lines) = live.tool_output.raw_tail(limit);
+                snap.activity_tool_output_hidden = hidden;
+                snap.activity_tool_output_raw = raw_lines;
             }
             if let Some(comp) = &live.compaction {
                 snap.compacting = Some((comp.forced, comp.started.elapsed().as_secs_f32()));

@@ -58,9 +58,14 @@ pub(super) fn turn_records(
         let tool_end = notice.tool_count.min(final_tool_items.len());
         let segment_tools = final_tool_items[tool_cursor..tool_end].to_vec();
         tool_cursor = tool_end;
+        let segment_reasoning = if segment_tools.iter().any(|it| it.is_thinking()) {
+            None
+        } else {
+            (!reasoning.is_empty()).then(|| reasoning.to_string())
+        };
         records.push(TurnRecord {
             user_query: std::mem::take(&mut segment_query),
-            reasoning: (!reasoning.is_empty()).then(|| reasoning.to_string()),
+            reasoning: segment_reasoning,
             tools: Vec::new(),
             tool_items: segment_tools,
             duration: notice.at.saturating_duration_since(segment_start),
@@ -69,9 +74,15 @@ pub(super) fn turn_records(
         segment_query = notice.text;
         segment_start = notice.at;
     }
+    let final_segment_tools = final_tool_items[tool_cursor..].to_vec();
+    let final_segment_reasoning = if final_segment_tools.iter().any(|it| it.is_thinking()) {
+        None
+    } else {
+        final_reasoning
+    };
     records.push(TurnRecord {
         user_query: segment_query,
-        reasoning: final_reasoning,
+        reasoning: final_segment_reasoning,
         // Once the turn is split, the header reads its tool names from the partitioned items:
         // keeping the whole turn's `tool_calls` here would stamp every call on the last segment.
         tools: if had_interruptions {
@@ -79,7 +90,7 @@ pub(super) fn turn_records(
         } else {
             final_tools
         },
-        tool_items: final_tool_items[tool_cursor..].to_vec(),
+        tool_items: final_segment_tools,
         duration: turn_duration.saturating_sub(segment_start.saturating_duration_since(turn_start)),
         reply: final_reply,
     });
@@ -527,6 +538,9 @@ pub(super) async fn handle_composer_command(
                         diff_lines: Vec::new(),
                         output: String::new(),
                         output_dropped: 0,
+                        arguments: None,
+                        duration_secs: None,
+                        is_error: false,
                     });
                 ui.emit_above(&line);
             } else {

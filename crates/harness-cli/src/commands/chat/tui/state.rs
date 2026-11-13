@@ -54,15 +54,43 @@ impl AgentMode {
     }
 }
 
+/// Payload backed by an inline placeholder token inside [`ComposerState::text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentKind {
+    ImageDataUrl(String),
+    PastedText(String),
+}
+
+/// An attached image or collapsed multi-line paste represented by a compact token
+/// (`[image: WxH]` or `[pasted ~N lines]`) in the composer input box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerAttachment {
+    pub token: String,
+    pub kind: AttachmentKind,
+}
+
+/// Result of taking the composer contents for submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmittedComposer {
+    /// Text as shown in the composer / transcript card (keeps `[image: ...]` and `[pasted ~N lines]`).
+    pub display_text: String,
+    /// Full prompt sent to the model (`[pasted ~N lines]` expanded to full pasted text).
+    pub expanded_text: String,
+    /// Image data URLs to attach to the turn in order of appearance.
+    pub image_data_urls: Vec<String>,
+}
+
 /// Multi-line text composer state with cursor & history navigation.
 #[derive(Debug, Clone, Default)]
 pub struct ComposerState {
     pub text: String,
     /// Byte index inside `text` (always on a char boundary).
     pub cursor: usize,
+    pub attachments: Vec<ComposerAttachment>,
     pub prompt_history: Vec<String>,
     pub history_cursor: Option<usize>,
     pub draft_backup: String,
+    pub draft_attachments_backup: Vec<ComposerAttachment>,
 }
 
 impl ComposerState {
@@ -78,8 +106,163 @@ impl ComposerState {
         self.history_cursor = None;
     }
 
+    /// Insert an inline image token `[image: WxH]` at the cursor and track its data URL.
+    pub fn attach_image(&mut self, width: usize, height: usize, data_url: String) {
+        let base = format!("[image: {width}x{height}]");
+        let token = self.unique_token(&base);
+        self.insert_token_with_spacing(&token);
+        self.attachments.push(ComposerAttachment {
+            token,
+            kind: AttachmentKind::ImageDataUrl(data_url),
+        });
+    }
+
+    /// Paste text into the composer, collapsing multi-line or large copied blocks into
+    /// `[pasted ~N lines]` while keeping short single-line pastes inline.
+    pub fn paste_text(&mut self, raw: &str) {
+        let cleaned = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let trimmed_nl = cleaned.trim_end_matches('\n');
+        let newline_count = trimmed_nl.matches('\n').count();
+        let is_block = newline_count >= 1 || cleaned.len() > 200;
+        if !is_block {
+            self.insert_str(&cleaned);
+            return;
+        }
+        let line_count = (newline_count + 1).max(cleaned.len().div_ceil(100));
+        let base = format!("[pasted ~{line_count} lines]");
+        let token = self.unique_token(&base);
+        self.insert_token_with_spacing(&token);
+        self.attachments.push(ComposerAttachment {
+            token,
+            kind: AttachmentKind::PastedText(cleaned),
+        });
+    }
+
+    pub fn image_count(&self) -> usize {
+        self.attachments
+            .iter()
+            .filter(|a| matches!(a.kind, AttachmentKind::ImageDataUrl(_)))
+            .count()
+    }
+
+    fn unique_token(&self, base: &str) -> String {
+        if !self.text.contains(base) && !self.attachments.iter().any(|a| a.token == base) {
+            return base.to_string();
+        }
+        let stem = base.strip_suffix(']').unwrap_or(base);
+        let mut n = 2usize;
+        loop {
+            let cand = format!("{stem} #{n}]");
+            if !self.text.contains(&cand) && !self.attachments.iter().any(|a| a.token == cand) {
+                return cand;
+            }
+            n += 1;
+        }
+    }
+
+    fn insert_token_with_spacing(&mut self, token: &str) {
+        let need_leading_space = self.cursor > 0
+            && self.text[..self.cursor]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+        let need_trailing_space = self.cursor == self.text.len()
+            || self.text[self.cursor..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace());
+        let mut snippet = String::with_capacity(token.len() + 2);
+        if need_leading_space {
+            snippet.push(' ');
+        }
+        snippet.push_str(token);
+        if need_trailing_space {
+            snippet.push(' ');
+        }
+        self.insert_str(&snippet);
+    }
+
+    fn attachment_range_for_backspace(&self) -> Option<(usize, usize)> {
+        if self.cursor == 0 {
+            return None;
+        }
+        for att in &self.attachments {
+            if let Some(start) = self.text.find(&att.token) {
+                let end = start + att.token.len();
+                if self.cursor > start && self.cursor <= end {
+                    return Some((start, end));
+                }
+            }
+        }
+        None
+    }
+
+    fn attachment_range_for_delete(&self) -> Option<(usize, usize)> {
+        for att in &self.attachments {
+            if let Some(start) = self.text.find(&att.token) {
+                let end = start + att.token.len();
+                if self.cursor >= start && self.cursor < end {
+                    return Some((start, end));
+                }
+            }
+        }
+        None
+    }
+
+    fn prune_missing_attachments(&mut self) {
+        self.attachments.retain(|att| self.text.contains(&att.token));
+    }
+
+    /// Take and expand the composer for submission, clearing the input state.
+    pub fn take_for_submit(&mut self) -> SubmittedComposer {
+        let raw = std::mem::take(&mut self.text);
+        let attachments = std::mem::take(&mut self.attachments);
+        self.clear();
+
+        let display_text = raw.trim().to_string();
+        let mut spans: Vec<(usize, usize, &ComposerAttachment)> = attachments
+            .iter()
+            .filter_map(|att| raw.find(&att.token).map(|s| (s, s + att.token.len(), att)))
+            .collect();
+        spans.sort_by_key(|(s, _, _)| *s);
+
+        let mut expanded = String::with_capacity(raw.len());
+        let mut image_data_urls = Vec::new();
+        let mut pos = 0usize;
+        for (start, end, att) in spans {
+            if start < pos {
+                continue;
+            }
+            expanded.push_str(&raw[pos..start]);
+            match &att.kind {
+                AttachmentKind::PastedText(full) => {
+                    expanded.push_str(full);
+                }
+                AttachmentKind::ImageDataUrl(url) => {
+                    expanded.push_str(&raw[start..end]);
+                    image_data_urls.push(url.clone());
+                }
+            }
+            pos = end;
+        }
+        expanded.push_str(&raw[pos..]);
+
+        SubmittedComposer {
+            display_text,
+            expanded_text: expanded.trim().to_string(),
+            image_data_urls,
+        }
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
+            return;
+        }
+        if let Some((start, end)) = self.attachment_range_for_backspace() {
+            self.text.drain(start..end);
+            self.cursor = start;
+            self.history_cursor = None;
+            self.prune_missing_attachments();
             return;
         }
         let prev = self.text[..self.cursor]
@@ -90,10 +273,18 @@ impl ComposerState {
         self.text.drain(prev..self.cursor);
         self.cursor = prev;
         self.history_cursor = None;
+        self.prune_missing_attachments();
     }
 
     pub fn delete(&mut self) {
         if self.cursor >= self.text.len() {
+            return;
+        }
+        if let Some((start, end)) = self.attachment_range_for_delete() {
+            self.text.drain(start..end);
+            self.cursor = start;
+            self.history_cursor = None;
+            self.prune_missing_attachments();
             return;
         }
         let next = self.text[self.cursor..]
@@ -103,10 +294,18 @@ impl ComposerState {
             .unwrap_or(self.text.len());
         self.text.drain(self.cursor..next);
         self.history_cursor = None;
+        self.prune_missing_attachments();
     }
 
     pub fn delete_word_back(&mut self) {
         if self.cursor == 0 {
+            return;
+        }
+        if let Some((start, end)) = self.attachment_range_for_backspace() {
+            self.text.drain(start..end);
+            self.cursor = start;
+            self.history_cursor = None;
+            self.prune_missing_attachments();
             return;
         }
         let before = &self.text[..self.cursor];
@@ -118,17 +317,20 @@ impl ComposerState {
         self.text.drain(cut..self.cursor);
         self.cursor = cut;
         self.history_cursor = None;
+        self.prune_missing_attachments();
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.attachments.clear();
         self.history_cursor = None;
     }
 
     pub fn set_text(&mut self, s: impl Into<String>) {
         self.text = s.into();
         self.cursor = self.text.len();
+        self.prune_missing_attachments();
     }
 
     pub fn move_left(&mut self) {
@@ -184,6 +386,7 @@ impl ComposerState {
         match self.history_cursor {
             None => {
                 self.draft_backup = self.text.clone();
+                self.draft_attachments_backup = std::mem::take(&mut self.attachments);
                 let idx = self.prompt_history.len() - 1;
                 self.history_cursor = Some(idx);
                 self.text = self.prompt_history[idx].clone();
@@ -192,6 +395,7 @@ impl ComposerState {
             Some(idx) if idx > 0 => {
                 let next = idx - 1;
                 self.history_cursor = Some(next);
+                self.attachments.clear();
                 self.text = self.prompt_history[next].clone();
                 self.cursor = self.text.len();
             }
@@ -206,11 +410,13 @@ impl ComposerState {
         if idx + 1 < self.prompt_history.len() {
             let next = idx + 1;
             self.history_cursor = Some(next);
+            self.attachments.clear();
             self.text = self.prompt_history[next].clone();
             self.cursor = self.text.len();
         } else {
             self.history_cursor = None;
             self.text = std::mem::take(&mut self.draft_backup);
+            self.attachments = std::mem::take(&mut self.draft_attachments_backup);
             self.cursor = self.text.len();
         }
     }
@@ -283,10 +489,14 @@ pub struct TabHitBox {
 
 /// Clickable target inside the rendered transcript viewport.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum TranscriptClickTarget {
-    ToggleTurnThinking(usize),
-    ToggleTurnTools(usize),
+    ToggleTurnThinking(usize, usize),
+    ToggleTurnTools(usize, usize),
+    ToggleLiveThinkingStep(usize),
+    ToggleLiveToolStep(usize),
     ToggleLiveThinking,
+    JumpToLatest,
 }
 
 #[derive(Debug, Clone)]
@@ -323,8 +533,10 @@ pub struct BackgroundSession {
     pub turns: Vec<TurnRecord>,
     pub turn_meta: Vec<TurnMeta>,
     pub system_notices: Vec<String>,
-    pub expanded_thinking: HashSet<usize>,
-    pub expanded_tools: HashSet<usize>,
+    pub expanded_thinking: HashSet<(usize, usize)>,
+    pub expanded_tools: HashSet<(usize, usize)>,
+    pub expanded_live_thinking: HashSet<usize>,
+    pub expanded_live_tools: HashSet<usize>,
     pub live_thinking_view: LiveThinkingView,
     pub process_expanded: bool,
     pub scroll_from_bottom: usize,
@@ -445,6 +657,69 @@ pub enum ActiveModal {
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_image_inserts_marker_and_submits_data_url() {
+        let mut c = ComposerState::default();
+        c.insert_str("check");
+        c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
+        assert_eq!(c.text, "check [image: 293x400] ");
+        assert_eq!(c.image_count(), 1);
+
+        c.insert_str("please");
+        let sub = c.take_for_submit();
+        assert_eq!(sub.display_text, "check [image: 293x400] please");
+        assert_eq!(sub.expanded_text, "check [image: 293x400] please");
+        assert_eq!(sub.image_data_urls, vec!["data:image/png;base64,AAA"]);
+        assert!(c.text.is_empty());
+        assert_eq!(c.image_count(), 0);
+    }
+
+    #[test]
+    fn paste_text_collapses_multiline_blocks_and_expands_on_submit() {
+        let mut c = ComposerState::default();
+        c.insert_str("explain ");
+        c.paste_text("line 1\nline 2\nline 3\n");
+        assert_eq!(c.text, "explain [pasted ~3 lines] ");
+
+        let sub = c.take_for_submit();
+        assert_eq!(sub.display_text, "explain [pasted ~3 lines]");
+        assert_eq!(sub.expanded_text, "explain line 1\nline 2\nline 3");
+        assert!(sub.image_data_urls.is_empty());
+    }
+
+    #[test]
+    fn paste_text_keeps_short_single_line_inline() {
+        let mut c = ComposerState::default();
+        c.paste_text("cargo test -p harness-cli");
+        assert_eq!(c.text, "cargo test -p harness-cli");
+        assert!(c.attachments.is_empty());
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_attachment_tokens_atomically() {
+        let mut c = ComposerState::default();
+        c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
+        assert_eq!(c.text, "[image: 293x400] ");
+        // First backspace deletes trailing space, second deletes whole token.
+        c.backspace();
+        assert_eq!(c.text, "[image: 293x400]");
+        assert_eq!(c.image_count(), 1);
+        c.backspace();
+        assert_eq!(c.text, "");
+        assert_eq!(c.image_count(), 0);
+
+        c.paste_text("a\nb\nc");
+        c.move_home();
+        c.delete();
+        assert_eq!(c.text, " ");
+        assert!(c.attachments.is_empty());
+    }
+}
+
 /// Autocomplete popup when typing `/` at the start of the composer.
 #[derive(Debug, Clone, Default)]
 pub struct SlashPopupState {
@@ -459,8 +734,10 @@ pub struct TuiState {
     pub turn_meta: Vec<TurnMeta>,
     pub system_notices: Vec<String>,
     pub process_expanded: bool,
-    pub expanded_thinking: HashSet<usize>,
-    pub expanded_tools: HashSet<usize>,
+    pub expanded_thinking: HashSet<(usize, usize)>,
+    pub expanded_tools: HashSet<(usize, usize)>,
+    pub expanded_live_thinking: HashSet<usize>,
+    pub expanded_live_tools: HashSet<usize>,
     pub live_thinking_view: LiveThinkingView,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub mode: AgentMode,

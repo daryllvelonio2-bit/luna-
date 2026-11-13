@@ -32,7 +32,13 @@ pub fn format_opencode_prompt(messages: &[Message]) -> OpencodePrompt {
             Role::System => "System Instruction",
             Role::User => "User",
             Role::Assistant => "Assistant",
-            Role::Tool => "Tool Output",
+            Role::Tool => {
+                if msg.tool_result.as_ref().is_some_and(|result| result.is_error) {
+                    "Tool Error"
+                } else {
+                    "Tool Output"
+                }
+            }
         };
         let mut text = String::new();
         if let Some(ref content) = msg.content {

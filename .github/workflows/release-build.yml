@@ -24,6 +24,12 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin luna
 
+      - name: Install luna binary
+        run: sudo install -m 0755 target/release/luna /usr/local/bin/luna
+
+      - name: Verify installed binary
+        run: luna --version
+
       - name: Upload luna binary artifact
         uses: actions/upload-artifact@v4
         with:

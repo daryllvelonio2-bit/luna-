@@ -1225,3 +1225,21 @@ fn finish_reasoning_preserves_live_reasoning_in_tui_mode() {
     assert!(snap.reasoning.contains("step one"), "{}", snap.reasoning);
     assert!(snap.reasoning.contains("step two"), "{}", snap.reasoning);
 }
+
+#[test]
+fn take_live_reasoning_clears_buffer_between_rounds() {
+    let ui = ChatUi::new(true);
+    ui.set_tui_mode(true);
+    assert_eq!(ui.take_live_reasoning(), None);
+
+    ui.push_reasoning("  round one thought\n");
+    assert_eq!(
+        ui.take_live_reasoning().as_deref(),
+        Some("round one thought")
+    );
+    assert_eq!(ui.take_live_reasoning(), None);
+    assert!(ui.tui_snapshot(80).reasoning.is_empty());
+
+    ui.push_reasoning("round two thought");
+    assert_eq!(ui.tui_snapshot(80).reasoning, "round two thought");
+}

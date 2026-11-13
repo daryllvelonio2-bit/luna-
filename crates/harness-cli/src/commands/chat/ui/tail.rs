@@ -8,6 +8,8 @@ pub(super) struct Activity {
     /// The formatted call line, shown from the instant the tool is invoked — the transcript
     /// carries the same line once it finishes, so the user watches the call, not just its result.
     pub(super) call: String,
+    pub(super) tool_name: String,
+    pub(super) arguments: serde_json::Value,
     pub(super) detail: Option<String>,
     pub(super) started: std::time::Instant,
     pub(super) frame: usize,
@@ -187,5 +189,24 @@ impl ToolTail {
             rows.push(format!("  {} {}", "│".dimmed(), line.dimmed()));
         }
         rows
+    }
+
+    /// Raw tail lines (plus count of earlier lines hidden before the tail) for TUI cards.
+    pub(super) fn raw_tail(&self, limit: usize) -> (usize, Vec<String>) {
+        let mut all: Vec<String> = self
+            .lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .cloned()
+            .collect();
+        let current = self.current.trim_end();
+        if !current.is_empty() {
+            all.push(current.to_string());
+        }
+        let limit = limit.max(1);
+        let content_limit = if all.len() > limit { limit } else { all.len() };
+        let start = all.len().saturating_sub(content_limit);
+        let hidden = self.dropped + start;
+        (hidden, all[start..].to_vec())
     }
 }

@@ -3,7 +3,7 @@ use super::form::{form_value_for_answer, parse_opencode_form_to_clarify, FormFie
 use super::native::session_permissions;
 use super::prompt::format_opencode_prompt;
 use super::usage::{add_usage, session_total_usage, step_context_usage, usage_from_tokens};
-use harness_core::types::Message;
+use harness_core::types::{Message, ToolResult};
 use harness_core::ClarifyAnswer;
 
 /// Code Mode is never offered to a Luna session: the deny rule must come after the blanket
@@ -115,6 +115,33 @@ fn headless_steps_are_summed_for_the_ledger() {
         second.prompt_tokens, 7_020,
         "each step still holds its own prompt"
     );
+}
+
+/// A failed tool result remains explicit in the prompt text sent on the next request.
+#[test]
+fn failed_tool_results_are_labeled_as_errors() {
+    let message = Message::tool(ToolResult::error(
+        "call-1",
+        "Missing required argument 'command'",
+    ));
+
+    let prompt = format_opencode_prompt(&[message]);
+
+    assert!(prompt.text.contains("[Tool Error]"));
+    assert!(prompt.text.contains("tool_call_id: call-1"));
+    assert!(prompt.text.contains("Missing required argument 'command'"));
+    assert!(!prompt.text.contains("Tool Output"));
+}
+
+#[test]
+fn successful_tool_results_are_labeled_as_output() {
+    let message = Message::tool(ToolResult::success("call-2", "done"));
+
+    let prompt = format_opencode_prompt(&[message]);
+
+    assert!(prompt.text.contains("[Tool Output]"));
+    assert!(prompt.text.contains("done"));
+    assert!(!prompt.text.contains("[Tool Error]"));
 }
 
 /// A pasted screenshot is an attachment, not 300 KB of prose. The text keeps the instruction

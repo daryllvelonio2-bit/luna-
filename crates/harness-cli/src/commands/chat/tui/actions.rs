@@ -1,6 +1,6 @@
 //! Session actions, slash-command execution, turn lifecycle, and tab management for the TUI.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -174,6 +174,8 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         system_notices: std::mem::take(&mut st.system_notices),
         expanded_thinking: std::mem::take(&mut st.expanded_thinking),
         expanded_tools: std::mem::take(&mut st.expanded_tools),
+        expanded_live_thinking: std::mem::take(&mut st.expanded_live_thinking),
+        expanded_live_tools: std::mem::take(&mut st.expanded_live_tools),
         live_thinking_view: st.live_thinking_view,
         process_expanded: st.process_expanded,
         scroll_from_bottom: st.scroll_from_bottom,
@@ -208,6 +210,8 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.system_notices = slot.system_notices;
     st.expanded_thinking = slot.expanded_thinking;
     st.expanded_tools = slot.expanded_tools;
+    st.expanded_live_thinking = slot.expanded_live_thinking;
+    st.expanded_live_tools = slot.expanded_live_tools;
     st.live_thinking_view = slot.live_thinking_view;
     st.process_expanded = slot.process_expanded;
     st.scroll_from_bottom = slot.scroll_from_bottom;
@@ -226,6 +230,17 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     apply_agent_mode(env, st, st.mode);
 }
 
+type SessionRuntimeBundle = (
+    Arc<tokio::sync::Mutex<super::super::ChatAgent>>,
+    Arc<ChatUi>,
+    Arc<Mutex<Vec<TurnProcessItem>>>,
+    Arc<Mutex<Vec<InterruptNotice>>>,
+    Arc<Mutex<VecDeque<String>>>,
+    Arc<harness_core::InterruptHandle>,
+    Arc<AtomicBool>,
+    u32,
+);
+
 /// Build an independent `ChatAgent` + `ChatUi` bundle for a newly-activated session without
 /// touching any currently running session's `agent` lock.
 fn instantiate_session_runtime(
@@ -235,19 +250,7 @@ fn instantiate_session_runtime(
     provider: &str,
     model: &str,
     reasoning_effort: Option<ReasoningEffort>,
-) -> Result<
-    (
-        Arc<tokio::sync::Mutex<super::super::ChatAgent>>,
-        Arc<ChatUi>,
-        Arc<Mutex<Vec<TurnProcessItem>>>,
-        Arc<Mutex<Vec<InterruptNotice>>>,
-        Arc<Mutex<VecDeque<String>>>,
-        Arc<harness_core::InterruptHandle>,
-        Arc<AtomicBool>,
-        u32,
-    ),
-    HarnessError,
-> {
+) -> Result<SessionRuntimeBundle, HarnessError> {
     let client = Arc::new(GenericProviderClient::new(
         provider.to_string(),
         model.to_string(),
@@ -400,6 +403,8 @@ pub async fn switch_to_session(
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
+    st.expanded_live_thinking.clear();
+    st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
     st.scroll_from_bottom = 0;
@@ -453,6 +458,8 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
+    st.expanded_live_thinking.clear();
+    st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
     st.scroll_from_bottom = 0;
@@ -707,13 +714,15 @@ pub async fn apply_thinking_selection(
 pub fn set_all_process_expanded(st: &mut TuiState, expanded: bool) {
     st.process_expanded = expanded;
     if expanded {
-        st.expanded_thinking = (0..st.turns.len()).collect();
-        st.expanded_tools = (0..st.turns.len()).collect();
+        st.expanded_thinking.clear();
+        st.expanded_live_thinking.clear();
         st.live_thinking_view = LiveThinkingView::Expanded;
     } else {
         st.expanded_thinking.clear();
         st.expanded_tools.clear();
-        st.live_thinking_view = LiveThinkingView::Collapsed;
+        st.expanded_live_thinking.clear();
+        st.expanded_live_tools.clear();
+        st.live_thinking_view = LiveThinkingView::Tail;
     }
 }
 
@@ -775,39 +784,51 @@ pub async fn submit_composer(
     st: &mut TuiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<Flow, HarnessError> {
-    let raw = std::mem::take(&mut st.composer.text);
-    st.composer.clear();
+    let submitted = st.composer.take_for_submit();
     sync_slash_popup(env, st);
 
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if submitted.display_text.is_empty() {
         return Ok(Flow::Continue);
     }
 
-    if st.composer.prompt_history.last().map(String::as_str) != Some(trimmed) {
-        st.composer.prompt_history.push(trimmed.to_string());
+    if !submitted.image_data_urls.is_empty() {
+        st.pending_images
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(submitted.image_data_urls);
+    }
+
+    let history_entry = crate::commands::prompt_images::remove_image_markers(&submitted.expanded_text);
+    let history_trimmed = history_entry.trim();
+    if !history_trimmed.is_empty()
+        && st.composer.prompt_history.last().map(String::as_str) != Some(history_trimmed)
+    {
+        st.composer.prompt_history.push(history_trimmed.to_string());
         if let Some(ref path) = st.history_path {
-            append_prompt_history(Some(path), trimmed);
+            append_prompt_history(Some(path), history_trimmed);
         }
     }
 
-    if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
+    let command_text =
+        crate::commands::prompt_images::strip_leading_image_markers(&submitted.expanded_text);
+
+    if command_text.eq_ignore_ascii_case("exit") || command_text.eq_ignore_ascii_case("quit") {
         return Ok(Flow::Break);
     }
 
-    if trimmed.starts_with('/') && !looks_like_path(trimmed) {
-        return run_slash_command(env, st, terminal, trimmed, trimmed).await;
+    if command_text.starts_with('/') && !looks_like_path(command_text) {
+        return run_slash_command(env, st, terminal, command_text, &submitted.display_text).await;
     }
 
     // Normal user prompt: queue/steer if a turn is active, else launch turn immediately.
     if env.compacting.load(Ordering::SeqCst) {
-        st.queue.push_back(trimmed.to_string());
+        st.queue.push_back(submitted.expanded_text);
         env.ui.set_queue_depth(st.queue.len());
         return Ok(Flow::Continue);
     }
 
     if st.active_turn.is_some() {
-        match env.interrupt_handle.interrupt(trimmed) {
+        match env.interrupt_handle.interrupt(&submitted.expanded_text) {
             harness_core::InterruptOutcome::Streaming => {
                 st.system_notices
                     .push("↳ Redirecting — stopping this reply to take your message".to_string());
@@ -817,18 +838,20 @@ pub async fn submit_composer(
                     .push("↳ Held until the running tool finishes, then sent".to_string());
             }
             harness_core::InterruptOutcome::Idle => {
-                st.queue.push_back(trimmed.to_string());
+                st.queue.push_back(submitted.expanded_text);
                 env.ui.set_queue_depth(st.queue.len());
             }
         }
         return Ok(Flow::Continue);
     }
 
+    let display_opt = (submitted.display_text != submitted.expanded_text)
+        .then_some(submitted.display_text.as_str());
     env.ui.clear_transient_error();
     st.scroll_from_bottom = 0;
     launch_turn(
-        trimmed,
-        None,
+        &submitted.expanded_text,
+        display_opt,
         &env.ui,
         &st.turns,
         st.process_expanded,
@@ -953,7 +976,7 @@ pub async fn run_slash_command(
         &env.ui,
         &mut st.active_turn,
         &mut st.active_goal,
-        &mut st.current_cancel,
+        &st.current_cancel,
         &env.interrupt_handle,
         &mut st.turns,
         &env.in_flight_tools,
@@ -1226,9 +1249,13 @@ pub async fn handle_turn_end(
     }
     env.ui.set_turn_active(false);
     env.ui.stop_activity();
+    let trailing_reasoning = env.ui.take_live_reasoning_with_duration();
+    let trailing_prose = env.ui.take_live_content();
     env.ui.clear_live_state();
+    st.expanded_live_thinking.clear();
+    st.expanded_live_tools.clear();
 
-    let current_tools: Vec<TurnProcessItem> = std::mem::take(
+    let mut current_tools: Vec<TurnProcessItem> = std::mem::take(
         &mut *env
             .in_flight_tools
             .lock()
@@ -1256,12 +1283,28 @@ pub async fn handle_turn_end(
                 .await;
 
             let out_tokens = outcome.usage.as_ref().map(|u| u.completion_tokens);
+            let has_prose_in_outcome = !outcome.reply.trim().is_empty();
+            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+                if !current_tools.is_empty() || secs.is_some() {
+                    current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+                }
+            }
+            if !has_prose_in_outcome {
+                if let Some(p) = trailing_prose.as_ref().filter(|s| !s.trim().is_empty()) {
+                    current_tools.push(TurnProcessItem::assistant_text(p.clone()));
+                }
+            }
+            let turn_reasoning = if current_tools.iter().any(|it| it.is_thinking()) {
+                None
+            } else {
+                trailing_reasoning.map(|(r, _)| r).or_else(|| outcome.reasoning.clone())
+            };
             let added = turn_records(
                 &st.current_query,
                 interruptions,
                 st.turn_start,
                 turn_dur,
-                outcome.reasoning.clone(),
+                turn_reasoning,
                 outcome.tool_calls.clone(),
                 current_tools,
                 outcome.reply.clone(),
@@ -1294,6 +1337,9 @@ pub async fn handle_turn_end(
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
+            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+                current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+            }
             let added = turn_records(
                 &st.current_query,
                 interruptions,
@@ -1390,10 +1436,14 @@ pub async fn handle_background_turn_end(
     }
     slot.ui.set_turn_active(false);
     slot.ui.stop_activity();
+    let trailing_reasoning = slot.ui.take_live_reasoning_with_duration();
+    let trailing_prose = slot.ui.take_live_content();
     slot.ui.clear_live_state();
+    slot.expanded_live_thinking.clear();
+    slot.expanded_live_tools.clear();
     slot.live_thinking_view = LiveThinkingView::Tail;
 
-    let current_tools: Vec<TurnProcessItem> = std::mem::take(
+    let mut current_tools: Vec<TurnProcessItem> = std::mem::take(
         &mut *slot
             .in_flight_tools
             .lock()
@@ -1420,12 +1470,28 @@ pub async fn handle_background_turn_end(
                 )
                 .await;
             let out_tokens = outcome.usage.as_ref().map(|u| u.completion_tokens);
+            let has_prose_in_outcome = !outcome.reply.trim().is_empty();
+            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+                if !current_tools.is_empty() || secs.is_some() {
+                    current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+                }
+            }
+            if !has_prose_in_outcome {
+                if let Some(p) = trailing_prose.as_ref().filter(|s| !s.trim().is_empty()) {
+                    current_tools.push(TurnProcessItem::assistant_text(p.clone()));
+                }
+            }
+            let turn_reasoning = if current_tools.iter().any(|it| it.is_thinking()) {
+                None
+            } else {
+                trailing_reasoning.map(|(r, _)| r).or_else(|| outcome.reasoning.clone())
+            };
             let added = turn_records(
                 &slot.current_query,
                 interruptions,
                 slot.turn_start,
                 turn_dur,
-                outcome.reasoning.clone(),
+                turn_reasoning,
                 outcome.tool_calls.clone(),
                 current_tools,
                 outcome.reply.clone(),
@@ -1452,12 +1518,17 @@ pub async fn handle_background_turn_end(
                 slot.process_expanded = false;
                 slot.expanded_thinking.clear();
                 slot.expanded_tools.clear();
+                slot.expanded_live_thinking.clear();
+                slot.expanded_live_tools.clear();
             }
             if slot.active_goal.is_some() {
                 goal_reply = Some(outcome.reply);
             }
         }
         Ok(Err(HarnessError::Cancelled)) => {
+            if let Some((r, secs)) = trailing_reasoning.as_ref().filter(|(s, _)| !s.trim().is_empty()) {
+                current_tools.push(TurnProcessItem::thinking_with_duration(r.clone(), *secs));
+            }
             let added = turn_records(
                 &slot.current_query,
                 interruptions,

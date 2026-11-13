@@ -129,9 +129,31 @@ impl ObserverState {
         }
     }
 
+    fn settle_reasoning_for_next_step(&self) {
+        if self.ui.is_tui_mode() {
+            if let Some((reasoning, secs)) = self.ui.take_live_reasoning_with_duration() {
+                self.in_flight_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(TurnProcessItem::thinking_with_duration(reasoning, secs));
+            }
+        } else {
+            self.ui.finish_reasoning();
+        }
+    }
+
     fn handle_tool_executing(&self, name: String, arguments: serde_json::Value) {
-        self.ui.finish_reasoning();
-        self.ui.clear_live_content();
+        self.settle_reasoning_for_next_step();
+        if self.ui.is_tui_mode() {
+            if let Some(prose) = self.ui.take_live_content() {
+                self.in_flight_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(TurnProcessItem::assistant_text(prose));
+            }
+        } else {
+            self.ui.clear_live_content();
+        }
         // A todo call reads as the task it acts on, not as the arguments it was sent.
         let call_fmt = if name == "todo_list" {
             todo::format_call(&arguments, &self.todo_scope)
@@ -159,6 +181,9 @@ impl ObserverState {
                     diff_lines,
                     output: String::new(),
                     output_dropped: 0,
+                    arguments: Some(arguments),
+                    duration_secs: None,
+                    is_error: false,
                 });
         }
     }
@@ -174,6 +199,7 @@ impl ObserverState {
             }
             return;
         }
+        let elapsed_secs = self.ui.activity_elapsed_secs();
         self.ui.stop_activity();
         let status = if is_error {
             " (failed)".red().to_string()
@@ -198,6 +224,8 @@ impl ObserverState {
                 let (bounded, dropped) = bounded_tool_output(&output);
                 item.output = bounded;
                 item.output_dropped = dropped;
+                item.is_error = is_error;
+                item.duration_secs = elapsed_secs;
                 let diff =
                     if !is_error && (name == "patch" || name == "edit" || name == "apply_patch") {
                         item.diff_lines.clone()
@@ -235,7 +263,7 @@ impl ObserverState {
         let shown = clean_user_query_for_transcript(&text);
         // The reasoning produced before the cut is already in the live region; settle it so
         // it stays on screen instead of disappearing when the next call starts.
-        self.ui.finish_reasoning();
+        self.settle_reasoning_for_next_step();
         if !self.ui.is_tui_mode() {
             // Reply text is not streamed live, so the part the model had written would go
             // unseen. Show it now, before the user's line that cut it off.
@@ -273,7 +301,7 @@ impl ObserverState {
     }
 
     fn handle_steered(&self, text: &str) {
-        self.ui.finish_reasoning();
+        self.settle_reasoning_for_next_step();
         let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
         self.in_flight_tools
             .lock()
@@ -285,6 +313,9 @@ impl ObserverState {
                 diff_lines: Vec::new(),
                 output: String::new(),
                 output_dropped: 0,
+                arguments: None,
+                duration_secs: None,
+                is_error: false,
             });
         self.ui.emit_above(&line);
     }

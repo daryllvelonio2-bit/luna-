@@ -16,11 +16,12 @@ impl ChatUi {
         *last = kind;
     }
     pub fn push_reasoning(&self, text: &str) {
-        self.live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reasoning
-            .push_str(text);
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        if live.reasoning.is_empty() && live.reasoning_started.is_none() && !text.is_empty() {
+            live.reasoning_started = Some(std::time::Instant::now());
+        }
+        live.reasoning.push_str(text);
+        drop(live);
         self.notify_tui();
     }
     pub fn push_content(&self, text: &str) {
@@ -38,6 +39,42 @@ impl ChatUi {
             .content
             .clear();
         self.notify_tui();
+    }
+    /// Take and clear the current live reply text buffer if non-empty (used to preserve
+    /// intermediate assistant prose emitted before a tool call).
+    pub fn take_live_content(&self) -> Option<String> {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let text = std::mem::take(&mut live.content);
+        drop(live);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            self.notify_tui();
+            Some(trimmed.to_string())
+        }
+    }
+    /// Take and clear the current live reasoning buffer if non-empty.
+    #[cfg(test)]
+    pub fn take_live_reasoning(&self) -> Option<String> {
+        self.take_live_reasoning_with_duration().map(|(t, _)| t)
+    }
+    /// Take and clear the current live reasoning buffer along with its measured duration.
+    pub fn take_live_reasoning_with_duration(&self) -> Option<(String, Option<f32>)> {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let text = std::mem::take(&mut live.reasoning);
+        let secs = live
+            .reasoning_started
+            .take()
+            .map(|started| started.elapsed().as_secs_f32());
+        drop(live);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            self.notify_tui();
+            Some((trimmed.to_string(), secs))
+        }
     }
     pub fn finish_reasoning(&self) {
         let rows = {
@@ -67,12 +104,22 @@ impl ChatUi {
         live.tool_output_expanded = false;
         live.activity = Some(Activity {
             call: call.to_string(),
+            tool_name: name.to_string(),
+            arguments: arguments.clone(),
             detail: tool_activity_detail(name, arguments),
             started: std::time::Instant::now(),
             frame: 0,
         });
         drop(live);
         self.notify_tui();
+    }
+    pub fn activity_elapsed_secs(&self) -> Option<f32> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .as_ref()
+            .map(|a| a.started.elapsed().as_secs_f32())
     }
     pub fn stop_activity(&self) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());

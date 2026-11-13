@@ -247,6 +247,9 @@ pub(super) async fn approval(
                 diff_lines: Vec::new(),
                 output: String::new(),
                 output_dropped: 0,
+                arguments: None,
+                duration_secs: None,
+                is_error: false,
             });
     }
     if is_run {

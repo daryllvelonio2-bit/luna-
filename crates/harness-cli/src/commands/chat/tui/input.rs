@@ -54,7 +54,14 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
     let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
     match &mut st.modal {
         ActiveModal::None => {
-            st.composer.insert_str(&cleaned);
+            if cleaned.is_empty() {
+                if let Ok(Some(img)) = crate::commands::clipboard_image::read_clipboard_image() {
+                    st.composer.attach_image(img.width, img.height, img.data_url());
+                    sync_slash_popup(env, st);
+                }
+                return;
+            }
+            st.composer.paste_text(&cleaned);
             sync_slash_popup(env, st);
         }
         ActiveModal::CommandPalette { query, selected } => {
@@ -136,14 +143,24 @@ async fn handle_mouse(
                 .map(|hb| hb.target.clone())
             {
                 match target {
-                    TranscriptClickTarget::ToggleTurnThinking(idx) => {
-                        if !st.expanded_thinking.remove(&idx) {
-                            st.expanded_thinking.insert(idx);
+                    TranscriptClickTarget::ToggleTurnThinking(idx, step_idx) => {
+                        if !st.expanded_thinking.remove(&(idx, step_idx)) {
+                            st.expanded_thinking.insert((idx, step_idx));
                         }
                     }
-                    TranscriptClickTarget::ToggleTurnTools(idx) => {
-                        if !st.expanded_tools.remove(&idx) {
-                            st.expanded_tools.insert(idx);
+                    TranscriptClickTarget::ToggleTurnTools(idx, group_idx) => {
+                        if !st.expanded_tools.remove(&(idx, group_idx)) {
+                            st.expanded_tools.insert((idx, group_idx));
+                        }
+                    }
+                    TranscriptClickTarget::ToggleLiveThinkingStep(step_idx) => {
+                        if !st.expanded_live_thinking.remove(&step_idx) {
+                            st.expanded_live_thinking.insert(step_idx);
+                        }
+                    }
+                    TranscriptClickTarget::ToggleLiveToolStep(step_idx) => {
+                        if !st.expanded_live_tools.remove(&step_idx) {
+                            st.expanded_live_tools.insert(step_idx);
                         }
                     }
                     TranscriptClickTarget::ToggleLiveThinking => {
@@ -152,6 +169,9 @@ async fn handle_mouse(
                             LiveThinkingView::Expanded => LiveThinkingView::Collapsed,
                             LiveThinkingView::Collapsed => LiveThinkingView::Expanded,
                         };
+                    }
+                    TranscriptClickTarget::JumpToLatest => {
+                        st.scroll_from_bottom = 0;
                     }
                 }
             }
@@ -391,25 +411,22 @@ async fn handle_key(
 }
 
 fn handle_ctrl_v(env: &Env<'_>, st: &mut TuiState) {
-    if let Ok(Some(img)) = crate::commands::clipboard_image::read_clipboard_image() {
-        let data_url = img.data_url();
-        st.pending_images
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(data_url);
-        let count = st
-            .pending_images
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
-        st.system_notices
-            .push(format!("Attached clipboard image ({}x{}, {} pending)", img.width, img.height, count));
-        return;
+    match crate::commands::clipboard_image::read_clipboard_image() {
+        Ok(Some(img)) => {
+            st.composer.attach_image(img.width, img.height, img.data_url());
+            sync_slash_popup(env, st);
+            return;
+        }
+        Err(e) => {
+            env.ui
+                .set_transient_error(Some(format!("Clipboard image paste failed: {e}")));
+            return;
+        }
+        Ok(None) => {}
     }
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
-            let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
-            st.composer.insert_str(&cleaned);
+            st.composer.paste_text(&text);
             sync_slash_popup(env, st);
         }
     }

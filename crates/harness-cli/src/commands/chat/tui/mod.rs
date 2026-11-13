@@ -184,7 +184,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                     if pending_session == env.session_id.as_str()
                         && !(st.active_turn.is_some() && st.turn_start > at)
                     {
-                        let images_len = st.pending_images.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        let images_len = st.pending_images.lock().unwrap_or_else(|e| e.into_inner()).len()
+                            + st.composer.image_count();
                         let modal_up = !matches!(st.modal, ActiveModal::None);
                         if can_auto_resume(
                             st.active_turn.is_some(),
@@ -428,6 +429,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         process_expanded: false,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
+        expanded_live_thinking: HashSet::new(),
+        expanded_live_tools: HashSet::new(),
         live_thinking_view: LiveThinkingView::Tail,
         reasoning_effort,
         mode,
