@@ -14,7 +14,7 @@ pub struct SlashCommand {
 /// One row in the slash menu: a built-in command or a configured worker.
 ///
 /// Built-ins are `&'static str`, workers are owned, so the menu works on owned rows uniformly.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CommandEntry {
     pub name: String,
     pub details: String,

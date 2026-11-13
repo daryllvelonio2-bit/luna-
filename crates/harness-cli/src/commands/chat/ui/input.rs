@@ -82,6 +82,10 @@ impl ChatUi {
     }
     pub fn redraw_input_line(&self) {
         let _paint = self.paint_in_flight();
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }

@@ -116,7 +116,12 @@ impl StreamAccumulator {
                 }
                 self.reasoning.push_str(&text);
             }
-            StreamEvent::ContentDelta(text) => self.content.push_str(&text),
+            StreamEvent::ContentDelta(text) => {
+                if let Some(observer) = observer {
+                    observer(AgentEvent::ContentDelta(text.clone()));
+                }
+                self.content.push_str(&text);
+            }
             StreamEvent::ToolExecuting { name, arguments } => {
                 if let Some(observer) = observer {
                     observer(AgentEvent::ToolExecuting {

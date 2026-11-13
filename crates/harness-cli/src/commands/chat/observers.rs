@@ -62,6 +62,9 @@ impl ObserverState {
             harness_core::AgentEvent::ReasoningDelta(text) => {
                 self.ui.push_reasoning(&text);
             }
+            harness_core::AgentEvent::ContentDelta(text) => {
+                self.ui.push_content(&text);
+            }
             harness_core::AgentEvent::ContextTokensUpdated { tokens_used, reset } => {
                 if reset {
                     self.ui.reset_context_used(tokens_used);
@@ -128,6 +131,7 @@ impl ObserverState {
 
     fn handle_tool_executing(&self, name: String, arguments: serde_json::Value) {
         self.ui.finish_reasoning();
+        self.ui.clear_live_content();
         // A todo call reads as the task it acts on, not as the arguments it was sent.
         let call_fmt = if name == "todo_list" {
             todo::format_call(&arguments, &self.todo_scope)

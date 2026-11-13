@@ -44,6 +44,9 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 libc = { workspace = true }
 crossterm = { workspace = true }
+ratatui = { workspace = true }
+pulldown-cmark = { workspace = true }
+unicode-width = { workspace = true }
 rusqlite = { workspace = true }
 similar = { workspace = true }
 reqwest = { workspace = true }

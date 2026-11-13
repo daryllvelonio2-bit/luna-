@@ -8,7 +8,7 @@ mod command;
 mod enter;
 mod keys;
 mod startup;
-mod state;
+pub(super) mod state;
 mod tick;
 mod turn_end;
 
@@ -17,7 +17,7 @@ use harness_core::{HarnessError, SessionStore};
 use super::clear_on_exit;
 use super::setup::ChatRuntime;
 use super::ui::{ANIMATION_INTERVAL, LANDING_FRAME_INTERVAL};
-use state::{Env, Flow};
+pub(in crate::commands::chat) use state::{Env, Flow};
 
 /// Run the attended loop until the user leaves, the key channel closes, or a command asks to exit.
 pub(super) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {

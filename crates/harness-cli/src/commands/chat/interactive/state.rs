@@ -24,7 +24,7 @@ pub(super) type KeyRx = mpsc::UnboundedReceiver<AppKey>;
 
 /// How a key handler tells the loop to keep going or to leave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Flow {
+pub(in crate::commands::chat) enum Flow {
     Continue,
     Break,
 }
@@ -35,47 +35,47 @@ pub(super) enum Flow {
 /// screen and the turn while it also mutates the session's model choice and config. Only the
 /// values that really change under the loop's feet — the config, the session id, the model
 /// strings and the channel receivers — are borrowed.
-pub(super) struct Env<'a> {
-    pub(super) ui: Arc<ChatUi>,
-    pub(super) cred_manager: Arc<CredentialManager>,
-    pub(super) discovery: Arc<ModelDiscovery>,
-    pub(super) store: Arc<SqliteSessionStore>,
-    pub(super) agent: Arc<tokio::sync::Mutex<ChatAgent>>,
-    pub(super) usage: Arc<crate::commands::usage::UsageRecorder>,
-    pub(super) todo_scope: harness_core::tools::TodoScope,
-    pub(super) feature_toggles: &'a FeatureToggles,
-    pub(super) bg_queue: Arc<harness_core::tasks::BackgroundTaskQueue>,
-    pub(super) delegate_tool: Arc<harness_core::tools::DelegateTaskTool>,
-    pub(super) plan_mode: Arc<AtomicBool>,
-    pub(super) allow_all_session: Arc<AtomicBool>,
-    pub(super) compacting: Arc<AtomicBool>,
-    pub(super) in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>>,
-    pub(super) interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
-    pub(super) steer_handle: Arc<Mutex<VecDeque<String>>>,
-    pub(super) interrupt_handle: Arc<InterruptHandle>,
-    pub(super) skills_arc: Option<Arc<Vec<harness_plugins::Skill>>>,
-    pub(super) skills_readout: Option<String>,
-    pub(super) approval_rx: &'a mut mpsc::UnboundedReceiver<(
+pub(in crate::commands::chat) struct Env<'a> {
+    pub(in crate::commands::chat) ui: Arc<ChatUi>,
+    pub(in crate::commands::chat) cred_manager: Arc<CredentialManager>,
+    pub(in crate::commands::chat) discovery: Arc<ModelDiscovery>,
+    pub(in crate::commands::chat) store: Arc<SqliteSessionStore>,
+    pub(in crate::commands::chat) agent: Arc<tokio::sync::Mutex<ChatAgent>>,
+    pub(in crate::commands::chat) usage: Arc<crate::commands::usage::UsageRecorder>,
+    pub(in crate::commands::chat) todo_scope: harness_core::tools::TodoScope,
+    pub(in crate::commands::chat) feature_toggles: &'a FeatureToggles,
+    pub(in crate::commands::chat) bg_queue: Arc<harness_core::tasks::BackgroundTaskQueue>,
+    pub(in crate::commands::chat) delegate_tool: Arc<harness_core::tools::DelegateTaskTool>,
+    pub(in crate::commands::chat) plan_mode: Arc<AtomicBool>,
+    pub(in crate::commands::chat) allow_all_session: Arc<AtomicBool>,
+    pub(in crate::commands::chat) compacting: Arc<AtomicBool>,
+    pub(in crate::commands::chat) in_flight_tools: Arc<Mutex<Vec<TurnProcessItem>>>,
+    pub(in crate::commands::chat) interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
+    pub(in crate::commands::chat) steer_handle: Arc<Mutex<VecDeque<String>>>,
+    pub(in crate::commands::chat) interrupt_handle: Arc<InterruptHandle>,
+    pub(in crate::commands::chat) skills_arc: Option<Arc<Vec<harness_plugins::Skill>>>,
+    pub(in crate::commands::chat) skills_readout: Option<String>,
+    pub(in crate::commands::chat) approval_rx: &'a mut mpsc::UnboundedReceiver<(
         harness_core::ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
-    pub(super) sudo_rx: &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
-    pub(super) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
+    pub(in crate::commands::chat) sudo_rx: &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
+    pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
         crate::commands::clarify::ClarifyRequest,
         oneshot::Sender<crate::commands::clarify::ClarifyResponse>,
     )>,
-    pub(super) job_rx: &'a mut mpsc::UnboundedReceiver<harness_core::tasks::JobCompletion>,
-    pub(super) config: &'a mut Config,
-    pub(super) session_id: &'a mut String,
-    pub(super) current_provider: &'a mut String,
-    pub(super) current_model: &'a mut String,
-    pub(super) compact_provider: &'a mut Option<String>,
-    pub(super) compact_model: &'a mut Option<String>,
-    pub(super) display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
+    pub(in crate::commands::chat) job_rx: &'a mut mpsc::UnboundedReceiver<harness_core::tasks::JobCompletion>,
+    pub(in crate::commands::chat) config: &'a mut Config,
+    pub(in crate::commands::chat) session_id: &'a mut String,
+    pub(in crate::commands::chat) current_provider: &'a mut String,
+    pub(in crate::commands::chat) current_model: &'a mut String,
+    pub(in crate::commands::chat) compact_provider: &'a mut Option<String>,
+    pub(in crate::commands::chat) compact_model: &'a mut Option<String>,
+    pub(in crate::commands::chat) display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
 impl<'a> Env<'a> {
-    pub(super) fn new(rt: &'a mut ChatRuntime) -> Self {
+    pub(in crate::commands::chat) fn new(rt: &'a mut ChatRuntime) -> Self {
         Self {
             ui: rt.ui.clone(),
             cred_manager: rt.cred_manager.clone(),

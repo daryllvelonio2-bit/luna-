@@ -10,7 +10,7 @@ use super::view::ChatUi;
 impl ChatUi {
     pub fn begin_block(&self, kind: OutputBlockKind) {
         let mut last = self.last_block.lock().unwrap_or_else(|e| e.into_inner());
-        if needs_separator(*last, kind) {
+        if !self.is_tui_mode() && needs_separator(*last, kind) {
             self.emit_above("");
         }
         *last = kind;
@@ -21,6 +21,23 @@ impl ChatUi {
             .unwrap_or_else(|e| e.into_inner())
             .reasoning
             .push_str(text);
+        self.notify_tui();
+    }
+    pub fn push_content(&self, text: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .content
+            .push_str(text);
+        self.notify_tui();
+    }
+    pub fn clear_live_content(&self) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .content
+            .clear();
+        self.notify_tui();
     }
     pub fn finish_reasoning(&self) {
         let rows = {
@@ -29,6 +46,11 @@ impl ChatUi {
                 return;
             }
             let text = std::mem::take(&mut live.reasoning);
+            if self.is_tui_mode() {
+                drop(live);
+                self.notify_tui();
+                return;
+            }
             reasoning_rows(&text, get_terminal_width())
         };
         if !rows.is_empty() {
@@ -46,12 +68,16 @@ impl ChatUi {
             started: std::time::Instant::now(),
             frame: 0,
         });
+        drop(live);
+        self.notify_tui();
     }
     pub fn stop_activity(&self) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.activity = None;
         live.tool_output.clear();
         live.tool_output_expanded = false;
+        drop(live);
+        self.notify_tui();
     }
     /// Whether a tool is running and therefore whether Ctrl+O should expand the live tail rather
     /// than the transcript.
@@ -92,6 +118,7 @@ impl ChatUi {
             .unwrap_or_else(|e| e.into_inner())
             .tool_output
             .push(chunk);
+        self.notify_tui();
     }
     /// A fold of the oldest turns has started: animate it until [`Self::finish_compaction`].
     ///
@@ -105,6 +132,8 @@ impl ChatUi {
             started: std::time::Instant::now(),
             frame: 0,
         });
+        drop(live);
+        self.notify_tui();
     }
     /// The fold is over, whatever it produced: stop animating it. Reporting what was folded is the
     /// caller's job, because the same event carries the failure to report.
@@ -117,6 +146,7 @@ impl ChatUi {
             // One final draw without the row, so the sweep does not stay frozen on screen while the
             // transcript below it is rewritten.
             self.animate_tick();
+            self.notify_tui();
         }
     }
     #[allow(dead_code)]

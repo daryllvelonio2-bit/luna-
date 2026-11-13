@@ -13,7 +13,7 @@ mod commands;
 mod update_tests;
 mod eval;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
-use commands::chat::run_interactive_chat;
+use commands::chat::{run_inline_chat, run_interactive_chat};
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
 use commands::memory::{handle_memory_command, MemoryCommand};
@@ -69,6 +69,10 @@ struct Cli {
     #[arg(long = "continue")]
     continue_session: bool,
 
+    /// Use the classic inline CLI scrollback REPL instead of the full-screen TUI
+    #[arg(long = "cli")]
+    cli_mode: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -77,6 +81,30 @@ struct Cli {
 enum Commands {
     /// Interactive chat session with Luna agent
     Chat {
+        /// Provider id; without it, `model.provider` from the config file
+        #[arg(short, long)]
+        provider: Option<String>,
+        /// Model id; without it, `model.default` from the config file
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Approve every mutating tool call without asking (same as `tools.approval=allow`)
+        #[arg(long)]
+        yes: bool,
+        /// Resume a stored session by id or name (`luna sessions list` shows both)
+        #[arg(long, conflicts_with_all = ["continue_session", "fork"])]
+        session: Option<String>,
+        /// Fork an existing session and start from the copy
+        #[arg(long, conflicts_with_all = ["session", "continue_session"])]
+        fork: Option<String>,
+        /// Resume the most recently updated session
+        #[arg(long = "continue")]
+        continue_session: bool,
+        /// Use the classic inline CLI scrollback REPL instead of the full-screen TUI
+        #[arg(long = "cli")]
+        cli_mode: bool,
+    },
+    /// Launch the full-screen OpenCode-style TUI
+    Tui {
         /// Provider id; without it, `model.provider` from the config file
         #[arg(short, long)]
         provider: Option<String>,
@@ -347,6 +375,12 @@ fn apply_model_flags(cli: &Cli, layers: &mut harness_core::config::Layers) -> bo
             yes,
             ..
         })
+        | Some(Commands::Tui {
+            provider,
+            model,
+            yes,
+            ..
+        })
         | Some(Commands::Voice {
             provider,
             model,
@@ -422,7 +456,7 @@ fn resolve_chat_config(
 
 fn interactive_chat(cli: &Cli) -> bool {
     match &cli.command {
-        None | Some(Commands::Chat { .. }) => {
+        None | Some(Commands::Chat { .. }) | Some(Commands::Tui { .. }) => {
             dialoguer::console::Term::stdout().features().is_attended()
         }
         _ => false,
@@ -624,6 +658,25 @@ async fn dispatch_command(
             session,
             fork,
             continue_session,
+            cli_mode,
+            ..
+        }) => {
+            let selection = session_selection(
+                session.or(cli.session),
+                fork.or(cli.fork),
+                continue_session || cli.continue_session,
+            );
+            if cli_mode || cli.cli_mode {
+                run_inline_chat(config, cred_manager, discovery, selection, explicit_model).await?;
+            } else {
+                run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
+                    .await?;
+            }
+        }
+        Some(Commands::Tui {
+            session,
+            fork,
+            continue_session,
             ..
         }) => {
             let selection = session_selection(
@@ -770,8 +823,12 @@ async fn dispatch_command(
         }
         None => {
             let selection = session_selection(cli.session, cli.fork, cli.continue_session);
-            run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
-                .await?;
+            if cli.cli_mode {
+                run_inline_chat(config, cred_manager, discovery, selection, explicit_model).await?;
+            } else {
+                run_interactive_chat(config, cred_manager, discovery, selection, explicit_model)
+                    .await?;
+            }
         }
     }
 

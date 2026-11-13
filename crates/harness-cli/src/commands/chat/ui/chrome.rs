@@ -44,6 +44,10 @@ impl ChatUi {
             }
             return;
         }
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if self.box_drawn.load(Ordering::SeqCst) {
             self.redraw_box();
         }
@@ -63,6 +67,10 @@ impl ChatUi {
     pub fn toggle_todo_collapsed(&self) -> bool {
         let folded = !self.todo_collapsed.load(Ordering::SeqCst);
         self.todo_collapsed.store(folded, Ordering::SeqCst);
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return folded;
+        }
         if self.box_drawn.load(Ordering::SeqCst) {
             self.redraw_box();
         }
@@ -92,11 +100,18 @@ impl ChatUi {
     }
     /// Update what a running delegated child is doing.
     pub fn update_delegate_task(&self, id: &str, activity: &str) {
-        let mut tasks = self.delegate_tasks.lock().unwrap();
-        if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
-            if task.activity != activity {
-                task.activity = activity.to_string();
+        let mut changed = false;
+        {
+            let mut tasks = self.delegate_tasks.lock().unwrap();
+            if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                if task.activity != activity {
+                    task.activity = activity.to_string();
+                    changed = true;
+                }
             }
+        }
+        if changed {
+            self.notify_tui();
         }
     }
     /// Remove a delegated child after it finishes.

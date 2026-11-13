@@ -31,6 +31,7 @@ pub(crate) mod render;
 pub(crate) mod setup;
 pub(crate) mod status;
 pub mod todo;
+pub(crate) mod tui;
 pub(crate) mod turn;
 pub mod ui;
 pub mod viewer;
@@ -52,8 +53,31 @@ use turn::Submission;
 pub(crate) type ChatAgent =
     Agent<GenericProviderClient, MemoryEngineKind, FileNotesEngine, DefaultToolRegistry>;
 
-/// Run a chat session: set it up once, then hand it to the loop that fits the terminal.
+/// Run a chat session: set it up once, then hand it to the TUI (or piped loop if unattended).
 pub async fn run_interactive_chat(
+    config: Config,
+    cred_manager: Arc<CredentialManager>,
+    discovery: Arc<ModelDiscovery>,
+    selection: SessionSelection,
+    explicit_model: bool,
+) -> Result<(), HarnessError> {
+    let mut runtime =
+        setup::prepare(config, cred_manager, discovery, selection, explicit_model).await?;
+    if !runtime.is_attended {
+        return piped::run(&mut runtime).await;
+    }
+    let force_cli = std::env::var("LUNA_UI")
+        .map(|v| v.eq_ignore_ascii_case("cli"))
+        .unwrap_or(false);
+    if force_cli {
+        interactive::run(&mut runtime).await
+    } else {
+        tui::run(&mut runtime).await
+    }
+}
+
+/// Run the classic inline scrollback CLI REPL (`luna --cli`).
+pub async fn run_inline_chat(
     config: Config,
     cred_manager: Arc<CredentialManager>,
     discovery: Arc<ModelDiscovery>,

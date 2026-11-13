@@ -20,7 +20,7 @@ impl ChatUi {
     /// the screen. Every frame keeps the same height, and the block is followed by exactly one
     /// blank line before the composer, so the tick can walk the cursor between the two by count.
     pub fn draw_landing(&self) {
-        if !self.is_attended {
+        if !self.is_attended || self.is_tui_mode() {
             return;
         }
         let width = get_terminal_width();
@@ -93,7 +93,11 @@ impl ChatUi {
     /// resize raced the tick), the composer is redrawn and the shower keeps running from the new
     /// row positions instead of freezing.
     pub fn animate_landing(&self) {
-        if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) || self.modal_active() {
+        if !self.is_attended
+            || self.is_tui_mode()
+            || !self.box_drawn.load(Ordering::SeqCst)
+            || self.modal_active()
+        {
             return;
         }
         if !self.advance_landing_frame() {
@@ -115,7 +119,7 @@ impl ChatUi {
     }
     pub fn handle_resize(&self) {
         let _paint = self.paint_in_flight();
-        if !self.is_attended {
+        if !self.is_attended || self.is_tui_mode() {
             return;
         }
         if self.modal_active() {

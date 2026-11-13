@@ -350,6 +350,9 @@ pub enum AgentEvent {
     /// One increment of the model's reasoning, emitted as it arrives so the UI can show thinking
     /// while it is still being produced. Concatenating every delta yields the turn's reasoning.
     ReasoningDelta(String),
+    /// One increment of the model's visible reply text, emitted as it arrives so a TUI can
+    /// stream the response live. Concatenating every delta yields the turn's final reply.
+    ContentDelta(String),
     ToolExecuting {
         name: String,
         arguments: serde_json::Value,

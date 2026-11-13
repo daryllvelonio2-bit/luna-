@@ -11,7 +11,7 @@ use super::view::ChatUi;
 impl ChatUi {
     pub fn erase_live_and_box(&self, previous_live_rows: usize) {
         let _paint = self.paint_in_flight();
-        if !self.is_attended {
+        if !self.is_attended || self.is_tui_mode() {
             return;
         }
         if self.modal_active() {
@@ -103,6 +103,21 @@ impl ChatUi {
         {
             capture.push(text.to_string());
         }
+        if self.is_tui_mode() {
+            let capturing = self
+                .command_capture
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            if !capturing {
+                self.tui_notices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(text.to_string());
+                self.notify_tui();
+            }
+            return;
+        }
         if !self.is_attended {
             println!("{}", text);
             return;
@@ -133,6 +148,10 @@ impl ChatUi {
     }
     pub fn set_live(&self, rows: Vec<String>) {
         let _paint = self.paint_in_flight();
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended {
             for row in &rows {
                 println!("{}", row);
@@ -164,7 +183,7 @@ impl ChatUi {
         self.draw_box(width, &buf);
     }
     pub fn animate_tick(&self) {
-        if !self.is_attended {
+        if !self.is_attended || self.is_tui_mode() {
             return;
         }
         let width = get_terminal_width();
@@ -246,6 +265,10 @@ impl ChatUi {
     }
     pub fn draw_box(&self, width: usize, buf: &str) {
         let _paint = self.paint_in_flight();
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if self.modal_active() {
             return;
         }
@@ -315,6 +338,10 @@ impl ChatUi {
         self.box_drawn.store(true, Ordering::SeqCst);
     }
     pub fn draw_initial_box(&self) {
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended {
             print!("{}", PROMPT.bold().yellow());
             let _ = io::stdout().flush();
@@ -326,6 +353,10 @@ impl ChatUi {
     }
     pub fn redraw_box(&self) {
         let _paint = self.paint_in_flight();
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
@@ -354,12 +385,20 @@ impl ChatUi {
         self.draw_box(width, &buf);
     }
     pub fn redraw_status_line(&self) {
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
         self.redraw_box();
     }
     pub fn redraw_queue_line(&self) {
+        if self.is_tui_mode() {
+            self.notify_tui();
+            return;
+        }
         if !self.is_attended || !self.box_drawn.load(Ordering::SeqCst) {
             return;
         }
@@ -367,7 +406,7 @@ impl ChatUi {
     }
     pub fn clear_box_on_exit(&self) {
         let _paint = self.paint_in_flight();
-        if !self.is_attended {
+        if !self.is_attended || self.is_tui_mode() {
             return;
         }
         let previous = {

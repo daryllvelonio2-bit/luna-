@@ -58,6 +58,7 @@ libc = "0.2"
 pulldown-cmark = "0.10"
 url = "2.5"
 crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.29"
 unicode-width = "0.2"
 base64 = "0.22"
 sha2 = "0.10"

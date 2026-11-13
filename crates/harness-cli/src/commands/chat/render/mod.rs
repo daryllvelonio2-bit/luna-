@@ -60,7 +60,6 @@ pub use transcript::{
 
 /// Helpers the rendering tests reach through the facade. They are internal to the module, so
 /// they are re-exported at crate scope rather than widening the public API.
-#[cfg(test)]
 pub(crate) use blocks::SPINNER_FRAMES;
 #[cfg(test)]
 pub(crate) use landing::{

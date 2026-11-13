@@ -1,0 +1,430 @@
+//! Full-screen `ratatui` TUI modeled after OpenCode's interface.
+//!
+//! Layout & components:
+//! - [`theme`]: OpenCode charcoal/coral palette, geometric `luna` logo, model/provider formatting
+//! - [`markdown`]: `pulldown-cmark` to wrapped `ratatui::text::Line`s
+//! - [`state`]: `TuiState`, `AgentMode`, `ComposerState`, `ActiveModal`, session tabs
+//! - [`render`]: top session tabs, centered landing screen, scrollable transcript, pinned composer
+//! - [`input`]: `crossterm::event::EventStream` keyboard, mouse, and paste handling
+//! - [`actions`]: turn lifecycle, slash commands, session switching, pickers
+
+mod actions;
+mod input;
+mod markdown;
+mod render;
+mod state;
+mod theme;
+
+use std::collections::VecDeque;
+use std::io;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    EventStream,
+};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use futures_util::StreamExt;
+use harness_core::{HarnessError, SessionStore};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use tokio_util::sync::CancellationToken;
+
+use super::helpers::IdleMemoryPass;
+use super::history::load_prompt_history;
+use super::interactive::state::{Env, Flow};
+use super::render::{background_job_resume_prompt, format_job_system_message, parse_turns_from_history};
+use super::setup::ChatRuntime;
+use super::status::{
+    refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed, QUOTA_REFRESH_INTERVAL,
+};
+use super::todo;
+use super::turn::{can_auto_resume, launch_internal_turn};
+use super::ui::ANIMATION_INTERVAL;
+use actions::{
+    drain_tui_notices, handle_turn_end, refresh_tabs,
+};
+use render::{draw, FooterInfo};
+use state::{ActiveModal, AgentMode, ComposerState, SlashPopupState, TuiState, TurnMeta};
+use theme::shorten_cwd;
+use crate::commands::context_window::context_window;
+
+/// Ensures raw mode, mouse capture, bracketed paste, and the alternate screen are always restored.
+struct TuiTerminalGuard;
+
+impl TuiTerminalGuard {
+    fn enter() -> Result<Self, HarnessError> {
+        crossterm::terminal::enable_raw_mode()?;
+        if let Err(e) = crossterm::execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
+            let _ = crossterm::terminal::disable_raw_mode();
+            return Err(e.into());
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for TuiTerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Run the full-screen OpenCode-style TUI until the user exits.
+pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<(), HarnessError> {
+    runtime.ui.set_tui_mode(true);
+    let _term_guard = TuiTerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let mut env = Env::new(runtime);
+    let mut st = init_tui_state(&mut env).await?;
+
+    // Warm model catalog in the background so `/model` and context window sizing stay crisp.
+    {
+        let discovery = env.discovery.clone();
+        let cred_manager = env.cred_manager.clone();
+        let provider = env.current_provider.clone();
+        tokio::spawn(async move {
+            let _ = discovery.get_models(&provider, &cred_manager, false).await;
+        });
+    }
+
+    let tui_notifier = env.ui.tui_notifier();
+    let mut events = EventStream::new();
+
+    let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
+    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let mut idle_tick = tokio::time::interval(Duration::from_secs(2));
+    idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        // Render current frame
+        let snap = {
+            let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
+            env.ui.tui_snapshot(w)
+        };
+        let reasoning_effort = env.agent.lock().await.reasoning_effort();
+        let tools_snapshot = env
+            .in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let info = FooterInfo {
+            provider: env.current_provider,
+            model: env.current_model,
+            reasoning_effort,
+            session_id: env.session_id,
+            in_flight_tools: &tools_snapshot,
+        };
+        terminal
+            .draw(|frame| draw(frame, &mut st, &snap, &info))?;
+
+        tokio::select! {
+            biased;
+
+            maybe_ev = events.next() => {
+                match maybe_ev {
+                    Some(Ok(ev)) => {
+                        if input::handle_event(&mut env, &mut st, &mut terminal, ev).await? == Flow::Break {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+
+            _ = tui_notifier.notified() => {
+                drain_tui_notices(&env, &mut st);
+            }
+
+            _ = animation.tick(), if st.active_turn.is_some()
+                || env.compacting.load(Ordering::SeqCst)
+                || snap.delegate_count > 0 => {
+                st.spinner_tick = st.spinner_tick.wrapping_add(1);
+            }
+
+            _ = idle_tick.tick() => {
+                if st.quota_refreshed_at.elapsed() >= QUOTA_REFRESH_INTERVAL {
+                    st.quota_refreshed_at = std::time::Instant::now();
+                    tokio::spawn(refresh_antigravity_quota_owned(
+                        env.ui.clone(),
+                        env.current_provider.clone(),
+                        env.current_model.clone(),
+                        env.cred_manager.clone(),
+                    ));
+                }
+                // Background job auto-resume + idle memory pass
+                if let Some((pending_session, at)) = st.pending_job_turn.take() {
+                    if pending_session == env.session_id.as_str()
+                        && !(st.active_turn.is_some() && st.turn_start > at)
+                    {
+                        let images_len = st.pending_images.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        let modal_up = !matches!(st.modal, ActiveModal::None);
+                        if can_auto_resume(
+                            st.active_turn.is_some(),
+                            env.compacting.load(Ordering::SeqCst),
+                            st.queue.len(),
+                            &st.composer.text,
+                            images_len,
+                            modal_up,
+                            env.plan_mode.load(Ordering::SeqCst),
+                        ) {
+                            launch_internal_turn(
+                                &background_job_resume_prompt(),
+                                &env.ui,
+                                &env.agent,
+                                &env.in_flight_tools,
+                                &mut st.current_cancel,
+                                &mut st.current_query,
+                                &mut st.turn_start,
+                                &mut st.active_turn,
+                            );
+                        } else {
+                            st.pending_job_turn = Some((pending_session, at));
+                        }
+                    }
+                }
+
+                let busy = st.active_turn.is_some()
+                    || env.compacting.load(Ordering::SeqCst)
+                    || !st.queue.is_empty();
+                if st.idle_pass.tick(
+                    st.turns.len(),
+                    busy,
+                    env.config.memory.background_idle_secs,
+                    std::time::Instant::now(),
+                ) {
+                    let agent = env.agent.clone();
+                    tokio::spawn(async move {
+                        let ag = agent.lock().await;
+                        ag.spawn_memory_pass_now().await;
+                    });
+                }
+            }
+
+            maybe_approval = env.approval_rx.recv() => {
+                if let Some((req, resp_tx)) = maybe_approval {
+                    if !resp_tx.is_closed() {
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected: 0,
+                        };
+                    }
+                }
+            }
+
+            maybe_sudo = env.sudo_rx.recv() => {
+                if let Some((prompt, resp_tx)) = maybe_sudo {
+                    if !resp_tx.is_closed() {
+                        st.modal = ActiveModal::Sudo {
+                            prompt,
+                            resp_tx,
+                            input: String::new(),
+                        };
+                    }
+                }
+            }
+
+            maybe_clarify = env.clarify_rx.recv() => {
+                if let Some((req, resp_tx)) = maybe_clarify {
+                    if !resp_tx.is_closed() {
+                        st.modal = ActiveModal::Clarify {
+                            req,
+                            resp_tx,
+                            question_idx: 0,
+                            answers: Vec::new(),
+                            selected: 0,
+                            custom: String::new(),
+                            editing_custom: false,
+                        };
+                    }
+                }
+            }
+
+            maybe_job = env.job_rx.recv() => {
+                if let Some(comp) = maybe_job {
+                    st.system_notices.push(format!(
+                        "Job {} ({}): {}",
+                        comp.id,
+                        comp.status,
+                        comp.command
+                    ));
+                    let msg = harness_core::Message::system(format_job_system_message(&comp));
+                    if let Err(e) = env.store.append(env.session_id, &msg, false).await {
+                        tracing::warn!("failed to record background job notice: {e}");
+                    } else {
+                        st.pending_job_turn = Some((env.session_id.clone(), std::time::Instant::now()));
+                    }
+                }
+            }
+
+            turn_res = async {
+                if let Some(ref mut handle) = st.active_turn {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                handle_turn_end(&env, &mut st, turn_res).await;
+            }
+        }
+    }
+
+    // Emit SessionEnd hook cleanly
+    {
+        let ag = env.agent.lock().await;
+        if let Err(error) = ag
+            .emit_hook_event(harness_core::HookEvent::SessionEnd, None)
+            .await
+        {
+            tracing::warn!("session_end hook failed: {}", error);
+        }
+    }
+
+    let session_name = env
+        .store
+        .get(env.session_id)
+        .await
+        .map(|s| s.name)
+        .unwrap_or_default();
+    let session_id_copy = env.session_id.clone();
+    drop(_term_guard);
+    runtime.ui.set_tui_mode(false);
+
+    if session_name.is_empty() {
+        println!("Resume: luna --session {}", session_id_copy);
+    } else {
+        println!(
+            "Resume: luna --session {}    (name: {})",
+            session_id_copy, session_name
+        );
+    }
+    Ok(())
+}
+
+async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
+    let replayed = env
+        .store
+        .replay_transcript(
+            env.session_id.as_str(),
+            env.config.session.resume_max_messages,
+        )
+        .await?;
+    let turns = parse_turns_from_history(&replayed.history);
+    let turn_meta: Vec<TurnMeta> = turns
+        .iter()
+        .map(|_| TurnMeta {
+            mode: "Build".to_string(),
+            model: env.current_model.clone(),
+            output_tokens: None,
+        })
+        .collect();
+
+    let ctx_max = context_window(
+        env.config,
+        env.discovery.as_ref(),
+        env.current_provider.as_str(),
+        env.current_model.as_str(),
+    );
+    let ctx_used = env
+        .agent
+        .lock()
+        .await
+        .estimate_session_tokens()
+        .await
+        .unwrap_or(0);
+    env.ui
+        .set_status(env.current_model.as_str(), ctx_used, ctx_max);
+    refresh_antigravity_status_if_needed(
+        &env.ui,
+        env.current_provider.as_str(),
+        env.current_model.as_str(),
+        &env.cred_manager,
+    )
+    .await;
+
+    let stored_name = env
+        .store
+        .get(env.session_id.as_str())
+        .await
+        .map(|s| s.name)
+        .unwrap_or_default();
+    env.ui.set_session_name(&stored_name);
+    todo::refresh_panel(&env.ui, &env.todo_scope);
+
+    let mode = if env.plan_mode.load(Ordering::SeqCst) {
+        AgentMode::Plan
+    } else if env.allow_all_session.load(Ordering::SeqCst) {
+        AgentMode::Auto
+    } else {
+        AgentMode::Build
+    };
+    env.ui.set_yolo(mode == AgentMode::Auto);
+    env.ui.set_plan_mode(mode == AgentMode::Plan);
+
+    let history_path = env
+        .config
+        .paths
+        .sessions_db
+        .parent()
+        .map(|p| p.join("history.txt"));
+    let prompt_history = load_prompt_history(history_path.as_deref(), &turns);
+
+    let cwd_label = shorten_cwd(&env.config.paths.workspace_root);
+
+    let initial_turns_len = turns.len();
+    let mut st = TuiState {
+        turns,
+        turn_meta,
+        system_notices: Vec::new(),
+        process_expanded: false,
+        mode,
+        composer: ComposerState {
+            prompt_history,
+            ..Default::default()
+        },
+        tabs: Vec::new(),
+        total_sessions_count: 0,
+        hit_boxes: Vec::new(),
+        scroll_from_bottom: 0,
+        max_scroll: 0,
+        modal: ActiveModal::None,
+        slash_popup: SlashPopupState::default(),
+        queue: VecDeque::new(),
+        current_cancel: CancellationToken::new(),
+        active_turn: None,
+        active_goal: None,
+        current_query: String::new(),
+        turn_start: std::time::Instant::now(),
+        quota_refreshed_at: std::time::Instant::now(),
+        idle_pass: IdleMemoryPass::new(initial_turns_len),
+        pending_job_turn: None,
+        pending_images: Arc::new(Mutex::new(Vec::new())),
+        history_path,
+        ctrl_c_armed: None,
+        spinner_tick: 0,
+        cwd_label,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        update_notice: None,
+        last_rendered_rect: (120, 34),
+    };
+    refresh_tabs(env, &mut st).await;
+    Ok(st)
+}

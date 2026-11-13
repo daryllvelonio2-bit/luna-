@@ -51,6 +51,7 @@ pub(super) struct Compaction {
 #[derive(Default)]
 pub(super) struct LiveRegion {
     pub(super) reasoning: String,
+    pub(super) content: String,
     pub(super) activity: Option<Activity>,
     /// The newest lines of the running tool's output, drawn under its activity row.
     pub(super) tool_output: ToolTail,
