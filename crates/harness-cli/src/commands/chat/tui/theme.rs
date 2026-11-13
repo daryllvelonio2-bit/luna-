@@ -40,6 +40,16 @@ pub const RED_ERR: Color = Color::Rgb(224, 108, 117);
 pub const YELLOW_WARN: Color = Color::Rgb(229, 192, 123);
 pub const CYAN_LINK: Color = Color::Rgb(106, 176, 219);
 
+/// Inline `code` payload: warm amber so it reads apart from prose.
+pub const CODE_INLINE: Color = Color::Rgb(229, 181, 103);
+/// Syntax tokens inside fenced code blocks.
+pub const CODE_KEYWORD: Color = Color::Rgb(198, 120, 221);
+pub const CODE_STRING: Color = Color::Rgb(152, 195, 121);
+pub const CODE_NUMBER: Color = Color::Rgb(229, 192, 123);
+pub const CODE_COMMENT: Color = Color::Rgb(106, 106, 116);
+pub const CODE_FUNCTION: Color = Color::Rgb(97, 175, 239);
+pub const CODE_KEY: Color = Color::Rgb(86, 182, 194);
+
 /// 3-row geometric pixel/half-block wordmark for `luna` styled like `opencode` in Screenshot 1:
 /// `lu` in muted gray (`LOGO_GRAY`), `na` in crisp white (`TEXT_PRIMARY`).
 ///

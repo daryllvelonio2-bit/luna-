@@ -1,11 +1,15 @@
 //! Markdown and plain-text wrapping into `ratatui` styled lines.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::theme::{ACCENT_CORAL, BG_CODE, CYAN_LINK, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY};
+use super::theme::{
+    ACCENT_AUTO, ACCENT_CORAL, BG_CODE, BORDER_SUBTLE, CODE_COMMENT, CODE_FUNCTION, CODE_INLINE,
+    CODE_KEY, CODE_KEYWORD, CODE_NUMBER, CODE_STRING, CYAN_LINK, TEXT_DIM, TEXT_MUTED,
+    TEXT_PRIMARY,
+};
 
 /// Render Markdown into wrapped `ratatui` lines constrained to `max_width` terminal cells.
 pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
@@ -26,6 +30,9 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut blockquote_depth: usize = 0;
     let mut pending_prefix: Option<Vec<Span<'static>>> = None;
     let mut ansi = AnsiLexer::default();
+    // Tables are buffered cell-by-cell, measured once, then drawn with box borders so the
+    // columns stay aligned regardless of the terminal width.
+    let mut table: Option<TableBuffer> = None;
 
     let flush_line = |out: &mut Vec<Line<'static>>,
                       cur_spans: &mut Vec<Span<'static>>,
@@ -48,6 +55,45 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     };
 
     for event in parser {
+        // While inside a table every event feeds the current cell instead of the prose buffer.
+        if matches!(&event, Event::End(TagEnd::Table)) {
+            if let Some(buf) = table.take() {
+                render_table(&mut out, &buf, width);
+                out.push(Line::default());
+            }
+            continue;
+        }
+        if let Some(buf) = table.as_mut() {
+            match &event {
+                Event::Start(Tag::TableHead) => {}
+                Event::End(TagEnd::TableHead) => {
+                    if !buf.row.is_empty() {
+                        let row = std::mem::take(&mut buf.row);
+                        buf.rows.push(row);
+                    }
+                    buf.header_rows = buf.rows.len();
+                }
+                Event::Start(Tag::TableRow) => {}
+                Event::End(TagEnd::TableRow) => {
+                    let row = std::mem::take(&mut buf.row);
+                    if !row.is_empty() {
+                        buf.rows.push(row);
+                    }
+                }
+                Event::Start(Tag::TableCell) => buf.cell.clear(),
+                Event::End(TagEnd::TableCell) => {
+                    let cell = buf.cell.trim().to_string();
+                    buf.row.push(cell);
+                    buf.cell.clear();
+                }
+                Event::Text(text) => buf.cell.push_str(&strip_ansi(text)),
+                Event::Code(code) => buf.cell.push_str(&strip_ansi(code)),
+                Event::SoftBreak | Event::HardBreak => buf.cell.push(' '),
+                _ => {}
+            }
+            continue;
+        }
+
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {}
@@ -57,9 +103,22 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     }
                     let color = match level {
                         HeadingLevel::H1 => ACCENT_CORAL,
+                        HeadingLevel::H2 => ACCENT_AUTO,
                         _ => TEXT_PRIMARY,
                     };
                     style_stack.push(Style::default().fg(color).add_modifier(Modifier::BOLD));
+                }
+                Tag::Table(alignments) => {
+                    flush_line(
+                        &mut out,
+                        &mut cur_spans,
+                        blockquote_depth,
+                        &mut pending_prefix,
+                    );
+                    if !out.is_empty() && !out.last().is_some_and(|l| l.spans.is_empty()) {
+                        out.push(Line::default());
+                    }
+                    table = Some(TableBuffer::new(alignments));
                 }
                 Tag::BlockQuote => {
                     blockquote_depth += 1;
@@ -82,7 +141,9 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     in_code_block = true;
                     code_buf.clear();
                     code_lang = match kind {
-                        CodeBlockKind::Fenced(lang) => lang.split_whitespace().next().unwrap_or("").to_string(),
+                        CodeBlockKind::Fenced(lang) => {
+                            lang.split_whitespace().next().unwrap_or("").to_string()
+                        }
                         CodeBlockKind::Indented => String::new(),
                     };
                 }
@@ -172,15 +233,23 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                         ]));
                     }
                     for raw_line in code_buf.lines() {
-                        for chunk in wrap_plain_text(raw_line, code_width.max(12)) {
+                        let highlighted = highlight_code_line(&code_lang, raw_line);
+                        for chunk in wrap_spans(&highlighted, code_width.max(12)) {
                             let pad = code_width.saturating_sub(chunk.width());
-                            out.push(Line::from(vec![
-                                Span::styled("│ ", Style::default().fg(TEXT_DIM).bg(BG_CODE)),
-                                Span::styled(
-                                    format!("{chunk}{}", " ".repeat(pad)),
-                                    Style::default().fg(TEXT_PRIMARY).bg(BG_CODE),
-                                ),
-                            ]));
+                            let mut spans = vec![Span::styled(
+                                "│ ",
+                                Style::default().fg(TEXT_DIM).bg(BG_CODE),
+                            )];
+                            for span in chunk.spans {
+                                spans.push(Span::styled(span.content, span.style.bg(BG_CODE)));
+                            }
+                            if pad > 0 {
+                                spans.push(Span::styled(
+                                    " ".repeat(pad),
+                                    Style::default().bg(BG_CODE),
+                                ));
+                            }
+                            out.push(Line::from(spans));
                         }
                     }
                     if code_buf.is_empty() {
@@ -227,7 +296,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
             Event::Code(code) => {
                 cur_spans.push(Span::styled(
                     format!("`{}`", strip_ansi(&code)),
-                    Style::default().fg(TEXT_PRIMARY).bg(BG_CODE),
+                    Style::default().fg(CODE_INLINE).bg(BG_CODE),
                 ));
             }
             Event::SoftBreak => {
@@ -275,6 +344,496 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     }
 
     out
+}
+
+/// Buffered Markdown table: rows of plain cell text plus the column alignments.
+#[derive(Debug, Default)]
+struct TableBuffer {
+    alignments: Vec<Alignment>,
+    rows: Vec<Vec<String>>,
+    header_rows: usize,
+    row: Vec<String>,
+    cell: String,
+}
+
+impl TableBuffer {
+    fn new(alignments: Vec<Alignment>) -> Self {
+        Self {
+            alignments,
+            ..Default::default()
+        }
+    }
+}
+
+/// Draw the buffered table with box borders, clipped to `width` terminal cells.
+fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize) {
+    let cols = table.rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    if cols == 0 {
+        return;
+    }
+
+    let natural: Vec<usize> = (0..cols)
+        .map(|col| {
+            table
+                .rows
+                .iter()
+                .filter_map(|row| row.get(col))
+                .map(|cell| cell.width())
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        })
+        .collect();
+
+    let avail = width.max(8);
+    // Each column costs its content plus one space of padding on both sides; plus the outer walls.
+    let max_content = avail.saturating_sub(3 * cols + 1);
+    let mut widths = natural;
+    while widths.iter().sum::<usize>() > max_content {
+        let Some((widest, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > 3)
+            .max_by_key(|(_, w)| **w)
+        else {
+            break;
+        };
+        widths[widest] -= 1;
+    }
+
+    let border = Style::default().fg(BORDER_SUBTLE);
+    let rule = |left: &str, mid: &str, right: &str| {
+        let mut s = String::from(left);
+        for (i, w) in widths.iter().enumerate() {
+            if i > 0 {
+                s.push_str(mid);
+            }
+            s.push_str(&"─".repeat(w + 2));
+        }
+        s.push_str(right);
+        s
+    };
+
+    let mut push_line = |spans: Vec<Span<'static>>| out.push(Line::from(spans));
+
+    push_line(vec![Span::styled(rule("┌", "┬", "┐"), border)]);
+
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let is_header = row_idx < table.header_rows;
+        let mut spans = vec![Span::styled("│", border)];
+        for (col, w) in widths.iter().enumerate() {
+            let text = row.get(col).map(String::as_str).unwrap_or("");
+            let clipped = clip_cells(text, *w);
+            let pad = w.saturating_sub(clipped.width());
+            let align = table
+                .alignments
+                .get(col)
+                .copied()
+                .unwrap_or(Alignment::None);
+            let (before, after) = match align {
+                Alignment::Right => (pad, 0),
+                Alignment::Center => (pad / 2, pad - pad / 2),
+                _ => (0, pad),
+            };
+            let style = if is_header {
+                Style::default()
+                    .fg(ACCENT_CORAL)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+            spans.push(Span::styled(" ", border));
+            spans.push(Span::styled(" ".repeat(before), style));
+            spans.push(Span::styled(clipped, style));
+            spans.push(Span::styled(" ".repeat(after), style));
+            spans.push(Span::styled(" ", border));
+            spans.push(Span::styled("│", border));
+        }
+        push_line(spans);
+
+        if is_header && row_idx + 1 == table.header_rows && table.header_rows > 0 {
+            push_line(vec![Span::styled(rule("├", "┼", "┤"), border)]);
+        }
+    }
+
+    push_line(vec![Span::styled(rule("└", "┴", "┘"), border)]);
+}
+
+/// Clip a string to `max_cells` display cells, marking the cut with an ellipsis.
+fn clip_cells(s: &str, max_cells: usize) -> String {
+    if s.width() <= max_cells {
+        return s.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > max_cells {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Language family drives which tokens get colour; unknown tags fall back to strings/numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lang {
+    Rust,
+    Python,
+    Js,
+    Go,
+    CLike,
+    Sql,
+    Bash,
+    Data,
+    Generic,
+}
+
+impl Lang {
+    fn from_tag(tag: &str) -> Self {
+        match tag.trim().to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Lang::Rust,
+            "python" | "py" => Lang::Python,
+            "js" | "javascript" | "ts" | "typescript" | "jsx" | "tsx" | "mjs" | "cjs" => Lang::Js,
+            "go" | "golang" => Lang::Go,
+            "c" | "h" | "cpp" | "c++" | "cc" | "hpp" | "java" | "cs" | "csharp" | "kt"
+            | "kotlin" | "swift" => Lang::CLike,
+            "sql" => Lang::Sql,
+            "sh" | "bash" | "zsh" | "shell" | "console" => Lang::Bash,
+            "json" | "toml" | "yaml" | "yml" | "ini" | "env" => Lang::Data,
+            _ => Lang::Generic,
+        }
+    }
+
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Lang::Rust => &[
+                "fn", "let", "mut", "pub", "use", "mod", "struct", "enum", "impl", "trait", "for",
+                "while", "loop", "if", "else", "match", "return", "self", "Self", "crate", "super",
+                "const", "static", "async", "await", "move", "ref", "where", "dyn", "unsafe",
+                "extern", "type", "in", "as", "break", "continue", "true", "false", "Some", "None",
+                "Ok", "Err",
+            ],
+            Lang::Python => &[
+                "def", "class", "import", "from", "return", "if", "elif", "else", "for", "while",
+                "in", "not", "and", "or", "is", "None", "True", "False", "try", "except",
+                "finally", "with", "as", "lambda", "yield", "async", "await", "pass", "raise",
+                "global", "nonlocal", "assert", "del", "break", "continue",
+            ],
+            Lang::Js => &[
+                "const",
+                "let",
+                "var",
+                "function",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "do",
+                "switch",
+                "case",
+                "break",
+                "continue",
+                "new",
+                "class",
+                "extends",
+                "import",
+                "export",
+                "default",
+                "from",
+                "async",
+                "await",
+                "try",
+                "catch",
+                "finally",
+                "throw",
+                "typeof",
+                "instanceof",
+                "this",
+                "null",
+                "undefined",
+                "true",
+                "false",
+                "interface",
+                "type",
+                "enum",
+                "implements",
+                "public",
+                "private",
+                "readonly",
+                "static",
+            ],
+            Lang::Go => &[
+                "func",
+                "package",
+                "import",
+                "var",
+                "const",
+                "type",
+                "struct",
+                "interface",
+                "map",
+                "chan",
+                "go",
+                "defer",
+                "return",
+                "if",
+                "else",
+                "for",
+                "range",
+                "switch",
+                "case",
+                "break",
+                "continue",
+                "select",
+                "nil",
+                "true",
+                "false",
+            ],
+            Lang::CLike => &[
+                "int",
+                "void",
+                "char",
+                "float",
+                "double",
+                "long",
+                "short",
+                "bool",
+                "class",
+                "struct",
+                "public",
+                "private",
+                "protected",
+                "static",
+                "final",
+                "const",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "switch",
+                "case",
+                "break",
+                "continue",
+                "new",
+                "delete",
+                "include",
+                "namespace",
+                "using",
+                "template",
+                "typename",
+                "virtual",
+                "override",
+                "nullptr",
+                "NULL",
+                "true",
+                "false",
+                "auto",
+            ],
+            Lang::Sql => &[
+                "select",
+                "from",
+                "where",
+                "insert",
+                "into",
+                "values",
+                "update",
+                "set",
+                "delete",
+                "create",
+                "table",
+                "drop",
+                "alter",
+                "join",
+                "left",
+                "right",
+                "inner",
+                "outer",
+                "on",
+                "group",
+                "by",
+                "order",
+                "having",
+                "limit",
+                "offset",
+                "as",
+                "and",
+                "or",
+                "not",
+                "null",
+                "is",
+                "distinct",
+                "count",
+                "sum",
+                "avg",
+                "min",
+                "max",
+                "primary",
+                "key",
+                "foreign",
+                "references",
+                "index",
+                "union",
+                "all",
+                "with",
+            ],
+            Lang::Bash => &[
+                "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
+                "function", "return", "export", "local", "echo", "cd", "source", "set", "unset",
+                "in",
+            ],
+            Lang::Data => &["true", "false", "null"],
+            Lang::Generic => &[],
+        }
+    }
+
+    fn comment(self) -> Option<&'static str> {
+        match self {
+            Lang::Rust | Lang::Js | Lang::Go | Lang::CLike => Some("//"),
+            Lang::Python | Lang::Bash | Lang::Data => Some("#"),
+            Lang::Sql => Some("--"),
+            Lang::Generic => None,
+        }
+    }
+
+    fn template_strings(self) -> bool {
+        matches!(self, Lang::Js | Lang::Bash)
+    }
+
+    fn keys_are_colored(self) -> bool {
+        self == Lang::Data
+    }
+}
+
+fn next_significant(chars: &[char], mut idx: usize) -> Option<char> {
+    while idx < chars.len() && chars[idx].is_whitespace() {
+        idx += 1;
+    }
+    chars.get(idx).copied()
+}
+
+/// Tokenize one line of a fenced code block into coloured spans.
+fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
+    let lang = Lang::from_tag(lang_tag);
+    let chars: Vec<char> = line.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0usize;
+
+    let flush_plain = |plain: &mut String, spans: &mut Vec<Span<'static>>| {
+        if !plain.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(plain),
+                Style::default().fg(TEXT_PRIMARY),
+            ));
+        }
+    };
+
+    while i < chars.len() {
+        if let Some(marker) = lang.comment() {
+            let marker: Vec<char> = marker.chars().collect();
+            if chars[i..].starts_with(&marker) {
+                flush_plain(&mut plain, &mut spans);
+                spans.push(Span::styled(
+                    chars[i..].iter().collect::<String>(),
+                    Style::default()
+                        .fg(CODE_COMMENT)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+                break;
+            }
+        }
+
+        let ch = chars[i];
+
+        if ch == '"' || ch == '\'' || (ch == '`' && lang.template_strings()) {
+            let quote = ch;
+            let start = i;
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let literal: String = chars[start..i.min(chars.len())].iter().collect();
+            flush_plain(&mut plain, &mut spans);
+            let is_key = lang.keys_are_colored()
+                && matches!(next_significant(&chars, i), Some(':') | Some('='));
+            let color = if is_key { CODE_KEY } else { CODE_STRING };
+            spans.push(Span::styled(literal, Style::default().fg(color)));
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric()
+                    || chars[i] == '.'
+                    || chars[i] == '_'
+                    || chars[i] == 'x')
+            {
+                i += 1;
+            }
+            flush_plain(&mut plain, &mut spans);
+            spans.push(Span::styled(
+                chars[start..i].iter().collect::<String>(),
+                Style::default().fg(CODE_NUMBER),
+            ));
+            continue;
+        }
+
+        if ch.is_alphabetic() || ch == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let mut probe = i;
+            if lang == Lang::Rust && chars.get(probe) == Some(&'!') {
+                probe += 1;
+            }
+            let style = if lang
+                .keywords()
+                .iter()
+                .any(|keyword| keyword.eq_ignore_ascii_case(&word))
+            {
+                Style::default()
+                    .fg(CODE_KEYWORD)
+                    .add_modifier(Modifier::BOLD)
+            } else if next_significant(&chars, probe) == Some('(') {
+                Style::default().fg(CODE_FUNCTION)
+            } else if lang.keys_are_colored()
+                && matches!(next_significant(&chars, i), Some(':') | Some('='))
+            {
+                Style::default().fg(CODE_KEY)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+            flush_plain(&mut plain, &mut spans);
+            spans.push(Span::styled(word, style));
+            continue;
+        }
+
+        plain.push(ch);
+        i += 1;
+    }
+
+    flush_plain(&mut plain, &mut spans);
+    spans
 }
 
 /// Wrap plain text into strings at most `max_width` display cells wide.
@@ -595,6 +1154,19 @@ impl AnsiLexer {
 mod tests {
     use super::*;
 
+    fn text_of(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn feed_all(input: &str) -> Vec<Span<'static>> {
         let mut lexer = AnsiLexer::default();
         let mut spans = Vec::new();
@@ -604,6 +1176,111 @@ mod tests {
             }
         }
         spans
+    }
+
+    #[test]
+    fn markdown_table_renders_aligned_borders_and_a_colored_header() {
+        let md = "| Provider | Model | Tokens |\n|:---|---:|---:|\n| openai | gpt-5 | 1200 |\n| gemini | pro | 98000 |";
+        let lines = render_markdown(md, 64);
+        let joined = text_of(&lines);
+
+        assert!(joined.contains("┌"), "missing table top border:\n{joined}");
+        assert!(
+            joined.contains("└"),
+            "missing table bottom border:\n{joined}"
+        );
+        assert!(joined.contains("├"), "missing header separator:\n{joined}");
+        assert!(joined.contains("Provider"));
+        assert!(joined.contains("gemini"));
+        assert!(
+            lines.iter().all(|l| l.width() <= 64),
+            "table overflowed:\n{joined}"
+        );
+
+        let header = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "Provider"))
+            .expect("header row");
+        assert!(
+            header
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(ACCENT_CORAL)),
+            "header cells should use the accent color"
+        );
+    }
+
+    #[test]
+    fn wide_table_clips_cells_instead_of_wrapping_outside_the_frame() {
+        let md = "| Key | Description |\n|---|---|\n| a_very_long_key_name | a very long description that cannot possibly fit |";
+        let lines = render_markdown(md, 32);
+        let joined = text_of(&lines);
+        assert!(
+            lines.iter().all(|l| l.width() <= 32),
+            "table overflowed:\n{joined}"
+        );
+        assert!(joined.contains('…'), "expected clipped cells:\n{joined}");
+    }
+
+    #[test]
+    fn fenced_code_is_syntax_colored() {
+        let md =
+            "```rust\nfn main() {\n    let count = 42; // note\n    println!(\"hello\");\n}\n```";
+        let lines = render_markdown(md, 64);
+        let spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref() == "fn" && s.style.fg == Some(CODE_KEYWORD)),
+            "keyword `fn` should use the keyword color"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref() == "42" && s.style.fg == Some(CODE_NUMBER)),
+            "number literal should use the number color"
+        );
+        assert!(
+            spans.iter().any(|s| s.content.as_ref().contains("// note")
+                && s.style.fg == Some(CODE_COMMENT)),
+            "comment should use the comment color"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("hello") && s.style.fg == Some(CODE_STRING)),
+            "string should use the string color"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref() == "println" && s.style.fg == Some(CODE_FUNCTION)),
+            "call name should use the function color"
+        );
+    }
+
+    #[test]
+    fn inline_code_and_headings_are_color_coded() {
+        let lines = render_markdown("## Setup\n\nRun `cargo test` first.", 60);
+
+        let heading = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "Setup"))
+            .expect("heading line");
+        assert!(heading
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(ACCENT_AUTO)
+                && s.style.add_modifier.contains(Modifier::BOLD)));
+
+        let inline = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref().contains("cargo test"))
+            .expect("inline code span");
+        assert_eq!(inline.style.fg, Some(CODE_INLINE));
+        assert_eq!(inline.style.bg, Some(BG_CODE));
     }
 
     #[test]
@@ -639,6 +1316,9 @@ mod tests {
         let spans = feed_all("ok \x1b[2Kdone\x1b]8;;https://example.com\x07 link\x1b]8;;\x07");
         let content: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(content, "ok done link");
-        assert!(!content.contains('\x1b'), "escape bytes leaked: {content:?}");
+        assert!(
+            !content.contains('\x1b'),
+            "escape bytes leaked: {content:?}"
+        );
     }
 }
