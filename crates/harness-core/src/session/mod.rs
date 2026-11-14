@@ -29,9 +29,9 @@ use crate::error::HarnessError;
 use crate::types::Message;
 
 pub use compaction::{
-    compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
-    heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
-    CHARS_PER_TOKEN, CHECKPOINT_SECTIONS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
+    compact, compact_percent, compact_tokens, estimate_tokens, fold_boundary, fold_boundary_percent,
+    fold_boundary_tokens, heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
+    CHARS_PER_TOKEN, CHECKPOINT_SECTIONS, COMPACTION_TARGET_KEEP_TOKENS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use transcript::{last_fold_seq, sendable_messages, trim_messages_to_tokens};
 

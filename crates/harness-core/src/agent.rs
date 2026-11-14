@@ -278,11 +278,12 @@ impl AgentConfig {
     }
 }
 
-/// What the fold targets (percentage of tokens or count of turns).
+/// What the fold targets (percentage of tokens, count of turns, or specific token budget).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldTarget {
     Percent(usize),
     Turns(usize),
+    Tokens(usize),
 }
 
 /// When the transcript gets folded, and how much of it stays verbatim afterwards.
@@ -335,6 +336,8 @@ pub struct CompactionNotice {
     pub turns: usize,
     /// Messages folded into the summary. A fold that took no whole turn is still a fold.
     pub messages: usize,
+    /// The generated summary text, if available.
+    pub summary: Option<String>,
 }
 
 /// Tool execution info recorded during a turn.
@@ -674,16 +677,12 @@ where
     }
 
     /// The policy a fold the user asked for by hand runs under: the threshold is irrelevant
-    /// (`force` skips the check), and the target is the configured percent or `keep_recent_turns`.
+    /// (`force` skips the check), and the target keeps a lean working context landing around 50k tokens.
     pub(super) fn explicit_fold_policy(&self) -> FoldPolicy {
-        let target = match self.config.auto_compact_percent {
-            Some(pct) => FoldTarget::Percent(pct),
-            None => FoldTarget::Turns(self.config.keep_recent_turns),
-        };
         FoldPolicy {
             threshold: self.bounded_threshold(self.config.compact_at_tokens),
             ceiling: urgent_fold_threshold(self.config.context_window),
-            target,
+            target: FoldTarget::Tokens(crate::session::COMPACTION_TARGET_KEEP_TOKENS),
         }
     }
 

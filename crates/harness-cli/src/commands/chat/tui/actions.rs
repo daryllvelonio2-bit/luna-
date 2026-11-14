@@ -2707,6 +2707,10 @@ pub async fn handle_turn_end(
         advance_goal_tui(env, st, &reply);
     }
 
+    st.current_query.clear();
+    st.live_content_cache = Default::default();
+    st.live_reasoning_cache = Default::default();
+
     if st.active_turn.is_none() && !env.compacting.load(Ordering::SeqCst) {
         drain_queue(
             &mut st.queue,
@@ -2728,9 +2732,6 @@ pub async fn handle_turn_end(
     refresh_tabs(env, st).await;
     drain_tui_notices(env, st);
     st.prune_stale_notices();
-    st.live_content_cache = Default::default();
-    st.live_reasoning_cache = Default::default();
-    st.current_query.clear();
     st.scroll_from_bottom = 0;
 }
 

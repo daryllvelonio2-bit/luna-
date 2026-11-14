@@ -421,6 +421,65 @@ pub fn fold_boundary_percent(history: &[StoredMessage], percent: usize) -> usize
 /// it.
 pub const FALLBACK_KEEP_TOKENS: usize = 16_000;
 
+/// Default token budget retained during an explicit compaction (/compact), targeting ~50k context.
+pub const COMPACTION_TARGET_KEEP_TOKENS: usize = 50_000;
+
+/// Find the boundary in `history` that folds the oldest content so the kept tail lands
+/// at approximately `target_keep_tokens`.
+pub fn fold_boundary_tokens(history: &[StoredMessage], target_keep_tokens: usize) -> usize {
+    if history.is_empty() {
+        return 0;
+    }
+    let total: usize = history
+        .iter()
+        .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+        .sum();
+    if total == 0 {
+        return 0;
+    }
+
+    let budget = if total > target_keep_tokens {
+        target_keep_tokens
+    } else {
+        total / 2
+    };
+
+    let user_indices: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, stored)| stored.message.role == Role::User)
+        .map(|(index, _)| index)
+        .collect();
+
+    let mut chosen_user_idx = None;
+    for &u_idx in user_indices.iter().rev() {
+        let kept_tokens: usize = history[u_idx..]
+            .iter()
+            .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+            .sum();
+        if kept_tokens <= budget {
+            chosen_user_idx = Some(u_idx);
+        } else {
+            break;
+        }
+    }
+
+    if let Some(idx) = chosen_user_idx {
+        let b = snap_to_round_boundary(history, idx);
+        if b > 0 && !history[..b].iter().all(|s| s.is_summary) {
+            return b;
+        }
+    }
+
+    let boundary = snap_to_round_boundary(history, budget_boundary_raw(history, budget));
+    let boundary_folds_content = boundary > 0 && !history[..boundary].iter().all(|s| s.is_summary);
+    if !boundary_folds_content && total > budget {
+        oldest_foldable_boundary(history, budget)
+    } else {
+        boundary
+    }
+}
+
 /// The newest boundary that folds the oldest messages while keeping the tail within `budget`.
 ///
 /// This is the escape hatch for the transcript that is one giant user turn: the turn rule has
@@ -792,6 +851,32 @@ pub async fn compact_percent(
         let target_fold = (total * percent.clamp(1, 90)) / 100;
         let budget = total.saturating_sub(target_fold);
         boundary = oldest_foldable_boundary(history, budget.max(FALLBACK_KEEP_TOKENS));
+        if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
+            return Ok(None);
+        }
+    }
+    compact_at_boundary(provider, model, history, boundary).await
+}
+
+/// Summarise the oldest messages of `history` so the retained context lands at or below `target_keep_tokens`.
+pub async fn compact_tokens(
+    provider: &dyn ModelProvider,
+    model: &str,
+    history: &[StoredMessage],
+    target_keep_tokens: usize,
+) -> Result<Option<CompactionOutcome>, HarnessError> {
+    let mut boundary = fold_boundary_tokens(history, target_keep_tokens);
+    if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
+        let total: usize = history
+            .iter()
+            .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+            .sum();
+        let budget = if total > target_keep_tokens {
+            target_keep_tokens
+        } else {
+            total / 2
+        };
+        boundary = oldest_foldable_boundary(history, budget);
         if boundary == 0 || history[..boundary].iter().all(|s| s.is_summary) {
             return Ok(None);
         }

@@ -318,7 +318,32 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                 &mut current_reply,
             ),
             Role::Tool => apply_tool_message(&stored.message, &mut current_tools),
-            Role::System => {}
+            Role::System => {
+                if stored.is_summary {
+                    if let Some(ref text) = stored.message.content {
+                        if !text.trim().is_empty() {
+                            if current_query.is_some()
+                                || current_reasoning.is_some()
+                                || !current_tools.is_empty()
+                                || current_reply.is_some()
+                            {
+                                turns.push(build_turn(
+                                    current_query.take().unwrap_or_default(),
+                                    current_reasoning.take(),
+                                    std::mem::take(&mut current_tools),
+                                    current_reply.take().unwrap_or_default(),
+                                ));
+                            }
+                            turns.push(build_turn(
+                                "Compaction".to_string(),
+                                None,
+                                Vec::new(),
+                                text.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 

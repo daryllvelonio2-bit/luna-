@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 use super::{Agent, AgentEvent, CompactionNotice, FoldInFlight, FoldPolicy, FoldTarget};
 use crate::error::HarnessError;
 use crate::session::{
-    compact, compact_percent, estimate_tokens, heuristic_tokens, last_fold_seq, CompactionOutcome,
+    compact, compact_percent, compact_tokens, estimate_tokens, heuristic_tokens, last_fold_seq, CompactionOutcome,
     SessionStore, StoredMessage,
 };
 use crate::traits::*;
@@ -169,6 +169,7 @@ where
                                 session_id: session_id.clone(),
                                 turns: outcome.folded_turns,
                                 messages: outcome.folded_messages,
+                                summary: Some(outcome.summary.clone()),
                             }),
                             error: None,
                         });
@@ -444,6 +445,7 @@ where
                         session_id: binding.session_id.clone(),
                         turns: outcome.folded_turns,
                         messages: outcome.folded_messages,
+                        summary: Some(outcome.summary.clone()),
                     };
                     folded_any = true;
                     if let Some(ref observer) = self.observer {
@@ -632,6 +634,7 @@ where
             session_id: binding.session_id.clone(),
             turns: outcome.folded_turns,
             messages: outcome.folded_messages,
+            summary: Some(outcome.summary.clone()),
         };
         let fold_seq = outcome.fold_seq;
         if let Some(ref observer) = self.observer {
@@ -679,6 +682,9 @@ async fn run_fold(
     let outcome = match target {
         FoldTarget::Percent(pct) => compact_percent(provider, model, history, pct).await?,
         FoldTarget::Turns(turns) => compact(provider, model, history, Some(turns)).await?,
+        FoldTarget::Tokens(target_tokens) => {
+            compact_tokens(provider, model, history, target_tokens).await?
+        }
     };
     let Some(mut outcome) = outcome else {
         return Ok(None);

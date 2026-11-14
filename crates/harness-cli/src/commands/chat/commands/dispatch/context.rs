@@ -26,7 +26,8 @@ impl<'a> SlashContext<'a> {
     }
 
     pub(super) async fn cmd_compact(&mut self) -> Result<SlashOutcome, HarnessError> {
-        if let Err(e) = handle_compact_command(
+        let start = std::time::Instant::now();
+        if let Ok(Some(notice)) = handle_compact_command(
             self.ui,
             self.config,
             self.agent,
@@ -35,11 +36,17 @@ impl<'a> SlashContext<'a> {
         )
         .await
         {
-            self.ui.emit_above(&format!(
-                "{} Failed to compact session: {}",
-                "✖".red().bold(),
-                e
-            ));
+            let elapsed = start.elapsed();
+            if let Some(summary) = notice.summary {
+                self.turns.push(TurnRecord {
+                    user_query: "Compaction".to_string(),
+                    reasoning: None,
+                    tools: Vec::new(),
+                    tool_items: Vec::new(),
+                    duration: elapsed,
+                    reply: summary,
+                });
+            }
         }
         Ok(SlashOutcome::Continue)
     }

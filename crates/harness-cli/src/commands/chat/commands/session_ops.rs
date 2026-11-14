@@ -964,30 +964,36 @@ pub(crate) async fn handle_compact_command(
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     current_provider: &str,
     current_model: &str,
-) -> Result<(), HarnessError> {
-    let ui = ui.clone();
-    let agent = agent.clone();
-    // Resolved here, on the caller's thread: the fold runs in a task that has no config, and the
-    // answer is the same before and after it (the window belongs to the model, not the fold).
+) -> Result<Option<harness_core::CompactionNotice>, HarnessError> {
     let context_max = context_window_for(config, current_provider, current_model);
-    tokio::spawn(async move {
-        let Ok(ag) = agent.try_lock() else {
-            ui.emit_above(&format!(
-                "{} Cannot compact while a turn is running: interrupt it (send a message or press Escape), then run /compact",
-                "✖".red().bold()
-            ));
-            return;
-        };
-        // Everything that happens inside the fold — the animation, the report, the failure — is
-        // emitted as compaction events, so this task only refreshes the gauge afterwards.
-        if ag.compact_current_session().await.is_ok() {
-            // The summary replaced the folded turns, so the gauge drops for real.
+    let Ok(ag) = agent.try_lock() else {
+        ui.emit_above(&format!(
+            "{} Cannot compact while a turn is running: interrupt it (send a message or press Escape), then run /compact",
+            "✖".red().bold()
+        ));
+        return Ok(None);
+    };
+
+    match ag.compact_current_session().await {
+        Ok(notice) => {
             let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
             ui.update_status(context_used, context_max);
+            if let Some(ref summary) = notice.summary {
+                if !ui.is_tui_mode() {
+                    ui.emit_above(summary);
+                }
+            }
+            Ok(Some(notice))
         }
-    });
-
-    Ok(())
+        Err(e) => {
+            ui.emit_above(&format!(
+                "{} Failed to compact session: {}",
+                "✖".red().bold(),
+                e
+            ));
+            Err(e)
+        }
+    }
 }
 
 /// `/auto-compact`: open the setup box — the threshold, then the turns — and turn the feature on.

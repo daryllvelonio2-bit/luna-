@@ -57,10 +57,10 @@ pub use saver::{
     SaveStorage, SavedMemory, SavedNote, SaverHook,
 };
 pub use session::{
-    compact, compact_percent, estimate_tokens, fold_boundary, fold_boundary_percent,
-    heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
+    compact, compact_percent, compact_tokens, estimate_tokens, fold_boundary, fold_boundary_percent,
+    fold_boundary_tokens, heuristic_tokens, summarize_session, CompactionOutcome, Estimate, EstimateSource,
     ReplayOutcome, SessionRecord, SessionStore, SqliteSessionStore, StoredMessage, CHARS_PER_TOKEN,
-    CHECKPOINT_SECTIONS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
+    CHECKPOINT_SECTIONS, COMPACTION_TARGET_KEEP_TOKENS, HEURISTIC_IMAGE_CHARS, HEURISTIC_TOLERANCE,
 };
 pub use tasks::BackgroundTaskQueue;
 pub use traits::{

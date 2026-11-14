@@ -2554,6 +2554,47 @@ async fn auto_compact_never_empties_a_session_that_holds_fewer_turns_than_it_kee
 }
 
 #[tokio::test]
+async fn fold_boundary_tokens_lands_on_budget_in_large_transcript() {
+    use harness_core::session::fold_boundary_tokens;
+
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+    // 20 turns, each with ~10k chars (2.5k tokens) => total ~50k tokens
+    for i in 0..20 {
+        store
+            .append(
+                "s1",
+                &Message::user(format!("user turn {i} {}", "a".repeat(10_000))),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &Message::assistant(format!("assistant turn {i} {}", "b".repeat(10_000))),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    let replay = store.replay("s1", 200).await.unwrap();
+    let history = replay.history;
+
+    // Compact to 20k tokens: should fold older turns and keep ~20k tokens
+    let boundary = fold_boundary_tokens(&history, 20_000);
+    assert!(boundary > 0);
+    assert_eq!(history[boundary].message.role, Role::User);
+
+    let kept_tokens: usize = history[boundary..]
+        .iter()
+        .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
+        .sum();
+    assert!(kept_tokens <= 25_000, "kept {kept_tokens} tokens, expected around 20k");
+}
+
+#[tokio::test]
 async fn fold_boundary_percent_respects_target_percentage() {
     use harness_core::session::fold_boundary_percent;
 
