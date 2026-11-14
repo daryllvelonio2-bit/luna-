@@ -14,7 +14,7 @@ use super::super::render::{
     SPINNER_FRAMES,
 };
 use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
-use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
+use super::markdown::{clean_terminal_text, render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
     PaletteItem, ProviderPickerItem, TabHitBox, TabHitTarget, TranscriptClickTarget,
@@ -163,6 +163,16 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
 
     // Active modal overlay renders on top of everything.
     render_modal(frame, area, st, info);
+
+    // Safety net: Sanitize all buffer cells before crossterm renders them.
+    // Any unexpanded tab or control character written to a terminal emulator
+    // causes cursor jumps or unexpected line wrapping that desyncs the TUI viewport.
+    let buf = frame.buffer_mut();
+    for cell in buf.content.iter_mut() {
+        if cell.symbol().contains('\t') || cell.symbol().chars().any(|c| c.is_control()) {
+            cell.set_symbol(" ");
+        }
+    }
 }
 
 /// The live pty mirror: the last screen the agent's pty session reported.
@@ -244,7 +254,7 @@ fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
 fn append_terminal_rows(rows: &mut Vec<Line<'static>>, lines: &[String], width: usize) {
     for line in lines {
         rows.push(Line::from(Span::styled(
-            truncate_to_cells(line, width),
+            truncate_str(line, width),
             Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
         )));
     }
@@ -1968,17 +1978,41 @@ fn push_card_row(
     width: usize,
     content_spans: Vec<Span<'static>>,
 ) {
-    let content_w: usize = content_spans.iter().map(|s| s.content.width()).sum();
+    let max_inner = width.saturating_sub(3);
+    let mut clamped_spans = Vec::with_capacity(content_spans.len());
+    let mut content_w = 0usize;
+
+    for span in content_spans {
+        let clean = clean_terminal_text(&span.content);
+        let mut span_text = String::new();
+        for ch in clean.chars() {
+            let cw = ch.width().unwrap_or(0);
+            if content_w + cw > max_inner {
+                break;
+            }
+            span_text.push(ch);
+            content_w += cw;
+        }
+        if !span_text.is_empty() {
+            clamped_spans.push(Span::styled(span_text, span.style));
+        }
+        if content_w >= max_inner {
+            break;
+        }
+    }
+
     let pad = width.saturating_sub(3 + content_w);
     let mut spans = vec![
         Span::styled("│", Style::default().fg(border_color).bg(BG_SURFACE)),
         Span::styled("  ", Style::default().bg(BG_SURFACE)),
     ];
-    spans.extend(content_spans);
-    spans.push(Span::styled(
-        " ".repeat(pad),
-        Style::default().bg(BG_SURFACE),
-    ));
+    spans.extend(clamped_spans);
+    if pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(BG_SURFACE),
+        ));
+    }
     let row_idx = out.len();
     out.push(Line::from(spans));
     if let (Some(targets), Some(target)) = (hit_targets, click_target) {
@@ -2014,7 +2048,7 @@ fn push_completed_tool_card(
     card_inner_w: usize,
 ) {
     if item.tool_name == "steer" || item.tool_name == "approval" {
-        let clean = strip_ansi(&item.call_formatted);
+        let clean = clean_terminal_text(&item.call_formatted);
         if !clean.trim().is_empty() {
             out.push(Line::from(Span::styled(
                 format!("  {}", truncate_str(clean.trim(), card_inner_w)),
@@ -2035,9 +2069,10 @@ fn push_completed_tool_card(
         item.arguments.as_ref(),
         Some(&item.call_formatted),
     );
+    let clean_header = clean_terminal_text(&header_body);
     let prefix_w = prefix.width();
     let wrap_w = card_inner_w.saturating_sub(prefix_w).max(8);
-    let header_lines = wrap_plain_text(&header_body, wrap_w);
+    let header_lines = wrap_plain_text(&clean_header, wrap_w);
 
     push_card_blank_row(
         out,
@@ -2090,7 +2125,7 @@ fn push_completed_tool_card(
         );
         let max_diff = if open { item.diff_lines.len() } else { 10 };
         for diff in item.diff_lines.iter().take(max_diff) {
-            let clean = strip_ansi(diff);
+            let clean = clean_terminal_text(diff);
             let color = if clean.trim_start().starts_with('+') {
                 GREEN_OK
             } else if clean.trim_start().starts_with('-') {
@@ -2141,7 +2176,7 @@ fn push_completed_tool_card(
                 TEXT_MUTED
             };
             for line in raw_lines.iter().take(max_lines) {
-                let clean = strip_ansi(line);
+                let clean = clean_terminal_text(line);
                 for wrapped in wrap_plain_text(&clean, card_inner_w) {
                     push_card_row(
                         out,
@@ -2179,7 +2214,7 @@ fn push_completed_tool_card(
             border_color,
             width,
         );
-        let res_clean = strip_ansi(&item.result_formatted);
+        let res_clean = clean_terminal_text(&item.result_formatted);
         push_card_row(
             out,
             Some(hit_targets),
@@ -2295,7 +2330,8 @@ fn push_running_tool_card(
             );
         }
         for line in raw_tail {
-            for wrapped in wrap_plain_text(&strip_ansi(line), card_inner_w) {
+            let clean = clean_terminal_text(line);
+            for wrapped in wrap_plain_text(&clean, card_inner_w) {
                 push_card_row(
                     out,
                     None,
@@ -2322,7 +2358,8 @@ fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: usize, inner
         Span::styled(blank_fill.clone(), Style::default().bg(BG_SURFACE)),
     ]));
 
-    for line in wrap_plain_text(query.trim(), inner_w) {
+    let max_inner = width.saturating_sub(3);
+    for line in wrap_plain_text(query.trim(), inner_w.min(max_inner)) {
         let pad = width.saturating_sub(3 + line.width());
         let mut spans = vec![
             Span::styled("▎", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
@@ -3426,15 +3463,16 @@ fn highlight_line_selection(line: Line<'static>, from_col: usize, to_col: usize)
 }
 
 fn truncate_str(s: &str, max_cells: usize) -> String {
-    if s.width() <= max_cells {
-        return s.to_string();
+    let clean = clean_terminal_text(s);
+    if clean.width() <= max_cells {
+        return clean;
     }
     if max_cells == 0 {
         return String::new();
     }
     let mut out = String::new();
     let mut w = 0usize;
-    for ch in s.chars() {
+    for ch in clean.chars() {
         let cw = ch.width().unwrap_or(0);
         if w + cw + 1 > max_cells {
             out.push('…');
@@ -4275,5 +4313,80 @@ mod tests {
             !joined_opened.contains("more lines"),
             "no remaining lines indicator"
         );
+    }
+
+    #[test]
+    fn push_card_row_clamps_content_to_width() {
+        let mut out = Vec::new();
+        let spans = vec![Span::raw("\tlong_text_with_tabs\t\t\t\t\tthat_is_very_long")];
+        push_card_row(&mut out, None, None, Color::Blue, 40, spans);
+        assert_eq!(out.len(), 1);
+        let row_w = out[0].spans.iter().map(|s| s.content.width()).sum::<usize>();
+        assert!(row_w <= 40, "row width {row_w} exceeded 40");
+        assert!(
+            !out[0].spans.iter().any(|s| s.content.contains('\t')),
+            "row contains tab"
+        );
+    }
+
+    #[test]
+    fn push_user_card_never_exceeds_width_with_tabs() {
+        let mut out = Vec::new();
+        let query = "Fix this:\n\t\tfoo\tbar\tbaz\tqux\tvery_long_variable_name_here";
+        push_user_card(&mut out, query, 32, 28);
+        for line in &out {
+            let row_w = line.spans.iter().map(|s| s.content.width()).sum::<usize>();
+            assert!(
+                row_w <= 32,
+                "user card row width {row_w} exceeded width 32: {line:?}"
+            );
+            assert!(
+                !line.spans.iter().any(|s| s.content.contains('\t')),
+                "user card row contains unexpanded tab"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_output_with_tabs_and_diffs_never_exceeds_width() {
+        let item = TurnProcessItem {
+            tool_name: "terminal".to_string(),
+            call_formatted: "gh run view\t23908298717\t--log".to_string(),
+            result_formatted: "✔ ok\tcompleted".to_string(),
+            diff_lines: vec!["+\treturn\t\ttrue;".to_string(), "-\treturn\t\tfalse;".to_string()],
+            output: "\tJob\t123\tsuccess\n\tStep\tbuild\tpassed\r\n\tStep\ttest\tpassed".to_string(),
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: Some(0.5),
+            is_error: false,
+        };
+
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        push_completed_tool_card(
+            &mut out,
+            &mut hits,
+            &item,
+            true,
+            TranscriptClickTarget::ToggleTurnTools(0, 0),
+            60,
+            56,
+        );
+
+        for line in &out {
+            let row_w = line.spans.iter().map(|s| s.content.width()).sum::<usize>();
+            assert!(
+                row_w <= 60,
+                "tool card row width {row_w} exceeded 60: {line:?}"
+            );
+            assert!(
+                !line.spans.iter().any(|s| s.content.contains('\t')),
+                "tool card line contains unexpanded tab"
+            );
+            assert!(
+                !line.spans.iter().any(|s| s.content.contains('\r')),
+                "tool card line contains carriage return"
+            );
+        }
     }
 }

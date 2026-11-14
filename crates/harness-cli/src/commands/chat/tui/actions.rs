@@ -411,6 +411,9 @@ pub async fn switch_to_session(
 
     st.turns = turns;
     st.turn_meta = turn_meta;
+    st.settled_cache.clear();
+    st.live_content_cache = Default::default();
+    st.live_reasoning_cache = Default::default();
     st.system_notices.clear();
     st.expanded_thinking.clear();
     st.expanded_tools.clear();
@@ -2458,6 +2461,7 @@ pub async fn run_slash_command(
     match outcome {
         SlashOutcome::Continue => {
             finish_slash_command(&env.ui, &mut st.turns, display, st.process_expanded, false);
+            st.settled_cache.clear();
             if st.turns.len() < prev_len {
                 st.turn_meta.truncate(st.turns.len());
             }

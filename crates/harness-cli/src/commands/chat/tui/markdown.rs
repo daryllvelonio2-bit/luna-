@@ -233,7 +233,8 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                         ]));
                     }
                     for raw_line in code_buf.lines() {
-                        let highlighted = highlight_code_line(&code_lang, raw_line);
+                        let cleaned_line = clean_terminal_text(raw_line);
+                        let highlighted = highlight_code_line(&code_lang, &cleaned_line);
                         for chunk in wrap_spans(&highlighted, code_width.max(12)) {
                             let pad = code_width.saturating_sub(chunk.width());
                             let mut spans = vec![Span::styled(
@@ -423,7 +424,8 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
         let mut spans = vec![Span::styled("│", border)];
         for (col, w) in widths.iter().enumerate() {
             let text = row.get(col).map(String::as_str).unwrap_or("");
-            let clipped = clip_cells(text, *w);
+            let clean = clean_terminal_text(text);
+            let clipped = clip_cells(&clean, *w);
             let pad = w.saturating_sub(clipped.width());
             let align = table
                 .alignments
@@ -838,9 +840,10 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
 
 /// Wrap plain text into strings at most `max_width` display cells wide.
 pub fn wrap_plain_text(text: &str, max_width: usize) -> Vec<String> {
+    let cleaned = clean_terminal_text(text);
     let width = max_width.max(1);
     let mut lines = Vec::new();
-    for raw_line in text.split('\n') {
+    for raw_line in cleaned.split('\n') {
         if raw_line.is_empty() {
             lines.push(String::new());
             continue;
@@ -888,8 +891,9 @@ pub fn wrap_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Line<'static
 
     for span in spans {
         let style = span.style;
+        let cleaned = clean_terminal_text(&span.content);
         let mut buf = String::new();
-        for token in split_keep_spaces(span.content.as_ref()) {
+        for token in split_keep_spaces(&cleaned) {
             let tw = token.width();
             if cur_w + tw > width && cur_w > 0 && !token.trim().is_empty() {
                 if !buf.is_empty() {
@@ -950,6 +954,34 @@ fn split_keep_spaces(s: &str) -> Vec<&str> {
     }
     if start < s.len() {
         out.push(&s[start..]);
+    }
+    out
+}
+
+/// Strip ANSI escape codes, normalize line endings, expand tabs to 4-space tab stops,
+/// and remove non-printable control characters so terminal cells measure and display accurately.
+pub fn clean_terminal_text(s: &str) -> String {
+    let stripped = strip_ansi(s);
+    let mut out = String::with_capacity(stripped.len());
+    let mut col = 0usize;
+    for ch in stripped.chars() {
+        if ch == '\t' {
+            let spaces = 4 - (col % 4);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else if ch == '\n' {
+            out.push('\n');
+            col = 0;
+        } else if ch.is_control() {
+            // Drop control characters (carriage return, bell, backspace, etc.)
+            continue;
+        } else {
+            let cw = ch.width().unwrap_or(0);
+            out.push(ch);
+            col += cw;
+        }
     }
     out
 }
@@ -1363,5 +1395,48 @@ mod tests {
             !content.contains('\x1b'),
             "escape bytes leaked: {content:?}"
         );
+    }
+
+    #[test]
+    fn clean_terminal_text_expands_tabs_to_four_space_tab_stops() {
+        assert_eq!(clean_terminal_text("a\tb"), "a   b");
+        assert_eq!(clean_terminal_text("ab\tc"), "ab  c");
+        assert_eq!(clean_terminal_text("abc\td"), "abc d");
+        assert_eq!(clean_terminal_text("abcd\te"), "abcd    e");
+    }
+
+    #[test]
+    fn clean_terminal_text_strips_carriage_returns_and_control_chars() {
+        assert_eq!(clean_terminal_text("hello\r\nworld"), "hello\nworld");
+        assert_eq!(clean_terminal_text("hello\x07\x08world"), "helloworld");
+    }
+
+    #[test]
+    fn wrap_plain_text_with_tabs_never_exceeds_max_width() {
+        let text = "\tcol1\tcol2\tcol3\tcol4";
+        let wrapped = wrap_plain_text(text, 16);
+        for line in &wrapped {
+            assert!(
+                line.width() <= 16,
+                "line '{}' exceeded width 16 (got {})",
+                line,
+                line.width()
+            );
+            assert!(!line.contains('\t'), "line contains unexpanded tab");
+        }
+    }
+
+    #[test]
+    fn fenced_code_with_tabs_wraps_within_frame_without_overflow() {
+        let md = "```bash\n\tgh run view 12345 --log\t--verbose\n```";
+        let lines = render_markdown(md, 30);
+        for line in &lines {
+            assert!(
+                line.width() <= 30,
+                "code line width {} > 30: {:?}",
+                line.width(),
+                line
+            );
+        }
     }
 }
