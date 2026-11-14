@@ -847,6 +847,7 @@ pub enum LiveThinkingView {
 #[derive(Debug, Default, Clone)]
 pub struct SettledTranscriptCache {
     pub session_id: String,
+    pub width: usize,
     pub card_inner_w: usize,
     pub turns_len: usize,
     pub process_expanded: bool,
@@ -859,6 +860,7 @@ pub struct SettledTranscriptCache {
 impl SettledTranscriptCache {
     pub fn clear(&mut self) {
         self.session_id.clear();
+        self.width = 0;
         self.card_inner_w = 0;
         self.turns_len = 0;
         self.lines.clear();
@@ -1251,6 +1253,18 @@ pub struct TuiState {
     pub composer_hit_boxes: Vec<ComposerHitBox>,
     /// Latest pointer position in screen cells, used for hover-only controls.
     pub pointer: Option<(u16, u16)>,
+    /// Last click timestamp and position for double/triple click detection.
+    pub last_click: Option<(std::time::Instant, u16, u16)>,
+    /// Sequential click counter (1 = single, 2 = double, 3 = triple).
+    pub click_count: usize,
+    /// Bounding rectangle of the open modal, if any.
+    pub modal_rect: Option<ratatui::layout::Rect>,
+    /// Bounding rectangle of the composer card `(x, y, width, height)`.
+    pub composer_area: (u16, u16, u16, u16),
+    /// Bounding rectangle of the composer text input area `(x, y, width, height)`.
+    pub composer_input_area: (u16, u16, u16, u16),
+    /// Vertical scroll offset of composer lines.
+    pub composer_scroll_off: usize,
     /// Viewport of the transcript as `(x, y, width, height)` in screen cells, refreshed each draw.
     pub transcript_area: (u16, u16, u16, u16),
     /// Absolute index of the first transcript line visible in the viewport.

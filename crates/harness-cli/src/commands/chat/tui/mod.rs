@@ -27,7 +27,7 @@ use crossterm::event::{
     EventStream,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use harness_core::{HarnessError, SessionBinding, SessionStore, TurnOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -173,13 +173,19 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             biased;
 
             maybe_ev = events.next() => {
-                match maybe_ev {
-                    Some(Ok(ev)) => {
-                        if input::handle_event(&mut env, &mut st, &mut terminal, ev).await? == Flow::Break {
-                            break;
-                        }
-                    }
+                let mut current_ev = match maybe_ev {
+                    Some(Ok(ev)) => ev,
                     Some(Err(_)) | None => break,
+                };
+                loop {
+                    if input::handle_event(&mut env, &mut st, &mut terminal, current_ev).await? == Flow::Break {
+                        return Ok(());
+                    }
+                    match events.next().now_or_never() {
+                        Some(Some(Ok(next_ev))) => current_ev = next_ev,
+                        Some(Some(Err(_))) | Some(None) => return Ok(()),
+                        None => break,
+                    }
                 }
             }
 
@@ -558,6 +564,12 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         transcript_hit_boxes: Vec::new(),
         composer_hit_boxes: Vec::new(),
         pointer: None,
+        last_click: None,
+        click_count: 0,
+        modal_rect: None,
+        composer_area: (0, 0, 0, 0),
+        composer_input_area: (0, 0, 0, 0),
+        composer_scroll_off: 0,
         transcript_area: (0, 0, 0, 0),
         transcript_start: 0,
         transcript_visible_text: Vec::new(),

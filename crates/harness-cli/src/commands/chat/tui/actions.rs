@@ -215,6 +215,9 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.live_thinking_view = slot.live_thinking_view;
     st.process_expanded = slot.process_expanded;
     st.scroll_from_bottom = slot.scroll_from_bottom;
+    st.selection = None;
+    st.pending_transcript_click = None;
+    st.selection_notice = None;
     st.queue = slot.queue;
     st.current_cancel = slot.current_cancel;
     st.active_turn = slot.active_turn;
@@ -413,6 +416,9 @@ pub async fn switch_to_session(
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
     st.scroll_from_bottom = 0;
+    st.selection = None;
+    st.pending_transcript_click = None;
+    st.selection_notice = None;
     st.idle_pass = IdleMemoryPass::new(initial_len);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
 
@@ -475,6 +481,9 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
     st.scroll_from_bottom = 0;
+    st.selection = None;
+    st.pending_transcript_click = None;
+    st.selection_notice = None;
     st.idle_pass = IdleMemoryPass::new(0);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
 

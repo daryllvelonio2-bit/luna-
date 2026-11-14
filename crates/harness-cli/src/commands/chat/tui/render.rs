@@ -933,6 +933,10 @@ fn render_composer_card(
         .cursor_line
         .saturating_sub(max_input_rows.saturating_sub(1));
 
+    st.composer_area = (rect.x, rect.y, rect.width, rect.height);
+    st.composer_input_area = (rect.x + 3, input_top, inner_w as u16, max_input_rows as u16);
+    st.composer_scroll_off = scroll_off;
+
     if st.composer.text.is_empty() && rect.height >= 2 {
         let placeholder = if st.active_turn.is_some() {
             "Type to queue or steer next message..."
@@ -1336,6 +1340,7 @@ fn ensure_settled_transcript(
     card_inner_w: usize,
 ) {
     let cache_valid = st.settled_cache.session_id == info.session_id
+        && st.settled_cache.width == width
         && st.settled_cache.card_inner_w == card_inner_w
         && st.settled_cache.process_expanded == st.process_expanded
         && st.settled_cache.expanded_thinking == st.expanded_thinking
@@ -1349,6 +1354,7 @@ fn ensure_settled_transcript(
         st.settled_cache.turns_len
     } else {
         st.settled_cache.session_id = info.session_id.to_string();
+        st.settled_cache.width = width;
         st.settled_cache.card_inner_w = card_inner_w;
         st.settled_cache.process_expanded = st.process_expanded;
         st.settled_cache.expanded_thinking = st.expanded_thinking.clone();
@@ -2583,7 +2589,8 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
-fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInfo<'_>) {
+fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &FooterInfo<'_>) {
+    st.modal_rect = None;
     match &st.modal {
         ActiveModal::None => {}
         ActiveModal::CommandPalette { query, selected } => {
@@ -2591,10 +2598,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(44, 68);
             let h = screen.height.saturating_sub(4).clamp(10, 20);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Commands", "esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
+            let cur_x =
+                (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
                 Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
@@ -2652,10 +2663,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(48, 76);
             let h = screen.height.saturating_sub(4).clamp(10, 20);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Sessions", "enter switch · esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
+            let cur_x =
+                (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
                 Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
@@ -2714,10 +2729,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(50, 78);
             let h = screen.height.saturating_sub(4).clamp(10, 22);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Select Provider", "enter models · esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
+            let cur_x =
+                (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
                 Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
@@ -2776,11 +2795,15 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(50, 78);
             let h = screen.height.saturating_sub(4).clamp(10, 22);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let title = format!("Models · {provider_display}");
             let inner = draw_modal_frame(frame, rect, &title, "enter select · ← providers · esc");
 
             let mut lines = Vec::new();
             lines.push(search_input_line(query, inner.width as usize));
+            let cur_x =
+                (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
                 Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
@@ -2889,12 +2912,16 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
         } => {
             let w = screen.width.saturating_sub(6).clamp(46, 76);
             let rect = centered_rect(screen, w, 7);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, title, "enter · esc");
             let shown = if *secret {
                 "*".repeat(value.chars().count())
             } else {
                 value.clone()
             };
+            let cur_x =
+                (inner.x + 2 + shown.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y + 2));
             let lines = vec![
                 Line::from(Span::styled(
                     format!(
@@ -2922,6 +2949,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(50, 82);
             let h = screen.height.saturating_sub(4).clamp(12, 24);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, title, "↑/↓ · pgup/pgdn · esc");
             let visible = inner.height as usize;
             let rows: Vec<Line<'static>> = lines
@@ -2940,6 +2968,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
         ActiveModal::ThinkingPicker { current, selected } => {
             let options = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
             let rect = centered_rect(screen, 42, 11);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Thinking Level", "enter · esc");
             let cur_str = current
                 .map(|e| e.to_string())
@@ -2971,6 +3000,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(50, 82);
             let h = screen.height.saturating_sub(4).clamp(12, 22);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Approve Tool Call", "↑/↓ · enter");
 
             let mut lines = Vec::new();
@@ -3051,6 +3081,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
             let w = screen.width.saturating_sub(6).clamp(48, 76);
             let h = screen.height.saturating_sub(4).clamp(12, 20);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let title = format!(
                 "Question {}/{}",
                 question_idx + 1,
@@ -3108,14 +3139,24 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &TuiState, info: &FooterInf
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                 ]));
+                if *editing_custom {
+                    let cur_x = (inner.x + 11 + custom.width() as u16)
+                        .min(inner.x + inner.width.saturating_sub(1));
+                    let cur_y = inner.y + (lines.len().saturating_sub(1)) as u16;
+                    frame.set_cursor_position((cur_x, cur_y));
+                }
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::Sudo { prompt, input, .. } => {
             let w = screen.width.saturating_sub(6).clamp(44, 68);
             let rect = centered_rect(screen, w, 7);
+            st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Authentication Required", "enter · esc");
             let masked = "*".repeat(input.chars().count());
+            let cur_x =
+                (inner.x + 11 + masked.width() as u16).min(inner.x + inner.width.saturating_sub(1));
+            frame.set_cursor_position((cur_x, inner.y + 2));
             let lines = vec![
                 Line::from(Span::styled(
                     format!(
@@ -3505,7 +3546,7 @@ fn wrap_composer_lines(text: &str, cursor_byte: usize, max_width: usize) -> Wrap
 }
 
 /// Concatenate a rendered line's spans back into plain text (styles and ANSI already resolved).
-fn line_plain_text(line: &Line<'_>) -> String {
+pub(crate) fn line_plain_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
@@ -4060,6 +4101,12 @@ mod tests {
             transcript_hit_boxes: Vec::new(),
             composer_hit_boxes: Vec::new(),
             pointer: None,
+            last_click: None,
+            click_count: 0,
+            modal_rect: None,
+            composer_area: (0, 0, 0, 0),
+            composer_input_area: (0, 0, 0, 0),
+            composer_scroll_off: 0,
             transcript_area: (0, 0, 0, 0),
             transcript_start: 0,
             transcript_visible_text: Vec::new(),

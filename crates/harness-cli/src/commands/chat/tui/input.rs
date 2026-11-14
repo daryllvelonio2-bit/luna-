@@ -8,7 +8,7 @@ use crossterm::event::{
 use harness_core::{ApprovalDecision, HarnessError, ReasoningEffort};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::interactive::state::{Env, Flow};
 use super::actions::{
@@ -47,10 +47,9 @@ pub async fn handle_event(
             Ok(Flow::Continue)
         }
         Event::Resize(_, _) => {
-            // Ratatui reallocates its buffers on resize, but the physical screen keeps the old
-            // frame in newly exposed columns (the vertical "ghost bands" at the window edges).
-            // Clear once so the next draw repaints every cell from scratch.
-            terminal.clear()?;
+            // Ratatui autoresizes on draw. Ensure buffer geometry matches the new window
+            // size without emitting an ANSI clear sequence that causes screen flicker.
+            let _ = terminal.autoresize();
             Ok(Flow::Continue)
         }
         Event::FocusGained | Event::FocusLost => Ok(Flow::Continue),
@@ -120,6 +119,81 @@ async fn handle_mouse(
     // modal owns the keyboard.
     st.pointer = Some((mouse.column, mouse.row));
     if !matches!(st.modal, ActiveModal::None) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => match &mut st.modal {
+                ActiveModal::CommandPalette { selected, .. }
+                | ActiveModal::SessionPicker { selected, .. }
+                | ActiveModal::ProviderPicker { selected, .. }
+                | ActiveModal::ModelPicker { selected, .. }
+                | ActiveModal::ThinkingPicker { selected, .. } => {
+                    *selected = selected.saturating_sub(1);
+                }
+                ActiveModal::TextModal { scroll, .. } => {
+                    *scroll = scroll.saturating_sub(3);
+                }
+                _ => {}
+            },
+            MouseEventKind::ScrollDown => match &mut st.modal {
+                ActiveModal::CommandPalette { query, selected } => {
+                    let count = filtered_palette_items(query).len();
+                    if count > 0 {
+                        *selected = (*selected + 1).min(count.saturating_sub(1));
+                    }
+                }
+                ActiveModal::SessionPicker {
+                    query,
+                    sessions,
+                    selected,
+                } => {
+                    let count = filtered_sessions(sessions, query).len();
+                    if count > 0 {
+                        *selected = (*selected + 1).min(count.saturating_sub(1));
+                    }
+                }
+                ActiveModal::ProviderPicker {
+                    query,
+                    items,
+                    selected,
+                    ..
+                } => {
+                    let count = filtered_providers(items, query).len();
+                    if count > 0 {
+                        *selected = (*selected + 1).min(count.saturating_sub(1));
+                    }
+                }
+                ActiveModal::ModelPicker {
+                    query,
+                    items,
+                    selected,
+                    ..
+                } => {
+                    let count = filtered_models(items, query).len();
+                    if count > 0 {
+                        *selected = (*selected + 1).min(count.saturating_sub(1));
+                    }
+                }
+                ActiveModal::ThinkingPicker { selected, .. } => {
+                    *selected = (*selected + 1).min(6);
+                }
+                ActiveModal::TextModal { lines, scroll, .. } => {
+                    let max_s = lines.len().saturating_sub(1);
+                    *scroll = (*scroll + 3).min(max_s);
+                }
+                _ => {}
+            },
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(r) = st.modal_rect {
+                    if mouse.column < r.x
+                        || mouse.column >= r.x + r.width
+                        || mouse.row < r.y
+                        || mouse.row >= r.y + r.height
+                    {
+                        close_modal_with_cancel(st);
+                    }
+                }
+            }
+            _ => {}
+        }
         return Ok(Flow::Continue);
     }
     match mouse.kind {
@@ -170,7 +244,7 @@ async fn handle_mouse(
                 st.composer.remove_attachment(&token);
                 clear_selection(st);
             } else {
-                begin_left_down(st, mouse);
+                begin_left_down(env, st, mouse);
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -193,7 +267,40 @@ fn clear_selection(st: &mut TuiState) {
 ///
 /// The click target is not fired yet: a press that turns into a drag is a text selection, not a
 /// toggle, so clicks are committed on button release.
-fn begin_left_down(st: &mut TuiState, mouse: MouseEvent) {
+fn begin_left_down(env: &Env<'_>, st: &mut TuiState, mouse: MouseEvent) {
+    let now = std::time::Instant::now();
+    let is_multi = if let Some((last_time, last_c, last_r)) = st.last_click {
+        now.duration_since(last_time).as_millis() <= 400
+            && (mouse.column as i32 - last_c as i32).abs() <= 1
+            && mouse.row == last_r
+    } else {
+        false
+    };
+    if is_multi {
+        st.click_count = (st.click_count % 3) + 1;
+    } else {
+        st.click_count = 1;
+    }
+    st.last_click = Some((now, mouse.column, mouse.row));
+
+    // Clicking inside the composer text area places the editing cursor.
+    let (cx, cy, cw, ch) = st.composer_input_area;
+    if cw > 0
+        && ch > 0
+        && mouse.column >= cx
+        && mouse.column < cx + cw
+        && mouse.row >= cy
+        && mouse.row < cy + ch
+    {
+        let target_line = (mouse.row - cy) as usize + st.composer_scroll_off;
+        let target_col = (mouse.column - cx) as usize;
+        let max_w = (st.composer_area.2 as usize).saturating_sub(4).max(12);
+        st.composer.cursor =
+            cursor_byte_from_coords(&st.composer.text, target_line, target_col, max_w);
+        clear_selection(st);
+        return;
+    }
+
     let (tx, ty, tw, th) = st.transcript_area;
     let in_transcript = tw > 0
         && th > 0
@@ -211,6 +318,34 @@ fn begin_left_down(st: &mut TuiState, mouse: MouseEvent) {
     if in_transcript {
         let line = st.transcript_start + (mouse.row - ty) as usize;
         let column = (mouse.column - tx) as usize;
+        let line_text = st
+            .transcript_visible_text
+            .get((mouse.row - ty) as usize)
+            .cloned()
+            .unwrap_or_default();
+
+        if st.click_count == 2 {
+            let (start_col, end_col) = find_word_bounds(&line_text, column);
+            st.selection = Some(TextSelection {
+                anchor: (line, start_col),
+                cursor: (line, end_col.saturating_sub(1)),
+                dragging: false,
+            });
+            st.pending_transcript_click = None;
+            copy_selection_to_clipboard(env, st);
+            return;
+        } else if st.click_count == 3 {
+            let line_w = line_text.width().max(1);
+            st.selection = Some(TextSelection {
+                anchor: (line, 0),
+                cursor: (line, line_w.saturating_sub(1)),
+                dragging: false,
+            });
+            st.pending_transcript_click = None;
+            copy_selection_to_clipboard(env, st);
+            return;
+        }
+
         st.selection = Some(TextSelection {
             anchor: (line, column),
             cursor: (line, column),
@@ -232,18 +367,30 @@ fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
     if tw == 0 || th == 0 {
         return;
     }
-    let start = st.transcript_start;
     let Some(selection) = st.selection.as_mut() else {
         return;
     };
     if !selection.dragging {
         return;
     }
+
+    // Auto-scroll when pointer drags beyond the transcript's top or bottom edge.
+    if mouse.row < ty && st.scroll_from_bottom < st.max_scroll {
+        st.scroll_from_bottom = (st.scroll_from_bottom + 1).min(st.max_scroll);
+        st.transcript_start = st.transcript_start.saturating_sub(1);
+    } else if mouse.row >= ty.saturating_add(th) && st.scroll_from_bottom > 0 {
+        st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(1);
+        st.transcript_start = st.transcript_start.saturating_add(1);
+    }
+
     let row = mouse.row.clamp(ty, ty.saturating_add(th).saturating_sub(1));
     let column = mouse
         .column
         .clamp(tx, tx.saturating_add(tw).saturating_sub(1));
-    selection.cursor = (start + (row - ty) as usize, (column - tx) as usize);
+    selection.cursor = (
+        st.transcript_start + (row - ty) as usize,
+        (column - tx) as usize,
+    );
     if selection.is_range() {
         st.pending_transcript_click = None;
     }
@@ -261,6 +408,26 @@ async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
         return;
     }
 
+    if selection.is_range() {
+        copy_selection_to_clipboard(env, st);
+        st.selection = Some(TextSelection {
+            dragging: false,
+            ..selection
+        });
+        st.pending_transcript_click = None;
+    } else {
+        // A plain click: drop the one-cell selection and run the click target, if any.
+        st.selection = None;
+        if let Some(target) = st.pending_transcript_click.take() {
+            apply_transcript_click(st, target);
+        }
+    }
+}
+
+fn copy_selection_to_clipboard(env: &Env<'_>, st: &mut TuiState) {
+    let Some(selection) = st.selection else {
+        return;
+    };
     if selection.is_range() {
         let text = selection_text(st, selection);
         if !text.is_empty() {
@@ -281,17 +448,6 @@ async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
                     .ui
                     .set_transient_error(Some(format!("Copy failed: {e}"))),
             }
-        }
-        st.selection = Some(TextSelection {
-            dragging: false,
-            ..selection
-        });
-        st.pending_transcript_click = None;
-    } else {
-        // A plain click: drop the one-cell selection and run the click target, if any.
-        st.selection = None;
-        if let Some(target) = st.pending_transcript_click.take() {
-            apply_transcript_click(st, target);
         }
     }
 }
@@ -332,17 +488,141 @@ fn apply_transcript_click(st: &mut TuiState, target: TranscriptClickTarget) {
     }
 }
 
-/// Plain text covered by a selection, using the visible-line snapshot captured during the last
-/// draw. Columns are terminal cells, so wide glyphs are included whole.
+/// Plain text covered by a selection. If lines belong to earlier turns in history that scrolled off,
+/// they are read directly from the settled transcript cache.
 fn selection_text(st: &TuiState, selection: TextSelection) -> String {
-    selection_text_from(
-        &st.transcript_visible_text,
-        st.transcript_start,
-        st.transcript_area.2 as usize,
-        selection,
-    )
+    let ((start_line, start_col), (end_line, end_col)) = selection.bounds();
+    let width = st.transcript_area.2 as usize;
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut first = true;
+
+    for line_idx in start_line..=end_line {
+        let line_text: Option<String> = if line_idx < st.settled_cache.lines.len() {
+            Some(super::render::line_plain_text(
+                &st.settled_cache.lines[line_idx],
+            ))
+        } else if let Some(vis_idx) = line_idx.checked_sub(st.transcript_start) {
+            st.transcript_visible_text.get(vis_idx).cloned()
+        } else {
+            None
+        };
+        let Some(line) = line_text else {
+            continue;
+        };
+        let from = if line_idx == start_line { start_col } else { 0 };
+        let to = if line_idx == end_line {
+            end_col.saturating_add(1)
+        } else {
+            width
+        }
+        .min(width);
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(&slice_cells(&line, from, to));
+    }
+    out
 }
 
+fn find_word_bounds(text: &str, target_col: usize) -> (usize, usize) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+    let mut chars_with_cols = Vec::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        let start = col;
+        col += w;
+        chars_with_cols.push((ch, start, col));
+    }
+    if chars_with_cols.is_empty() {
+        return (0, 0);
+    }
+    let target_idx = chars_with_cols
+        .iter()
+        .position(|&(_, start, end)| target_col >= start && target_col < end)
+        .unwrap_or(chars_with_cols.len().saturating_sub(1));
+
+    let (target_char, _, _) = chars_with_cols[target_idx];
+    let is_word_char =
+        |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.' || c == ':';
+    let target_is_word = is_word_char(target_char);
+
+    let mut left = target_idx;
+    while left > 0 {
+        let (c, _, _) = chars_with_cols[left - 1];
+        if is_word_char(c) == target_is_word && !c.is_whitespace() {
+            left -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut right = target_idx;
+    while right + 1 < chars_with_cols.len() {
+        let (c, _, _) = chars_with_cols[right + 1];
+        if is_word_char(c) == target_is_word && !c.is_whitespace() {
+            right += 1;
+        } else {
+            break;
+        }
+    }
+
+    (chars_with_cols[left].1, chars_with_cols[right].2)
+}
+
+fn cursor_byte_from_coords(
+    text: &str,
+    target_line: usize,
+    target_col: usize,
+    max_width: usize,
+) -> usize {
+    let width = max_width.max(8);
+    let mut current_line = 0usize;
+    let mut byte_pos = 0usize;
+
+    for (raw_idx, raw_line) in text.split('\n').enumerate() {
+        if raw_idx > 0 {
+            byte_pos += 1; // `\n`
+        }
+        if raw_line.is_empty() {
+            if current_line == target_line {
+                return byte_pos;
+            }
+            current_line += 1;
+            continue;
+        }
+        let mut cur_w = 0usize;
+        for ch in raw_line.chars() {
+            let ch_len = ch.len_utf8();
+            let cw = ch.width().unwrap_or(0);
+            if cur_w + cw > width && cur_w > 0 {
+                if current_line == target_line {
+                    return byte_pos;
+                }
+                current_line += 1;
+                cur_w = 0;
+            }
+            if current_line == target_line && cur_w + cw > target_col {
+                return byte_pos;
+            }
+            cur_w += cw;
+            byte_pos += ch_len;
+        }
+        if current_line == target_line {
+            return byte_pos;
+        }
+        current_line += 1;
+    }
+    byte_pos
+}
+
+#[cfg(test)]
 fn selection_text_from(
     visible_text: &[String],
     transcript_start: usize,
@@ -1548,5 +1828,26 @@ mod tests {
             selection_text_from(&lines, 5, 0, selection((5, 0), (5, 3))),
             ""
         );
+    }
+
+    #[test]
+    fn find_word_bounds_identifies_words_and_flags() {
+        use super::find_word_bounds;
+        let line = "cargo test --release /path/to/file.rs";
+        assert_eq!(find_word_bounds(line, 7), (6, 10)); // "test"
+        assert_eq!(find_word_bounds(line, 13), (11, 20)); // "--release"
+        assert_eq!(find_word_bounds(line, 25), (21, 37)); // "/path/to/file.rs"
+        assert_eq!(find_word_bounds(line, 5), (5, 6)); // whitespace
+    }
+
+    #[test]
+    fn cursor_byte_from_coords_maps_lines_and_columns() {
+        use super::cursor_byte_from_coords;
+        let text = "hello\nworld";
+        assert_eq!(cursor_byte_from_coords(text, 0, 0, 40), 0);
+        assert_eq!(cursor_byte_from_coords(text, 0, 3, 40), 3);
+        assert_eq!(cursor_byte_from_coords(text, 0, 10, 40), 5);
+        assert_eq!(cursor_byte_from_coords(text, 1, 0, 40), 6);
+        assert_eq!(cursor_byte_from_coords(text, 1, 2, 40), 8);
     }
 }
