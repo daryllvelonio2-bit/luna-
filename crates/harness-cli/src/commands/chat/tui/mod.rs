@@ -44,7 +44,7 @@ use super::status::{
     refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed, QUOTA_REFRESH_INTERVAL,
 };
 use super::todo;
-use super::turn::{can_auto_resume, launch_internal_turn};
+use super::turn::{can_auto_resume, drain_queue, launch_internal_turn};
 use super::ui::ANIMATION_INTERVAL;
 use crate::commands::context_window::context_window;
 use actions::{drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs};
@@ -185,6 +185,25 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             _ = tui_notifier.notified() => {
                 drain_tui_notices(&env, &mut st);
+                if st.active_turn.is_none()
+                    && !env.compacting.load(Ordering::SeqCst)
+                    && !st.queue.is_empty()
+                {
+                    drain_queue(
+                        &mut st.queue,
+                        &env.ui,
+                        &st.turns,
+                        st.process_expanded,
+                        &st.pending_images,
+                        &env.plan_mode,
+                        &env.agent,
+                        &env.in_flight_tools,
+                        &mut st.current_cancel,
+                        &mut st.current_query,
+                        &mut st.turn_start,
+                        &mut st.active_turn,
+                    );
+                }
             }
 
             maybe_picker = st.picker_rx.recv() => {
@@ -196,11 +215,72 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             _ = animation.tick(), if st.active_turn.is_some()
                 || has_bg_active
                 || env.compacting.load(Ordering::SeqCst)
-                || snap.delegate_count > 0 => {
+                || snap.delegate_count > 0
+                || !st.queue.is_empty() => {
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
+                if st.active_turn.is_none()
+                    && !env.compacting.load(Ordering::SeqCst)
+                    && !st.queue.is_empty()
+                {
+                    drain_queue(
+                        &mut st.queue,
+                        &env.ui,
+                        &st.turns,
+                        st.process_expanded,
+                        &st.pending_images,
+                        &env.plan_mode,
+                        &env.agent,
+                        &env.in_flight_tools,
+                        &mut st.current_cancel,
+                        &mut st.current_query,
+                        &mut st.turn_start,
+                        &mut st.active_turn,
+                    );
+                }
             }
 
             _ = idle_tick.tick() => {
+                if st.active_turn.is_none()
+                    && !env.compacting.load(Ordering::SeqCst)
+                    && !st.queue.is_empty()
+                {
+                    drain_queue(
+                        &mut st.queue,
+                        &env.ui,
+                        &st.turns,
+                        st.process_expanded,
+                        &st.pending_images,
+                        &env.plan_mode,
+                        &env.agent,
+                        &env.in_flight_tools,
+                        &mut st.current_cancel,
+                        &mut st.current_query,
+                        &mut st.turn_start,
+                        &mut st.active_turn,
+                    );
+                }
+                for slot in st.background_sessions.values_mut() {
+                    if slot.active_turn.is_none()
+                        && !slot.compacting.load(Ordering::SeqCst)
+                        && !slot.queue.is_empty()
+                    {
+                        drain_queue(
+                            &mut slot.queue,
+                            &slot.ui,
+                            &slot.turns,
+                            slot.process_expanded,
+                            &slot.pending_images,
+                            &env.plan_mode,
+                            &slot.agent,
+                            &slot.in_flight_tools,
+                            &mut slot.current_cancel,
+                            &mut slot.current_query,
+                            &mut slot.turn_start,
+                            &mut slot.active_turn,
+                        );
+                    }
+                }
+
                 if st.quota_refreshed_at.elapsed() >= QUOTA_REFRESH_INTERVAL {
                     st.quota_refreshed_at = std::time::Instant::now();
                     tokio::spawn(refresh_antigravity_quota_owned(

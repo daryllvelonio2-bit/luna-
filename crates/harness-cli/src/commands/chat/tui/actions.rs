@@ -2383,6 +2383,25 @@ pub async fn run_slash_command(
     {
         sync_turn_meta_len(env, st);
         drain_tui_notices(env, st);
+        if st.active_turn.is_none()
+            && !env.compacting.load(Ordering::SeqCst)
+            && !st.queue.is_empty()
+        {
+            drain_queue(
+                &mut st.queue,
+                &env.ui,
+                &st.turns,
+                st.process_expanded,
+                &st.pending_images,
+                &env.plan_mode,
+                &env.agent,
+                &env.in_flight_tools,
+                &mut st.current_cancel,
+                &mut st.current_query,
+                &mut st.turn_start,
+                &mut st.active_turn,
+            );
+        }
         return Ok(Flow::Continue);
     }
 
@@ -2656,6 +2675,14 @@ pub async fn handle_turn_end(
     );
     env.ui.update_status(used, ctx_max);
 
+    // Any line the user submitted while the turn was finishing may still be held by the interrupt
+    // handle. Move it into the session queue so it drains as the next turn instead of being lost.
+    let held = env.interrupt_handle.take_leftover();
+    if !held.is_empty() {
+        st.queue.extend(held);
+        env.ui.set_queue_depth(st.queue.len());
+    }
+
     if let Some(reply) = goal_reply {
         advance_goal_tui(env, st, &reply);
     }
@@ -2893,6 +2920,12 @@ pub async fn handle_background_turn_end(
                 }
             }
         }
+    }
+
+    let held = slot.interrupt_handle.take_leftover();
+    if !held.is_empty() {
+        slot.queue.extend(held);
+        slot.ui.set_queue_depth(slot.queue.len());
     }
 
     if slot.active_turn.is_none() && !slot.compacting.load(Ordering::SeqCst) {
