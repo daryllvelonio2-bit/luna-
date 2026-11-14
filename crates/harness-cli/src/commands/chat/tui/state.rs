@@ -253,10 +253,10 @@ pub struct ComposerAttachment {
 }
 
 /// Thumbnail size cap, in terminal cells. Cells are roughly twice as tall as they are wide, so
-/// twenty rows cover forty image rows. The preview is decoded once at this size and downsampled
-/// when the composer is narrower, which keeps small pasted screenshots legible.
-const PREVIEW_MAX_COLS: u32 = 32;
-const PREVIEW_MAX_ROWS: u32 = 8;
+/// twelve rows cover twenty-four image rows. The preview is decoded at this size and downsampled
+/// when the composer is narrower, which keeps small pasted screenshots legible and sharp.
+const PREVIEW_MAX_COLS: u32 = 64;
+const PREVIEW_MAX_ROWS: u32 = 12;
 /// Never blow a tiny image up more than this, so a 16×16 icon stays an icon.
 const PREVIEW_MAX_UPSCALE: f64 = 4.0;
 
@@ -284,13 +284,13 @@ fn decode_image_preview(data_url: &str) -> Option<ImagePreview> {
         .min(PREVIEW_MAX_UPSCALE);
     let width = ((image_w as f64 * scale).round() as u32).clamp(1, max_w);
     let height = ((image_h as f64 * scale).round() as u32).clamp(1, max_h);
-    let thumb = image::imageops::resize(
+    let mut thumb = image::imageops::resize(
         &decoded,
         width,
         height,
         image::imageops::FilterType::Lanczos3,
     );
-    let thumb = image::imageops::unsharpen(&thumb, 1.2, 2);
+    image::imageops::colorops::contrast_in_place(&mut thumb, 10.0);
 
     let rows = height.div_ceil(2) as u16;
     let mut cells = Vec::with_capacity(width as usize * rows as usize);
