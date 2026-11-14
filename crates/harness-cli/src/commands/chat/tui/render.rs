@@ -1492,23 +1492,8 @@ fn render_completed_turn_process(
         }
     }
 
-    let mut pending_explored: Vec<&super::super::render::TurnProcessItem> = Vec::new();
     for item in &turn.tool_items {
         if item.is_thinking() {
-            if !pending_explored.is_empty() {
-                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &pending_explored,
-                    open,
-                    TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx),
-                    width,
-                    card_inner_w,
-                );
-                tool_group_idx += 1;
-                pending_explored.clear();
-            }
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 let open =
@@ -1525,20 +1510,6 @@ fn render_completed_turn_process(
                 thinking_idx += 1;
             }
         } else if item.is_assistant_text() {
-            if !pending_explored.is_empty() {
-                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &pending_explored,
-                    open,
-                    TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx),
-                    width,
-                    card_inner_w,
-                );
-                tool_group_idx += 1;
-                pending_explored.clear();
-            }
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 for mline in render_markdown(trimmed, card_inner_w) {
@@ -1548,23 +1519,7 @@ fn render_completed_turn_process(
                 }
                 out.push(Line::default());
             }
-        } else if is_collapsible_exploration(item) {
-            pending_explored.push(item);
         } else {
-            if !pending_explored.is_empty() {
-                let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &pending_explored,
-                    open,
-                    TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx),
-                    width,
-                    card_inner_w,
-                );
-                tool_group_idx += 1;
-                pending_explored.clear();
-            }
             let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
             push_completed_tool_card(
                 out,
@@ -1577,18 +1532,6 @@ fn render_completed_turn_process(
             );
             tool_group_idx += 1;
         }
-    }
-    if !pending_explored.is_empty() {
-        let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
-        push_explored_group(
-            out,
-            hit_targets,
-            &pending_explored,
-            open,
-            TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx),
-            width,
-            card_inner_w,
-        );
     }
 }
 
@@ -1621,25 +1564,8 @@ fn render_active_turn_process(
     let auto_hide_thinking = auto_hide_thinking && tool_active;
 
     // Chronological settled thinking blocks, prose, and tool cards executed so far in this turn
-    let mut pending_explored: Vec<(usize, &super::super::render::TurnProcessItem)> = Vec::new();
     for (step_idx, item) in in_flight_tools.iter().enumerate() {
         if item.is_thinking() {
-            if !pending_explored.is_empty() {
-                let first_idx = pending_explored[0].0;
-                let open = process_expanded || expanded_live_tools.contains(&first_idx);
-                let items: Vec<&super::super::render::TurnProcessItem> =
-                    pending_explored.iter().map(|(_, it)| *it).collect();
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &items,
-                    open,
-                    TranscriptClickTarget::ToggleLiveToolStep(first_idx),
-                    width,
-                    card_inner_w,
-                );
-                pending_explored.clear();
-            }
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 let open = process_expanded
@@ -1657,22 +1583,6 @@ fn render_active_turn_process(
             continue;
         }
         if item.is_assistant_text() {
-            if !pending_explored.is_empty() {
-                let first_idx = pending_explored[0].0;
-                let open = process_expanded || expanded_live_tools.contains(&first_idx);
-                let items: Vec<&super::super::render::TurnProcessItem> =
-                    pending_explored.iter().map(|(_, it)| *it).collect();
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &items,
-                    open,
-                    TranscriptClickTarget::ToggleLiveToolStep(first_idx),
-                    width,
-                    card_inner_w,
-                );
-                pending_explored.clear();
-            }
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 for mline in render_markdown(trimmed, card_inner_w) {
@@ -1685,23 +1595,6 @@ fn render_active_turn_process(
             continue;
         }
         if item.result_formatted.is_empty() {
-            // Still running: flush pending explored group and draw running card below if active
-            if !pending_explored.is_empty() {
-                let first_idx = pending_explored[0].0;
-                let open = process_expanded || expanded_live_tools.contains(&first_idx);
-                let items: Vec<&super::super::render::TurnProcessItem> =
-                    pending_explored.iter().map(|(_, it)| *it).collect();
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &items,
-                    open,
-                    TranscriptClickTarget::ToggleLiveToolStep(first_idx),
-                    width,
-                    card_inner_w,
-                );
-                pending_explored.clear();
-            }
             if snap.activity_call.is_none() {
                 push_running_tool_card(
                     out,
@@ -1719,48 +1612,13 @@ fn render_active_turn_process(
             }
             continue;
         }
-        if is_collapsible_exploration(item) {
-            pending_explored.push((step_idx, item));
-        } else {
-            if !pending_explored.is_empty() {
-                let first_idx = pending_explored[0].0;
-                let open = process_expanded || expanded_live_tools.contains(&first_idx);
-                let items: Vec<&super::super::render::TurnProcessItem> =
-                    pending_explored.iter().map(|(_, it)| *it).collect();
-                push_explored_group(
-                    out,
-                    hit_targets,
-                    &items,
-                    open,
-                    TranscriptClickTarget::ToggleLiveToolStep(first_idx),
-                    width,
-                    card_inner_w,
-                );
-                pending_explored.clear();
-            }
-            let open = process_expanded || expanded_live_tools.contains(&step_idx);
-            push_completed_tool_card(
-                out,
-                hit_targets,
-                item,
-                open,
-                TranscriptClickTarget::ToggleLiveToolStep(step_idx),
-                width,
-                card_inner_w,
-            );
-        }
-    }
-    if !pending_explored.is_empty() {
-        let first_idx = pending_explored[0].0;
-        let open = process_expanded || expanded_live_tools.contains(&first_idx);
-        let items: Vec<&super::super::render::TurnProcessItem> =
-            pending_explored.iter().map(|(_, it)| *it).collect();
-        push_explored_group(
+        let open = process_expanded || expanded_live_tools.contains(&step_idx);
+        push_completed_tool_card(
             out,
             hit_targets,
-            &items,
+            item,
             open,
-            TranscriptClickTarget::ToggleLiveToolStep(first_idx),
+            TranscriptClickTarget::ToggleLiveToolStep(step_idx),
             width,
             card_inner_w,
         );
@@ -1956,86 +1814,6 @@ fn push_settled_thinking_block(
         hit_targets.push((row_idx, click_target));
         out.push(Line::default());
     }
-}
-
-fn is_collapsible_exploration(item: &super::super::render::TurnProcessItem) -> bool {
-    if item.is_error {
-        return false;
-    }
-    match item.tool_name.as_str() {
-        "read_file" | "read" | "list_files" | "ls" => true,
-        "search_files" | "grep" | "find" => {
-            item.output.lines().count() <= 1 && item.output_dropped == 0
-        }
-        _ => false,
-    }
-}
-
-fn push_explored_group(
-    out: &mut Vec<Line<'static>>,
-    hit_targets: &mut Vec<(usize, TranscriptClickTarget)>,
-    items: &[&super::super::render::TurnProcessItem],
-    open: bool,
-    click_target: TranscriptClickTarget,
-    width: usize,
-    card_inner_w: usize,
-) {
-    if open {
-        for item in items {
-            push_completed_tool_card(
-                out,
-                hit_targets,
-                item,
-                true,
-                click_target.clone(),
-                width,
-                card_inner_w,
-            );
-        }
-        return;
-    }
-
-    let mut reads = 0usize;
-    let mut searches = 0usize;
-    let mut lists = 0usize;
-    for item in items {
-        match item.tool_name.as_str() {
-            "read_file" | "read" => reads += 1,
-            "list_files" | "ls" => lists += 1,
-            "search_files" | "grep" | "find" => searches += 1,
-            _ => {}
-        }
-    }
-    let mut parts = Vec::new();
-    if searches > 0 {
-        parts.push(if searches == 1 {
-            "1 search".to_string()
-        } else {
-            format!("{searches} searches")
-        });
-    }
-    if reads > 0 {
-        parts.push(if reads == 1 {
-            "1 read".to_string()
-        } else {
-            format!("{reads} reads")
-        });
-    }
-    if lists > 0 {
-        parts.push(if lists == 1 {
-            "1 list".to_string()
-        } else {
-            format!("{lists} lists")
-        });
-    }
-    let summary = parts.join(", ");
-    let row_idx = out.len();
-    out.push(Line::from(Span::styled(
-        format!("  → Explored: {summary}"),
-        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
-    )));
-    hit_targets.push((row_idx, click_target));
-    out.push(Line::default());
 }
 
 fn format_opencode_tool_header(
@@ -2269,7 +2047,6 @@ fn push_completed_tool_card(
     }
 
     let has_diff = !item.diff_lines.is_empty() && !item.is_error;
-    let tail_cap = if open { 40 } else { 7 };
 
     if has_diff {
         push_card_blank_row(
@@ -2301,7 +2078,8 @@ fn push_completed_tool_card(
                 )],
             );
         }
-        if item.diff_lines.len() > max_diff {
+        let diff_more = (item.diff_lines.len().saturating_sub(max_diff)) + item.output_dropped;
+        if diff_more > 0 {
             push_card_row(
                 out,
                 Some(hit_targets),
@@ -2309,14 +2087,14 @@ fn push_completed_tool_card(
                 border_color,
                 width,
                 vec![Span::styled(
-                    format!("({} more diff lines)", item.diff_lines.len() - max_diff),
+                    format!("({diff_more} more diff lines)"),
                     Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
                 )],
             );
         }
     } else if !item.output.trim().is_empty() {
-        let total_non_empty = item.output.lines().filter(|l| !l.trim().is_empty()).count();
-        if total_non_empty > 0 {
+        let raw_lines: Vec<&str> = item.output.trim().lines().collect();
+        if !raw_lines.is_empty() {
             push_card_blank_row(
                 out,
                 Some(hit_targets),
@@ -2324,35 +2102,14 @@ fn push_completed_tool_card(
                 border_color,
                 width,
             );
-            let start = total_non_empty.saturating_sub(tail_cap);
-            let hidden = item.output_dropped + start;
-            if hidden > 0 {
-                push_card_row(
-                    out,
-                    Some(hit_targets),
-                    Some(&click_target),
-                    border_color,
-                    width,
-                    vec![Span::styled(
-                        format!("({hidden} earlier lines)"),
-                        Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-                    )],
-                );
-            }
-            let body_color = if item.is_error && total_non_empty <= 6 {
+            let max_lines = if open { raw_lines.len() } else { 10 };
+            let body_color = if item.is_error && raw_lines.len() <= 6 {
                 RED_ERR
             } else {
                 TEXT_MUTED
             };
-            let tail_lines: Vec<&str> = item
-                .output
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .rev()
-                .take(tail_cap)
-                .collect();
-            for oline in tail_lines.into_iter().rev() {
-                let clean = strip_ansi(oline);
+            for line in raw_lines.iter().take(max_lines) {
+                let clean = strip_ansi(line);
                 for wrapped in wrap_plain_text(&clean, card_inner_w) {
                     push_card_row(
                         out,
@@ -2366,6 +2123,20 @@ fn push_completed_tool_card(
                         )],
                     );
                 }
+            }
+            let more = (raw_lines.len().saturating_sub(max_lines)) + item.output_dropped;
+            if more > 0 {
+                push_card_row(
+                    out,
+                    Some(hit_targets),
+                    Some(&click_target),
+                    border_color,
+                    width,
+                    vec![Span::styled(
+                        format!("({more} more lines)"),
+                        Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+                    )],
+                );
             }
         }
     } else if item.is_error && !item.result_formatted.is_empty() {
@@ -3759,11 +3530,11 @@ mod tests {
         let joined = rendered.join("\n");
 
         let pos_t1 = joined.find("▸ Thought: 1.4s (1 line)").unwrap();
-        let pos_tool1 = joined.find("→ Explored: 1 list").unwrap();
+        let pos_tool1 = joined.find("→ List .").unwrap();
         let pos_t2 = joined.find("Thought: 2.0s").unwrap();
         let pos_t2_body = joined.find("round 2 reasoning").unwrap();
         let pos_tool2_cmd = joined.find("$ ls -la /home/janelle").unwrap();
-        let pos_tool2_hidden = joined.find("(186 earlier lines)").unwrap();
+        let pos_tool2_hidden = joined.find("(185 more lines)").unwrap();
         let pos_t3_hdr = joined.find("Thought: 0.8s").unwrap();
         let pos_t3_body = joined.find("round 3 active reasoning").unwrap();
 
@@ -3789,6 +3560,9 @@ mod tests {
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveThinkingStep(0))));
+        assert!(hits
+            .iter()
+            .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveToolStep(1))));
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveThinkingStep(2))));
@@ -4033,10 +3807,10 @@ mod tests {
 
         let joined = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
         let p_think0 = joined.find("▸ Thought: 1.1s (1 line)").unwrap();
-        let p_tools0 = joined.find("→ Explored: 1 list").unwrap();
+        let p_tools0 = joined.find("→ List .").unwrap();
         let p_think1 = joined.find("second thought").unwrap();
         let p_prose = joined.find("Found it. Let me inspect.").unwrap();
-        let p_tools1 = joined.find("→ Explored: 1 read").unwrap();
+        let p_tools1 = joined.find("→ Read README.md").unwrap();
         let p_think2 = joined[p_tools1..]
             .find("final thought")
             .map(|rel| p_tools1 + rel)
@@ -4398,5 +4172,76 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(selected, "中");
+    }
+
+    #[test]
+    fn tool_cards_in_box_truncate_to_ten_lines_and_expand_on_click() {
+        let lines_20 = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item = TurnProcessItem {
+            tool_name: "terminal".to_string(),
+            call_formatted: "cargo check".to_string(),
+            result_formatted: "✔ ok".to_string(),
+            diff_lines: Vec::new(),
+            output: lines_20,
+            output_dropped: 0,
+            arguments: Some(serde_json::json!({ "command": "cargo check" })),
+            duration_secs: Some(1.0),
+            is_error: false,
+        };
+
+        // When closed (open = false)
+        let mut out_closed = Vec::new();
+        let mut hits_closed = Vec::new();
+        push_completed_tool_card(
+            &mut out_closed,
+            &mut hits_closed,
+            &item,
+            false,
+            TranscriptClickTarget::ToggleTurnTools(0, 0),
+            80,
+            76,
+        );
+        let joined_closed = out_closed
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined_closed.contains("line 1"), "starts from head");
+        assert!(joined_closed.contains("line 10"), "shows 10th line");
+        assert!(!joined_closed.contains("line 11"), "line 11 is truncated");
+        assert!(
+            joined_closed.contains("(10 more lines)"),
+            "shows bottom more lines indicator"
+        );
+
+        // When opened (open = true)
+        let mut out_opened = Vec::new();
+        let mut hits_opened = Vec::new();
+        push_completed_tool_card(
+            &mut out_opened,
+            &mut hits_opened,
+            &item,
+            true,
+            TranscriptClickTarget::ToggleTurnTools(0, 0),
+            80,
+            76,
+        );
+        let joined_opened = out_opened
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined_opened.contains("line 1"));
+        assert!(
+            joined_opened.contains("line 20"),
+            "all 20 lines displayed when opened"
+        );
+        assert!(
+            !joined_opened.contains("more lines"),
+            "no remaining lines indicator"
+        );
     }
 }
