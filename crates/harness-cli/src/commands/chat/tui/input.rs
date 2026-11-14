@@ -384,7 +384,7 @@ fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
     if tw == 0 || th == 0 {
         return;
     }
-    let Some(selection) = st.selection.as_mut() else {
+    let Some(mut selection) = st.selection else {
         return;
     };
     if !selection.dragging {
@@ -411,6 +411,7 @@ fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
     if selection.is_range() {
         st.pending_transcript_click = None;
     }
+    st.selection = Some(selection);
 }
 
 async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {

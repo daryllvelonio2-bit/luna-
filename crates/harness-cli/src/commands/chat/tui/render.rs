@@ -617,6 +617,9 @@ fn render_conversation(
     }
 
     let selection_bounds = st.selection.map(|sel| sel.bounds());
+    let selected = |line: usize, col: usize| {
+        selection_bounds.is_some_and(|(start, end)| (line, col) >= start && (line, col) <= end)
+    };
     let mut visible_slice: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
     let mut visible_text: Vec<String> = Vec::with_capacity(end.saturating_sub(start));
     for i in start..end {
@@ -649,6 +652,35 @@ fn render_conversation(
         visible_slice.push(line);
     }
     st.transcript_visible_text = visible_text;
+
+    // Fill the blank cells after a selected line so a block drag visibly reaches the pointer's
+    // row instead of highlighting only the text up to that line's right margin.
+    if selection_bounds.is_some() {
+        for i in start..end {
+            let row = transcript_rect.y + (i - start) as u16;
+            let line_w = visible_slice[i - start]
+                .spans
+                .iter()
+                .map(|s| s.content.width())
+                .sum::<usize>()
+                .min(transcript_rect.width as usize);
+            if !selected(i, line_w) {
+                continue;
+            }
+            for col in line_w..transcript_rect.width as usize {
+                if !selected(i, col) {
+                    break;
+                }
+                let Some(cell) = frame
+                    .buffer_mut()
+                    .cell_mut((transcript_rect.x + col as u16, row))
+                else {
+                    continue;
+                };
+                cell.set_style(Style::default().bg(BG_SELECTION));
+            }
+        }
+    }
 
     frame.render_widget(Paragraph::new(visible_slice), transcript_rect);
 
