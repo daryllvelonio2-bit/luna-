@@ -182,6 +182,61 @@ impl ImagePreview {
             .get(y as usize * self.width as usize + x as usize)
             .copied()
     }
+
+    /// Average the stored cells covered by destination cell `(x, y)` of a `dest_w × dest_h`
+    /// thumbnail.
+    ///
+    /// The preview is decoded once at its maximum size and painted at whatever width the composer
+    /// has, so a narrow card downsamples instead of cropping the right-hand edge off the image.
+    pub fn sampled_cell(&self, x: u16, y: u16, dest_w: u16, dest_h: u16) -> Option<(Color, Color)> {
+        if dest_w == 0 || dest_h == 0 || x >= dest_w || y >= dest_h {
+            return None;
+        }
+        let (src_w, src_h) = (self.width as u32, self.height as u32);
+        let (dest_w, dest_h) = (dest_w as u32, dest_h as u32);
+        let x0 = (x as u32 * src_w / dest_w).min(src_w.saturating_sub(1));
+        let x1 = (((x as u32 + 1) * src_w / dest_w).max(x0 + 1)).min(src_w);
+        let y0 = (y as u32 * src_h / dest_h).min(src_h.saturating_sub(1));
+        let y1 = (((y as u32 + 1) * src_h / dest_h).max(y0 + 1)).min(src_h);
+
+        let mut top_sum = (0u32, 0u32, 0u32);
+        let mut bottom_sum = (0u32, 0u32, 0u32);
+        let mut count = 0u32;
+        for sy in y0..y1 {
+            for sx in x0..x1 {
+                let Some((top, bottom)) = self.cell(sx as u16, sy as u16) else {
+                    continue;
+                };
+                let top = rgb_of(top);
+                let bottom = rgb_of(bottom);
+                top_sum = (top_sum.0 + top.0, top_sum.1 + top.1, top_sum.2 + top.2);
+                bottom_sum = (
+                    bottom_sum.0 + bottom.0,
+                    bottom_sum.1 + bottom.1,
+                    bottom_sum.2 + bottom.2,
+                );
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        let average = |sum: (u32, u32, u32)| {
+            Color::Rgb(
+                (sum.0 / count) as u8,
+                (sum.1 / count) as u8,
+                (sum.2 / count) as u8,
+            )
+        };
+        Some((average(top_sum), average(bottom_sum)))
+    }
+}
+
+fn rgb_of(color: Color) -> (u32, u32, u32) {
+    match color {
+        Color::Rgb(r, g, b) => (r as u32, g as u32, b as u32),
+        _ => (30, 30, 32),
+    }
 }
 
 /// An attached image or collapsed multi-line paste represented by a compact token
@@ -195,9 +250,12 @@ pub struct ComposerAttachment {
 }
 
 /// Thumbnail size cap, in terminal cells. Cells are roughly twice as tall as they are wide, so
-/// six rows cover twelve image rows.
-const PREVIEW_MAX_COLS: u32 = 20;
-const PREVIEW_MAX_ROWS: u32 = 6;
+/// twenty rows cover forty image rows. The preview is decoded once at this size and downsampled
+/// when the composer is narrower, which keeps small pasted screenshots legible.
+const PREVIEW_MAX_COLS: u32 = 72;
+const PREVIEW_MAX_ROWS: u32 = 20;
+/// Never blow a tiny image up more than this, so a 16×16 icon stays an icon.
+const PREVIEW_MAX_UPSCALE: f64 = 4.0;
 
 /// Decode a pasted image into a half-block thumbnail for the composer.
 ///
@@ -218,14 +276,16 @@ fn decode_image_preview(data_url: &str) -> Option<ImagePreview> {
 
     let max_w = PREVIEW_MAX_COLS;
     let max_h = PREVIEW_MAX_ROWS * 2;
-    let scale = (max_w as f64 / image_w as f64).min(max_h as f64 / image_h as f64);
+    let scale = (max_w as f64 / image_w as f64)
+        .min(max_h as f64 / image_h as f64)
+        .min(PREVIEW_MAX_UPSCALE);
     let width = ((image_w as f64 * scale).round() as u32).clamp(1, max_w);
     let height = ((image_h as f64 * scale).round() as u32).clamp(1, max_h);
     let thumb = image::imageops::resize(
         &decoded,
         width,
         height,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::CatmullRom,
     );
 
     let rows = height.div_ceil(2) as u16;
@@ -1075,6 +1135,22 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_composer_downsamples_the_preview_instead_of_cropping_it() {
+        let mut c = ComposerState::default();
+        c.attach_image(32, 18, png_data_url(32, 18));
+        let preview = c.attachments[0].preview.clone().expect("preview");
+        let (dest_w, dest_h) = (preview.width / 2, preview.height / 2);
+
+        let sampled = preview
+            .sampled_cell(dest_w - 1, dest_h - 1, dest_w, dest_h)
+            .expect("sampled cell");
+        // The last destination cell must come from the bottom-right of the image, not fall off
+        // the end of the source grid.
+        assert!(matches!(sampled.0, ratatui::style::Color::Rgb(..)));
+        assert!(preview.sampled_cell(dest_w, 0, dest_w, dest_h).is_none());
+    }
+
+    #[test]
     fn an_unreadable_image_data_url_still_attaches_as_a_token() {
         let mut c = ComposerState::default();
         c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
@@ -1173,6 +1249,8 @@ pub struct TuiState {
     pub transcript_hit_boxes: Vec<TranscriptHitBox>,
     /// Close buttons on composer image previews, rebuilt each draw.
     pub composer_hit_boxes: Vec<ComposerHitBox>,
+    /// Latest pointer position in screen cells, used for hover-only controls.
+    pub pointer: Option<(u16, u16)>,
     /// Viewport of the transcript as `(x, y, width, height)` in screen cells, refreshed each draw.
     pub transcript_area: (u16, u16, u16, u16),
     /// Absolute index of the first transcript line visible in the viewport.

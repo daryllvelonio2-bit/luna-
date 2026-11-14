@@ -477,6 +477,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         hit_boxes: Vec::new(),
         transcript_hit_boxes: Vec::new(),
         composer_hit_boxes: Vec::new(),
+        pointer: None,
         transcript_area: (0, 0, 0, 0),
         transcript_start: 0,
         transcript_visible_text: Vec::new(),

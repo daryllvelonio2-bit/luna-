@@ -116,6 +116,9 @@ async fn handle_mouse(
     st: &mut TuiState,
     mouse: MouseEvent,
 ) -> Result<Flow, HarnessError> {
+    // Hover state drives the preview close buttons, so it has to track the pointer even while a
+    // modal owns the keyboard.
+    st.pointer = Some((mouse.column, mouse.row));
     if !matches!(st.modal, ActiveModal::None) {
         return Ok(Flow::Continue);
     }

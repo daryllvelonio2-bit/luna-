@@ -764,6 +764,22 @@ fn layout_preview_sizes(sizes: &[(u16, u16)], max_width: u16) -> (Vec<PreviewPla
     (placements, height)
 }
 
+/// Fit a decoded preview into the card width, preserving its aspect ratio.
+///
+/// The preview is decoded at the largest useful size; painting it at the card's real width keeps
+/// the composer from overflowing on a narrow terminal without cropping the image.
+fn preview_display_size(preview: &ImagePreview, max_width: u16) -> (u16, u16) {
+    let max_width = max_width.max(1);
+    let width = preview.width.min(max_width);
+    if width == preview.width || preview.width == 0 {
+        return (width.max(1), preview.height);
+    }
+    let height = ((preview.height as u32 * width as u32) / preview.width as u32)
+        .max(1)
+        .min(preview.height as u32) as u16;
+    (width.max(1), height)
+}
+
 /// Height of the composer preview strip, in terminal rows (zero when there are no images).
 fn composer_preview_height(st: &TuiState, max_width: u16) -> u16 {
     let sizes: Vec<(u16, u16)> = st
@@ -771,9 +787,16 @@ fn composer_preview_height(st: &TuiState, max_width: u16) -> u16 {
         .attachments
         .iter()
         .filter_map(|att| att.preview.as_ref())
-        .map(|preview| (preview.width, preview.height))
+        .map(|preview| preview_display_size(preview, max_width))
         .collect();
     layout_preview_sizes(&sizes, max_width).1
+}
+
+/// Whether the pointer sits inside a rectangle, used to gate hover-only controls.
+fn pointer_inside(pointer: Option<(u16, u16)>, x: u16, y: u16, width: u16, height: u16) -> bool {
+    pointer.is_some_and(|(px, py)| {
+        px >= x && px < x.saturating_add(width) && py >= y && py < y.saturating_add(height)
+    })
 }
 
 /// Paint one thumbnail with half-block cells and arm its close button.
@@ -783,16 +806,20 @@ fn render_preview_cell(
     placement: &PreviewPlacement,
     token: &str,
     preview: &ImagePreview,
+    pointer: Option<(u16, u16)>,
     hit_boxes: &mut Vec<ComposerHitBox>,
 ) {
     let abs_x = rect.x.saturating_add(3).saturating_add(placement.x);
     let abs_y = rect.y.saturating_add(1).saturating_add(placement.y);
     let right_edge = rect.x.saturating_add(rect.width);
+    let draw_w = placement.width.min(right_edge.saturating_sub(abs_x));
 
     for row in 0..placement.height {
-        let mut spans = Vec::with_capacity(placement.width as usize);
-        for x in 0..placement.width {
-            let Some((top, bottom)) = preview.cell(x, row) else {
+        let mut spans = Vec::with_capacity(draw_w as usize);
+        for x in 0..draw_w {
+            let Some((top, bottom)) =
+                preview.sampled_cell(x, row, placement.width, placement.height)
+            else {
                 continue;
             };
             spans.push(Span::styled("▀", Style::default().fg(top).bg(bottom)));
@@ -805,22 +832,21 @@ fn render_preview_cell(
             Rect {
                 x: abs_x,
                 y: abs_y.saturating_add(row),
-                width: placement.width.min(right_edge.saturating_sub(abs_x)),
+                width: draw_w,
                 height: 1,
             },
         );
     }
 
-    // The close button sits in the thumbnail's top-right corner.
+    // The close button only shows while the pointer is over the thumbnail, so the image itself is
+    // never covered at rest. It keeps the surface colour and a muted glyph: no red warning box.
     let close_x = abs_x.saturating_add(placement.width.saturating_sub(1));
-    if close_x < right_edge {
+    let over_preview = pointer_inside(pointer, abs_x, abs_y, placement.width, placement.height);
+    if over_preview && close_x < right_edge {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "✕",
-                Style::default()
-                    .fg(TEXT_PRIMARY)
-                    .bg(RED_ERR)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
             )),
             Rect {
                 x: close_x,
@@ -882,9 +908,10 @@ fn render_composer_card(
         .collect();
     let sizes: Vec<(u16, u16)> = previews
         .iter()
-        .map(|(_, preview)| (preview.width, preview.height))
+        .map(|(_, preview)| preview_display_size(preview, rect.width.saturating_sub(3).max(1)))
         .collect();
     let (placements, preview_h) = layout_preview_sizes(&sizes, rect.width.saturating_sub(3).max(1));
+    let pointer = st.pointer;
     st.composer_hit_boxes.clear();
     for placement in &placements {
         let (token, preview) = &previews[placement.index];
@@ -894,6 +921,7 @@ fn render_composer_card(
             placement,
             token,
             preview,
+            pointer,
             &mut st.composer_hit_boxes,
         );
     }
@@ -3770,6 +3798,103 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_is_scaled_down_to_the_card_instead_of_clipped() {
+        let preview = ImagePreview {
+            width: 72,
+            height: 20,
+            cells: vec![(BG_SURFACE, BG_SURFACE); 72 * 20],
+        };
+
+        let (width, height) = preview_display_size(&preview, 72);
+        assert_eq!((width, height), (72, 20));
+
+        let (width, height) = preview_display_size(&preview, 36);
+        assert_eq!(width, 36);
+        assert_eq!(height, 10, "aspect ratio kept when the card is narrow");
+    }
+
+    #[test]
+    fn the_preview_close_button_only_arms_while_hovered() {
+        assert!(!pointer_inside(None, 10, 5, 20, 6));
+
+        // Inside the thumbnail.
+        assert!(pointer_inside(Some((10, 5)), 10, 5, 20, 6));
+        assert!(pointer_inside(Some((29, 10)), 10, 5, 20, 6));
+
+        // Just outside: left, right, above, below.
+        assert!(!pointer_inside(Some((9, 5)), 10, 5, 20, 6));
+        assert!(!pointer_inside(Some((30, 5)), 10, 5, 20, 6));
+        assert!(!pointer_inside(Some((10, 4)), 10, 5, 20, 6));
+        assert!(!pointer_inside(Some((10, 11)), 10, 5, 20, 6));
+    }
+
+    #[test]
+    fn the_close_button_is_drawn_muted_and_only_on_hover() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let preview = ImagePreview {
+            width: 8,
+            height: 4,
+            cells: vec![(BG_SURFACE, BG_SURFACE); 8 * 4],
+        };
+        let placement = PreviewPlacement {
+            index: 0,
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 4,
+        };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 10,
+        };
+        let draw = |pointer| {
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            let mut hits = Vec::new();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_preview_cell(
+                        frame,
+                        rect,
+                        &placement,
+                        "[Image 1]",
+                        &preview,
+                        pointer,
+                        &mut hits,
+                    );
+                    assert!(area.width > 0);
+                })
+                .unwrap();
+            (terminal.backend().buffer().clone(), hits)
+        };
+
+        let (resting, hits) = draw(None);
+        assert!(hits.is_empty(), "no close button while the pointer is away");
+        let resting_text: String = (0..resting.area.height)
+            .map(|y| {
+                (0..resting.area.width)
+                    .map(|x| resting[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!resting_text.contains('✕'), "{resting_text}");
+
+        let (hovered, hits) = draw(Some((4, 1)));
+        assert_eq!(hits.len(), 1, "hovering arms exactly one close button");
+        let close_x = 3 + placement.width - 1;
+        let cell = &hovered[(close_x, 1)];
+        assert_eq!(cell.symbol(), "✕");
+        assert_eq!(cell.fg, TEXT_MUTED, "the glyph is muted, not a red warning");
+        assert_eq!(cell.bg, BG_SURFACE, "the glyph sits on the card surface");
+        assert_eq!(hits[0].x_start, close_x);
+        assert_eq!(hits[0].y, 1);
+    }
+
+    #[test]
     fn collapsed_thinking_header_keeps_the_coral_accent() {
         let mut out = Vec::new();
         let mut hits = Vec::new();
@@ -3934,6 +4059,7 @@ mod tests {
             hit_boxes: Vec::new(),
             transcript_hit_boxes: Vec::new(),
             composer_hit_boxes: Vec::new(),
+            pointer: None,
             transcript_area: (0, 0, 0, 0),
             transcript_start: 0,
             transcript_visible_text: Vec::new(),
