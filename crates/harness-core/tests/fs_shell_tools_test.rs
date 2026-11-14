@@ -2119,3 +2119,67 @@ fn an_allowed_network_is_left_alone() {
         "the probe reached the kernel's own answer (ECONNREFUSED): {output}"
     );
 }
+
+#[tokio::test]
+async fn patch_handles_crlf_and_trailing_whitespace_differences() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cache = ReadCache::new();
+    let cancel = CancellationToken::new();
+
+    let patcher = PatchTool::new(root.clone(), cache.clone());
+    let reader = ReadFileTool::new(root.clone(), 100_000, cache.clone());
+
+    // File with trailing whitespace on line 2
+    let file_path = root.join("whitespace.rs");
+    tokio::fs::write(&file_path, "fn test() {\n    let val = 42;   \n    println!(\"{val}\");\n}\n")
+        .await
+        .unwrap();
+
+    // Read first
+    reader
+        .execute("r1", &json!({ "path": "whitespace.rs" }), &cancel)
+        .await
+        .unwrap();
+
+    // Patch with old_string lacking trailing spaces on line 2
+    let patch_res = patcher
+        .execute(
+            "p1",
+            &json!({
+                "path": "whitespace.rs",
+                "old_string": "    let val = 42;\n    println!(\"{val}\");",
+                "new_string": "    let val = 100;\n    println!(\"{val}\");"
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(!patch_res.is_error, "Patch with trailing whitespace difference should succeed: {}", patch_res.content);
+
+    let updated = tokio::fs::read_to_string(&file_path).await.unwrap();
+    assert!(updated.contains("let val = 100;"));
+}
+
+#[tokio::test]
+async fn file_tools_resolve_subcrate_relative_paths() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cache = ReadCache::new();
+    let cancel = CancellationToken::new();
+
+    let crates_dir = root.join("crates").join("my-crate");
+    tokio::fs::create_dir_all(&crates_dir).await.unwrap();
+    tokio::fs::write(crates_dir.join("lib.rs"), "pub fn hello() {}\n")
+        .await
+        .unwrap();
+
+    let reader = ReadFileTool::new(root.clone(), 100_000, cache.clone());
+    // Passing "my-crate/lib.rs" should resolve to crates/my-crate/lib.rs
+    let res = reader
+        .execute("r2", &json!({ "path": "my-crate/lib.rs" }), &cancel)
+        .await
+        .unwrap();
+    assert!(!res.is_error, "Should resolve in crates subdirectory: {}", res.content);
+    assert!(res.content.contains("pub fn hello()"));
+}

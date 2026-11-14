@@ -964,36 +964,41 @@ pub(crate) async fn handle_compact_command(
     agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
     current_provider: &str,
     current_model: &str,
-) -> Result<Option<harness_core::CompactionNotice>, HarnessError> {
+) -> Result<(), HarnessError> {
+    let ui = ui.clone();
+    let agent = agent.clone();
     let context_max = context_window_for(config, current_provider, current_model);
-    let Ok(ag) = agent.try_lock() else {
-        ui.emit_above(&format!(
-            "{} Cannot compact while a turn is running: interrupt it (send a message or press Escape), then run /compact",
-            "✖".red().bold()
-        ));
-        return Ok(None);
-    };
 
-    match ag.compact_current_session().await {
-        Ok(notice) => {
-            let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
-            ui.update_status(context_used, context_max);
-            if let Some(ref summary) = notice.summary {
-                if !ui.is_tui_mode() {
-                    ui.emit_above(summary);
+    tokio::spawn(async move {
+        let Ok(ag) = agent.try_lock() else {
+            ui.emit_above(&format!(
+                "{} Cannot compact while a turn is running: interrupt it (send a message or press Escape), then run /compact",
+                "✖".red().bold()
+            ));
+            return;
+        };
+
+        match ag.compact_current_session().await {
+            Ok(notice) => {
+                let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
+                ui.update_status(context_used, context_max);
+                if let Some(ref summary) = notice.summary {
+                    if !ui.is_tui_mode() {
+                        ui.emit_above(summary);
+                    }
                 }
             }
-            Ok(Some(notice))
+            Err(e) => {
+                ui.emit_above(&format!(
+                    "{} Failed to compact session: {}",
+                    "✖".red().bold(),
+                    e
+                ));
+            }
         }
-        Err(e) => {
-            ui.emit_above(&format!(
-                "{} Failed to compact session: {}",
-                "✖".red().bold(),
-                e
-            ));
-            Err(e)
-        }
-    }
+    });
+
+    Ok(())
 }
 
 /// `/auto-compact`: open the setup box — the threshold, then the turns — and turn the feature on.

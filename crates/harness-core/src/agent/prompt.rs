@@ -203,7 +203,7 @@ where
         if let Some(ref root) = self.config.workspace_root {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
             format!(
-                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root. Changing directory with cd in terminal does not persist to native tools or across turns.",
+                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root. Changing directory with cd in terminal does not persist to native tools or across turns; specify workdir on terminal calls when running commands in subdirectories.",
                 root.display(),
                 cwd.display(),
                 std::env::consts::OS,

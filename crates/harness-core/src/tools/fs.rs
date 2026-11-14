@@ -87,6 +87,97 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
     Sandbox::workspace(workspace_root.to_path_buf()).resolve(user_path)
 }
 
+/// Resolves a user-supplied path relative to `workspace_root` and refuses anything outside it.
+/// If not found directly, checks if it exists relative to the current working directory or under
+/// subcrates, provided the target is within the sandbox boundaries.
+pub(crate) fn resolve_existing_path(
+    sandbox: &Sandbox,
+    workspace_root: &Path,
+    user_path: &str,
+) -> Result<PathBuf, String> {
+    let resolved = sandbox.resolve(user_path)?;
+    if resolved.exists() {
+        return Ok(resolved);
+    }
+
+    let clean = user_path.trim().trim_start_matches("./");
+
+    // 1. Try relative to process current_dir if allowed by sandbox
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_candidate = cwd.join(clean);
+        if cwd_candidate.exists() && sandbox.allows(&cwd_candidate) {
+            return Ok(cwd_candidate);
+        }
+        let cwd_crates = cwd.join("crates").join(clean);
+        if cwd_crates.exists() && sandbox.allows(&cwd_crates) {
+            return Ok(cwd_crates);
+        }
+    }
+
+    // 2. Try workspace_root/crates/...
+    let crates_alt = workspace_root.join("crates").join(clean);
+    if crates_alt.exists() && sandbox.allows(&crates_alt) {
+        return Ok(crates_alt);
+    }
+
+    Ok(resolved)
+}
+
+/// Look for an exact unique match of `old_str` in `content` ignoring trailing whitespace on each line.
+/// Returns byte range `(start, end)` in `content` if and only if exactly one match is found.
+fn find_unique_line_trimmed_match(content: &str, old_str: &str) -> Option<(usize, usize)> {
+    let old_lines: Vec<&str> = old_str.lines().map(str::trim_end).collect();
+    if old_lines.is_empty() {
+        return None;
+    }
+
+    let mut matches = Vec::new();
+    let mut content_lines: Vec<(usize, usize, &str)> = Vec::new();
+    let mut offset = 0;
+    for line in content.split('\n') {
+        let start = offset;
+        let end = offset + line.len();
+        let trimmed = line.trim_end_matches('\r').trim_end();
+        content_lines.push((start, end, trimmed));
+        offset = end + 1;
+    }
+
+    if content_lines.len() < old_lines.len() {
+        return None;
+    }
+
+    for i in 0..=content_lines.len() - old_lines.len() {
+        let mut matched = true;
+        for j in 0..old_lines.len() {
+            if content_lines[i + j].2 != old_lines[j] {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            let byte_start = content_lines[i].0;
+            let mut byte_end = content_lines[i + old_lines.len() - 1].1;
+            if old_str.ends_with('\n') {
+                if byte_end < content.len() && content.as_bytes()[byte_end] == b'\n' {
+                    byte_end += 1;
+                } else if byte_end + 1 < content.len()
+                    && content.as_bytes()[byte_end] == b'\r'
+                    && content.as_bytes()[byte_end + 1] == b'\n'
+                {
+                    byte_end += 2;
+                }
+            }
+            matches.push((byte_start, byte_end));
+        }
+    }
+
+    if matches.len() == 1 {
+        Some(matches[0])
+    } else {
+        None
+    }
+}
+
 /// The first `max_chars` bytes of `s`, never splitting a UTF-8 character.
 ///
 /// `String::truncate` panics when `max_chars` lands in the middle of a multi-byte character,
@@ -203,28 +294,20 @@ impl Tool for ReadFileTool {
             }
         };
 
-        let mut resolved = match self.sandbox().resolve(path_str) {
+        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            let crates_alt = self
-                .workspace_root
-                .join("crates")
-                .join(path_str.trim_start_matches("./"));
-            if crates_alt.exists() && crates_alt.is_file() {
-                resolved = crates_alt;
-            } else {
-                return Ok(ToolResult::error(
-                    call_id,
-                    format!(
-                        "File not found: '{}' (relative to workspace root '{}')",
-                        path_str,
-                        self.workspace_root.display()
-                    ),
-                ));
-            }
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "File not found: '{}' (relative to workspace root '{}')",
+                    path_str,
+                    self.workspace_root.display()
+                ),
+            ));
         }
 
         let content = match tokio::fs::read_to_string(&resolved).await {
@@ -376,7 +459,7 @@ impl Tool for WriteFileTool {
             }
         };
 
-        let resolved = match self.sandbox().resolve(path_str) {
+        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -458,7 +541,7 @@ impl Tool for PatchTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Path to file to patch" },
-                "old_string": { "type": "string", "description": "Exact text to find and replace" },
+                "old_string": { "type": "string", "description": "Exact text to find and replace. Include 2-4 lines of unique surrounding context to guarantee an unambiguous match." },
                 "new_string": { "type": "string", "description": "Changed replacement text" },
                 "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)" }
             },
@@ -479,22 +562,49 @@ impl Tool for PatchTool {
             .and_then(|r| r.as_bool())
             .unwrap_or(false);
 
-        let mut resolved = self.sandbox().resolve(path).ok()?;
-        if !resolved.exists() {
-            let crates_alt = self
-                .workspace_root
-                .join("crates")
-                .join(path.trim_start_matches("./"));
-            if crates_alt.exists() && crates_alt.is_file() {
-                resolved = crates_alt;
-            }
-        }
+        let resolved = resolve_existing_path(&self.sandbox(), &self.workspace_root, path).ok()?;
         let current = std::fs::read_to_string(&resolved).ok()?;
 
-        let patched = if replace_all {
-            current.replace(old_str, new_str)
+        let mut target_old = old_str.to_string();
+        let mut target_new = new_str.to_string();
+        let mut count = current.matches(&target_old).count();
+
+        if count == 0 {
+            if current.contains("\r\n") && !target_old.contains("\r\n") {
+                let crlf_old = target_old.replace('\n', "\r\n");
+                let crlf_count = current.matches(&crlf_old).count();
+                if crlf_count > 0 {
+                    target_old = crlf_old;
+                    target_new = target_new.replace('\n', "\r\n");
+                    count = crlf_count;
+                }
+            } else if !current.contains("\r\n") && target_old.contains("\r\n") {
+                let lf_old = target_old.replace("\r\n", "\n");
+                let lf_count = current.matches(&lf_old).count();
+                if lf_count > 0 {
+                    target_old = lf_old;
+                    target_new = target_new.replace("\r\n", "\n");
+                    count = lf_count;
+                }
+            }
+        }
+
+        let line_match_range = if count == 0 {
+            find_unique_line_trimmed_match(&current, &target_old)
         } else {
-            current.replacen(old_str, new_str, 1)
+            None
+        };
+
+        let patched = if let Some((start, end)) = line_match_range {
+            let mut s = String::with_capacity(current.len() + target_new.len());
+            s.push_str(&current[..start]);
+            s.push_str(&target_new);
+            s.push_str(&current[end..]);
+            s
+        } else if replace_all {
+            current.replace(&target_old, &target_new)
+        } else {
+            current.replacen(&target_old, &target_new, 1)
         };
 
         let diff = unified_diff(&current, &patched, path);
@@ -542,28 +652,20 @@ impl Tool for PatchTool {
             .and_then(|r| r.as_bool())
             .unwrap_or(false);
 
-        let mut resolved = match self.sandbox().resolve(path_str) {
+        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            let crates_alt = self
-                .workspace_root
-                .join("crates")
-                .join(path_str.trim_start_matches("./"));
-            if crates_alt.exists() && crates_alt.is_file() {
-                resolved = crates_alt;
-            } else {
-                return Ok(ToolResult::error(
-                    call_id,
-                    format!(
-                        "File not found: '{}' (relative to workspace root '{}')",
-                        path_str,
-                        self.workspace_root.display()
-                    ),
-                ));
-            }
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "File not found: '{}' (relative to workspace root '{}')",
+                    path_str,
+                    self.workspace_root.display()
+                ),
+            ));
         }
 
         let current = match tokio::fs::read_to_string(&resolved).await {
@@ -576,8 +678,37 @@ impl Tool for PatchTool {
             }
         };
 
-        let count = current.matches(old_str).count();
+        let mut target_old = old_str.to_string();
+        let mut target_new = new_str.to_string();
+        let mut count = current.matches(&target_old).count();
+
         if count == 0 {
+            if current.contains("\r\n") && !target_old.contains("\r\n") {
+                let crlf_old = target_old.replace('\n', "\r\n");
+                let crlf_count = current.matches(&crlf_old).count();
+                if crlf_count > 0 {
+                    target_old = crlf_old;
+                    target_new = target_new.replace('\n', "\r\n");
+                    count = crlf_count;
+                }
+            } else if !current.contains("\r\n") && target_old.contains("\r\n") {
+                let lf_old = target_old.replace("\r\n", "\n");
+                let lf_count = current.matches(&lf_old).count();
+                if lf_count > 0 {
+                    target_old = lf_old;
+                    target_new = target_new.replace("\r\n", "\n");
+                    count = lf_count;
+                }
+            }
+        }
+
+        let line_match_range = if count == 0 {
+            find_unique_line_trimmed_match(&current, &target_old)
+        } else {
+            None
+        };
+
+        if count == 0 && line_match_range.is_none() {
             return Ok(ToolResult::error(
                 call_id,
                 format!("old_string not found in '{}'", path_str),
@@ -593,10 +724,16 @@ impl Tool for PatchTool {
             ));
         }
 
-        let patched = if replace_all {
-            current.replace(old_str, new_str)
+        let patched = if let Some((start, end)) = line_match_range {
+            let mut s = String::with_capacity(current.len() + target_new.len());
+            s.push_str(&current[..start]);
+            s.push_str(&target_new);
+            s.push_str(&current[end..]);
+            s
+        } else if replace_all {
+            current.replace(&target_old, &target_new)
         } else {
-            current.replacen(old_str, new_str, 1)
+            current.replacen(&target_old, &target_new, 1)
         };
 
         if let Err(refusal) = self
@@ -812,28 +949,20 @@ impl Tool for SearchFilesTool {
             .and_then(|m| m.as_str())
             .unwrap_or("content");
 
-        let mut resolved = match self.sandbox().resolve(search_path_str) {
+        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, search_path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved.exists() {
-            let crates_alt = self
-                .workspace_root
-                .join("crates")
-                .join(search_path_str.trim_start_matches("./"));
-            if crates_alt.exists() {
-                resolved = crates_alt;
-            } else {
-                return Ok(ToolResult::error(
-                    call_id,
-                    format!(
-                        "Path not found: '{}' (relative to workspace root '{}')",
-                        search_path_str,
-                        self.workspace_root.display()
-                    ),
-                ));
-            }
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Path not found: '{}' (relative to workspace root '{}')",
+                    search_path_str,
+                    self.workspace_root.display()
+                ),
+            ));
         }
 
         // The walk and the file reads are blocking syscalls. Running them on the async
@@ -1157,7 +1286,7 @@ impl Tool for ListFilesTool {
             .map(|depth| (depth as usize).clamp(1, MAX_LIST_DEPTH))
             .unwrap_or(DEFAULT_LIST_DEPTH);
 
-        let resolved = match self.sandbox().resolve(path_str) {
+        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };

@@ -65,6 +65,7 @@ pub struct ChatUi {
     pub(super) tui_mode: Arc<AtomicBool>,
     pub(super) tui_notify: Arc<tokio::sync::Notify>,
     pub(super) tui_notices: Arc<Mutex<Vec<String>>>,
+    pub(super) compaction_completed: Arc<AtomicBool>,
     pub is_attended: bool,
 }
 
@@ -147,6 +148,7 @@ impl ChatUi {
             tui_mode: Arc::new(AtomicBool::new(false)),
             tui_notify,
             tui_notices: Arc::new(Mutex::new(Vec::new())),
+            compaction_completed: Arc::new(AtomicBool::new(false)),
             is_attended,
         }
     }

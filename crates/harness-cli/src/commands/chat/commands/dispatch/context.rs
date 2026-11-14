@@ -26,28 +26,14 @@ impl<'a> SlashContext<'a> {
     }
 
     pub(super) async fn cmd_compact(&mut self) -> Result<SlashOutcome, HarnessError> {
-        let start = std::time::Instant::now();
-        if let Ok(Some(notice)) = handle_compact_command(
+        handle_compact_command(
             self.ui,
             self.config,
             self.agent,
             self.current_provider,
             self.current_model,
         )
-        .await
-        {
-            let elapsed = start.elapsed();
-            if let Some(summary) = notice.summary {
-                self.turns.push(TurnRecord {
-                    user_query: "Compaction".to_string(),
-                    reasoning: None,
-                    tools: Vec::new(),
-                    tool_items: Vec::new(),
-                    duration: elapsed,
-                    reply: summary,
-                });
-            }
-        }
+        .await?;
         Ok(SlashOutcome::Continue)
     }
 

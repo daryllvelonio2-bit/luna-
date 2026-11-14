@@ -198,11 +198,17 @@ impl ChatUi {
             live.compaction.take().is_some()
         };
         if had {
+            self.compaction_completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             // One final draw without the row, so the sweep does not stay frozen on screen while the
             // transcript below it is rewritten.
             self.animate_tick();
             self.notify_tui();
         }
+    }
+    pub fn take_compaction_completed(&self) -> bool {
+        self.compaction_completed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
     #[allow(dead_code)]
     pub fn is_compacting(&self) -> bool {
