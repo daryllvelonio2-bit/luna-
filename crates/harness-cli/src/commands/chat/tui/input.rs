@@ -253,6 +253,23 @@ async fn handle_mouse(
         MouseEventKind::Up(MouseButton::Left) => {
             finish_left_up(env, st).await;
         }
+        MouseEventKind::Down(MouseButton::Middle) => {
+            let (cx, cy, cw, ch) = st.composer_input_area;
+            if cw > 0
+                && ch > 0
+                && mouse.column >= cx
+                && mouse.column < cx + cw
+                && mouse.row >= cy
+                && mouse.row < cy + ch
+            {
+                if let Some(text) = crate::commands::clipboard_image::read_primary_text()
+                    .or_else(crate::commands::clipboard_image::read_clipboard_text)
+                {
+                    st.composer.paste_text(&text);
+                    sync_slash_popup(env, st);
+                }
+            }
+        }
         _ => {}
     }
     Ok(Flow::Continue)
@@ -500,15 +517,27 @@ fn selection_text(st: &TuiState, selection: TextSelection) -> String {
     let mut first = true;
 
     for line_idx in start_line..=end_line {
-        let line_text: Option<String> = if line_idx < st.settled_cache.lines.len() {
-            Some(super::render::line_plain_text(
-                &st.settled_cache.lines[line_idx],
-            ))
-        } else if let Some(vis_idx) = line_idx.checked_sub(st.transcript_start) {
-            st.transcript_visible_text.get(vis_idx).cloned()
-        } else {
-            None
-        };
+        let line_text: Option<String> =
+            if let Some(vis_idx) = line_idx.checked_sub(st.transcript_start) {
+                st.transcript_visible_text
+                    .get(vis_idx)
+                    .cloned()
+                    .or_else(|| {
+                        if line_idx < st.settled_cache.lines.len() {
+                            Some(super::render::line_plain_text(
+                                &st.settled_cache.lines[line_idx],
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+            } else if line_idx < st.settled_cache.lines.len() {
+                Some(super::render::line_plain_text(
+                    &st.settled_cache.lines[line_idx],
+                ))
+            } else {
+                None
+            };
         let Some(line) = line_text else {
             continue;
         };
@@ -922,25 +951,15 @@ async fn handle_key(
 }
 
 fn handle_ctrl_v(env: &Env<'_>, st: &mut TuiState) {
-    match crate::commands::clipboard_image::read_clipboard_image() {
-        Ok(Some(img)) => {
-            st.composer
-                .attach_image(img.width, img.height, img.data_url());
-            sync_slash_popup(env, st);
-            return;
-        }
-        Err(e) => {
-            env.ui
-                .set_transient_error(Some(format!("Clipboard image paste failed: {e}")));
-            return;
-        }
-        Ok(None) => {}
+    if let Ok(Some(img)) = crate::commands::clipboard_image::read_clipboard_image() {
+        st.composer
+            .attach_image(img.width, img.height, img.data_url());
+        sync_slash_popup(env, st);
+        return;
     }
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if let Ok(text) = cb.get_text() {
-            st.composer.paste_text(&text);
-            sync_slash_popup(env, st);
-        }
+    if let Some(text) = crate::commands::clipboard_image::read_clipboard_text() {
+        st.composer.paste_text(&text);
+        sync_slash_popup(env, st);
     }
 }
 
@@ -950,6 +969,13 @@ async fn handle_modal_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     key: KeyEvent,
 ) -> Result<Flow, HarnessError> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+        if let Some(text) = crate::commands::clipboard_image::read_clipboard_text() {
+            handle_paste(env, st, &text);
+        }
+        return Ok(Flow::Continue);
+    }
+
     let modal = std::mem::replace(&mut st.modal, ActiveModal::None);
     match modal {
         ActiveModal::None => {}

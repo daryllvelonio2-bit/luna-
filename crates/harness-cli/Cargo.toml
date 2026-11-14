@@ -10,7 +10,7 @@ name = "luna"
 path = "src/main.rs"
 
 [dependencies]
-arboard = "3.4"
+arboard = { version = "3.4", features = ["wayland-data-control"] }
 base64 = "0.22"
 image = { workspace = true }
 flate2 = "1"

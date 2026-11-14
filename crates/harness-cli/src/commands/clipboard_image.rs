@@ -27,11 +27,116 @@ impl ClipboardImage {
 
 /// Write plain text to the system clipboard (used by transcript mouse selection).
 pub fn write_clipboard_text(text: &str) -> Result<(), String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
-    clipboard
-        .set_text(text.to_string())
+    // 1. Wayland clipboard support via `wl-copy`.
+    // When available, wl-copy forks and stays resident in the Wayland compositor to serve
+    // paste requests reliably across applications.
+    if write_via_command("wl-copy", &[], text) {
+        // Also copy to PRIMARY selection for middle-click paste.
+        write_via_command("wl-copy", &["--primary"], text);
+        return Ok(());
+    }
+
+    // 2. X11 clipboard support via `xclip` or `xsel`.
+    if write_via_command("xclip", &["-selection", "clipboard"], text) {
+        write_via_command("xclip", &["-selection", "primary"], text);
+        return Ok(());
+    } else if write_via_command("xsel", &["--clipboard", "--input"], text) {
+        write_via_command("xsel", &["--primary", "--input"], text);
+        return Ok(());
+    }
+
+    // 3. Native arboard clipboard (works natively on macOS, Windows, and fallback X11/Wayland).
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+    cb.set_text(text.to_string())
         .map_err(|e| format!("clipboard write failed: {e}"))
+}
+
+fn write_via_command(program: &str, args: &[&str], text: &str) -> bool {
+    use std::io::Write;
+    let mut child = match std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    match child.wait() {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
+}
+
+/// Read plain text from the system clipboard.
+pub fn read_clipboard_text() -> Option<String> {
+    // 1. Wayland `wl-paste`
+    if let Some(bytes) = command_bytes("wl-paste", &["--no-newline"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    // 2. X11 `xclip`
+    if let Some(bytes) = command_bytes("xclip", &["-selection", "clipboard", "-o"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    // 3. X11 `xsel`
+    if let Some(bytes) = command_bytes("xsel", &["--clipboard", "--output"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    // 4. arboard
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(text) = cb.get_text() {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+/// Read text from the primary selection (Linux mouse selection / middle-click paste).
+pub fn read_primary_text() -> Option<String> {
+    if let Some(bytes) = command_bytes("wl-paste", &["--primary", "--no-newline"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    if let Some(bytes) = command_bytes("xclip", &["-selection", "primary", "-o"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    if let Some(bytes) = command_bytes("xsel", &["--primary", "--output"]) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
 
 /// Read an image (screenshot) from the system clipboard, if one is present.
@@ -44,19 +149,20 @@ pub fn write_clipboard_text(text: &str) -> Result<(), String> {
 /// arboard read, then falls back to pasting the PNG directly via
 /// `wl-paste` (Wayland) and `xclip` (X11).
 pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+    // If fallback command (e.g. wl-paste --type image/png) has an image right now, take it immediately.
+    if let Some(png) = fallback_image_bytes() {
+        return clipboard_image_from_png(png).map(Some);
+    }
+
     const ATTEMPTS: usize = 3;
     const RETRY_DELAY: Duration = Duration::from_millis(150);
 
-    // arboard's own view. Each attempt builds a fresh `Clipboard` so a
-    // transient Wayland init failure gets the Wayland backend again instead
-    // of being pinned to the X11 fallback for the lifetime of one instance.
     let mut hard_err: Option<String> = None;
     for attempt in 0..ATTEMPTS {
         match try_arboard() {
             Ok(Some(img)) => return Ok(Some(img)),
-            // Clipboard reachable, just no image in it (yet). A later attempt
-            // or the command fallbacks may still find one.
-            Ok(None) => hard_err = None,
+            // Clipboard reachable, just no image in it (holds text or empty).
+            Ok(None) => return Ok(None),
             Err(e) => hard_err = Some(e),
         }
         if attempt + 1 < ATTEMPTS {
@@ -68,8 +174,6 @@ pub fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
         return clipboard_image_from_png(png).map(Some);
     }
 
-    // A hard error (e.g. no display/clipboard service at all) is more useful
-    // to surface than a bare "no image"; a steady no-image clipboard is None.
     match hard_err {
         Some(e) => Err(e),
         None => Ok(None),
@@ -418,5 +522,14 @@ mod tests {
             png.len(),
             "file round-trip"
         );
+    }
+
+    #[test]
+    fn write_and_read_clipboard_text_round_trip() {
+        let test_str = "luna clipboard roundtrip test";
+        let res = write_clipboard_text(test_str);
+        let read = read_clipboard_text();
+        assert!(res.is_ok(), "write error: {res:?}");
+        assert_eq!(read.as_deref(), Some(test_str));
     }
 }
