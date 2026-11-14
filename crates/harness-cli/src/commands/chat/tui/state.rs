@@ -905,7 +905,7 @@ pub struct BackgroundSession {
     pub turns: Vec<TurnRecord>,
     pub turn_meta: Vec<TurnMeta>,
     pub settled_cache: SettledTranscriptCache,
-    pub system_notices: Vec<String>,
+    pub system_notices: Vec<SystemNotice>,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
     pub expanded_live_thinking: HashSet<usize>,
@@ -922,6 +922,63 @@ pub struct BackgroundSession {
     pub idle_pass: IdleMemoryPass,
     pub pending_images: Arc<Mutex<Vec<String>>>,
     pub pending_job_turn: Option<(String, std::time::Instant)>,
+}
+
+/// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemNotice {
+    pub text: String,
+    pub created_at: std::time::Instant,
+}
+
+impl SystemNotice {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    pub fn is_stale(&self, now: std::time::Instant, queue_empty: bool, turn_active: bool) -> bool {
+        if super::actions::is_transient_queue_notice(&self.text) {
+            queue_empty && !turn_active
+        } else {
+            now.duration_since(self.created_at).as_secs() >= 5
+        }
+    }
+}
+
+impl From<String> for SystemNotice {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for SystemNotice {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
+impl std::ops::Deref for SystemNotice {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+impl BackgroundSession {
+    pub fn prune_stale_notices(&mut self) {
+        let now = std::time::Instant::now();
+        let queue_empty = self.queue.is_empty();
+        let turn_active = self.active_turn.is_some();
+        self.system_notices
+            .retain(|n| !n.is_stale(now, queue_empty, turn_active));
+        if self.system_notices.len() > 20 {
+            let excess = self.system_notices.len() - 20;
+            self.system_notices.drain(..excess);
+        }
+    }
 }
 
 /// Per-turn metadata stored alongside `TurnRecord` for rendering OpenCode-style footers
@@ -1234,7 +1291,7 @@ pub struct SlashPopupState {
 pub struct TuiState {
     pub turns: Vec<TurnRecord>,
     pub turn_meta: Vec<TurnMeta>,
-    pub system_notices: Vec<String>,
+    pub system_notices: Vec<SystemNotice>,
     pub process_expanded: bool,
     /// Collapse a thinking block as soon as the next tool call starts (mirrors
     /// `display.auto_hide_thinking`; the settings modal keeps it in sync).
@@ -1319,4 +1376,18 @@ pub struct TuiState {
     pub template_agent: Arc<ChatAgent>,
     /// Other sessions kept live in memory (including any running background turns).
     pub background_sessions: HashMap<String, BackgroundSession>,
+}
+
+impl TuiState {
+    pub fn prune_stale_notices(&mut self) {
+        let now = std::time::Instant::now();
+        let queue_empty = self.queue.is_empty();
+        let turn_active = self.active_turn.is_some();
+        self.system_notices
+            .retain(|n| !n.is_stale(now, queue_empty, turn_active));
+        if self.system_notices.len() > 20 {
+            let excess = self.system_notices.len() - 20;
+            self.system_notices.drain(..excess);
+        }
+    }
 }

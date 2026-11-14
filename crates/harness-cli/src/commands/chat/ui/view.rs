@@ -15,7 +15,7 @@ pub struct ChatUi {
     pub(super) status: Arc<Mutex<Option<ChatStatus>>>,
     pub(super) live: Arc<Mutex<LiveRegion>>,
     pub(super) last_block: Arc<Mutex<OutputBlockKind>>,
-    pub(super) transient_error: Arc<Mutex<Option<String>>>,
+    pub(super) transient_error: Arc<Mutex<Option<(String, std::time::Instant)>>>,
     /// The todo panel's source: the session's list, as it stands.
     ///
     /// The list is kept rather than the rows it was drawn into, so the panel is
@@ -231,14 +231,20 @@ impl ChatUi {
         *self
             .transient_error
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = err;
+            .unwrap_or_else(|e| e.into_inner()) = err.map(|m| (m, std::time::Instant::now()));
         self.notify_tui();
     }
     pub fn transient_error(&self) -> Option<String> {
-        self.transient_error
+        let mut guard = self
+            .transient_error
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((_, at)) = *guard {
+            if at.elapsed().as_secs() >= 8 {
+                *guard = None;
+            }
+        }
+        guard.as_ref().map(|(msg, _)| msg.clone())
     }
     pub fn clear_transient_error(&self) {
         *self

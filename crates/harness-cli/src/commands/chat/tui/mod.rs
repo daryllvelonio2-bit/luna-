@@ -209,8 +209,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
-                    st.system_notices
-                        .retain(|n| !actions::is_transient_queue_notice(n));
+                    st.prune_stale_notices();
                 }
             }
 
@@ -226,6 +225,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || snap.delegate_count > 0
                 || !st.queue.is_empty() => {
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
+                st.prune_stale_notices();
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
                     && !st.queue.is_empty()
@@ -244,12 +244,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
-                    st.system_notices
-                        .retain(|n| !actions::is_transient_queue_notice(n));
+                    st.prune_stale_notices();
                 }
             }
 
             _ = idle_tick.tick() => {
+                st.prune_stale_notices();
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
                     && !st.queue.is_empty()
@@ -268,14 +268,10 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
-                    st.system_notices
-                        .retain(|n| !actions::is_transient_queue_notice(n));
-                }
-                if st.queue.is_empty() {
-                    st.system_notices
-                        .retain(|n| !actions::is_transient_queue_notice(n));
+                    st.prune_stale_notices();
                 }
                 for slot in st.background_sessions.values_mut() {
+                    slot.prune_stale_notices();
                     if slot.active_turn.is_none()
                         && !slot.compacting.load(Ordering::SeqCst)
                         && !slot.queue.is_empty()
@@ -294,12 +290,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             &mut slot.turn_start,
                             &mut slot.active_turn,
                         );
-                        slot.system_notices
-                            .retain(|n| !actions::is_transient_queue_notice(n));
-                    }
-                    if slot.queue.is_empty() {
-                        slot.system_notices
-                            .retain(|n| !actions::is_transient_queue_notice(n));
+                        slot.prune_stale_notices();
                     }
                 }
 
@@ -404,12 +395,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             maybe_job = env.job_rx.recv() => {
                 if let Some(comp) = maybe_job {
-                    st.system_notices.push(format!(
+                    st.system_notices.push(state::SystemNotice::new(format!(
                         "Job {} ({}): {}",
                         comp.id,
                         comp.status,
                         comp.command
-                    ));
+                    )));
                     let msg = harness_core::Message::system(format_job_system_message(&comp));
                     if let Err(e) = env.store.append(env.session_id, &msg, false).await {
                         tracing::warn!("failed to record background job notice: {e}");

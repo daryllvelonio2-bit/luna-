@@ -33,7 +33,8 @@ use super::super::ui::ChatUi;
 use super::markdown::strip_ansi;
 use super::state::{
     ActiveModal, AgentMode, BackgroundSession, InputAction, LiveThinkingView, ModelPickerItem,
-    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, TuiState, TurnMeta,
+    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, SystemNotice,
+    TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
 use crate::commands::context_window::context_window;
@@ -209,6 +210,7 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.live_content_cache = super::state::LiveContentCache::default();
     st.live_reasoning_cache = super::state::LiveReasoningCache::default();
     st.system_notices = slot.system_notices;
+    st.prune_stale_notices();
     st.expanded_thinking = slot.expanded_thinking;
     st.expanded_tools = slot.expanded_tools;
     st.expanded_live_thinking = slot.expanded_live_thinking;
@@ -991,9 +993,9 @@ fn apply_worker_target(
     let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
     harness_core::config::set_worker_in_file(&layers, name, &profile)?;
     env.config.workers.insert(name.to_string(), profile);
-    st.system_notices.push(format!(
+    st.system_notices.push(SystemNotice::new(format!(
         "✔ Worker /{name} → {model} ({provider}) · invoke with /{name} <task>"
-    ));
+    )));
     Ok(())
 }
 
@@ -2012,12 +2014,14 @@ pub async fn submit_composer(
     if st.active_turn.is_some() {
         match env.interrupt_handle.interrupt(&submitted.expanded_text) {
             harness_core::InterruptOutcome::Streaming => {
-                st.system_notices
-                    .push("↳ Redirecting — stopping this reply to take your message".to_string());
+                st.system_notices.push(SystemNotice::new(
+                    "↳ Redirecting — stopping this reply to take your message",
+                ));
             }
             harness_core::InterruptOutcome::Queued => {
-                st.system_notices
-                    .push("↳ Held until the running tool finishes, then sent".to_string());
+                st.system_notices.push(SystemNotice::new(
+                    "↳ Held until the running tool finishes, then sent",
+                ));
             }
             harness_core::InterruptOutcome::Idle => {
                 st.queue.push_back(submitted.expanded_text);
@@ -2031,7 +2035,7 @@ pub async fn submit_composer(
         .then_some(submitted.display_text.as_str());
     env.ui.clear_transient_error();
     st.scroll_from_bottom = 0;
-    st.system_notices.retain(|n| !is_transient_queue_notice(n));
+    st.system_notices.clear();
     launch_turn(
         &submitted.expanded_text,
         display_opt,
@@ -2412,7 +2416,7 @@ pub async fn run_slash_command(
                 &mut st.turn_start,
                 &mut st.active_turn,
             );
-            st.system_notices.retain(|n| !is_transient_queue_notice(n));
+            st.prune_stale_notices();
         }
         return Ok(Flow::Continue);
     }
@@ -2714,14 +2718,15 @@ pub async fn handle_turn_end(
             &mut st.turn_start,
             &mut st.active_turn,
         );
-        st.system_notices.retain(|n| !is_transient_queue_notice(n));
+        st.prune_stale_notices();
     }
 
     refresh_tabs(env, st).await;
     drain_tui_notices(env, st);
-    if st.queue.is_empty() {
-        st.system_notices.retain(|n| !is_transient_queue_notice(n));
-    }
+    st.prune_stale_notices();
+    st.live_content_cache = Default::default();
+    st.live_reasoning_cache = Default::default();
+    st.current_query.clear();
     st.scroll_from_bottom = 0;
 }
 
@@ -2896,27 +2901,27 @@ pub async fn handle_background_turn_end(
         if let Some(ref mut goal) = slot.active_goal {
             match harness_core::GoalRunState::evaluate_reply(&reply) {
                 harness_core::GoalVerdict::Complete(_) => {
-                    slot.system_notices.push(format!(
+                    slot.system_notices.push(SystemNotice::new(format!(
                         "✔ Goal achieved in {} iteration(s).",
                         goal.iteration
-                    ));
+                    )));
                     slot.active_goal = None;
                     slot.ui.set_goal_status(None);
                 }
                 harness_core::GoalVerdict::Blocked(reason) => {
-                    slot.system_notices.push(format!(
+                    slot.system_notices.push(SystemNotice::new(format!(
                         "✖ Goal blocked ({}/{}): {reason}",
                         goal.iteration, goal.max_iterations
-                    ));
+                    )));
                     slot.active_goal = None;
                     slot.ui.set_goal_status(None);
                 }
                 harness_core::GoalVerdict::Continue => {
                     if !goal.advance() {
-                        slot.system_notices.push(format!(
+                        slot.system_notices.push(SystemNotice::new(format!(
                             "■ Goal stopped: max iterations ({}) reached",
                             goal.max_iterations
-                        ));
+                        )));
                         slot.active_goal = None;
                         slot.ui.set_goal_status(None);
                     } else if let Ok(prompt) = goal.prompt_for_current_iteration() {
@@ -2959,15 +2964,10 @@ pub async fn handle_background_turn_end(
             &mut slot.turn_start,
             &mut slot.active_turn,
         );
-        slot.system_notices
-            .retain(|n| !is_transient_queue_notice(n));
+        slot.prune_stale_notices();
     }
 
-    if slot.queue.is_empty() {
-        slot.system_notices
-            .retain(|n| !is_transient_queue_notice(n));
-    }
-
+    slot.prune_stale_notices();
     refresh_tabs(env, st).await;
 }
 
@@ -2977,27 +2977,27 @@ fn advance_goal_tui(env: &Env<'_>, st: &mut TuiState, reply: &str) {
     };
     match harness_core::GoalRunState::evaluate_reply(reply) {
         harness_core::GoalVerdict::Complete(_) => {
-            st.system_notices.push(format!(
+            st.system_notices.push(SystemNotice::new(format!(
                 "✔ Goal achieved in {} iteration(s).",
                 goal.iteration
-            ));
+            )));
             st.active_goal = None;
             env.ui.set_goal_status(None);
         }
         harness_core::GoalVerdict::Blocked(reason) => {
-            st.system_notices.push(format!(
+            st.system_notices.push(SystemNotice::new(format!(
                 "✖ Goal blocked ({}/{}): {reason}",
                 goal.iteration, goal.max_iterations
-            ));
+            )));
             st.active_goal = None;
             env.ui.set_goal_status(None);
         }
         harness_core::GoalVerdict::Continue => {
             if !goal.advance() {
-                st.system_notices.push(format!(
+                st.system_notices.push(SystemNotice::new(format!(
                     "■ Goal stopped: max iterations ({}) reached",
                     goal.max_iterations
-                ));
+                )));
                 st.active_goal = None;
                 env.ui.set_goal_status(None);
             } else if let Ok(prompt) = goal.prompt_for_current_iteration() {
@@ -3034,16 +3034,10 @@ pub fn drain_tui_notices(env: &Env<'_>, st: &mut TuiState) {
             if is_transient_queue_notice(&n) && st.queue.is_empty() && st.active_turn.is_none() {
                 continue;
             }
-            st.system_notices.push(n);
+            st.system_notices.push(SystemNotice::new(n));
         }
     }
-    if st.queue.is_empty() && st.active_turn.is_none() {
-        st.system_notices.retain(|n| !is_transient_queue_notice(n));
-    }
-    if st.system_notices.len() > 20 {
-        let excess = st.system_notices.len() - 20;
-        st.system_notices.drain(..excess);
-    }
+    st.prune_stale_notices();
 }
 
 pub fn sync_turn_meta_len(env: &Env<'_>, st: &mut TuiState) {
@@ -3132,5 +3126,18 @@ mod tests {
         assert!(!is_transient_queue_notice(
             "Build · Nemotron 3.5 Super VL 120B A12b · 0.0s"
         ));
+    }
+
+    #[test]
+    fn compaction_notice_expires_after_ttl() {
+        use super::SystemNotice;
+        let notice = SystemNotice {
+            text: "✓ Compacted 1 turns (10 messages) into 1 summary".to_string(),
+            created_at: std::time::Instant::now() - std::time::Duration::from_secs(6),
+        };
+        assert!(notice.is_stale(std::time::Instant::now(), true, false));
+
+        let fresh_notice = SystemNotice::new("✓ Compacted 1 turns (10 messages) into 1 summary");
+        assert!(!fresh_notice.is_stale(std::time::Instant::now(), true, false));
     }
 }

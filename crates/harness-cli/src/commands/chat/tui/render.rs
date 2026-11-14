@@ -106,9 +106,17 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         height: area.height.saturating_sub(1),
     };
 
+    let now = std::time::Instant::now();
+    let queue_empty = st.queue.is_empty();
+    let turn_active = st.active_turn.is_some();
+    let has_visible_notices = st
+        .system_notices
+        .iter()
+        .any(|n| !n.is_stale(now, queue_empty, turn_active));
+
     let show_landing = st.turns.is_empty()
         && st.active_turn.is_none()
-        && st.system_notices.is_empty()
+        && !has_visible_notices
         && snap.transient_error.is_none();
 
     // The pty mirror is an overlay in the transcript corner, so the conversation keeps the whole
@@ -1222,9 +1230,9 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
             )));
         }
     }
-    if snap.queue_depth > 0 {
+    if !st.queue.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("⏸ {} queued — will run next", snap.queue_depth),
+            format!("⏸ {} queued — will run next", st.queue.len()),
             Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
         )));
     }
@@ -1401,16 +1409,22 @@ fn build_active_and_notice_lines(
     Vec<Line<'static>>,
     Vec<(usize, TranscriptClickTarget)>,
 ) {
+    let now = std::time::Instant::now();
+    let queue_empty = st.queue.is_empty();
+    let turn_active = st.active_turn.is_some();
     let mut notice_lines: Vec<Line<'static>> = Vec::new();
     for notice in &st.system_notices {
-        for line in wrap_plain_text(&strip_ansi(notice), card_inner_w) {
+        if notice.is_stale(now, queue_empty, turn_active) {
+            continue;
+        }
+        for line in wrap_plain_text(&strip_ansi(&notice.text), card_inner_w) {
             notice_lines.push(Line::from(Span::styled(
                 format!("  {line}"),
                 Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
             )));
         }
     }
-    if !st.system_notices.is_empty() {
+    if !notice_lines.is_empty() {
         notice_lines.push(Line::default());
     }
 
