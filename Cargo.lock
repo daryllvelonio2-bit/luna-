@@ -1344,6 +1344,7 @@ dependencies = [
  "harness-telemetry",
  "harness-voice",
  "hmac",
+ "image",
  "indicatif",
  "libc",
  "pulldown-cmark",
@@ -1901,6 +1902,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

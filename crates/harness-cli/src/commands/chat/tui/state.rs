@@ -8,6 +8,7 @@ use harness_core::{
     ApprovalDecision, ApprovalRequest, HarnessError, InterruptHandle, ReasoningEffort,
     SessionRecord, TurnOutcome,
 };
+use ratatui::style::Color;
 use ratatui::text::Line;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +20,8 @@ use super::super::turn::InterruptNotice;
 use super::super::ui::ChatUi;
 use super::super::ChatAgent;
 use crate::commands::clarify::{ClarifyRequest, ClarifyResponse};
+
+use super::theme::BG_SURFACE;
 
 /// Agent execution mode toggled by `Shift+Tab` (shown in coral/accent on composer footer).
 /// Which model slot a provider → model picker is choosing for.
@@ -158,12 +161,107 @@ pub enum AttachmentKind {
     PastedText(String),
 }
 
+/// A half-block thumbnail decoded from a pasted image.
+///
+/// Each cell carries the colour of the pixel above it and the pixel below it, so the renderer can
+/// paint two image rows with one terminal row (`▀` with a foreground and background colour).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePreview {
+    pub width: u16,
+    pub height: u16,
+    /// Row-major `(top, bottom)` colours, `width * height` entries.
+    pub cells: Vec<(Color, Color)>,
+}
+
+impl ImagePreview {
+    pub fn cell(&self, x: u16, y: u16) -> Option<(Color, Color)> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        self.cells
+            .get(y as usize * self.width as usize + x as usize)
+            .copied()
+    }
+}
+
 /// An attached image or collapsed multi-line paste represented by a compact token
 /// (`[image: WxH]` or `[pasted ~N lines]`) in the composer input box.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerAttachment {
     pub token: String,
     pub kind: AttachmentKind,
+    /// Decoded thumbnail for image attachments, so the composer can show the image itself.
+    pub preview: Option<ImagePreview>,
+}
+
+/// Thumbnail size cap, in terminal cells. Cells are roughly twice as tall as they are wide, so
+/// six rows cover twelve image rows.
+const PREVIEW_MAX_COLS: u32 = 20;
+const PREVIEW_MAX_ROWS: u32 = 6;
+
+/// Decode a pasted image into a half-block thumbnail for the composer.
+///
+/// A missing or unsupported image is not an error: the attachment still carries its data URL and
+/// the `[Image N]` token, it just renders as a token instead of a preview.
+fn decode_image_preview(data_url: &str) -> Option<ImagePreview> {
+    use base64::Engine;
+
+    let (_, payload) = data_url.split_once(',')?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let (image_w, image_h) = decoded.dimensions();
+    if image_w == 0 || image_h == 0 {
+        return None;
+    }
+
+    let max_w = PREVIEW_MAX_COLS;
+    let max_h = PREVIEW_MAX_ROWS * 2;
+    let scale = (max_w as f64 / image_w as f64).min(max_h as f64 / image_h as f64);
+    let width = ((image_w as f64 * scale).round() as u32).clamp(1, max_w);
+    let height = ((image_h as f64 * scale).round() as u32).clamp(1, max_h);
+    let thumb = image::imageops::resize(
+        &decoded,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+
+    let rows = height.div_ceil(2) as u16;
+    let mut cells = Vec::with_capacity(width as usize * rows as usize);
+    for row in 0..rows {
+        let top_y = row as u32 * 2;
+        let bottom_y = (top_y + 1).min(height - 1);
+        for x in 0..width {
+            let top = blend_over_surface(thumb.get_pixel(x, top_y).0);
+            let bottom = blend_over_surface(thumb.get_pixel(x, bottom_y).0);
+            cells.push((top, bottom));
+        }
+    }
+
+    Some(ImagePreview {
+        width: width as u16,
+        height: rows,
+        cells,
+    })
+}
+
+/// Composite one RGBA pixel over the composer surface, which is what the cell background will be.
+fn blend_over_surface(pixel: [u8; 4]) -> Color {
+    let (bg_r, bg_g, bg_b) = match BG_SURFACE {
+        Color::Rgb(r, g, b) => (r as u32, g as u32, b as u32),
+        _ => (30, 30, 32),
+    };
+    let alpha = pixel[3] as u32;
+    let mix = |channel: u8, background: u32| {
+        ((channel as u32 * alpha + background * (255 - alpha)) / 255) as u8
+    };
+    Color::Rgb(
+        mix(pixel[0], bg_r),
+        mix(pixel[1], bg_g),
+        mix(pixel[2], bg_b),
+    )
 }
 
 /// Result of taking the composer contents for submission.
@@ -209,10 +307,39 @@ impl ComposerState {
         let base = format!("[Image {image_num}]");
         let token = self.unique_token(&base);
         self.insert_token_with_spacing(&token);
+        let preview = decode_image_preview(&data_url);
         self.attachments.push(ComposerAttachment {
             token,
             kind: AttachmentKind::ImageDataUrl(data_url),
+            preview,
         });
+    }
+
+    /// Drop one attachment by token: the close button on an image preview calls this.
+    pub fn remove_attachment(&mut self, token: &str) {
+        let Some(start) = self.text.find(token) else {
+            self.attachments.retain(|att| att.token != token);
+            return;
+        };
+        let mut end = start + token.len();
+        // The token is inserted with surrounding spaces; take one with it so removing a chip does
+        // not leave a double space behind.
+        if end < self.text.len() && self.text.as_bytes().get(end) == Some(&b' ') {
+            end += 1;
+        } else if start > 0 && self.text.as_bytes().get(start - 1) == Some(&b' ') {
+            // `start - 1` is ASCII whitespace, so it is a char boundary.
+            self.text.remove(start - 1);
+            end -= 1;
+        }
+        self.text.replace_range(start..end, "");
+        self.cursor = if self.cursor >= end {
+            self.cursor - (end - start)
+        } else if self.cursor > start {
+            start
+        } else {
+            self.cursor
+        };
+        self.attachments.retain(|att| att.token != token);
     }
 
     /// Paste text into the composer, collapsing multi-line or large copied blocks into
@@ -233,6 +360,7 @@ impl ComposerState {
         self.attachments.push(ComposerAttachment {
             token,
             kind: AttachmentKind::PastedText(cleaned),
+            preview: None,
         });
     }
 
@@ -606,6 +734,16 @@ pub struct TranscriptHitBox {
     pub target: TranscriptClickTarget,
 }
 
+/// Clickable control inside the composer card (currently the close button on an image preview).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerHitBox {
+    pub y: u16,
+    pub x_start: u16,
+    pub x_end: u16,
+    /// Token of the attachment this control removes.
+    pub token: String,
+}
+
 /// A text selection in the transcript.
 ///
 /// Positions are absolute transcript coordinates: `line` is the index into the full transcript
@@ -904,6 +1042,62 @@ mod tests {
         assert_eq!(c.image_count(), 0);
     }
 
+    fn png_data_url(width: u32, height: u32) -> String {
+        use base64::Engine;
+
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([(x * 9) as u8, (y * 17) as u8, 120, 255])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode png");
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+        )
+    }
+
+    #[test]
+    fn attached_image_decodes_into_a_half_block_preview() {
+        let mut c = ComposerState::default();
+        c.attach_image(32, 18, png_data_url(32, 18));
+
+        let preview = c.attachments[0].preview.as_ref().expect("preview");
+        assert!(preview.width > 0 && preview.width <= PREVIEW_MAX_COLS as u16);
+        assert!(preview.height > 0 && preview.height <= PREVIEW_MAX_ROWS as u16);
+        assert_eq!(
+            preview.cells.len(),
+            preview.width as usize * preview.height as usize
+        );
+        assert!(preview.cell(0, 0).is_some());
+        assert!(preview.cell(preview.width, 0).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_image_data_url_still_attaches_as_a_token() {
+        let mut c = ComposerState::default();
+        c.attach_image(293, 400, "data:image/png;base64,AAA".to_string());
+
+        assert_eq!(c.text, "[Image 1] ");
+        assert!(c.attachments[0].preview.is_none());
+    }
+
+    #[test]
+    fn remove_attachment_drops_the_token_preview_and_extra_space() {
+        let mut c = ComposerState::default();
+        c.insert_str("before ");
+        c.attach_image(8, 8, png_data_url(8, 8));
+        c.insert_str("after");
+        let token = c.attachments[0].token.clone();
+
+        c.remove_attachment(&token);
+
+        assert_eq!(c.text, "before after");
+        assert!(c.attachments.is_empty());
+        assert_eq!(c.cursor, c.text.len());
+    }
+
     #[test]
     fn paste_text_collapses_multiline_blocks_and_expands_on_submit() {
         let mut c = ComposerState::default();
@@ -969,12 +1163,16 @@ pub struct TuiState {
     pub expanded_live_tools: HashSet<usize>,
     pub live_thinking_view: LiveThinkingView,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Model choice waiting on the thinking-level picker that `/models` chains after it.
+    pub pending_model_choice: Option<(ModelTarget, String, String)>,
     pub mode: AgentMode,
     pub composer: ComposerState,
     pub tabs: Vec<SessionTab>,
     pub total_sessions_count: usize,
     pub hit_boxes: Vec<TabHitBox>,
     pub transcript_hit_boxes: Vec<TranscriptHitBox>,
+    /// Close buttons on composer image previews, rebuilt each draw.
+    pub composer_hit_boxes: Vec<ComposerHitBox>,
     /// Viewport of the transcript as `(x, y, width, height)` in screen cells, refreshed each draw.
     pub transcript_area: (u16, u16, u16, u16),
     /// Absolute index of the first transcript line visible in the viewport.

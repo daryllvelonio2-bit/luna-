@@ -466,6 +466,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         expanded_live_tools: HashSet::new(),
         live_thinking_view: LiveThinkingView::Tail,
         reasoning_effort,
+        pending_model_choice: None,
         mode,
         composer: ComposerState {
             prompt_history,
@@ -475,6 +476,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         total_sessions_count: 0,
         hit_boxes: Vec::new(),
         transcript_hit_boxes: Vec::new(),
+        composer_hit_boxes: Vec::new(),
         transcript_area: (0, 0, 0, 0),
         transcript_start: 0,
         transcript_visible_text: Vec::new(),

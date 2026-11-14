@@ -14,15 +14,15 @@ use super::super::interactive::state::{Env, Flow};
 use super::actions::{
     apply_agent_mode, apply_model_target, apply_thinking_selection, create_new_session,
     interrupt_turn, open_models_for_target, open_provider_picker_for, open_session_picker,
-    run_palette_action, run_slash_command, set_all_process_expanded, submit_composer,
-    switch_to_session, sync_slash_popup,
+    open_thinking_picker, run_palette_action, run_slash_command, set_all_process_expanded,
+    submit_composer, switch_to_session, sync_slash_popup,
 };
 use super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
 };
 use super::state::{
-    ActiveModal, AgentMode, LiveThinkingView, TabHitTarget, TextSelection, TranscriptClickTarget,
-    TuiState,
+    ActiveModal, AgentMode, LiveThinkingView, ModelTarget, TabHitTarget, TextSelection,
+    TranscriptClickTarget, TuiState,
 };
 use crate::commands::clarify::{ClarifyAnswer, ClarifyResponse};
 
@@ -156,7 +156,19 @@ async fn handle_mouse(
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            begin_left_down(st, mouse);
+            let attachment = st
+                .composer_hit_boxes
+                .iter()
+                .find(|hit| {
+                    mouse.row == hit.y && mouse.column >= hit.x_start && mouse.column < hit.x_end
+                })
+                .map(|hit| hit.token.clone());
+            if let Some(token) = attachment {
+                st.composer.remove_attachment(&token);
+                clear_selection(st);
+            } else {
+                begin_left_down(st, mouse);
+            }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             extend_selection(st, mouse);
@@ -904,7 +916,13 @@ async fn handle_modal_key(
                     if let Some((prov, model)) =
                         filtered_pairs.get(selected.min(filtered_pairs.len().saturating_sub(1)))
                     {
-                        if let Err(e) =
+                        if matches!(target, ModelTarget::Session) {
+                            // `/models` chains into the thinking-level picker: remember the
+                            // chosen pair and apply both once the effort is confirmed.
+                            st.pending_model_choice =
+                                Some((target.clone(), prov.clone(), model.clone()));
+                            open_thinking_picker(env, st).await;
+                        } else if let Err(e) =
                             apply_model_target(env, st, target.clone(), prov, model).await
                         {
                             env.ui
@@ -1116,7 +1134,10 @@ async fn handle_modal_key(
                 Some(ReasoningEffort::Max),
             ];
             match key.code {
-                KeyCode::Esc => {}
+                KeyCode::Esc => {
+                    // Cancelling the chained picker cancels the model switch too.
+                    st.pending_model_choice = None;
+                }
                 KeyCode::Up => {
                     selected = if selected == 0 { 6 } else { selected - 1 };
                     st.modal = ActiveModal::ThinkingPicker { current, selected };
@@ -1127,6 +1148,13 @@ async fn handle_modal_key(
                 }
                 KeyCode::Enter => {
                     apply_thinking_selection(env, st, options[selected]).await;
+                    if let Some((target, provider, model)) = st.pending_model_choice.take() {
+                        if let Err(e) = apply_model_target(env, st, target, &provider, &model).await
+                        {
+                            env.ui
+                                .set_transient_error(Some(format!("Model switch failed: {e}")));
+                        }
+                    }
                 }
                 _ => {
                     st.modal = ActiveModal::ThinkingPicker { current, selected };

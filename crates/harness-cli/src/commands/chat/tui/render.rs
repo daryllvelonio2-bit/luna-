@@ -16,8 +16,9 @@ use super::super::render::{
 use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
 use super::markdown::{render_markdown, strip_ansi, wrap_plain_text};
 use super::state::{
-    ActiveModal, LiveThinkingView, ModelPickerItem, PaletteAction, PaletteItem, ProviderPickerItem,
-    TabHitBox, TabHitTarget, TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
+    ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
+    PaletteItem, ProviderPickerItem, TabHitBox, TabHitTarget, TranscriptClickTarget,
+    TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
@@ -367,7 +368,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_landing(frame: &mut Frame, area: Rect, st: &TuiState, info: &FooterInfo<'_>) -> Rect {
+fn render_landing(frame: &mut Frame, area: Rect, st: &mut TuiState, info: &FooterInfo<'_>) -> Rect {
     let box_width = area
         .width
         .saturating_sub(12)
@@ -378,8 +379,9 @@ fn render_landing(frame: &mut Frame, area: Rect, st: &TuiState, info: &FooterInf
     let inner_text_w = box_width.saturating_sub(5) as usize;
     let wrapped_input = wrap_composer_lines(&st.composer.text, st.composer.cursor, inner_text_w);
     let input_rows = wrapped_input.lines.len().clamp(1, 5) as u16;
-    // Card height: 1 top pad + input_rows + 1 blank spacer + 1 footer row = input_rows + 3
-    let card_h = input_rows + 3;
+    let preview_h = composer_preview_height(st, box_width.saturating_sub(3));
+    // Card height: 1 top pad + preview strip + 1 gap + input_rows + 1 blank spacer + footer.
+    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0);
 
     // Total vertical lockup: logo (3) + gap (2) + optional update (2) + card + hint (1)
     let update_rows: u16 = if st.update_notice.is_some() { 2 } else { 0 };
@@ -513,7 +515,8 @@ fn render_conversation(
     let inner_text_w = content_w.saturating_sub(5) as usize;
     let wrapped_input = wrap_composer_lines(&st.composer.text, st.composer.cursor, inner_text_w);
     let input_rows = wrapped_input.lines.len().clamp(1, 6) as u16;
-    let card_h = input_rows + 3;
+    let preview_h = composer_preview_height(st, content_w.saturating_sub(3));
+    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0);
 
     // Optional chrome strips above composer (todo, delegate, memory notices, queue, compaction, error)
     let chrome_lines = build_chrome_lines(st, snap, content_w as usize);
@@ -719,10 +722,126 @@ fn render_conversation(
     composer_rect
 }
 
+/// Where one image thumbnail lands inside the composer's preview strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewPlacement {
+    index: usize,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+/// Lay thumbnails out left to right, wrapping when they run past the card.
+fn layout_preview_sizes(sizes: &[(u16, u16)], max_width: u16) -> (Vec<PreviewPlacement>, u16) {
+    let max_width = max_width.max(1);
+    let mut placements = Vec::with_capacity(sizes.len());
+    let mut x = 0u16;
+    let mut y = 0u16;
+    let mut row_h = 0u16;
+    for (index, &(width, height)) in sizes.iter().enumerate() {
+        let width = width.min(max_width);
+        if x > 0 && x.saturating_add(width) > max_width {
+            y = y.saturating_add(row_h).saturating_add(1);
+            x = 0;
+            row_h = 0;
+        }
+        placements.push(PreviewPlacement {
+            index,
+            x,
+            y,
+            width,
+            height,
+        });
+        x = x.saturating_add(width).saturating_add(1);
+        row_h = row_h.max(height);
+    }
+    let height = if placements.is_empty() {
+        0
+    } else {
+        y.saturating_add(row_h)
+    };
+    (placements, height)
+}
+
+/// Height of the composer preview strip, in terminal rows (zero when there are no images).
+fn composer_preview_height(st: &TuiState, max_width: u16) -> u16 {
+    let sizes: Vec<(u16, u16)> = st
+        .composer
+        .attachments
+        .iter()
+        .filter_map(|att| att.preview.as_ref())
+        .map(|preview| (preview.width, preview.height))
+        .collect();
+    layout_preview_sizes(&sizes, max_width).1
+}
+
+/// Paint one thumbnail with half-block cells and arm its close button.
+fn render_preview_cell(
+    frame: &mut Frame,
+    rect: Rect,
+    placement: &PreviewPlacement,
+    token: &str,
+    preview: &ImagePreview,
+    hit_boxes: &mut Vec<ComposerHitBox>,
+) {
+    let abs_x = rect.x.saturating_add(3).saturating_add(placement.x);
+    let abs_y = rect.y.saturating_add(1).saturating_add(placement.y);
+    let right_edge = rect.x.saturating_add(rect.width);
+
+    for row in 0..placement.height {
+        let mut spans = Vec::with_capacity(placement.width as usize);
+        for x in 0..placement.width {
+            let Some((top, bottom)) = preview.cell(x, row) else {
+                continue;
+            };
+            spans.push(Span::styled("▀", Style::default().fg(top).bg(bottom)));
+        }
+        if spans.is_empty() {
+            continue;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: abs_x,
+                y: abs_y.saturating_add(row),
+                width: placement.width.min(right_edge.saturating_sub(abs_x)),
+                height: 1,
+            },
+        );
+    }
+
+    // The close button sits in the thumbnail's top-right corner.
+    let close_x = abs_x.saturating_add(placement.width.saturating_sub(1));
+    if close_x < right_edge {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "✕",
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .bg(RED_ERR)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect {
+                x: close_x,
+                y: abs_y,
+                width: 1,
+                height: 1,
+            },
+        );
+        hit_boxes.push(ComposerHitBox {
+            y: abs_y,
+            x_start: close_x,
+            x_end: close_x.saturating_add(1),
+            token: token.to_string(),
+        });
+    }
+}
+
 fn render_composer_card(
     frame: &mut Frame,
     rect: Rect,
-    st: &TuiState,
+    st: &mut TuiState,
     info: &FooterInfo<'_>,
     wrapped: &WrappedComposer,
     is_landing: bool,
@@ -750,8 +869,38 @@ fn render_composer_card(
         );
     }
 
-    // Input rows start at `rect.y + 1` (leaving 1 top padding row inside the card).
-    let max_input_rows = rect.height.saturating_sub(3).max(1) as usize;
+    // Image previews sit in a strip at the top of the card, above the input line.
+    let previews: Vec<(String, ImagePreview)> = st
+        .composer
+        .attachments
+        .iter()
+        .filter_map(|att| {
+            att.preview
+                .clone()
+                .map(|preview| (att.token.clone(), preview))
+        })
+        .collect();
+    let sizes: Vec<(u16, u16)> = previews
+        .iter()
+        .map(|(_, preview)| (preview.width, preview.height))
+        .collect();
+    let (placements, preview_h) = layout_preview_sizes(&sizes, rect.width.saturating_sub(3).max(1));
+    st.composer_hit_boxes.clear();
+    for placement in &placements {
+        let (token, preview) = &previews[placement.index];
+        render_preview_cell(
+            frame,
+            rect,
+            placement,
+            token,
+            preview,
+            &mut st.composer_hit_boxes,
+        );
+    }
+
+    // Input rows start below the preview strip (plus one gap row when a preview is shown).
+    let input_top = rect.y + 1 + preview_h + u16::from(preview_h > 0);
+    let max_input_rows = rect.height.saturating_sub((input_top - rect.y) + 2).max(1) as usize;
     let scroll_off = wrapped
         .cursor_line
         .saturating_sub(max_input_rows.saturating_sub(1));
@@ -776,7 +925,7 @@ fn render_composer_card(
             ])),
             Rect {
                 x: rect.x,
-                y: rect.y + 1,
+                y: input_top,
                 width: rect.width,
                 height: 1,
             },
@@ -789,7 +938,7 @@ fn render_composer_card(
             .take(max_input_rows)
             .enumerate()
         {
-            let y = rect.y + 1 + vis_idx as u16;
+            let y = input_top + vis_idx as u16;
             let mut spans = vec![
                 Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
                 Span::styled("  ", Style::default().bg(BG_SURFACE)),
@@ -811,7 +960,7 @@ fn render_composer_card(
     if matches!(st.modal, ActiveModal::None) && rect.height >= 2 {
         let vis_cursor_y = wrapped.cursor_line.saturating_sub(scroll_off);
         let cur_x = (rect.x + 3 + wrapped.cursor_col as u16).min(rect.x + rect.width - 1);
-        let cur_y = (rect.y + 1 + vis_cursor_y as u16).min(rect.y + rect.height - 1);
+        let cur_y = (input_top + vis_cursor_y as u16).min(rect.y + rect.height - 1);
         frame.set_cursor_position((cur_x, cur_y));
     }
 
@@ -1753,7 +1902,7 @@ fn push_settled_thinking_block(
             Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
             Span::styled(
                 format!("▸ {label} ({line_count} {unit})"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
             ),
         ]));
         hit_targets.push((row_idx, click_target));
@@ -3621,6 +3770,32 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_thinking_header_keeps_the_coral_accent() {
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        push_settled_thinking_block(
+            &mut out,
+            &mut hits,
+            "one line of reasoning",
+            Some(1.2),
+            false,
+            TranscriptClickTarget::JumpToLatest,
+            80,
+        );
+
+        let header = out
+            .iter()
+            .find(|line| line_text(line).contains("▸ Thought: 1.2s"))
+            .expect("collapsed thinking header");
+        let label = header
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Thought"))
+            .expect("label span");
+        assert_eq!(label.style.fg, Some(ACCENT_CORAL));
+    }
+
+    #[test]
     fn completed_turn_renders_interleaved_thinking_prose_and_tool_cards() {
         let turn = TurnRecord {
             user_query: "what is this repo about".to_string(),
@@ -3751,12 +3926,14 @@ mod tests {
             expanded_live_tools: HashSet::new(),
             live_thinking_view: LiveThinkingView::Tail,
             reasoning_effort: None,
+            pending_model_choice: None,
             mode: super::super::state::AgentMode::Build,
             composer: super::super::state::ComposerState::default(),
             tabs: Vec::new(),
             total_sessions_count: 1,
             hit_boxes: Vec::new(),
             transcript_hit_boxes: Vec::new(),
+            composer_hit_boxes: Vec::new(),
             transcript_area: (0, 0, 0, 0),
             transcript_start: 0,
             transcript_visible_text: Vec::new(),
