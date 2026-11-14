@@ -507,16 +507,18 @@ pub(super) async fn handle_composer_command(
             let thinking = active_turn.is_some();
             queue.push_back(text);
             ui.set_queue_depth(queue.len());
-            ui.emit_above(&format!(
-                "{} Queued ({} waiting) — {}",
-                "⏸".yellow().bold(),
-                queue.len(),
-                if thinking {
-                    "sent when the turn in flight finishes".to_string()
-                } else {
-                    "Luna is idle, so it goes out on the next turn".to_string()
-                }
-            ));
+            if !ui.is_tui_mode() {
+                ui.emit_above(&format!(
+                    "{} Queued ({} waiting) — {}",
+                    "⏸".yellow().bold(),
+                    queue.len(),
+                    if thinking {
+                        "sent when the turn in flight finishes".to_string()
+                    } else {
+                        "Luna is idle, so it goes out on the next turn".to_string()
+                    }
+                ));
+            }
         }
         ComposerCommand::Steer(text) => {
             // Pushed straight onto the handle the agent drains. Taking the agent lock here would

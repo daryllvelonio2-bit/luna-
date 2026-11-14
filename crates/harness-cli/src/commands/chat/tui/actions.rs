@@ -30,6 +30,7 @@ use super::super::turn::{
     turn_records, InterruptNotice,
 };
 use super::super::ui::ChatUi;
+use super::markdown::strip_ansi;
 use super::state::{
     ActiveModal, AgentMode, BackgroundSession, InputAction, LiveThinkingView, ModelPickerItem,
     ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, TuiState, TurnMeta,
@@ -2030,6 +2031,7 @@ pub async fn submit_composer(
         .then_some(submitted.display_text.as_str());
     env.ui.clear_transient_error();
     st.scroll_from_bottom = 0;
+    st.system_notices.retain(|n| !is_transient_queue_notice(n));
     launch_turn(
         &submitted.expanded_text,
         display_opt,
@@ -2410,6 +2412,7 @@ pub async fn run_slash_command(
                 &mut st.turn_start,
                 &mut st.active_turn,
             );
+            st.system_notices.retain(|n| !is_transient_queue_notice(n));
         }
         return Ok(Flow::Continue);
     }
@@ -2711,10 +2714,14 @@ pub async fn handle_turn_end(
             &mut st.turn_start,
             &mut st.active_turn,
         );
+        st.system_notices.retain(|n| !is_transient_queue_notice(n));
     }
 
     refresh_tabs(env, st).await;
     drain_tui_notices(env, st);
+    if st.queue.is_empty() {
+        st.system_notices.retain(|n| !is_transient_queue_notice(n));
+    }
     st.scroll_from_bottom = 0;
 }
 
@@ -2952,6 +2959,13 @@ pub async fn handle_background_turn_end(
             &mut slot.turn_start,
             &mut slot.active_turn,
         );
+        slot.system_notices
+            .retain(|n| !is_transient_queue_notice(n));
+    }
+
+    if slot.queue.is_empty() {
+        slot.system_notices
+            .retain(|n| !is_transient_queue_notice(n));
     }
 
     refresh_tabs(env, st).await;
@@ -3004,12 +3018,27 @@ fn advance_goal_tui(env: &Env<'_>, st: &mut TuiState, reply: &str) {
     }
 }
 
+pub(crate) fn is_transient_queue_notice(s: &str) -> bool {
+    let plain = strip_ansi(s);
+    plain.contains("Queued")
+        || plain.contains("waiting)")
+        || plain.contains("sent when the turn in flight finishes")
+        || plain.contains("Held until the running tool finishes")
+        || plain.contains("Redirecting — stopping this reply")
+}
+
 pub fn drain_tui_notices(env: &Env<'_>, st: &mut TuiState) {
     let notices = env.ui.take_tui_notices();
     for n in notices {
         if !n.trim().is_empty() {
+            if is_transient_queue_notice(&n) && st.queue.is_empty() && st.active_turn.is_none() {
+                continue;
+            }
             st.system_notices.push(n);
         }
+    }
+    if st.queue.is_empty() && st.active_turn.is_none() {
+        st.system_notices.retain(|n| !is_transient_queue_notice(n));
     }
     if st.system_notices.len() > 20 {
         let excess = st.system_notices.len() - 20;
@@ -3083,5 +3112,25 @@ mod tests {
         assert_eq!(compact_scope_arg(None), None);
         assert_eq!(compact_scope_arg(Some("global")), Some(true));
         assert_eq!(compact_scope_arg(Some("whatever")), Some(false));
+    }
+
+    #[test]
+    fn transient_queue_notices_are_properly_detected() {
+        use super::is_transient_queue_notice;
+        assert!(is_transient_queue_notice(
+            "⏸ Queued (1 waiting) — sent when the turn in flight finishes"
+        ));
+        assert!(is_transient_queue_notice(
+            "↳ Held until the running tool finishes, then sent"
+        ));
+        assert!(is_transient_queue_notice(
+            "↳ Redirecting — stopping this reply to take your message"
+        ));
+        assert!(!is_transient_queue_notice(
+            "✓ Deleted session sa889751a and started fresh session s5227ec12"
+        ));
+        assert!(!is_transient_queue_notice(
+            "Build · Nemotron 3.5 Super VL 120B A12b · 0.0s"
+        ));
     }
 }

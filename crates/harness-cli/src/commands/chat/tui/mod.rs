@@ -209,6 +209,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
+                    st.system_notices
+                        .retain(|n| !actions::is_transient_queue_notice(n));
                 }
             }
 
@@ -242,6 +244,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
+                    st.system_notices
+                        .retain(|n| !actions::is_transient_queue_notice(n));
                 }
             }
 
@@ -264,6 +268,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         &mut st.turn_start,
                         &mut st.active_turn,
                     );
+                    st.system_notices
+                        .retain(|n| !actions::is_transient_queue_notice(n));
+                }
+                if st.queue.is_empty() {
+                    st.system_notices
+                        .retain(|n| !actions::is_transient_queue_notice(n));
                 }
                 for slot in st.background_sessions.values_mut() {
                     if slot.active_turn.is_none()
@@ -284,6 +294,12 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             &mut slot.turn_start,
                             &mut slot.active_turn,
                         );
+                        slot.system_notices
+                            .retain(|n| !actions::is_transient_queue_notice(n));
+                    }
+                    if slot.queue.is_empty() {
+                        slot.system_notices
+                            .retain(|n| !actions::is_transient_queue_notice(n));
                     }
                 }
 
