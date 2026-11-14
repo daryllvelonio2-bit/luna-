@@ -27,7 +27,7 @@ use crossterm::event::{
     EventStream,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use futures_util::{FutureExt, StreamExt};
+use futures_util::StreamExt;
 use harness_core::{HarnessError, SessionBinding, SessionStore, TurnOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -139,30 +139,37 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     let mut idle_tick = tokio::time::interval(Duration::from_secs(2));
     idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let mut needs_redraw = true;
+    let mut snap = {
+        let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
+        env.ui.tui_snapshot(w)
+    };
+
     loop {
-        let t_draw = std::time::Instant::now();
-        // Render current frame (never await env.agent.lock() here — the running turn holds it!).
-        // Keep the thinking auto-collapse toggle in step with `/settings` changes.
-        st.auto_hide_thinking = env.config.display.auto_hide_thinking;
-        let snap = {
+        if needs_redraw {
+            let t_draw = std::time::Instant::now();
+            // Render current frame (never await env.agent.lock() here — the running turn holds it!).
+            // Keep the thinking auto-collapse toggle in step with `/settings` changes.
+            st.auto_hide_thinking = env.config.display.auto_hide_thinking;
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
-            env.ui.tui_snapshot(w)
-        };
-        let reasoning_effort = st.reasoning_effort;
-        let tools_snapshot = env
-            .in_flight_tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let info = FooterInfo {
-            provider: env.current_provider,
-            model: env.current_model,
-            reasoning_effort,
-            session_id: env.session_id,
-            in_flight_tools: &tools_snapshot,
-        };
-        terminal.draw(|frame| draw(frame, &mut st, &snap, &info))?;
-        trace_event(&format!("draw {:?}", t_draw.elapsed()));
+            snap = env.ui.tui_snapshot(w);
+            let reasoning_effort = st.reasoning_effort;
+            let tools_snapshot = env
+                .in_flight_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let info = FooterInfo {
+                provider: env.current_provider,
+                model: env.current_model,
+                reasoning_effort,
+                session_id: env.session_id,
+                in_flight_tools: &tools_snapshot,
+            };
+            terminal.draw(|frame| draw(frame, &mut st, &snap, &info))?;
+            trace_event(&format!("draw {:?}", t_draw.elapsed()));
+            needs_redraw = false;
+        }
 
         let has_bg_active = st
             .background_sessions
@@ -173,23 +180,33 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             biased;
 
             maybe_ev = events.next() => {
-                let mut current_ev = match maybe_ev {
-                    Some(Ok(ev)) => ev,
+                match maybe_ev {
+                    Some(Ok(ev)) => {
+                        let should_redraw = match &ev {
+                            crossterm::event::Event::Mouse(m) => {
+                                m.kind != crossterm::event::MouseEventKind::Moved
+                                    || st.composer.image_count() > 0
+                            }
+                            crossterm::event::Event::Key(k) => {
+                                k.kind != crossterm::event::KeyEventKind::Release
+                            }
+                            crossterm::event::Event::FocusGained
+                            | crossterm::event::Event::FocusLost => false,
+                            _ => true,
+                        };
+                        if input::handle_event(&mut env, &mut st, &mut terminal, ev).await? == Flow::Break {
+                            return Ok(());
+                        }
+                        if should_redraw {
+                            needs_redraw = true;
+                        }
+                    }
                     Some(Err(_)) | None => break,
-                };
-                loop {
-                    if input::handle_event(&mut env, &mut st, &mut terminal, current_ev).await? == Flow::Break {
-                        return Ok(());
-                    }
-                    match events.next().now_or_never() {
-                        Some(Some(Ok(next_ev))) => current_ev = next_ev,
-                        Some(Some(Err(_))) | Some(None) => return Ok(()),
-                        None => break,
-                    }
                 }
             }
 
             _ = tui_notifier.notified() => {
+                needs_redraw = true;
                 drain_tui_notices(&env, &mut st);
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
@@ -216,6 +233,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             maybe_picker = st.picker_rx.recv() => {
                 if let Some(load) = maybe_picker {
                     actions::apply_picker_load(&mut st, load);
+                    needs_redraw = true;
                 }
             }
 
@@ -224,6 +242,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || env.compacting.load(Ordering::SeqCst)
                 || snap.delegate_count > 0
                 || !st.queue.is_empty() => {
+                needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
                 st.prune_stale_notices();
                 if st.active_turn.is_none()
@@ -249,6 +268,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             }
 
             _ = idle_tick.tick() => {
+                needs_redraw = true;
                 st.prune_stale_notices();
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
@@ -361,6 +381,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             resp_tx,
                             selected: 0,
                         };
+                        needs_redraw = true;
                     }
                 }
             }
@@ -373,6 +394,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             resp_tx,
                             input: String::new(),
                         };
+                        needs_redraw = true;
                     }
                 }
             }
@@ -389,12 +411,14 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             custom: String::new(),
                             editing_custom: false,
                         };
+                        needs_redraw = true;
                     }
                 }
             }
 
             maybe_job = env.job_rx.recv() => {
                 if let Some(comp) = maybe_job {
+                    needs_redraw = true;
                     st.system_notices.push(state::SystemNotice::new(format!(
                         "Job {} ({}): {}",
                         comp.id,
