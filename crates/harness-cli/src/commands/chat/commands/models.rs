@@ -551,14 +551,28 @@ async fn apply_default_model_live(
     }
 
     let context_max = context_window(config, discovery, &chosen_provider, &chosen_model);
-    let context_used = agent
-        .lock()
-        .await
-        .estimate_session_tokens()
-        .await
-        .unwrap_or(0);
+    let context_used = ui.current_context_used();
     ui.set_model(&chosen_model, context_used, context_max);
-    refresh_antigravity_status_if_needed(ui, &chosen_provider, &chosen_model, cred_manager).await;
+
+    let ui_bg = ui.clone();
+    let prov_bg = chosen_provider.clone();
+    let mod_bg = chosen_model.clone();
+    let cred_bg = cred_manager.clone();
+    tokio::spawn(async move {
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+    });
+
+    let ui_tokens = ui.clone();
+    let agent_tokens = agent.clone();
+    tokio::spawn(async move {
+        let est = agent_tokens
+            .lock()
+            .await
+            .estimate_session_tokens()
+            .await
+            .unwrap_or(0);
+        ui_tokens.update_status(est, context_max);
+    });
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 }

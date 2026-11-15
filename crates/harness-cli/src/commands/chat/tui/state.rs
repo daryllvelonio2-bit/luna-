@@ -146,14 +146,6 @@ impl AgentMode {
         }
     }
 
-    pub fn sub_label(self) -> &'static str {
-        match self {
-            AgentMode::Build => "default",
-            AgentMode::Auto => "auto",
-            AgentMode::Plan => "plan",
-        }
-    }
-
     pub fn cycle(self) -> Self {
         match self {
             AgentMode::Build => AgentMode::Auto,

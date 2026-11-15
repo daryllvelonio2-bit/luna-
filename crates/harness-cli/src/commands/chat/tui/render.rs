@@ -1077,7 +1077,7 @@ fn render_composer_card(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" {} · ", st.mode.sub_label()),
+                " · ",
                 Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
             ),
             Span::styled(

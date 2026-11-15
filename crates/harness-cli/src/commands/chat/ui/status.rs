@@ -167,6 +167,15 @@ impl ChatUi {
     }
     /// Take a context figure that may be lower than the one on screen, right now.
     ///
+    pub fn current_context_used(&self) -> u32 {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.context_used)
+            .unwrap_or(0)
+    }
+
     /// Only an explicit fold between turns (`/compact`) calls this: the value is the transcript
     /// that will be sent next, and no running turn can contradict it.
     pub fn reset_context_used(&self, context_used: u32) {

@@ -876,14 +876,40 @@ pub async fn apply_model_selection(
             }));
         }
     }
-    let used = ag.estimate_session_tokens().await.unwrap_or(0);
     drop(ag);
     *env.current_provider = provider.to_string();
     *env.current_model = model.to_string();
+    let used = env.ui.current_context_used();
     env.ui.set_status(model, used, ctx_max);
-    refresh_antigravity_status_if_needed(&env.ui, provider, model, &env.cred_manager).await;
+
+    let ui_tokens = env.ui.clone();
+    let agent_tokens = env.agent.clone();
+    tokio::spawn(async move {
+        let est = agent_tokens
+            .lock()
+            .await
+            .estimate_session_tokens()
+            .await
+            .unwrap_or(0);
+        ui_tokens.update_status(est, ctx_max);
+    });
+
+    let ui_bg = env.ui.clone();
+    let prov_bg = provider.to_string();
+    let mod_bg = model.to_string();
+    let cred_bg = env.cred_manager.clone();
+    tokio::spawn(async move {
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+    });
+
     if persist {
-        let _ = env.store.set_model(env.session_id, provider, model).await;
+        let store = env.store.clone();
+        let session_id = env.session_id.clone();
+        let prov = provider.to_string();
+        let mod_ = model.to_string();
+        tokio::spawn(async move {
+            let _ = store.set_model(&session_id, &prov, &mod_).await;
+        });
     }
     st.scroll_from_bottom = 0;
     Ok(())
@@ -1907,13 +1933,13 @@ async fn finish_connect_action(
         env.ui
             .set_transient_error(Some(format!("Provider setup failed: {error}")));
     }
-    refresh_antigravity_status_if_needed(
-        &env.ui,
-        env.current_provider,
-        env.current_model,
-        &env.cred_manager,
-    )
-    .await;
+    let ui_bg = env.ui.clone();
+    let prov_bg = env.current_provider.clone();
+    let mod_bg = env.current_model.clone();
+    let cred_bg = env.cred_manager.clone();
+    tokio::spawn(async move {
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+    });
     open_connect_menu(st);
 }
 
@@ -2002,13 +2028,13 @@ pub async fn run_input_action(
                     .ui
                     .set_transient_error(Some(format!("Add credential failed: {error}"))),
             }
-            refresh_antigravity_status_if_needed(
-                &env.ui,
-                env.current_provider,
-                env.current_model,
-                &env.cred_manager,
-            )
-            .await;
+            let ui_bg = env.ui.clone();
+            let prov_bg = env.current_provider.clone();
+            let mod_bg = env.current_model.clone();
+            let cred_bg = env.cred_manager.clone();
+            tokio::spawn(async move {
+                refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+            });
             st.provider_items = build_provider_items(
                 env.cred_manager.clone(),
                 Some(&env.config.providers),
