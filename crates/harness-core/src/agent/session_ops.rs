@@ -131,17 +131,34 @@ where
             tail.len(),
             saver.model()
         );
+        if let Some(obs) = observer.as_ref() {
+            obs(super::AgentEvent::MemoryPassStarted {
+                model: saver.model().to_string(),
+            });
+        }
         tokio::spawn(async move {
             match saver.distil(&tail).await {
                 Ok(report) => {
                     info!("background memory saver: {}", report.summary());
                     announce_save_report(&report, &observer);
+                    if let Some(obs) = observer.as_ref() {
+                        obs(super::AgentEvent::MemoryPassFinished {
+                            memories: report.memories,
+                            notes: report.notes,
+                        });
+                    }
                 }
                 Err(error) => {
                     // A failed pass did not read the store: let the next tick retry this same
                     // transcript instead of waiting for a new turn.
                     Self::release_saver_fingerprint(&fingerprint_slot, fingerprint);
                     warn!("background memory saver failed: {}", error);
+                    if let Some(obs) = observer.as_ref() {
+                        obs(super::AgentEvent::MemoryPassFinished {
+                            memories: 0,
+                            notes: 0,
+                        });
+                    }
                 }
             }
         });
@@ -192,16 +209,40 @@ where
         if tail.is_empty() {
             return Ok(crate::saver::SaveReport::default());
         }
-        let report = hook.saver.distil(&tail).await?;
-        // An explicit `/remember` always runs, but it has now seen this tail: an idle pass over
-        // the same window would only pay for the same model call again.
-        *self
-            .saver_fingerprint
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(crate::saver::tail_fingerprint(&tail));
-        announce_save_report(&report, &self.observer);
-        Ok(report)
+        if let Some(obs) = self.observer.as_ref() {
+            obs(super::AgentEvent::MemoryPassStarted {
+                model: hook.saver.model().to_string(),
+            });
+        }
+        let report_result = hook.saver.distil(&tail).await;
+        match report_result {
+            Ok(report) => {
+                // An explicit `/remember` always runs, but it has now seen this tail: an idle pass over
+                // the same window would only pay for the same model call again.
+                *self
+                    .saver_fingerprint
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some(crate::saver::tail_fingerprint(&tail));
+                announce_save_report(&report, &self.observer);
+                if let Some(obs) = self.observer.as_ref() {
+                    obs(super::AgentEvent::MemoryPassFinished {
+                        memories: report.memories,
+                        notes: report.notes,
+                    });
+                }
+                Ok(report)
+            }
+            Err(error) => {
+                if let Some(obs) = self.observer.as_ref() {
+                    obs(super::AgentEvent::MemoryPassFinished {
+                        memories: 0,
+                        notes: 0,
+                    });
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Run a pass now, detached, for a session that has gone quiet.
@@ -238,15 +279,32 @@ where
             tail.len(),
             saver.model()
         );
+        if let Some(obs) = observer.as_ref() {
+            obs(super::AgentEvent::MemoryPassStarted {
+                model: saver.model().to_string(),
+            });
+        }
         tokio::spawn(async move {
             match saver.distil(&tail).await {
                 Ok(report) => {
                     info!("idle memory saver: {}", report.summary());
                     announce_save_report(&report, &observer);
+                    if let Some(obs) = observer.as_ref() {
+                        obs(super::AgentEvent::MemoryPassFinished {
+                            memories: report.memories,
+                            notes: report.notes,
+                        });
+                    }
                 }
                 Err(error) => {
                     Self::release_saver_fingerprint(&fingerprint_slot, fingerprint);
                     warn!("idle memory saver failed: {}", error);
+                    if let Some(obs) = observer.as_ref() {
+                        obs(super::AgentEvent::MemoryPassFinished {
+                            memories: 0,
+                            notes: 0,
+                        });
+                    }
                 }
             }
         });

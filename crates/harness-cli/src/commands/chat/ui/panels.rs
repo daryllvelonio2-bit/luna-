@@ -62,6 +62,13 @@ pub(super) struct PtyPane {
     pub(super) running: bool,
 }
 
+/// An in-flight background memory saver pass.
+#[derive(Clone, Debug)]
+pub(super) struct MemoryDistillation {
+    pub(super) model: String,
+    pub(super) started: std::time::Instant,
+}
+
 /// The in-place region between the transcript and the composer: the tail of the reasoning as it
 /// streams in, the animated line for a running tool, and the sweep shown while the transcript is
 /// being folded.
@@ -80,6 +87,8 @@ pub(super) struct LiveRegion {
     /// A fold in flight. It outranks the activity row: for the seconds it runs, the fold is the
     /// only thing happening that the user cannot see the shape of.
     pub(super) compaction: Option<Compaction>,
+    /// Background memory distillation pass in flight.
+    pub(super) memory_distillation: Option<MemoryDistillation>,
     /// Limit on lines displayed per execution block while in progress.
     /// `None` means uncapped (display everything). `Some(1..=10)` caps output.
     pub(super) block_limit: Option<usize>,

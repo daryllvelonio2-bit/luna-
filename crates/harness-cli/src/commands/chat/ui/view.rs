@@ -120,6 +120,7 @@ pub struct TuiLiveSnapshot {
     pub delegate_count: usize,
     pub delegate_last: Option<(String, String)>,
     pub memory_notices: Vec<(String, String, Option<String>, String)>,
+    pub memory_distilling: Option<(String, f32)>,
 }
 
 impl ChatUi {
@@ -310,6 +311,10 @@ impl ChatUi {
             }
             if let Some(comp) = &live.compaction {
                 snap.compacting = Some((comp.forced, comp.started.elapsed().as_secs_f32()));
+            }
+            if let Some(dist) = &live.memory_distillation {
+                snap.memory_distilling =
+                    Some((dist.model.clone(), dist.started.elapsed().as_secs_f32()));
             }
             let pty_expired = live.pty_pane.as_ref().is_some_and(|pane| {
                 !pane.running && pane.last_activity.elapsed().as_secs() >= PTY_PANE_IDLE_SECS

@@ -130,7 +130,7 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         st.transcript_visible_text.clear();
         st.selection = None;
         st.pending_transcript_click = None;
-        render_landing(frame, body_area, st, info)
+        render_landing(frame, body_area, st, info, snap)
     } else {
         render_conversation(frame, body_area, st, snap, info, pty_pane_open)
     };
@@ -429,7 +429,13 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_landing(frame: &mut Frame, area: Rect, st: &mut TuiState, info: &FooterInfo<'_>) -> Rect {
+fn render_landing(
+    frame: &mut Frame,
+    area: Rect,
+    st: &mut TuiState,
+    info: &FooterInfo<'_>,
+    snap: &TuiLiveSnapshot,
+) -> Rect {
     let box_width = area
         .width
         .saturating_sub(12)
@@ -444,9 +450,13 @@ fn render_landing(frame: &mut Frame, area: Rect, st: &mut TuiState, info: &Foote
     // Card height: 1 top pad + preview strip + 1 gap + input_rows + 1 blank spacer + footer.
     let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0);
 
-    // Total vertical lockup: logo (3) + gap (2) + optional update (2) + card + hint (1)
+    // Optional chrome strips above composer
+    let chrome_lines = build_chrome_lines(st, snap, box_width as usize);
+    let chrome_h = chrome_lines.len().min(4) as u16;
+
+    // Total vertical lockup: logo (3) + gap (2) + optional update (2) + chrome + card + hint (1)
     let update_rows: u16 = if st.update_notice.is_some() { 2 } else { 0 };
-    let total_h = 3 + 2 + update_rows + card_h + 1;
+    let total_h = 3 + 2 + update_rows + chrome_h + card_h + 1;
     let top_y = area.y + area.height.saturating_sub(total_h + 1) / 2;
 
     // 1. Centered `luna` block logo
@@ -511,6 +521,18 @@ fn render_landing(frame: &mut Frame, area: Rect, st: &mut TuiState, info: &Foote
         cur_y += 1;
     }
 
+    if chrome_h > 0 {
+        let chrome_rect = Rect {
+            x: box_x,
+            y: cur_y,
+            width: box_width,
+            height: chrome_h,
+        };
+        let take_from = chrome_lines.len().saturating_sub(chrome_h as usize);
+        frame.render_widget(Paragraph::new(chrome_lines[take_from..].to_vec()), chrome_rect);
+        cur_y += chrome_h;
+    }
+
     // 3. Centered composer card
     let composer_rect = Rect {
         x: box_x,
@@ -532,7 +554,7 @@ fn render_landing(frame: &mut Frame, area: Rect, st: &mut TuiState, info: &Foote
                 height: 1,
             },
             st,
-            None,
+            Some(snap),
             None,
             true,
         );
@@ -581,7 +603,7 @@ fn render_conversation(
 
     // Optional chrome strips above composer (todo, delegate, memory notices, queue, compaction, error)
     let chrome_lines = build_chrome_lines(st, snap, content_w as usize);
-    let chrome_h = chrome_lines.len().min(6) as u16;
+    let chrome_h = chrome_lines.len().min(8) as u16;
 
     let bottom_total = chrome_h + card_h + 1; // +1 for bottom status hint row
     let transcript_h = area.height.saturating_sub(bottom_total + 1).max(3);
@@ -1200,6 +1222,12 @@ fn render_composer_hint_row(
     }
 
     if let Some(s) = snap {
+        if s.memory_distilling.is_some() {
+            right_spans.push(Span::styled(
+                "🧠 memory · ",
+                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+            ));
+        }
         if s.delegate_count > 0 {
             let label = if s.delegate_count == 1 {
                 "● 1 subagent · ".to_string()
@@ -1295,6 +1323,76 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
             format!("{spinner} {kind} context… ({secs:.1}s)"),
             Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
         )]));
+    }
+    if let Some((ref model, secs)) = snap.memory_distilling {
+        let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
+        let model_label = if model.is_empty() {
+            String::new()
+        } else {
+            format!(" · {model}")
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{spinner} "),
+                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+            ),
+            Span::styled(
+                "Distilling memory",
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(BG_CANVAS),
+            ),
+            Span::styled(
+                format!("{model_label}… ({secs:.1}s)"),
+                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            ),
+        ]));
+    }
+    for (storage, name, detail, status) in &snap.memory_notices {
+        let status_color = match status.as_str() {
+            "saved" => GREEN_OK,
+            "updated" => YELLOW_WARN,
+            "deleted" => RED_ERR,
+            "merged" => CYAN_LINK,
+            _ => TEXT_MUTED,
+        };
+        let (icon, storage_color) = if storage == "note" {
+            ("📝 ", Color::Rgb(210, 140, 230))
+        } else {
+            ("🧠 ", CYAN_LINK)
+        };
+        let max_name_len = 32.min(width.saturating_sub(20));
+        let short_name = truncate_str(name, max_name_len);
+        let mut spans = vec![
+            Span::styled(icon, Style::default().bg(BG_CANVAS)),
+            Span::styled(
+                format!("{storage} "),
+                Style::default().fg(storage_color).bg(BG_CANVAS),
+            ),
+            Span::styled(
+                short_name.to_string(),
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(BG_CANVAS),
+            ),
+            Span::styled(
+                format!(" {status}"),
+                Style::default().fg(status_color).bg(BG_CANVAS),
+            ),
+        ];
+        if let Some(ref d) = detail {
+            let used_w = 3 + storage.width() + 1 + short_name.width() + 1 + status.width() + 2;
+            let avail = width.saturating_sub(used_w);
+            if avail >= 8 {
+                spans.push(Span::styled(
+                    format!(": {}", truncate_str(d, avail)),
+                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
     }
     if let Some(ref todos) = snap.todo_snapshot {
         let total = todos.items.len();
@@ -5066,6 +5164,33 @@ mod tests {
         }
         let rendered_label: String = right_spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(rendered_label, "● 2 subagents · ");
+    }
+
+    #[test]
+    fn test_background_memory_saver_chrome_and_notices() {
+        let st = test_dummy_tui_state();
+        let mut snap = TuiLiveSnapshot::default();
+        snap.memory_distilling = Some(("claude-3-5-sonnet".to_string(), 1.4));
+        snap.memory_notices = vec![
+            (
+                "memory".to_string(),
+                "user.preference.theme".to_string(),
+                Some("dark mode enabled".to_string()),
+                "saved".to_string(),
+            ),
+            (
+                "note".to_string(),
+                "Architecture Decision".to_string(),
+                None,
+                "updated".to_string(),
+            ),
+        ];
+
+        let chrome = build_chrome_lines(&st, &snap, 80);
+        let chrome_text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(chrome_text.contains("Distilling memory · claude-3-5-sonnet… (1.4s)"));
+        assert!(chrome_text.contains("🧠 memory user.preference.theme saved: dark mode enabled"));
+        assert!(chrome_text.contains("📝 note Architecture Decision updated"));
     }
 
     fn test_dummy_tui_state() -> TuiState {

@@ -292,6 +292,52 @@ async fn a_saved_note_is_announced_to_the_observer() {
 }
 
 #[tokio::test]
+async fn memory_pass_started_and_finished_events_are_announced_to_the_observer() {
+    let passes = Arc::new(Mutex::new(Vec::new()));
+    let mut saver = RecordingSaver::new(passes, 1, 24);
+    Arc::get_mut(&mut saver).expect("sole owner").report = SaveReport {
+        memories: 1,
+        saved: vec![SavedMemory {
+            name: "test_mem".to_string(),
+            detail: None,
+            status: MemorySaveStatus::Saved,
+        }],
+        ..SaveReport::default()
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_obs = events.clone();
+    let agent = agent(saver).with_observer(Arc::new(move |event| {
+        match event {
+            AgentEvent::MemoryPassStarted { model } => {
+                events_obs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("started:{model}"));
+            }
+            AgentEvent::MemoryPassFinished { memories, notes } => {
+                events_obs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("finished:{memories}:{notes}"));
+            }
+            _ => {}
+        }
+    }));
+
+    agent
+        .run_turn("remember this", CancellationToken::new())
+        .await
+        .expect("turn completes");
+    settle().await;
+
+    let recorded = events.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        recorded,
+        vec!["started:recording".to_string(), "finished:1:0".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn the_interval_is_counted_in_turns_not_in_wall_time() {
     let passes = Arc::new(Mutex::new(Vec::new()));
     let saver = RecordingSaver::new(passes.clone(), 3, 24);

@@ -244,7 +244,9 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || has_bg_active
                 || env.compacting.load(Ordering::SeqCst)
                 || env.ui.is_compacting()
+                || env.ui.is_memory_distilling()
                 || snap.compacting.is_some()
+                || snap.memory_distilling.is_some()
                 || snap.delegate_count > 0
                 || matches!(
                     st.modal,

@@ -2,7 +2,7 @@ use super::super::render::{
     needs_separator, reasoning_rows, tool_activity_detail, OutputBlockKind,
 };
 use super::metrics::finished_reasoning_text;
-use super::panels::{Compaction, PtyPane};
+use super::panels::{Compaction, MemoryDistillation, PtyPane};
 use super::tail::Activity;
 use super::terminal::get_terminal_width;
 use super::view::ChatUi;
@@ -241,6 +241,34 @@ impl ChatUi {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .compaction
+            .is_some()
+    }
+    /// A background memory distillation pass has started: animate it until finished.
+    pub fn start_memory_distillation(&self, model: &str) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.memory_distillation = Some(MemoryDistillation {
+            model: model.to_string(),
+            started: std::time::Instant::now(),
+        });
+        drop(live);
+        self.notify_tui();
+    }
+    /// The background memory distillation pass is complete: stop animating it.
+    pub fn finish_memory_distillation(&self) {
+        let had = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.memory_distillation.take().is_some()
+        };
+        if had {
+            self.notify_tui();
+        }
+    }
+    #[allow(dead_code)]
+    pub fn is_memory_distilling(&self) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .memory_distillation
             .is_some()
     }
     /// A pty tool has started: open the mirror, or mark the one already on screen as busy.

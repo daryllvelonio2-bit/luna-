@@ -125,6 +125,12 @@ impl ObserverState {
             harness_core::AgentEvent::CompactionFinished { folded, error } => {
                 self.handle_compaction_finished(folded, error);
             }
+            harness_core::AgentEvent::MemoryPassStarted { model } => {
+                self.ui.start_memory_distillation(&model);
+            }
+            harness_core::AgentEvent::MemoryPassFinished { .. } => {
+                self.ui.finish_memory_distillation();
+            }
         }
     }
 
