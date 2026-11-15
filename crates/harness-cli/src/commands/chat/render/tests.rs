@@ -1709,52 +1709,6 @@ async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     assert_eq!(turns[1].reply, "second answer");
 }
 
-#[tokio::test]
-async fn compaction_summary_spawns_at_the_bottom_of_transcript() {
-    use harness_core::{Message, SessionStore, SqliteSessionStore};
-
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("sessions.db");
-    let store = SqliteSessionStore::new(Some(db_path)).unwrap();
-    store.ensure_session("s_summary").await.unwrap();
-
-    // Turn 1
-    store
-        .append("s_summary", &Message::user("first question"), false)
-        .await
-        .unwrap();
-    store
-        .append("s_summary", &Message::assistant("first answer"), false)
-        .await
-        .unwrap();
-
-    // Turn 2
-    store
-        .append("s_summary", &Message::user("second question"), false)
-        .await
-        .unwrap();
-    store
-        .append("s_summary", &Message::assistant("second answer"), false)
-        .await
-        .unwrap();
-
-    // Compaction folds into a summary
-    store
-        .record_compaction("s_summary", &[1, 2], "Summary of the conversation")
-        .await
-        .unwrap();
-
-    // When replaying with summary row present, the compaction summary is placed at the bottom (latest)
-    let replayed = store.replay("s_summary", 200).await.unwrap();
-    let turns = parse_turns_from_history(&replayed.history);
-
-    assert_eq!(turns.len(), 2, "1 uncompacted turn + 1 compaction turn");
-    assert_eq!(turns[0].user_query, "second question");
-    assert_eq!(turns[0].reply, "second answer");
-    assert_eq!(turns[1].user_query, "Compaction");
-    assert_eq!(turns[1].reply, "Summary of the conversation");
-}
-
 #[test]
 fn a_finished_job_reads_as_a_notice_and_a_model_message() {
     use harness_core::tasks::JobCompletion;

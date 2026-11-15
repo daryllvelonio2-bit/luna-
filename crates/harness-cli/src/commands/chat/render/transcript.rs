@@ -300,7 +300,6 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
     let mut current_reasoning: Option<String> = None;
     let mut current_tools: Vec<TurnProcessItem> = Vec::new();
     let mut current_reply: Option<String> = None;
-    let mut summary_turns: Vec<TurnRecord> = Vec::new();
 
     for stored in history {
         match stored.message.role {
@@ -319,20 +318,7 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
                 &mut current_reply,
             ),
             Role::Tool => apply_tool_message(&stored.message, &mut current_tools),
-            Role::System => {
-                if stored.is_summary {
-                    if let Some(ref text) = stored.message.content {
-                        if !text.trim().is_empty() {
-                            summary_turns.push(build_turn(
-                                "Compaction".to_string(),
-                                None,
-                                Vec::new(),
-                                text.clone(),
-                            ));
-                        }
-                    }
-                }
-            }
+            Role::System => {}
         }
     }
 
@@ -352,7 +338,6 @@ pub fn parse_turns_from_history(history: &[StoredMessage]) -> Vec<TurnRecord> {
         ));
     }
 
-    turns.extend(summary_turns);
     turns
 }
 

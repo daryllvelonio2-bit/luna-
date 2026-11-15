@@ -379,15 +379,7 @@ pub async fn switch_to_session(
         st.reasoning_effort,
     )?;
 
-    let mut history = replayed.history;
-    if let Ok(replay_with_summaries) = env.store.replay(target_id, 0).await {
-        for s in replay_with_summaries.history {
-            if s.is_summary {
-                history.push(s);
-            }
-        }
-    }
-    let turns = parse_turns_from_history(&history);
+    let turns = parse_turns_from_history(&replayed.history);
     let turn_meta: Vec<TurnMeta> = turns
         .iter()
         .map(|_| TurnMeta {
