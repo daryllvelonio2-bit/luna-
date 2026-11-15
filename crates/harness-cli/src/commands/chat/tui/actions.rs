@@ -344,7 +344,9 @@ pub async fn switch_to_session(
     if let Some(existing) = st.background_sessions.remove(target_id) {
         park_current_session(env, st);
         restore_background_session(env, st, existing);
-        refresh_tabs(env, st).await;
+        if !st.tabs.iter().any(|t| t.id == *env.session_id) {
+            refresh_tabs(env, st).await;
+        }
         return Ok(());
     }
 
@@ -377,13 +379,15 @@ pub async fn switch_to_session(
         st.reasoning_effort,
     )?;
 
-    let used = agent
-        .lock()
-        .await
-        .estimate_session_tokens()
-        .await
-        .unwrap_or(0);
-    let turns = parse_turns_from_history(&replayed.history);
+    let mut history = replayed.history;
+    if let Ok(replay_with_summaries) = env.store.replay(target_id, 0).await {
+        for s in replay_with_summaries.history {
+            if s.is_summary {
+                history.push(s);
+            }
+        }
+    }
+    let turns = parse_turns_from_history(&history);
     let turn_meta: Vec<TurnMeta> = turns
         .iter()
         .map(|_| TurnMeta {
@@ -397,8 +401,8 @@ pub async fn switch_to_session(
     park_current_session(env, st);
 
     *env.session_id = target_id.to_string();
-    env.agent = agent;
-    env.ui = ui;
+    env.agent = agent.clone();
+    env.ui = ui.clone();
     env.in_flight_tools = in_flight_tools;
     env.interruptions = interruptions;
     env.steer_handle = steer_handle;
@@ -430,18 +434,34 @@ pub async fn switch_to_session(
     st.idle_pass = IdleMemoryPass::new(initial_len);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
 
-    env.ui.set_status(&target_model, used, ctx_max);
+    env.ui.set_status(&target_model, 0, ctx_max);
     env.ui.set_session_name(&record.name);
     env.ui.clear_live_state();
     env.ui.clear_transient_error();
-    refresh_antigravity_status_if_needed(
-        &env.ui,
-        &target_provider,
-        &target_model,
-        &env.cred_manager,
-    )
-    .await;
-    refresh_tabs(env, st).await;
+
+    let ui_tokens = env.ui.clone();
+    let agent_tokens = agent.clone();
+    tokio::spawn(async move {
+        let used = agent_tokens
+            .lock()
+            .await
+            .estimate_session_tokens()
+            .await
+            .unwrap_or(0);
+        ui_tokens.update_status(used, ctx_max);
+    });
+
+    let ui_bg = env.ui.clone();
+    let prov_bg = target_provider.clone();
+    let mod_bg = target_model.clone();
+    let cred_bg = env.cred_manager.clone();
+    tokio::spawn(async move {
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+    });
+
+    if !st.tabs.iter().any(|t| t.id == *env.session_id) {
+        refresh_tabs(env, st).await;
+    }
     Ok(())
 }
 
@@ -541,6 +561,7 @@ pub async fn open_provider_picker_with_query(env: &Env<'_>, st: &mut TuiState, q
 /// and probes the OpenCode daemon/binary, neither of which belongs on the render loop.
 pub async fn build_provider_items(
     cred_manager: Arc<harness_providers::CredentialManager>,
+    config_providers: Option<&std::collections::BTreeMap<String, harness_core::config::ProviderOverride>>,
     current_provider: &str,
 ) -> Vec<ProviderPickerItem> {
     let loaded = cred_manager.get_loaded_providers().await;
@@ -573,7 +594,7 @@ pub async fn build_provider_items(
     });
 
     let catalog = harness_providers::get_provider_catalog();
-    let configured: Vec<_> = catalog
+    let mut configured: Vec<_> = catalog
         .iter()
         .filter(|p| {
             loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
@@ -583,6 +604,31 @@ pub async fn build_provider_items(
         })
         .cloned()
         .collect();
+
+    let mut custom_ids = Vec::new();
+    if let Some(cfgs) = config_providers {
+        for id in cfgs.keys() {
+            if id != "custom"
+                && !custom_ids.contains(id)
+                && !configured.iter().any(|p| p.id.eq_ignore_ascii_case(id))
+            {
+                custom_ids.push(id.clone());
+            }
+        }
+    }
+    for id in &loaded {
+        let clean = super::super::connect::provider_id_of(id);
+        if clean != "custom"
+            && !custom_ids.contains(&clean.to_string())
+            && !configured.iter().any(|p| p.id.eq_ignore_ascii_case(clean))
+        {
+            custom_ids.push(clean.to_string());
+        }
+    }
+    for id in custom_ids {
+        configured.push(harness_providers::catalog::custom_provider_descriptor(&id, ""));
+    }
+
     let available = if configured.is_empty() {
         catalog
     } else {
@@ -639,8 +685,14 @@ pub async fn open_provider_picker_with_target(
     let tx = st.picker_tx.clone();
     let cred_manager = env.cred_manager.clone();
     let current_provider = env.current_provider.clone();
+    let config_providers = env.config.providers.clone();
     tokio::spawn(async move {
-        let items = build_provider_items(cred_manager, &current_provider).await;
+        let items = build_provider_items(
+            cred_manager,
+            Some(&config_providers),
+            &current_provider,
+        )
+        .await;
         let _ = tx.send(super::state::PickerLoad::Providers(items));
     });
 }
@@ -667,7 +719,7 @@ pub async fn load_model_items(
         .await
         .unwrap_or_default();
     let def = harness_providers::catalog::get_default_model(provider).to_string();
-    if !def.is_empty() && !models.contains(&def) {
+    if !def.is_empty() && def != "default" && !models.contains(&def) {
         models.insert(0, def);
     }
     if provider.eq_ignore_ascii_case(current_provider) && !models.iter().any(|m| m == current_model)
@@ -1093,7 +1145,7 @@ fn open_connect_menu(st: &mut TuiState) {
 }
 
 async fn open_connect_add_provider(env: &Env<'_>, st: &mut TuiState) {
-    let providers = provider_items(&env.cred_manager).await;
+    let providers = provider_items(&env.cred_manager, Some(&env.config.providers)).await;
     let ids: Vec<String> = providers
         .iter()
         .map(|(label, _)| provider_id_of(label).to_string())
@@ -1691,15 +1743,25 @@ pub async fn run_select_action(
         },
         SelectAction::ConnectAddProvider { ids } => {
             if let Some(provider) = ids.get(choice) {
-                st.modal = ActiveModal::InputModal {
-                    title: "Add Provider — Label".to_string(),
-                    prompt: "Credential label (blank uses '<provider>-primary')".to_string(),
-                    value: String::new(),
-                    secret: false,
-                    action: InputAction::ApiKeyLabel {
-                        provider: provider.clone(),
-                    },
-                };
+                if provider == "custom" {
+                    st.modal = ActiveModal::InputModal {
+                        title: "Add Custom Provider — Name".to_string(),
+                        prompt: "Custom provider name (e.g. coarena, vllm, local)".to_string(),
+                        value: String::new(),
+                        secret: false,
+                        action: InputAction::CustomProviderName,
+                    };
+                } else {
+                    st.modal = ActiveModal::InputModal {
+                        title: "Add Provider — Label".to_string(),
+                        prompt: format!("Credential label (blank uses '{provider}-primary')"),
+                        value: String::new(),
+                        secret: false,
+                        action: InputAction::ApiKeyLabel {
+                            provider: provider.clone(),
+                        },
+                    };
+                }
             }
         }
         SelectAction::ConnectRemoveProvider { ids } => {
@@ -1955,6 +2017,107 @@ pub async fn run_input_action(
                 &env.cred_manager,
             )
             .await;
+            st.provider_items = build_provider_items(
+                env.cred_manager.clone(),
+                Some(&env.config.providers),
+                env.current_provider,
+            )
+            .await;
+            open_connect_menu(st);
+        }
+        InputAction::CustomProviderName => {
+            let name = value.trim().to_lowercase();
+            if name.is_empty() {
+                env.ui.emit_above("No provider name entered — cancelled");
+                open_connect_menu(st);
+                return;
+            }
+            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                env.ui.set_transient_error(Some(
+                    "Provider name may only contain alphanumeric characters, hyphens, and underscores"
+                        .to_string(),
+                ));
+                st.modal = ActiveModal::InputModal {
+                    title: "Add Custom Provider — Name".to_string(),
+                    prompt: "Invalid characters. Use alphanumeric, hyphen, underscore:".to_string(),
+                    value: name,
+                    secret: false,
+                    action: InputAction::CustomProviderName,
+                };
+                return;
+            }
+            st.modal = ActiveModal::InputModal {
+                title: format!("Add Custom Provider [{name}] — Endpoint"),
+                prompt: format!("Base URL endpoint for {name} (e.g. https://api.example.com/v1)"),
+                value: "http://localhost:8000/v1".to_string(),
+                secret: false,
+                action: InputAction::CustomProviderEndpoint { provider: name },
+            };
+        }
+        InputAction::CustomProviderEndpoint { provider } => {
+            let endpoint = value.trim().to_string();
+            if endpoint.is_empty() {
+                env.ui.emit_above("No endpoint entered — cancelled");
+                open_connect_menu(st);
+                return;
+            }
+            st.modal = ActiveModal::InputModal {
+                title: format!("Add Custom Provider [{provider}] — API Key"),
+                prompt: format!("API key for {provider} (masked, leave blank if unauthenticated)"),
+                value: String::new(),
+                secret: true,
+                action: InputAction::CustomProviderApiKey {
+                    provider,
+                    endpoint,
+                },
+            };
+        }
+        InputAction::CustomProviderApiKey { provider, endpoint } => {
+            let key = if value.trim().is_empty() {
+                "none".to_string()
+            } else {
+                value.trim().to_string()
+            };
+            let label = format!("{provider}-primary");
+
+            let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+            if let Ok(ref layers) = layers {
+                if let Err(err) = harness_core::config::set_in_file(
+                    layers,
+                    &format!("providers.{provider}.base_url"),
+                    &endpoint,
+                ) {
+                    tracing::warn!("Failed to persist custom provider base_url to config file: {err}");
+                }
+            }
+
+            let override_cfg = harness_core::config::ProviderOverride {
+                base_url: Some(endpoint.clone()),
+                models_endpoint: None,
+                timeout_secs: None,
+                context_window: None,
+            };
+            env.config.providers.insert(provider.clone(), override_cfg.clone());
+            env.discovery.set_override(&provider, override_cfg);
+
+            match env.cred_manager.add_credential(&provider, &label, &key, true).await {
+                Ok(id) => {
+                    env.ui.emit_above(&format!(
+                        "✔ Custom provider '{provider}' ({endpoint}) created with credential '{label}' ({id})"
+                    ));
+                }
+                Err(error) => {
+                    env.ui.set_transient_error(Some(format!("Add credential failed: {error}")));
+                }
+            }
+
+            st.provider_items = build_provider_items(
+                env.cred_manager.clone(),
+                Some(&env.config.providers),
+                env.current_provider,
+            )
+            .await;
+
             open_connect_menu(st);
         }
         InputAction::AutoCompactThreshold => {
@@ -2338,8 +2501,18 @@ pub async fn run_slash_command(
         }
         "/model" | "/models" | "/provider" => {
             if let Some(target) = arg {
+                let find_prov = |id: &str| {
+                    harness_providers::catalog::find_provider(id).or_else(|| {
+                        env.config.providers.get(id).map(|o| {
+                            harness_providers::catalog::custom_provider_descriptor(
+                                id,
+                                o.base_url.as_deref().unwrap_or(""),
+                            )
+                        })
+                    })
+                };
                 if let Some((prov_prefix, model_rest)) = target.split_once('/') {
-                    if let Some(prov) = harness_providers::catalog::find_provider(prov_prefix) {
+                    if let Some(prov) = find_prov(prov_prefix) {
                         if !model_rest.trim().is_empty() {
                             if let Err(e) =
                                 apply_model_selection(env, st, &prov.id, model_rest.trim(), true)
@@ -2352,7 +2525,7 @@ pub async fn run_slash_command(
                         }
                     }
                 }
-                if let Some(prov) = harness_providers::catalog::find_provider(target) {
+                if let Some(prov) = find_prov(target) {
                     open_models_for_provider(env, st, &prov.id, String::new()).await;
                 } else {
                     open_provider_picker_with_query(env, st, target.to_string()).await;
@@ -3266,14 +3439,20 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
     }
     if let Some((notice, dur)) = result {
         if let Some(summary) = notice.summary.clone() {
-            st.turns.push(TurnRecord {
-                user_query: "Compaction".to_string(),
-                reasoning: None,
-                tools: Vec::new(),
-                tool_items: Vec::new(),
-                duration: dur,
-                reply: summary,
-            });
+            if !st
+                .turns
+                .iter()
+                .any(|t| t.user_query == "Compaction" && t.reply == summary)
+            {
+                st.turns.push(TurnRecord {
+                    user_query: "Compaction".to_string(),
+                    reasoning: None,
+                    tools: Vec::new(),
+                    tool_items: Vec::new(),
+                    duration: dur,
+                    reply: summary,
+                });
+            }
         }
         let report = compaction_report(&notice);
         st.system_notices.push(SystemNotice::new(report));

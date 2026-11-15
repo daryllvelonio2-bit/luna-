@@ -762,21 +762,61 @@ async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), Har
         catalog[cat_sel].id.clone()
     };
 
+    let (target_provider, default_label) = if provider_id == "custom" {
+        println!();
+        let name = Input::<String>::new()
+            .with_prompt("Custom Provider Name (e.g. coarena, vllm, local)")
+            .interact_text()
+            .map_err(|e| HarnessError::Io(e.to_string()))?
+            .trim()
+            .to_lowercase();
+        if name.is_empty() {
+            println!("No provider name entered.");
+            return Ok(());
+        }
+        let endpoint = Input::<String>::new()
+            .with_prompt(format!("Base URL Endpoint for {}", name))
+            .default("http://localhost:8000/v1".to_string())
+            .interact_text()
+            .map_err(|e| HarnessError::Io(e.to_string()))?
+            .trim()
+            .to_string();
+
+        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+        if let Ok(ref layers) = layers {
+            if let Err(e) = harness_core::config::set_in_file(
+                layers,
+                &format!("providers.{name}.base_url"),
+                &endpoint,
+            ) {
+                println!("Warning: could not write config file: {e}");
+            }
+        }
+        (name.clone(), format!("{name}-primary"))
+    } else {
+        (provider_id.clone(), format!("{provider_id}-primary"))
+    };
+
     println!();
-    let default_label = format!("{}-primary", provider_id);
     let label = Input::<String>::new()
         .with_prompt("Credential Label")
         .default(default_label)
         .interact_text()
         .map_err(|e| HarnessError::Io(e.to_string()))?;
 
-    let api_key = if provider_id == "ollama" {
+    let api_key = if target_provider == "ollama" {
         "ollama-local".to_string()
     } else {
         Password::new()
             .with_prompt("API Key (masked)")
+            .allow_empty_password(true)
             .interact()
             .map_err(|e| HarnessError::Io(e.to_string()))?
+    };
+    let api_key = if api_key.is_empty() && provider_id == "custom" {
+        "none".to_string()
+    } else {
+        api_key
     };
 
     let is_priority = dialoguer::Confirm::new()
@@ -786,7 +826,7 @@ async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), Har
         .unwrap_or(true);
 
     let id = cred_manager
-        .add_credential(&provider_id, &label, &api_key, is_priority)
+        .add_credential(&target_provider, &label, &api_key, is_priority)
         .await?;
 
     println!();
@@ -794,7 +834,7 @@ async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), Har
         "  {} Credential '{}' registered for provider '{}' (ID: {})",
         "✔".green().bold(),
         label.bold(),
-        provider_id.cyan(),
+        target_provider.cyan(),
         id
     );
     pause_prompt();
@@ -802,14 +842,7 @@ async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), Har
 }
 
 async fn interactive_remove(cred_manager: Arc<CredentialManager>) -> Result<(), HarnessError> {
-    let catalog = get_provider_catalog();
-    let mut configured_providers = Vec::new();
-    for p in &catalog {
-        let creds = cred_manager.get_credentials(&p.id).await;
-        if !creds.is_empty() {
-            configured_providers.push(p.id.clone());
-        }
-    }
+    let configured_providers = cred_manager.get_loaded_providers().await;
 
     if configured_providers.is_empty() {
         println!("No credentials registered for any provider.");

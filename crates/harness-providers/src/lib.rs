@@ -21,9 +21,9 @@ pub use capability::{
     resolve as resolve_capabilities, resolve_default as resolve_default_capabilities,
 };
 pub use catalog::{
-    find_provider, get_context_window, get_default_model, get_provider_catalog, known_provider_ids,
-    resolve_context_window, resolve_descriptor, AuthHeaderFormat, ProviderDescriptor,
-    DEFAULT_CONTEXT_WINDOW, DEFAULT_TIMEOUT_SECS,
+    custom_provider_descriptor, find_provider, get_context_window, get_default_model,
+    get_provider_catalog, known_provider_ids, resolve_context_window, resolve_descriptor,
+    AuthHeaderFormat, ProviderDescriptor, DEFAULT_CONTEXT_WINDOW, DEFAULT_TIMEOUT_SECS,
 };
 pub use client::{build_http_client, GenericProviderClient};
 pub use codex::{

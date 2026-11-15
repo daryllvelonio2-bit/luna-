@@ -412,28 +412,22 @@ fn ordinary_window_start(
         // Fewer live rows than the bound allows: the window is the whole transcript.
         return first_seq(conn, session_id, include_compacted);
     };
-    // A window that already holds a user row starts on a turn; there is nothing to pull back.
-    let anchored_sql = if include_compacted {
-        "SELECT 1 FROM messages
-         WHERE session_id = ?1 AND is_summary = 0
-           AND role = 'user' AND seq >= ?2
-         LIMIT 1"
+    // If the boundary row is already a user message, the window opens cleanly on a turn start.
+    let is_user_sql = if include_compacted {
+        "SELECT role = 'user' FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND seq = ?2"
     } else {
-        "SELECT 1 FROM messages
-         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
-           AND role = 'user' AND seq >= ?2
-         LIMIT 1"
+        "SELECT role = 'user' FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL AND seq = ?2"
     };
-    let anchored: Option<i64> = conn
-        .query_row(anchored_sql, params![session_id, boundary], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(|error| session_error("failed to read the replay window anchor", error))?;
-    if anchored.is_some() {
+    let is_user: bool = conn
+        .query_row(is_user_sql, params![session_id, boundary], |row| row.get(0))
+        .unwrap_or(false);
+    if is_user {
         return Ok(Some(boundary));
     }
-    // The window lies inside one turn: pull it back to the user row that anchors that turn.
+
+    // The boundary lands inside a turn: pull it back to the user row that anchors that turn.
     let anchor_sql = if include_compacted {
         "SELECT MAX(seq) FROM messages
          WHERE session_id = ?1 AND is_summary = 0
@@ -448,7 +442,29 @@ fn ordinary_window_start(
             row.get::<_, Option<i64>>(0)
         })
         .map_err(|error| session_error("failed to read the replay window anchor", error))?;
-    Ok(Some(anchor.unwrap_or(boundary)))
+    if let Some(anchor) = anchor {
+        return Ok(Some(anchor));
+    }
+
+    // No preceding user message exists in the window scope; find the first user message forward.
+    let forward_sql = if include_compacted {
+        "SELECT MIN(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0
+           AND role = 'user' AND seq > ?2"
+    } else {
+        "SELECT MIN(seq) FROM messages
+         WHERE session_id = ?1 AND is_summary = 0 AND compacted_at IS NULL
+           AND role = 'user' AND seq > ?2"
+    };
+    let forward: Option<i64> = conn
+        .query_row(forward_sql, params![session_id, boundary], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .optional()
+        .map_err(|error| session_error("failed to read forward anchor", error))?
+        .flatten();
+
+    Ok(Some(forward.unwrap_or(boundary)))
 }
 
 /// The seq of the first row of a session, if it holds one.

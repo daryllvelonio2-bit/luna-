@@ -10,6 +10,7 @@ use colored::Colorize;
 use tokio::sync::mpsc;
 
 use super::{looks_like_path, CommandEntry};
+use crate::commands::chat::connect::provider_id_of;
 use crate::commands::chat::keys::AppKey;
 use crate::commands::chat::render::PROMPT;
 use crate::commands::chat::ui::{get_terminal_width, ChatUi};
@@ -772,7 +773,20 @@ fn available_provider_catalog(
     has_opencode_daemon: bool,
     has_opencode_cli: bool,
 ) -> Vec<ProviderDescriptor> {
-    let configured: Vec<_> = get_provider_catalog()
+    let mut catalog = get_provider_catalog();
+    for id in loaded {
+        let clean = provider_id_of(id);
+        if clean != "custom" && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(clean)) {
+            catalog.push(harness_providers::catalog::custom_provider_descriptor(clean, ""));
+        }
+    }
+    if !current_provider.is_empty()
+        && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(current_provider))
+    {
+        catalog.push(harness_providers::catalog::custom_provider_descriptor(current_provider, ""));
+    }
+
+    let configured: Vec<_> = catalog
         .into_iter()
         .filter(|p| {
             loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id))
@@ -1025,7 +1039,7 @@ async fn pick_model_for_provider(
         .unwrap_or_default();
 
     let default_model = get_default_model(chosen_provider).to_string();
-    if !default_model.is_empty() && !models.contains(&default_model) {
+    if !default_model.is_empty() && default_model != "default" && !models.contains(&default_model) {
         models.insert(0, default_model.clone());
     }
 

@@ -513,7 +513,15 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
             env.config.session.resume_max_messages,
         )
         .await?;
-    let turns = parse_turns_from_history(&replayed.history);
+    let mut history = replayed.history;
+    if let Ok(replay_with_summaries) = env.store.replay(env.session_id.as_str(), 0).await {
+        for s in replay_with_summaries.history {
+            if s.is_summary {
+                history.push(s);
+            }
+        }
+    }
+    let turns = parse_turns_from_history(&history);
     let turn_meta: Vec<TurnMeta> = turns
         .iter()
         .map(|_| TurnMeta {
@@ -646,6 +654,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         last_rendered_rect: (120, 34),
         provider_items: actions::build_provider_items(
             env.cred_manager.clone(),
+            Some(&env.config.providers),
             env.current_provider.as_str(),
         )
         .await,

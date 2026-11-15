@@ -111,6 +111,14 @@ pub enum InputAction {
         provider: String,
         label: String,
     },
+    CustomProviderName,
+    CustomProviderEndpoint {
+        provider: String,
+    },
+    CustomProviderApiKey {
+        provider: String,
+        endpoint: String,
+    },
     AutoCompactThreshold,
     AutoCompactPercent {
         threshold: usize,

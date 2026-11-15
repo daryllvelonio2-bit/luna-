@@ -552,6 +552,60 @@ async fn replay_window_pulls_back_to_the_user_message_that_anchors_the_turn() {
 }
 
 #[tokio::test]
+async fn replay_window_pulls_back_when_cut_turn_precedes_later_user_turns() {
+    let (_dir, _path, store) = temp_store();
+    store.ensure_session("s1").await.unwrap();
+
+    // Turn 1: user message followed by tool call, tool result, and assistant reply
+    store
+        .append("s1", &Message::user("turn 1 prompt"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("calling tool"), false)
+        .await
+        .unwrap();
+    store
+        .append(
+            "s1",
+            &Message::tool(ToolResult::success("tool_1", "tool result output")),
+            false,
+        )
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("turn 1 answer"), false)
+        .await
+        .unwrap();
+
+    // Turn 2: clean user turn
+    store
+        .append("s1", &Message::user("turn 2 prompt"), false)
+        .await
+        .unwrap();
+    store
+        .append("s1", &Message::assistant("turn 2 answer"), false)
+        .await
+        .unwrap();
+
+    // Total rows: 6.
+    // Bound limit = 3 falls on seq 4 ("turn 1 answer", assistant).
+    // Must pull back to seq 1 ("turn 1 prompt") so turn 1 is preserved whole.
+    let replay = store.replay("s1", 3).await.unwrap();
+    assert_eq!(
+        replay.history[0].message.role,
+        Role::User,
+        "history starts on a clean user turn"
+    );
+    assert_eq!(
+        replay.history[0].message.content.as_deref(),
+        Some("turn 1 prompt"),
+        "pulled back to the user message anchoring the cut turn"
+    );
+    assert_eq!(replay.history.len(), 6, "all rows of both turns preserved");
+}
+
+#[tokio::test]
 async fn record_compaction_writes_a_summary_and_keeps_the_folded_rows() {
     let (_dir, path, store) = temp_store();
     store.ensure_session("s1").await.unwrap();

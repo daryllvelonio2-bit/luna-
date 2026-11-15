@@ -943,7 +943,7 @@ pub struct SessionSettings {
 impl Default for SessionSettings {
     fn default() -> Self {
         Self {
-            resume_max_messages: 200,
+            resume_max_messages: 1000,
         }
     }
 }

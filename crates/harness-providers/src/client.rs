@@ -355,7 +355,9 @@ impl GenericProviderClient {
         overrides: Option<&ProviderOverride>,
     ) -> Result<Self, HarnessError> {
         let p_id = provider_id.into();
-        let descriptor = resolve_descriptor(&p_id, overrides)?;
+        let fallback = discovery.get_override(&p_id);
+        let effective_override = overrides.or(fallback.as_ref());
+        let descriptor = resolve_descriptor(&p_id, effective_override)?;
 
         Ok(Self {
             provider_id: p_id,

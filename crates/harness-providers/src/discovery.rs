@@ -59,7 +59,7 @@ pub struct ModelDiscovery {
     cache_path: PathBuf,
     ttl: Duration,
     /// Resolved `providers.<id>.*` config, applied when a provider's models endpoint is fetched.
-    overrides: BTreeMap<String, ProviderOverride>,
+    overrides: std::sync::RwLock<BTreeMap<String, ProviderOverride>>,
 }
 
 /// How many providers are asked for their model list at once.
@@ -81,8 +81,19 @@ impl ModelDiscovery {
         Self {
             cache_path: path,
             ttl: Duration::hours(ttl_hours),
-            overrides,
+            overrides: std::sync::RwLock::new(overrides),
         }
+    }
+
+    pub fn get_override(&self, provider_id: &str) -> Option<ProviderOverride> {
+        self.overrides.read().unwrap().get(provider_id).cloned()
+    }
+
+    pub fn set_override(&self, provider_id: impl Into<String>, override_cfg: ProviderOverride) {
+        self.overrides
+            .write()
+            .unwrap()
+            .insert(provider_id.into(), override_cfg);
     }
 
     fn load_cache(&self) -> ModelsCache {
@@ -210,7 +221,7 @@ impl ModelDiscovery {
                 providers.push(p);
             }
         }
-        for p in self.overrides.keys() {
+        for p in self.overrides.read().unwrap().keys() {
             if !providers.contains(p) {
                 providers.push(p.clone());
             }
@@ -256,7 +267,9 @@ impl ModelDiscovery {
             if !seen_canonical.insert(canonical.to_string()) {
                 continue;
             }
-            if crate::catalog::find_provider(&provider).is_none() {
+            if crate::catalog::find_provider(&provider).is_none()
+                && self.get_override(&provider).is_none()
+            {
                 continue;
             }
             targets.push(provider);
@@ -313,7 +326,8 @@ impl ModelDiscovery {
         provider_id: &str,
         cred_manager: &CredentialManager,
     ) -> Result<ModelListing, HarnessError> {
-        let descriptor = resolve_descriptor(provider_id, self.overrides.get(provider_id))?;
+        let ov = self.get_override(provider_id);
+        let descriptor = resolve_descriptor(provider_id, ov.as_ref())?;
         // Per-provider timeout, so a hanging `/models` call cannot outlive the config value.
         let http_client = build_http_client(descriptor.timeout_secs)?;
 

@@ -131,20 +131,22 @@ async fn pick_action(
 
 /// Ids of every provider that has at least one stored credential.
 pub(crate) async fn connected_providers(cred_manager: &CredentialManager) -> Vec<String> {
-    let mut connected = Vec::new();
-    for provider in get_provider_catalog() {
-        if !cred_manager.get_credentials(&provider.id).await.is_empty() {
-            connected.push(provider.id);
-        }
-    }
-    connected
+    cred_manager.get_loaded_providers().await
 }
 
 /// A plain-text report of every stored credential, for the TUI's text modal.
 pub(crate) async fn list_keys_text(cred_manager: &CredentialManager) -> String {
     let mut any = false;
     let mut out = String::new();
-    for provider in get_provider_catalog() {
+    let loaded = cred_manager.get_loaded_providers().await;
+    let mut catalog = get_provider_catalog();
+    for id in &loaded {
+        let clean = provider_id_of(id);
+        if !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(clean)) {
+            catalog.push(harness_providers::catalog::custom_provider_descriptor(clean, ""));
+        }
+    }
+    for provider in catalog {
         let creds = cred_manager.get_credentials(&provider.id).await;
         if creds.is_empty() {
             continue;
@@ -180,9 +182,38 @@ pub(crate) async fn list_keys_text(cred_manager: &CredentialManager) -> String {
 }
 
 /// The providers a key can be added for, with the ones already connected marked.
-pub(crate) async fn provider_items(cred_manager: &CredentialManager) -> Vec<(String, bool)> {
+pub(crate) async fn provider_items(
+    cred_manager: &CredentialManager,
+    config_providers: Option<&std::collections::BTreeMap<String, harness_core::config::ProviderOverride>>,
+) -> Vec<(String, bool)> {
     let loaded = cred_manager.get_loaded_providers().await;
-    get_provider_catalog()
+    let mut catalog = get_provider_catalog();
+
+    let mut custom_ids = Vec::new();
+    if let Some(cfgs) = config_providers {
+        for id in cfgs.keys() {
+            if id != "custom"
+                && !custom_ids.contains(id)
+                && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(id))
+            {
+                custom_ids.push(id.clone());
+            }
+        }
+    }
+    for id in &loaded {
+        let clean_id = provider_id_of(id);
+        if clean_id != "custom"
+            && !custom_ids.contains(&clean_id.to_string())
+            && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(clean_id))
+        {
+            custom_ids.push(clean_id.to_string());
+        }
+    }
+    for id in custom_ids {
+        catalog.push(harness_providers::catalog::custom_provider_descriptor(&id, ""));
+    }
+
+    catalog
         .into_iter()
         .map(|p| {
             let connected = loaded.iter().any(|l| l.eq_ignore_ascii_case(&p.id));
@@ -198,7 +229,7 @@ async fn add_key(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {
-    let providers = provider_items(cred_manager).await;
+    let providers = provider_items(cred_manager, None).await;
     let items: Vec<String> = providers.iter().map(|(label, _)| label.clone()).collect();
 
     let Some(index) =
@@ -210,11 +241,37 @@ async fn add_key(
 
     let provider_id = provider_id_of(&providers[index].0).to_string();
 
+    let (target_provider, default_label) = if provider_id == "custom" {
+        let Some(name) = super::commands::input_from_rx(key_rx, "Custom provider name (e.g. coarena, vllm)").await else {
+            return Ok(());
+        };
+        let name = name.trim().to_lowercase();
+        if name.is_empty() {
+            ui.emit_above(&format!("{} No provider name entered — cancelled", "•".dimmed()));
+            return Ok(());
+        }
+        let Some(endpoint) = super::commands::input_from_rx(key_rx, &format!("Base URL endpoint for {name} (e.g. https://api.example.com/v1)")).await else {
+            return Ok(());
+        };
+        let endpoint = endpoint.trim().to_string();
+        if endpoint.is_empty() {
+            ui.emit_above(&format!("{} No endpoint entered — cancelled", "•".dimmed()));
+            return Ok(());
+        }
+        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+        if let Ok(ref layers) = layers {
+            let _ = harness_core::config::set_in_file(layers, &format!("providers.{name}.base_url"), &endpoint);
+        }
+        (name.clone(), format!("{name}-primary"))
+    } else {
+        (provider_id.clone(), format!("{provider_id}-primary"))
+    };
+
     let Some(label) = super::commands::input_from_rx(key_rx, "Credential label").await else {
         return Ok(());
     };
     let label = if label.trim().is_empty() {
-        format!("{}-primary", provider_id)
+        default_label
     } else {
         label.trim().to_string()
     };
@@ -225,20 +282,24 @@ async fn add_key(
     let Some(api_key) = masked_input(key_rx, "API key (masked)").await else {
         return Ok(());
     };
-    if api_key.is_empty() {
+    let api_key = if api_key.is_empty() && provider_id == "custom" {
+        "none".to_string()
+    } else if api_key.is_empty() {
         ui.emit_above(&format!("{} No key entered — nothing added", "•".dimmed()));
         return Ok(());
-    }
+    } else {
+        api_key
+    };
 
     let id = cred_manager
-        .add_credential(&provider_id, &label, &api_key, true)
+        .add_credential(&target_provider, &label, &api_key, true)
         .await?;
 
     ui.emit_above(&format!(
         "{} Credential '{}' added for {} ({})",
         "✔".green().bold(),
         label.bold(),
-        provider_id.cyan(),
+        target_provider.cyan(),
         id.dimmed()
     ));
     Ok(())
@@ -246,9 +307,10 @@ async fn add_key(
 
 /// The provider id out of a rendered menu label like `NVIDIA NIM (nvidia)`.
 pub(crate) fn provider_id_of(label: &str) -> &str {
-    match label.rfind('(') {
-        Some(open) => label[open + 1..].trim_end_matches(')'),
-        None => label.trim(),
+    let clean = label.trim_end().strip_suffix("[connected]").unwrap_or(label).trim();
+    match clean.rfind('(') {
+        Some(open) => clean[open + 1..].trim_end_matches(')').trim(),
+        None => clean,
     }
 }
 
@@ -720,12 +782,7 @@ async fn reset_cooldowns(
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {
-    let mut connected: Vec<String> = Vec::new();
-    for provider in get_provider_catalog() {
-        if !cred_manager.get_credentials(&provider.id).await.is_empty() {
-            connected.push(provider.id.clone());
-        }
-    }
+    let connected = connected_providers(cred_manager).await;
 
     let items: Vec<String> = std::iter::once("All providers".to_string())
         .chain(connected.iter().cloned())
@@ -760,10 +817,40 @@ mod tests {
     fn a_provider_id_is_read_out_of_its_menu_label() {
         assert_eq!(provider_id_of("NVIDIA NIM (nvidia)"), "nvidia");
         assert_eq!(
+            provider_id_of("NVIDIA NIM (nvidia) [connected]"),
+            "nvidia"
+        );
+        assert_eq!(
             provider_id_of("Custom (OpenAI-compatible) (custom)"),
             "custom"
         );
         assert_eq!(provider_id_of("plain"), "plain");
+    }
+
+    #[tokio::test]
+    async fn provider_items_includes_custom_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cred_path = tmp.path().join("credentials.json");
+        let mgr = CredentialManager::new(Some(cred_path)).unwrap();
+        mgr.add_credential("coarena", "coarena-primary", "secret-key", true)
+            .await
+            .unwrap();
+
+        let mut config_providers = std::collections::BTreeMap::new();
+        config_providers.insert(
+            "vllm-local".to_string(),
+            harness_core::config::ProviderOverride {
+                base_url: Some("http://localhost:8000/v1".to_string()),
+                models_endpoint: None,
+                timeout_secs: None,
+                context_window: None,
+            },
+        );
+
+        let items = provider_items(&mgr, Some(&config_providers)).await;
+        assert!(items.iter().any(|(lbl, _)| lbl.contains("coarena")));
+        assert!(items.iter().any(|(lbl, _)| lbl.contains("vllm-local")));
+        assert!(items.iter().any(|(lbl, _)| lbl.contains("custom")));
     }
 
     #[test]

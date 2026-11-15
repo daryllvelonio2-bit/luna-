@@ -848,6 +848,23 @@ pub fn known_provider_ids() -> Vec<String> {
     get_provider_catalog().into_iter().map(|p| p.id).collect()
 }
 
+/// Create a descriptor for a custom OpenAI-compatible provider with a user-defined name and base URL.
+pub fn custom_provider_descriptor(id: &str, base_url: &str) -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: id.to_string(),
+        display_name: format!("Custom ({id})"),
+        default_base_url: if base_url.is_empty() {
+            "http://localhost:8000/v1".to_string()
+        } else {
+            base_url.to_string()
+        },
+        models_endpoint: "/models".to_string(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        auth_header_format: AuthHeaderFormat::Bearer,
+        context_windows: std::collections::HashMap::new(),
+    }
+}
+
 /// The catalog entry for `id` with the user's `providers.<id>.*` config applied.
 ///
 /// An unknown id is an error instead of a silent fallback to another vendor: a typo in
@@ -857,13 +874,20 @@ pub fn resolve_descriptor(
     id: &str,
     overrides: Option<&ProviderOverride>,
 ) -> Result<ProviderDescriptor, HarnessError> {
-    let mut descriptor = find_provider(id).ok_or_else(|| {
-        HarnessError::ConfigurationError(format!(
-            "unknown provider '{}': known providers are {}",
-            id,
-            known_provider_ids().join(", ")
-        ))
-    })?;
+    let mut descriptor = match find_provider(id) {
+        Some(d) => d,
+        None if overrides.is_some_and(|o| o.base_url.is_some()) => {
+            let base_url = overrides.and_then(|o| o.base_url.as_deref()).unwrap_or("");
+            custom_provider_descriptor(id, base_url)
+        }
+        None => {
+            return Err(HarnessError::ConfigurationError(format!(
+                "unknown provider '{}': known providers are {}",
+                id,
+                known_provider_ids().join(", ")
+            )));
+        }
+    };
 
     if let Some(overrides) = overrides {
         if let Some(base_url) = &overrides.base_url {
@@ -1078,6 +1102,21 @@ mod tests {
             AuthHeaderFormat::Bearer
         ));
         assert_eq!(get_default_model("gemini"), "gemini-3.5-flash-lite");
+    }
+
+    #[test]
+    fn custom_provider_resolves_when_base_url_is_supplied() {
+        let ov = ProviderOverride {
+            base_url: Some("https://my-custom.ai/v1".to_string()),
+            models_endpoint: None,
+            timeout_secs: None,
+            context_window: None,
+        };
+        let desc = resolve_descriptor("coarena", Some(&ov)).expect("resolves custom provider");
+        assert_eq!(desc.id, "coarena");
+        assert_eq!(desc.display_name, "Custom (coarena)");
+        assert_eq!(desc.default_base_url, "https://my-custom.ai/v1");
+        assert_eq!(desc.models_endpoint, "/models");
     }
 
     #[test]
