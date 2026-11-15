@@ -433,12 +433,14 @@ def format_result(tool: str, result: Any) -> str:
         if result.get("matched"):
             return (
                 f"matched '{result.get('pattern')}' after {result.get('elapsed_ms')}ms\n"
-                f"line: {result.get('line')}"
+                f"line: {result.get('line')}\n\n"
+                f"--- screen ---\n{result.get('screen', '')}"
             )
         return (
             f"NOT matched '{result.get('pattern')}' after {result.get('elapsed_ms')}ms\n"
             f"exited: {result.get('exited')} (code {result.get('exit_code')})\n\n"
-            f"--- screen tail ---\n{result.get('tail', '')}"
+            f"--- screen tail ---\n{result.get('tail', '')}\n\n"
+            f"--- screen ---\n{result.get('screen', '')}"
         )
 
     if tool == "pty_idle":

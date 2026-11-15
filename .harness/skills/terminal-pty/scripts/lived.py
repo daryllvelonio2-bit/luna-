@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -176,16 +177,40 @@ class Registry:
 
     @staticmethod
     def _resolve_argv(params: dict[str, Any]) -> list[str]:
-        argv = params.get("argv")
-        if argv:
-            return [str(a) for a in argv]
-        command = params.get("command")
-        if command:
-            if isinstance(command, str):
-                # A shell string is convenient but opaque; wrap it so quoting
-                # still behaves the way the caller wrote it.
-                return ["sh", "-lc", command]
-            return [str(a) for a in command]
+        raw = params.get("argv") if params.get("argv") is not None else params.get("command")
+        if not raw:
+            raw = params.get("cmd") or params.get("args")
+        if not raw:
+            return [os.environ.get("SHELL") or "/bin/sh"]
+
+        if isinstance(raw, str):
+            s = raw.strip()
+            # If bracketed string e.g. '["opencode"]' or malformed '["opencode]'
+            if (s.startswith("[") and s.endswith("]")) or (s.startswith("(") and s.endswith(")")):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return [str(a) for a in parsed if a]
+                except Exception:
+                    pass
+                s = s[1:-1].strip()
+            s = s.strip("[]() ")
+            try:
+                parts = shlex.split(s)
+                if parts:
+                    return parts
+            except Exception:
+                return s.split()
+
+        if isinstance(raw, (list, tuple)):
+            cleaned = []
+            for item in raw:
+                val = str(item).strip().strip("[]() ")
+                if val:
+                    cleaned.append(val)
+            if cleaned:
+                return cleaned
+
         return [os.environ.get("SHELL") or "/bin/sh"]
 
     def send(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -236,13 +261,15 @@ class Registry:
         pattern = params.get("pattern")
         if not pattern:
             raise LiveError("wait requires 'pattern'")
-        return session.wait_for(
+        res = session.wait_for(
             str(pattern),
             timeout=float(params.get("timeout") or 15.0),
             regex=bool(params.get("regex", True)),
             scope=str(params.get("scope") or "screen"),
             scrollback=bool(params.get("scrollback", True)),
         )
+        res["screen"] = session.screen_text()
+        return res
 
     def assert_(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self.get(params.get("session_id"))

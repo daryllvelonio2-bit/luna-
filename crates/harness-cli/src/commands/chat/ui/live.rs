@@ -254,16 +254,18 @@ impl ChatUi {
             return;
         }
         let now = std::time::Instant::now();
+        let title = pty_title(name, arguments);
         {
             let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             match live.pty_pane.as_mut() {
                 Some(pane) => {
+                    pane.title = title;
                     pane.running = true;
                     pane.last_activity = now;
                 }
                 None => {
                     live.pty_pane = Some(PtyPane {
-                        title: pty_title(name, arguments),
+                        title,
                         lines: Vec::new(),
                         last_activity: now,
                         running: true,
@@ -329,13 +331,20 @@ fn pty_title(name: &str, arguments: &serde_json::Value) -> String {
     };
     let argv = arguments
         .get("argv")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+        .and_then(|v| {
+            if let Some(items) = v.as_array() {
+                Some(
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            } else if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else {
+                None
+            }
         })
         .filter(|s| !s.is_empty());
     let target = non_empty("label")
@@ -366,29 +375,51 @@ fn pty_screen_lines(output: &str, allow_raw: bool) -> Option<Vec<String>> {
     if trimmed.is_empty() {
         return None;
     }
-    let text = match serde_json::from_str::<serde_json::Value>(trimmed) {
+    let json_text = match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(value) => value
             .get("screen")
             .and_then(|v| v.as_str())
-            .or_else(|| value.get("text").and_then(|v| v.as_str()))?
-            .to_string(),
-        Err(_) if !allow_raw => return None,
-        Err(_) => {
+            .or_else(|| value.get("text").and_then(|v| v.as_str()))
+            .map(str::to_string),
+        Err(_) => None,
+    };
+    let text = match json_text {
+        Some(t) => t,
+        None => {
             if let Some(pos) = trimmed.find("--- screen ---\n") {
                 trimmed[pos + "--- screen ---\n".len()..].to_string()
             } else if let Some(pos) = trimmed.find("--- screen tail ---\n") {
                 trimmed[pos + "--- screen tail ---\n".len()..].to_string()
+            } else if allow_raw {
+                trimmed.to_string()
             } else {
                 return None;
             }
         }
     };
-    let mut lines: Vec<String> = text
+    let mut raw_lines: Vec<String> = text
         .lines()
         .map(|line| line.trim_end().to_string())
         .collect();
-    while lines.last().is_some_and(|line| line.is_empty()) {
-        lines.pop();
+    while raw_lines.last().is_some_and(|line| line.is_empty()) {
+        raw_lines.pop();
+    }
+    while raw_lines.first().is_some_and(|line| line.is_empty()) {
+        raw_lines.remove(0);
+    }
+    if raw_lines.is_empty() {
+        return None;
+    }
+    // Collapse runs of multiple consecutive empty lines to 1 empty line
+    let mut lines: Vec<String> = Vec::with_capacity(raw_lines.len());
+    let mut prev_empty = false;
+    for line in raw_lines {
+        let is_empty = line.trim().is_empty();
+        if is_empty && prev_empty {
+            continue;
+        }
+        lines.push(line);
+        prev_empty = is_empty;
     }
     if lines.is_empty() {
         return None;

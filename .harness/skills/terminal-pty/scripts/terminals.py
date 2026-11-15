@@ -17,6 +17,7 @@ import fcntl
 import os
 import pty
 import re
+import shutil
 import signal
 import struct
 import subprocess
@@ -346,6 +347,43 @@ class PtySession:
         env.update(self._env)
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("COLORTERM", "truecolor")
+
+        # Ensure user and standard bin directories are always present in PATH
+        home = os.path.expanduser("~")
+        user_bins = [
+            os.path.join(home, ".local", "bin"),
+            os.path.join(home, ".opencode", "bin"),
+            os.path.join(home, "bin"),
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/local/sbin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        cur_path = env.get("PATH", "")
+        paths = cur_path.split(os.path.pathsep) if cur_path else []
+        for ub in user_bins:
+            if os.path.isdir(ub) and ub not in paths:
+                paths.insert(0, ub)
+        env["PATH"] = os.path.pathsep.join(paths)
+
+        # Resolve binary path from user paths, PATH, or working directory
+        if self.argv:
+            prog = os.path.expanduser(self.argv[0])
+            if prog.startswith("./"):
+                prog = prog[2:]
+            if os.path.isfile(prog) and os.access(prog, os.X_OK):
+                self.argv[0] = os.path.abspath(prog)
+            else:
+                home_prog = os.path.join(home, prog)
+                if os.path.isfile(home_prog) and os.access(home_prog, os.X_OK):
+                    self.argv[0] = os.path.abspath(home_prog)
+                else:
+                    which = shutil.which(prog, path=env.get("PATH"))
+                    if which:
+                        self.argv[0] = which
+
         # A Luna verification run must never stop at its onboarding prompt;
         # other programs ignore the variable.
         if os.path.basename(self.argv[0]) == "luna":
@@ -580,6 +618,7 @@ class PtySession:
                     "pattern": pattern,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "tail": _tail(text),
+                    "screen": text,
                     "exited": self.exited(),
                     "exit_code": self.exit_code(),
                 }
@@ -601,7 +640,9 @@ class PtySession:
             with self._lock:
                 idle_for = time.time() - self._last_output_at
                 exited = self._exited
-            if idle_for >= quiet or exited:
+                has_output = self._raw_len > 0
+            startup_grace = not has_output and not exited and (time.monotonic() - started < min(timeout, 3.0))
+            if not startup_grace and (idle_for >= quiet or exited):
                 return {
                     "idle": True,
                     "quiet_ms": int(idle_for * 1000),
