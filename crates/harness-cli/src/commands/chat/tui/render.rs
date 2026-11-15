@@ -19,12 +19,12 @@ use super::markdown::{
 };
 use super::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
-    PaletteItem, ProviderPickerItem, TabHitBox, TabHitTarget, TranscriptClickTarget,
+    PaletteItem, ProviderPickerItem, SubagentUiEntry, TabHitBox, TabHitTarget, TranscriptClickTarget,
     TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
-    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, GREEN_OK,
+    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, CYAN_LINK, GREEN_OK,
     LOGO_GRAY, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
     YELLOW_WARN,
 };
@@ -719,8 +719,20 @@ fn render_conversation(
 
     if chrome_h > 0 {
         let take_from = chrome_lines.len().saturating_sub(chrome_h as usize);
+        let visible_chrome = &chrome_lines[take_from..];
+        for (i, line) in visible_chrome.iter().enumerate() {
+            let row_y = cur_y + i as u16;
+            if snap.delegate_count > 0 && line.spans.iter().any(|s| s.content.contains("Subagent")) {
+                st.transcript_hit_boxes.push(TranscriptHitBox {
+                    y: row_y,
+                    x_start: content_x,
+                    x_end: content_x + content_w,
+                    target: TranscriptClickTarget::OpenSubagents,
+                });
+            }
+        }
         frame.render_widget(
-            Paragraph::new(chrome_lines[take_from..].to_vec()),
+            Paragraph::new(visible_chrome.to_vec()),
             Rect {
                 x: content_x,
                 y: cur_y,
@@ -1138,6 +1150,17 @@ fn render_composer_hint_row(
     }
 
     if let Some(s) = snap {
+        if s.delegate_count > 0 {
+            let label = if s.delegate_count == 1 {
+                "● 1 subagent · ".to_string()
+            } else {
+                format!("● {} subagents · ", s.delegate_count)
+            };
+            right_spans.push(Span::styled(
+                label,
+                Style::default().fg(CYAN_LINK).bg(BG_CANVAS),
+            ));
+        }
         if st.active_turn.is_some() {
             if let Some(ref tool_name) = s.activity_tool_name {
                 let kind_label = if matches!(tool_name.as_str(), "terminal" | "shell" | "bash") {
@@ -1259,10 +1282,33 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
             } else {
                 String::new()
             };
-            lines.push(Line::from(Span::styled(
-                truncate_str(&format!("{spinner} Subagent{more}: {goal} — {act}"), width),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
-            )));
+            let body = format!("{spinner} Subagent{more}: {goal} — {act}");
+            let hint = " (Ctrl+B / click to inspect)";
+            let avail_body = width.saturating_sub(hint.len() + 1);
+            let spans = if width >= 50 && avail_body >= 20 {
+                vec![
+                    Span::styled(
+                        truncate_str(&body, avail_body),
+                        Style::default()
+                            .fg(CYAN_LINK)
+                            .add_modifier(Modifier::BOLD)
+                            .bg(BG_CANVAS),
+                    ),
+                    Span::styled(
+                        hint,
+                        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                    ),
+                ]
+            } else {
+                vec![Span::styled(
+                    truncate_str(&body, width),
+                    Style::default()
+                        .fg(CYAN_LINK)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(BG_CANVAS),
+                )]
+            };
+            lines.push(Line::from(spans));
         }
     }
     if !st.queue.is_empty() {
@@ -1570,12 +1616,17 @@ fn render_completed_turn_process(
             }
         } else {
             let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
+            let click_target = if item.tool_name == "delegate_task" {
+                TranscriptClickTarget::OpenSubagents
+            } else {
+                TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx)
+            };
             push_completed_tool_card(
                 out,
                 hit_targets,
                 item,
                 open,
-                TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx),
+                click_target,
                 width,
                 card_inner_w,
             );
@@ -3085,6 +3136,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 ("/diff", "Show turn file diffs"),
                 ("/usage", "Show token usage summary"),
                 ("/jobs", "View background tasks and subagents"),
+                ("ctrl+b", "Inspect subagents and tasks"),
             ];
             let visible_h = inner.height as usize;
             let lines: Vec<Line<'static>> = help_rows
@@ -3105,6 +3157,28 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 })
                 .collect();
             frame.render_widget(Paragraph::new(lines), inner);
+        }
+        ActiveModal::SubagentsModal {
+            items,
+            selected,
+            active_only,
+        } => {
+            let w = screen.width.saturating_sub(6).clamp(54, 88);
+            let h = screen.height.saturating_sub(4).clamp(12, 24);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+            render_subagents_modal(frame, rect, items, *selected, *active_only, st.spinner_tick);
+        }
+        ActiveModal::SubagentInspector {
+            items,
+            current_idx,
+            scroll,
+        } => {
+            let w = screen.width.saturating_sub(4).clamp(60, 110);
+            let h = screen.height.saturating_sub(2).clamp(14, 38);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+            render_subagent_inspector(frame, rect, items, *current_idx, *scroll, st.spinner_tick);
         }
     }
 }
@@ -3132,6 +3206,389 @@ fn draw_modal_frame(frame: &mut Frame, rect: Rect, title: &str, hint: &str) -> R
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     inner
+}
+
+fn render_subagents_modal(
+    frame: &mut Frame,
+    rect: Rect,
+    items: &[SubagentUiEntry],
+    selected: usize,
+    active_only: bool,
+    spinner_tick: usize,
+) {
+    let hint = "enter inspect · tab filter · x stop · esc back";
+    let inner = draw_modal_frame(frame, rect, "Subagents", hint);
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+
+    let running_count = items.iter().filter(|i| i.status == "running").count();
+    let completed_count = items.iter().filter(|i| i.status == "completed").count();
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+
+    // Top filter & status row
+    let filter_label = if active_only {
+        " [Active] (Tab / Ctrl+A to show all) "
+    } else {
+        " [All] (Tab / Ctrl+A to show active) "
+    };
+    let count_label = format!("{running_count} running · {completed_count} completed");
+    let pad = (inner.width as usize).saturating_sub(filter_label.len() + count_label.len() + 2);
+    rows.push(Line::from(vec![
+        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(
+            filter_label,
+            Style::default()
+                .fg(if active_only { CYAN_LINK } else { TEXT_PRIMARY })
+                .bg(BG_SURFACE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(pad), Style::default().bg(BG_ELEVATED)),
+        Span::styled(
+            count_label,
+            Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+        ),
+        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+    ]));
+    rows.push(Line::default());
+
+    let filtered: Vec<&SubagentUiEntry> = items
+        .iter()
+        .filter(|i| !active_only || i.status == "running")
+        .collect();
+
+    let list_h = (inner.height as usize).saturating_sub(2);
+    if filtered.is_empty() {
+        let msg = if active_only {
+            "   No active subagents running. Press Tab to view all subagents."
+        } else {
+            "   No subagent tasks recorded."
+        };
+        rows.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+        )));
+    } else {
+        let sel = selected.min(filtered.len().saturating_sub(1));
+        let scroll = sel.saturating_sub(list_h.saturating_sub(1));
+        for (idx, item) in filtered.iter().enumerate().skip(scroll).take(list_h) {
+            let is_sel = idx == sel;
+            let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+            let prefix = if is_sel { " ▸ " } else { "   " };
+
+            let (status_icon, status_color) = if item.status == "running" {
+                let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+                (spinner, CYAN_LINK)
+            } else if item.status == "completed" {
+                ("●", GREEN_OK)
+            } else if item.status.starts_with("failed") {
+                ("◍", RED_ERR)
+            } else {
+                ("○", TEXT_MUTED)
+            };
+
+            let elapsed_str = format!("{}s", item.elapsed_secs);
+            let agent_badge = format!("[{}] ", item.agent);
+            let avail_w = (inner.width as usize)
+                .saturating_sub(prefix.len() + 2 + agent_badge.len() + elapsed_str.len() + 3);
+            let title_trunc = truncate_str(&item.title, avail_w);
+
+            let row_pad = (inner.width as usize).saturating_sub(
+                prefix.len() + 2 + agent_badge.len() + title_trunc.width() + elapsed_str.len() + 2,
+            );
+
+            rows.push(Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default()
+                        .fg(if is_sel { ACCENT_CORAL } else { TEXT_MUTED })
+                        .bg(bg),
+                ),
+                Span::styled(format!("{status_icon} "), Style::default().fg(status_color).bg(bg)),
+                Span::styled(
+                    agent_badge,
+                    Style::default()
+                        .fg(if is_sel { ACCENT_CORAL } else { CYAN_LINK })
+                        .add_modifier(Modifier::BOLD)
+                        .bg(bg),
+                ),
+                Span::styled(
+                    title_trunc,
+                    Style::default().fg(TEXT_PRIMARY).bg(bg),
+                ),
+                Span::styled(" ".repeat(row_pad), Style::default().bg(bg)),
+                Span::styled(
+                    elapsed_str,
+                    Style::default().fg(TEXT_MUTED).bg(bg),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+fn render_subagent_inspector(
+    frame: &mut Frame,
+    rect: Rect,
+    items: &[SubagentUiEntry],
+    current_idx: usize,
+    scroll: usize,
+    spinner_tick: usize,
+) {
+    let Some(item) = items.get(current_idx) else {
+        return;
+    };
+
+    let title = format!("Subagent: {}", item.agent);
+    let hint = if items.len() > 1 {
+        "tab next · esc back · ↑/↓ scroll · x stop"
+    } else {
+        "esc back · ↑/↓ scroll · x stop"
+    };
+    let inner = draw_modal_frame(frame, rect, &title, hint);
+    if inner.height < 4 || inner.width < 10 {
+        return;
+    }
+
+    let (status_icon, _) = if item.status == "running" {
+        let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+        (spinner, CYAN_LINK)
+    } else if item.status == "completed" {
+        ("●", GREEN_OK)
+    } else if item.status.starts_with("failed") {
+        ("◍", RED_ERR)
+    } else {
+        ("○", TEXT_MUTED)
+    };
+
+    let cycle_badge = if items.len() > 1 {
+        format!("Tab: {} of {} ›", current_idx + 1, items.len())
+    } else {
+        String::new()
+    };
+
+    let mut header_rows = Vec::new();
+    let title_line = format!("{status_icon} {} — {}", item.agent, item.title);
+    let avail_title = (inner.width as usize).saturating_sub(cycle_badge.len() + 3);
+    let title_trunc = truncate_str(&title_line, avail_title);
+    let hpad = (inner.width as usize).saturating_sub(title_trunc.width() + cycle_badge.len() + 2);
+
+    header_rows.push(Line::from(vec![
+        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(
+            title_trunc,
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD)
+                .bg(BG_ELEVATED),
+        ),
+        Span::styled(" ".repeat(hpad), Style::default().bg(BG_ELEVATED)),
+        Span::styled(
+            cycle_badge,
+            Style::default()
+                .fg(ACCENT_CORAL)
+                .add_modifier(Modifier::BOLD)
+                .bg(BG_ELEVATED),
+        ),
+        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+    ]));
+
+    let meta_line = format!(
+        " ID: {} · Status: {} · Duration: {}s · Activity: {}",
+        item.id, item.status, item.elapsed_secs, item.activity
+    );
+    header_rows.push(Line::from(Span::styled(
+        truncate_str(&meta_line, inner.width as usize),
+        Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+    )));
+    header_rows.push(Line::from(Span::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+    )));
+
+    let header_h = header_rows.len() as u16;
+    frame.render_widget(
+        Paragraph::new(header_rows),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: header_h,
+        },
+    );
+
+    let body_rect = Rect {
+        x: inner.x,
+        y: inner.y + header_h,
+        width: inner.width,
+        height: inner.height.saturating_sub(header_h),
+    };
+    if body_rect.height == 0 {
+        return;
+    }
+
+    let content_lines = build_subagent_inspector_lines(item, body_rect.width as usize);
+    let visible_h = body_rect.height as usize;
+    let max_scroll = content_lines.len().saturating_sub(visible_h);
+    let clamped_scroll = scroll.min(max_scroll);
+
+    let rows: Vec<Line<'static>> = content_lines
+        .into_iter()
+        .skip(clamped_scroll)
+        .take(visible_h)
+        .collect();
+
+    frame.render_widget(Paragraph::new(rows), body_rect);
+}
+
+fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let card_inner_w = width.saturating_sub(4).max(10);
+
+    if item.turns.is_empty() {
+        if item.status == "running" {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                format!("  ⠋ Subagent is starting... (Activity: {})", item.activity),
+                Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  Tools and responses will appear here live.",
+                Style::default().fg(TEXT_MUTED),
+            )));
+        } else {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                format!("  No transcript recorded. (Status: {})", item.status),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+        return lines;
+    }
+
+    for (turn_idx, turn) in item.turns.iter().enumerate() {
+        if !turn.user_query.trim().is_empty() {
+            let label = if turn_idx == 0 { "Task Goal" } else { "Follow-up" };
+            lines.push(Line::from(vec![
+                Span::styled("▎ ", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
+                Span::styled(
+                    format!("{label}: "),
+                    Style::default()
+                        .fg(ACCENT_CORAL)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(BG_SURFACE),
+                ),
+            ]));
+            for qline in wrap_plain_text(&turn.user_query, card_inner_w) {
+                let pad = card_inner_w.saturating_sub(qline.width());
+                lines.push(Line::from(vec![
+                    Span::styled("▎ ", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
+                    Span::styled(qline, Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE)),
+                    Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)),
+                ]));
+            }
+            lines.push(Line::default());
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(CYAN_LINK)),
+            Span::styled(
+                format!("Subagent [{}]", item.agent),
+                Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {:.1}s", turn.duration.as_secs_f64()),
+                Style::default().fg(TEXT_MUTED),
+            ),
+        ]));
+
+        if let Some(ref reasoning) = turn.reasoning {
+            lines.push(Line::from(Span::styled(
+                "  ◈ Thinking",
+                Style::default().fg(TEXT_MUTED).add_modifier(Modifier::ITALIC),
+            )));
+            for rline in wrap_plain_text(reasoning, card_inner_w) {
+                lines.push(Line::from(Span::styled(
+                    format!("    {rline}"),
+                    Style::default().fg(TEXT_MUTED),
+                )));
+            }
+            lines.push(Line::default());
+        }
+
+        if !turn.tool_items.is_empty() {
+            for t_item in &turn.tool_items {
+                let glyph = if t_item.is_error { "✖ " } else { "✓ " };
+                let glyph_color = if t_item.is_error { RED_ERR } else { GREEN_OK };
+                let desc = if !t_item.call_formatted.is_empty() {
+                    &t_item.call_formatted
+                } else {
+                    &t_item.tool_name
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(glyph, Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        truncate_str(desc, card_inner_w.saturating_sub(4)),
+                        Style::default().fg(TEXT_PRIMARY),
+                    ),
+                ]));
+                for diff in t_item.diff_lines.iter().take(6) {
+                    let clean = clean_terminal_text(diff);
+                    let c = if clean.trim_start().starts_with('+') {
+                        GREEN_OK
+                    } else if clean.trim_start().starts_with('-') {
+                        RED_ERR
+                    } else {
+                        TEXT_MUTED
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("      {}", truncate_str(&clean, card_inner_w)),
+                        Style::default().fg(c),
+                    )));
+                }
+            }
+            lines.push(Line::default());
+        } else if !turn.tools.is_empty() {
+            for tool in &turn.tools {
+                let glyph = if tool.is_error { "✖ " } else { "✓ " };
+                let glyph_color = if tool.is_error { RED_ERR } else { GREEN_OK };
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(glyph, Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        truncate_str(&tool.name, 24),
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {}", truncate_str(&tool.output, card_inner_w.saturating_sub(28))),
+                        Style::default().fg(TEXT_MUTED),
+                    ),
+                ]));
+            }
+            lines.push(Line::default());
+        }
+
+        if !turn.reply.is_empty() {
+            let rendered = render_markdown(&turn.reply, card_inner_w);
+            for rline in rendered {
+                lines.push(rline);
+            }
+            lines.push(Line::default());
+        }
+    }
+
+    if item.status == "running" {
+        lines.push(Line::from(Span::styled(
+            format!("  ⠋ Subagent is running ({})", item.activity),
+            Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines
 }
 
 fn search_input_line(query: &str, width: usize) -> Line<'static> {
@@ -4444,6 +4901,169 @@ mod tests {
                 !line.spans.iter().any(|s| s.content.contains('\r')),
                 "tool card line contains carriage return"
             );
+        }
+    }
+
+    #[test]
+    fn test_subagent_inspector_lines_formatting() {
+        let entry = SubagentUiEntry {
+            id: "sub_12345".to_string(),
+            agent: "Explore".to_string(),
+            title: "Inspect repository architecture".to_string(),
+            status: "completed".to_string(),
+            activity: "done".to_string(),
+            elapsed_secs: 14,
+            turns: vec![TurnRecord {
+                user_query: "Map the system architecture".to_string(),
+                reasoning: Some("Inspecting source tree and entrypoints".to_string()),
+                tools: Vec::new(),
+                tool_items: vec![TurnProcessItem {
+                    tool_name: "read_file".to_string(),
+                    call_formatted: "read_file(Cargo.toml)".to_string(),
+                    result_formatted: "done".to_string(),
+                    diff_lines: Vec::new(),
+                    output: "package details".to_string(),
+                    output_dropped: 0,
+                    arguments: None,
+                    duration_secs: Some(0.2),
+                    is_error: false,
+                }],
+                duration: std::time::Duration::from_secs(14),
+                reply: "The repository contains a modular CLI harness.".to_string(),
+            }],
+        };
+
+        let lines = build_subagent_inspector_lines(&entry, 80);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Task Goal:"));
+        assert!(text.contains("Map the system architecture"));
+        assert!(text.contains("Subagent [Explore]"));
+        assert!(text.contains("◈ Thinking"));
+        assert!(text.contains("read_file(Cargo.toml)"));
+        assert!(text.contains("The repository contains a modular CLI harness."));
+    }
+
+    #[test]
+    fn test_subagents_chrome_strip_and_hint_counter() {
+        let st = test_dummy_tui_state();
+        let mut snap = TuiLiveSnapshot::default();
+        snap.delegate_count = 2;
+        snap.delegate_last = Some((
+            "Review pull request changes".to_string(),
+            "search_files running".to_string(),
+        ));
+
+        let chrome = build_chrome_lines(&st, &snap, 80);
+        let chrome_text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(chrome_text.contains("Subagent (+1): Review pull request"));
+        assert!(chrome_text.contains("(Ctrl+B / click to inspect)"));
+
+        let mut right_spans = Vec::new();
+        if snap.delegate_count > 0 {
+            let label = format!("● {} subagents · ", snap.delegate_count);
+            right_spans.push(Span::styled(label, Style::default().fg(CYAN_LINK)));
+        }
+        let rendered_label: String = right_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered_label, "● 2 subagents · ");
+    }
+
+    fn test_dummy_tui_state() -> TuiState {
+        let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
+            harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
+        ));
+        let notes = std::sync::Arc::new(
+            harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap(),
+        );
+        let registry = std::sync::Arc::new(harness_core::DefaultToolRegistry::new());
+        let creds = harness_providers::CredentialManager::new(None).unwrap();
+        let discovery = std::sync::Arc::new(harness_providers::ModelDiscovery::new(
+            None,
+            0,
+            Default::default(),
+        ));
+        let provider = std::sync::Arc::new(
+            harness_providers::GenericProviderClient::new(
+                "openai".to_string(),
+                "gpt-4o".to_string(),
+                creds,
+                discovery,
+                None,
+            )
+            .unwrap(),
+        );
+        let agent = std::sync::Arc::new(harness_core::Agent::new(
+            provider,
+            memory,
+            notes,
+            registry,
+            harness_core::AgentConfig::default(),
+        ));
+
+        TuiState {
+            turns: Vec::new(),
+            turn_meta: Vec::new(),
+            system_notices: Vec::new(),
+            process_expanded: false,
+            auto_hide_thinking: true,
+            expanded_thinking: HashSet::new(),
+            expanded_tools: HashSet::new(),
+            expanded_live_thinking: HashSet::new(),
+            expanded_live_tools: HashSet::new(),
+            live_thinking_view: LiveThinkingView::Tail,
+            reasoning_effort: None,
+            pending_model_choice: None,
+            mode: super::super::state::AgentMode::Build,
+            composer: super::super::state::ComposerState::default(),
+            tabs: Vec::new(),
+            total_sessions_count: 1,
+            hit_boxes: Vec::new(),
+            transcript_hit_boxes: Vec::new(),
+            composer_hit_boxes: Vec::new(),
+            pointer: None,
+            last_click: None,
+            click_count: 0,
+            modal_rect: None,
+            composer_area: (0, 0, 0, 0),
+            composer_input_area: (0, 0, 0, 0),
+            composer_scroll_off: 0,
+            transcript_area: (0, 0, 0, 0),
+            transcript_start: 0,
+            transcript_visible_text: Vec::new(),
+            selection: None,
+            pending_transcript_click: None,
+            selection_notice: None,
+            scroll_from_bottom: 0,
+            max_scroll: 0,
+            modal: ActiveModal::None,
+            slash_popup: super::super::state::SlashPopupState::default(),
+            queue: std::collections::VecDeque::new(),
+            current_cancel: tokio_util::sync::CancellationToken::new(),
+            active_turn: None,
+            active_goal: None,
+            current_query: String::new(),
+            turn_start: std::time::Instant::now(),
+            quota_refreshed_at: std::time::Instant::now(),
+            idle_pass: super::super::super::helpers::IdleMemoryPass::new(1),
+            pending_job_turn: None,
+            pending_images: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            history_path: None,
+            ctrl_c_armed: None,
+            spinner_tick: 0,
+            cwd_label: "/workspace".to_string(),
+            version: "0.1.8".to_string(),
+            update_notice: None,
+            last_rendered_rect: (100, 30),
+            provider_items: Vec::new(),
+            picker_loading: None,
+            picker_tx,
+            picker_rx,
+            settled_cache: super::super::state::SettledTranscriptCache::default(),
+            live_content_cache: super::super::state::LiveContentCache::default(),
+            live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
+            template_agent: agent,
+            background_sessions: std::collections::HashMap::new(),
         }
     }
 }

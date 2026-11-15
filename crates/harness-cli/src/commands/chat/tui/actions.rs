@@ -35,8 +35,8 @@ use super::super::ui::ChatUi;
 use super::markdown::strip_ansi;
 use super::state::{
     ActiveModal, AgentMode, BackgroundSession, InputAction, LiveThinkingView, ModelPickerItem,
-    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, SystemNotice,
-    TuiState, TurnMeta,
+    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, SubagentUiEntry,
+    SystemNotice, TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
 use crate::commands::context_window::context_window;
@@ -1262,48 +1262,194 @@ async fn open_connect_reset_cooldowns(env: &Env<'_>, st: &mut TuiState) {
     };
 }
 
-async fn open_task_list(env: &Env<'_>, st: &mut TuiState) {
+pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
+    let mut entries = Vec::new();
     let tasks = super::super::viewer::collect_tasks(
         Some(env.bg_queue.as_ref()),
         Some(env.delegate_tool.as_ref()),
     )
     .await;
-    if tasks.is_empty() {
+
+    let live_tasks: std::collections::HashMap<String, (String, String)> = env
+        .ui
+        .active_delegate_tasks()
+        .into_iter()
+        .map(|(id, goal, act)| (id, (goal, act)))
+        .collect();
+
+    for task in tasks {
+        let is_sub = task.id.starts_with("sub_")
+            || task.command.starts_with("worker:")
+            || task.command.starts_with("subagent:");
+
+        let agent = if task.command.starts_with("worker:") {
+            "Worker".to_string()
+        } else if let Some(stripped) = task.command.strip_prefix("subagent: ") {
+            if let Some(pos) = stripped.find(':') {
+                let cand = stripped[..pos].trim();
+                if !cand.is_empty()
+                    && cand.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                {
+                    cand.to_string()
+                } else {
+                    "Subagent".to_string()
+                }
+            } else {
+                "Subagent".to_string()
+            }
+        } else if task.id.starts_with("sub_") {
+            "Subagent".to_string()
+        } else {
+            "Job".to_string()
+        };
+
+        let title = task
+            .command
+            .strip_prefix("worker: ")
+            .or_else(|| task.command.strip_prefix("subagent: "))
+            .unwrap_or(&task.command)
+            .to_string();
+
+        let live_act = live_tasks.get(&task.id).map(|(_, a)| a.clone());
+        let activity = live_act.unwrap_or_else(|| {
+            if task.status == "running" {
+                "running".to_string()
+            } else {
+                task.status.clone()
+            }
+        });
+
+        let mut turns = Vec::new();
+        if is_sub {
+            if let Ok(outcome) = env.store.replay_transcript(&task.id, usize::MAX).await {
+                turns = parse_turns_from_history(&outcome.history);
+            }
+        } else {
+            let log_body = std::fs::read_to_string(&task.log_path).unwrap_or_default();
+            turns.push(TurnRecord {
+                user_query: task.command.clone(),
+                reasoning: None,
+                tools: Vec::new(),
+                tool_items: Vec::new(),
+                duration: std::time::Duration::from_secs(task.elapsed_secs),
+                reply: if log_body.is_empty() {
+                    "(no output yet)".to_string()
+                } else {
+                    log_body
+                },
+            });
+        }
+
+        entries.push(SubagentUiEntry {
+            id: task.id,
+            agent,
+            title,
+            status: task.status,
+            activity,
+            elapsed_secs: task.elapsed_secs,
+            turns,
+        });
+    }
+
+    entries
+}
+
+pub async fn open_subagents_list(env: &Env<'_>, st: &mut TuiState) {
+    let items = collect_subagent_entries(env).await;
+    if items.is_empty() {
         env.ui
             .emit_above("No background tasks or subagents active or recorded");
         return;
     }
-    let items: Vec<String> = tasks
-        .iter()
-        .map(|task| {
-            let kind = if task.command.starts_with("worker:") {
-                "worker"
-            } else if task.id.starts_with("sub_") || task.command.starts_with("subagent:") {
-                "subagent"
-            } else {
-                "job"
-            };
-            let subject = task
-                .command
-                .strip_prefix("worker: ")
-                .or_else(|| task.command.strip_prefix("subagent: "))
-                .unwrap_or(&task.command);
-            format!(
-                "{} · {}s · {} · {}",
-                task.status, task.elapsed_secs, kind, subject
-            )
-        })
-        .collect();
-    let pairs: Vec<(String, String)> = tasks
-        .into_iter()
-        .map(|task| (task.id, task.log_path))
-        .collect();
-    st.modal = ActiveModal::SelectModal {
-        title: "Background Tasks".to_string(),
+    let has_running = items.iter().any(|i| i.status == "running");
+    st.modal = ActiveModal::SubagentsModal {
         items,
         selected: 0,
-        action: SelectAction::TaskList { tasks: pairs },
+        active_only: has_running,
     };
+}
+
+pub async fn open_subagent_inspector(env: &Env<'_>, st: &mut TuiState, target_id: &str) {
+    let items = collect_subagent_entries(env).await;
+    if items.is_empty() {
+        env.ui.emit_above("No subagents found");
+        return;
+    }
+    let current_idx = items.iter().position(|e| e.id == target_id).unwrap_or(0);
+    st.modal = ActiveModal::SubagentInspector {
+        items,
+        current_idx,
+        scroll: 0,
+    };
+}
+
+pub async fn interrupt_subagent(env: &Env<'_>, st: &mut TuiState, id: &str) {
+    let killed = env.delegate_tool.kill(id).await;
+    env.ui.finish_delegate_task(id);
+    if killed {
+        env.ui.emit_above(&format!("Stopped subagent [{id}]"));
+    }
+    match &mut st.modal {
+        ActiveModal::SubagentsModal { items, .. } => {
+            if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+                item.status = "cancelled".to_string();
+                item.activity = "cancelled by user".to_string();
+            }
+        }
+        ActiveModal::SubagentInspector { items, current_idx, .. } => {
+            if let Some(item) = items.get_mut(*current_idx) {
+                if item.id == id {
+                    item.status = "cancelled".to_string();
+                    item.activity = "cancelled by user".to_string();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub async fn refresh_subagents_if_open(env: &Env<'_>, st: &mut TuiState) {
+    match &mut st.modal {
+        ActiveModal::SubagentInspector {
+            items,
+            current_idx,
+            ..
+        } => {
+            if let Some(item) = items.get_mut(*current_idx) {
+                if item.status == "running" {
+                    if let Ok(outcome) = env.store.replay_transcript(&item.id, usize::MAX).await {
+                        let replayed = parse_turns_from_history(&outcome.history);
+                        if !replayed.is_empty() {
+                            item.turns = replayed;
+                        }
+                    }
+                    let tasks = env.ui.active_delegate_tasks();
+                    if let Some((_, _, act)) = tasks.into_iter().find(|(id, _, _)| id == &item.id) {
+                        item.activity = act;
+                    } else {
+                        item.status = "completed".to_string();
+                    }
+                }
+            }
+        }
+        ActiveModal::SubagentsModal { items, .. } => {
+            let tasks = env.ui.active_delegate_tasks();
+            for item in items.iter_mut() {
+                if item.status == "running" {
+                    if let Some((_, _, act)) = tasks.iter().find(|(id, _, _)| id == &item.id) {
+                        item.activity = act.clone();
+                    } else {
+                        item.status = "completed".to_string();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn open_task_list(env: &Env<'_>, st: &mut TuiState) {
+    open_subagents_list(env, st).await;
 }
 
 async fn open_auto_compact_threshold(env: &Env<'_>, st: &mut TuiState) {
@@ -3223,5 +3369,24 @@ mod tests {
 
         let fresh_notice = SystemNotice::new("✓ Compacted 1 turns (10 messages) into 1 summary");
         assert!(!fresh_notice.is_stale(std::time::Instant::now(), true, false));
+    }
+
+    #[test]
+    fn subagent_ui_entry_state_and_cancellation() {
+        use super::SubagentUiEntry;
+        let mut entry = SubagentUiEntry {
+            id: "sub_100".to_string(),
+            agent: "Explore".to_string(),
+            title: "Inspect directory".to_string(),
+            status: "running".to_string(),
+            activity: "starting".to_string(),
+            elapsed_secs: 5,
+            turns: Vec::new(),
+        };
+        assert_eq!(entry.status, "running");
+        entry.status = "cancelled".to_string();
+        entry.activity = "cancelled by user".to_string();
+        assert_eq!(entry.status, "cancelled");
+        assert_eq!(entry.activity, "cancelled by user");
     }
 }

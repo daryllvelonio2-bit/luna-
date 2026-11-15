@@ -246,10 +246,15 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || env.ui.is_compacting()
                 || snap.compacting.is_some()
                 || snap.delegate_count > 0
+                || matches!(
+                    st.modal,
+                    ActiveModal::SubagentInspector { .. } | ActiveModal::SubagentsModal { .. }
+                )
                 || !st.queue.is_empty() => {
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
                 st.prune_stale_notices();
+                actions::refresh_subagents_if_open(&env, &mut st).await;
                 if env.ui.take_compaction_completed() {
                     actions::apply_compaction_completed(&env, &mut st).await;
                 }

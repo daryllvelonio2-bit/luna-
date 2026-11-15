@@ -125,10 +125,12 @@ async fn handle_mouse(
                 | ActiveModal::SessionPicker { selected, .. }
                 | ActiveModal::ProviderPicker { selected, .. }
                 | ActiveModal::ModelPicker { selected, .. }
-                | ActiveModal::ThinkingPicker { selected, .. } => {
+                | ActiveModal::ThinkingPicker { selected, .. }
+                | ActiveModal::SubagentsModal { selected, .. } => {
                     *selected = selected.saturating_sub(1);
                 }
-                ActiveModal::TextModal { scroll, .. } => {
+                ActiveModal::TextModal { scroll, .. }
+                | ActiveModal::SubagentInspector { scroll, .. } => {
                     *scroll = scroll.saturating_sub(3);
                 }
                 _ => {}
@@ -175,9 +177,15 @@ async fn handle_mouse(
                 ActiveModal::ThinkingPicker { selected, .. } => {
                     *selected = (*selected + 1).min(6);
                 }
+                ActiveModal::SubagentsModal { items, selected, .. } => {
+                    *selected = (*selected + 1).min(items.len().saturating_sub(1));
+                }
                 ActiveModal::TextModal { lines, scroll, .. } => {
                     let max_s = lines.len().saturating_sub(1);
                     *scroll = (*scroll + 3).min(max_s);
+                }
+                ActiveModal::SubagentInspector { scroll, .. } => {
+                    *scroll = *scroll + 3;
                 }
                 _ => {}
             },
@@ -417,7 +425,7 @@ fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
 async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
     let Some(selection) = st.selection else {
         if let Some(target) = st.pending_transcript_click.take() {
-            apply_transcript_click(st, target);
+            apply_transcript_click(env, st, target).await;
         }
         return;
     };
@@ -437,7 +445,7 @@ async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
         // A plain click: drop the one-cell selection and run the click target, if any.
         st.selection = None;
         if let Some(target) = st.pending_transcript_click.take() {
-            apply_transcript_click(st, target);
+            apply_transcript_click(env, st, target).await;
         }
     }
 }
@@ -470,8 +478,14 @@ fn copy_selection_to_clipboard(env: &Env<'_>, st: &mut TuiState) {
     }
 }
 
-fn apply_transcript_click(st: &mut TuiState, target: TranscriptClickTarget) {
+async fn apply_transcript_click(env: &Env<'_>, st: &mut TuiState, target: TranscriptClickTarget) {
     match target {
+        TranscriptClickTarget::OpenSubagents => {
+            super::actions::open_subagents_list(env, st).await;
+        }
+        TranscriptClickTarget::OpenSubagent(id) => {
+            super::actions::open_subagent_inspector(env, st, &id).await;
+        }
         TranscriptClickTarget::ToggleTurnThinking(idx, step_idx) => {
             if !st.expanded_thinking.remove(&(idx, step_idx)) {
                 st.expanded_thinking.insert((idx, step_idx));
@@ -754,6 +768,14 @@ async fn handle_key(
             query: String::new(),
             selected: 0,
         };
+        return Ok(Flow::Continue);
+    }
+
+    // Ctrl+B (or Ctrl+Shift+B) opens the Subagents manager.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && (key.code == KeyCode::Char('b') || key.code == KeyCode::Char('B'))
+    {
+        super::actions::open_subagents_list(env, st).await;
         return Ok(Flow::Continue);
     }
 
@@ -1763,6 +1785,227 @@ async fn handle_modal_key(
                 st.modal = ActiveModal::Help { scroll };
             }
         },
+        ActiveModal::SubagentsModal {
+            items,
+            mut selected,
+            mut active_only,
+        } => {
+            if key.code == KeyCode::Esc {
+                return Ok(Flow::Continue);
+            }
+            let filtered_indices: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| !active_only || i.status == "running")
+                .map(|(idx, _)| idx)
+                .collect();
+
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if !filtered_indices.is_empty() {
+                        selected = if selected == 0 {
+                            filtered_indices.len().saturating_sub(1)
+                        } else {
+                            selected - 1
+                        };
+                    }
+                    st.modal = ActiveModal::SubagentsModal {
+                        items,
+                        selected,
+                        active_only,
+                    };
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !filtered_indices.is_empty() {
+                        selected = (selected + 1) % filtered_indices.len();
+                    }
+                    st.modal = ActiveModal::SubagentsModal {
+                        items,
+                        selected,
+                        active_only,
+                    };
+                }
+                KeyCode::Tab
+                | KeyCode::Char('a')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.code == KeyCode::Tab =>
+                {
+                    active_only = !active_only;
+                    selected = 0;
+                    st.modal = ActiveModal::SubagentsModal {
+                        items,
+                        selected,
+                        active_only,
+                    };
+                }
+                KeyCode::Enter => {
+                    if let Some(&orig_idx) = filtered_indices.get(selected) {
+                        st.modal = ActiveModal::SubagentInspector {
+                            items,
+                            current_idx: orig_idx,
+                            scroll: 0,
+                        };
+                    } else {
+                        st.modal = ActiveModal::SubagentsModal {
+                            items,
+                            selected,
+                            active_only,
+                        };
+                    }
+                }
+                KeyCode::Char('x')
+                | KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.code == KeyCode::Char('x') =>
+                {
+                    if let Some(&orig_idx) = filtered_indices.get(selected) {
+                        if let Some(target) = items.get(orig_idx) {
+                            let target_id = target.id.clone();
+                            st.modal = ActiveModal::SubagentsModal {
+                                items,
+                                selected,
+                                active_only,
+                            };
+                            super::actions::interrupt_subagent(env, st, &target_id).await;
+                        } else {
+                            st.modal = ActiveModal::SubagentsModal {
+                                items,
+                                selected,
+                                active_only,
+                            };
+                        }
+                    } else {
+                        st.modal = ActiveModal::SubagentsModal {
+                            items,
+                            selected,
+                            active_only,
+                        };
+                    }
+                }
+                _ => {
+                    st.modal = ActiveModal::SubagentsModal {
+                        items,
+                        selected,
+                        active_only,
+                    };
+                }
+            }
+        }
+        ActiveModal::SubagentInspector {
+            items,
+            mut current_idx,
+            mut scroll,
+        } => {
+            if key.code == KeyCode::Esc || key.code == KeyCode::Backspace {
+                st.modal = ActiveModal::SubagentsModal {
+                    items,
+                    selected: current_idx,
+                    active_only: false,
+                };
+                return Ok(Flow::Continue);
+            }
+            match key.code {
+                KeyCode::Tab => {
+                    if !items.is_empty() {
+                        current_idx = (current_idx + 1) % items.len();
+                        scroll = 0;
+                    }
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::BackTab => {
+                    if !items.is_empty() {
+                        current_idx =
+                            (current_idx + items.len().saturating_sub(1)) % items.len();
+                        scroll = 0;
+                    }
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    scroll = scroll.saturating_sub(1);
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    scroll = scroll.saturating_add(1);
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::PageUp => {
+                    scroll = scroll.saturating_sub(10);
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::PageDown => {
+                    scroll = scroll.saturating_add(10);
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    scroll = 0;
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    scroll = usize::MAX / 2;
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+                KeyCode::Char('x')
+                | KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.code == KeyCode::Char('x') =>
+                {
+                    if let Some(target) = items.get(current_idx) {
+                        let target_id = target.id.clone();
+                        st.modal = ActiveModal::SubagentInspector {
+                            items,
+                            current_idx,
+                            scroll,
+                        };
+                        super::actions::interrupt_subagent(env, st, &target_id).await;
+                    } else {
+                        st.modal = ActiveModal::SubagentInspector {
+                            items,
+                            current_idx,
+                            scroll,
+                        };
+                    }
+                }
+                _ => {
+                    st.modal = ActiveModal::SubagentInspector {
+                        items,
+                        current_idx,
+                        scroll,
+                    };
+                }
+            }
+        }
     }
     Ok(Flow::Continue)
 }

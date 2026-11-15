@@ -90,6 +90,7 @@ pub enum SelectAction {
         name: String,
         summary: String,
     },
+    #[allow(dead_code)]
     TaskList {
         tasks: Vec<(String, String)>,
     },
@@ -788,6 +789,9 @@ pub enum TranscriptClickTarget {
     ToggleLiveToolStep(usize),
     ToggleLiveThinking,
     JumpToLatest,
+    OpenSubagents,
+    #[allow(dead_code)]
+    OpenSubagent(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1119,6 +1123,27 @@ pub enum ActiveModal {
     Help {
         scroll: usize,
     },
+    SubagentsModal {
+        items: Vec<SubagentUiEntry>,
+        selected: usize,
+        active_only: bool,
+    },
+    SubagentInspector {
+        items: Vec<SubagentUiEntry>,
+        current_idx: usize,
+        scroll: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentUiEntry {
+    pub id: String,
+    pub agent: String,
+    pub title: String,
+    pub status: String,
+    pub activity: String,
+    pub elapsed_secs: u64,
+    pub turns: Vec<TurnRecord>,
 }
 
 #[cfg(test)]
