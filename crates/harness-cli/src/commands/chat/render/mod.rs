@@ -32,7 +32,10 @@ pub use blocks::{
     USER_BLOCK_MIN_CHARS, USER_BLOCK_PERCENT,
 };
 #[allow(unused_imports)]
-pub use diff::{extract_patch_diff, format_patch_diff, format_unified_diff};
+pub use diff::{
+    extract_patch_diff, extract_tool_diff, extract_write_diff, format_patch_diff,
+    format_unified_diff, is_diff_or_write_tool,
+};
 #[allow(unused_imports)]
 pub use landing::{
     landing_rows, landing_star_positions, landing_star_rows, LANDING_FALL_FRAMES, LANDING_STAR,

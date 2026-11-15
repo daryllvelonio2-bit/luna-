@@ -45,12 +45,12 @@ pub fn format_unified_diff(diff_str: &str) -> Vec<String> {
         } else if val.starts_with('+') {
             lines.push(format!(
                 "\x1b[48;2;0;160;0m\x1b[38;2;255;255;255;1m  + {}\x1b[0m",
-                val.strip_prefix('+').unwrap_or(val).trim_start()
+                val.strip_prefix('+').unwrap_or(val)
             ));
         } else if val.starts_with('-') {
             lines.push(format!(
                 "\x1b[48;2;200;0;0m\x1b[38;2;255;255;255;1m  - {}\x1b[0m",
-                val.strip_prefix('-').unwrap_or(val).trim_start()
+                val.strip_prefix('-').unwrap_or(val)
             ));
         } else if val.starts_with("@@") {
             lines.push(format!("\x1b[2m  {}\x1b[0m", val));
@@ -60,6 +60,100 @@ pub fn format_unified_diff(diff_str: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Extracts formatted diff lines from a write_file or write tool call.
+///
+/// If an existing file is present on disk and differs from the new content,
+/// formats a unified diff against the previous on-disk content.
+/// Otherwise, formats the written lines as green addition lines.
+pub fn extract_write_diff(arguments: &serde_json::Value) -> Vec<String> {
+    let text_any = |keys: &[&str]| -> Option<&str> {
+        for k in keys {
+            if let Some(s) = arguments
+                .get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(s);
+            }
+        }
+        None
+    };
+
+    let new_content = text_any(&["content", "contents", "text", "new_string", "newString", "code"]);
+    let path = text_any(&["path", "filePath", "filepath", "file"]);
+
+    let Some(new) = new_content else {
+        return Vec::new();
+    };
+
+    // If explicit old content was provided in arguments
+    if let Some(old) = text_any(&["old_content", "oldContent", "old_string", "oldString", "old_str", "old"]) {
+        return format_patch_diff(old, new);
+    }
+
+    if let Some(p) = path {
+        let path_obj = std::path::Path::new(p);
+        let expanded = if let Some(stripped) = p.strip_prefix("~/") {
+            if let Some(home) = std::env::var_os("HOME") {
+                std::path::PathBuf::from(home).join(stripped)
+            } else {
+                path_obj.to_path_buf()
+            }
+        } else {
+            path_obj.to_path_buf()
+        };
+        let on_disk = if expanded.is_file() {
+            std::fs::read_to_string(&expanded).ok()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            let joined = cwd.join(&expanded);
+            if joined.is_file() {
+                std::fs::read_to_string(joined).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(old) = on_disk {
+            if old != new {
+                let diff_str = similar::TextDiff::from_lines(old.as_str(), new)
+                    .unified_diff()
+                    .context_radius(3)
+                    .to_string();
+                let lines = format_unified_diff(&diff_str);
+                if !lines.is_empty() {
+                    return lines;
+                }
+            }
+        }
+    }
+
+    let mut diff = format_patch_diff("", new);
+    if diff.len() > 2000 {
+        diff.truncate(2000);
+        diff.push(format!("\x1b[2m    ... ({} more lines omitted)\x1b[0m", diff.len().saturating_sub(2000)));
+    }
+    diff
+}
+
+/// Returns true if the tool modifies files and produces diffs.
+pub fn is_diff_or_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "patch" | "edit" | "apply_patch" | "write_file" | "write" | "create_file"
+    )
+}
+
+/// Extracts formatted diff lines for any patch or write tool.
+pub fn extract_tool_diff(name: &str, arguments: &serde_json::Value) -> Vec<String> {
+    match name {
+        "patch" | "edit" | "apply_patch" => extract_patch_diff(arguments),
+        "write_file" | "write" | "create_file" => extract_write_diff(arguments),
+        _ => Vec::new(),
+    }
 }
 
 /// Deletions are styled with a red background; additions are styled with a green background.

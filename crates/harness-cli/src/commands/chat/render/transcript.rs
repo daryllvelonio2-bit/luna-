@@ -4,7 +4,7 @@ use colored::Colorize;
 use harness_core::{Message, Role, StoredMessage, ToolCall, TurnToolCall};
 
 use super::blocks::{reasoning_rows, right_aligned_user_message, truncate_to_cells, LUNA_LABEL};
-use super::diff::extract_patch_diff;
+use super::diff::{extract_tool_diff, is_diff_or_write_tool};
 use super::notices::BACKGROUND_JOB_RESUME_PREFIX;
 use super::results::{format_process_header, format_tool_result_for};
 use super::tools::format_tool_call;
@@ -518,10 +518,10 @@ fn apply_assistant_message(
     }
 }
 
-/// The formatted call for one stored tool call, with its diff when it is a patch tool.
+/// The formatted call for one stored tool call, with its diff when it is a patch or write tool.
 fn tool_call_item(call: &ToolCall) -> TurnProcessItem {
-    let diff_lines = if call.name == "patch" || call.name == "edit" || call.name == "apply_patch" {
-        extract_patch_diff(&call.arguments)
+    let diff_lines = if is_diff_or_write_tool(&call.name) {
+        extract_tool_diff(&call.name, &call.arguments)
     } else {
         Vec::new()
     };

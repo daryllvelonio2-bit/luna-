@@ -62,8 +62,12 @@ pub fn tool_activity_detail(name: &str, arguments: &serde_json::Value) -> Option
                 Some("−0 +0".to_string())
             }
         }
-        "write_file" => {
-            let added = text("content").map(|c| c.lines().count()).unwrap_or(0);
+        "write_file" | "write" | "create_file" => {
+            let added = text("content")
+                .or_else(|| text("contents"))
+                .or_else(|| text("text"))
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
             Some(format!("+{}", added))
         }
         "summarize" => Some("summarizing session...".to_string()),

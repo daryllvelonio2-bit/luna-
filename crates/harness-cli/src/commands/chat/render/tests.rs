@@ -1689,6 +1689,65 @@ fn patch_diff_included_in_history_parsing() {
     assert!(tool.diff_lines[1].contains("0;160;0"));
 }
 
+#[test]
+fn write_file_shows_diff_lines_in_transcript_and_tui() {
+    use harness_core::{Message, Role, StoredMessage};
+
+    let history = vec![
+        StoredMessage {
+            id: 0,
+            seq: 0,
+            message: Message::user("write terrain"),
+            is_summary: false,
+        },
+        StoredMessage {
+            id: 1,
+            seq: 1,
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                reasoning: None,
+                tool_calls: vec![harness_core::ToolCall {
+                    id: "call_write_1".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "src/world/terrain.rs",
+                        "content": "pub struct Terrain;\nimpl Terrain {\n    pub fn new() -> Self {\n        Self\n    }\n}\n"
+                    }),
+                    signature: None,
+                }],
+                tool_result: None,
+                usage: None,
+            },
+            is_summary: false,
+        },
+    ];
+
+    let turns = parse_turns_from_history(&history);
+    assert_eq!(turns.len(), 1);
+    let turn = &turns[0];
+    assert_eq!(turn.tool_items.len(), 1);
+    let tool = &turn.tool_items[0];
+    assert!(!tool.diff_lines.is_empty(), "write_file must populate diff_lines");
+    assert!(tool.diff_lines.iter().any(|line| line.contains("+") && line.contains("pub struct Terrain")));
+}
+
+#[test]
+fn extract_write_diff_unified_diff_against_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("code.rs");
+    std::fs::write(&file_path, "fn old_func() {\n    let x = 1;\n}\n").unwrap();
+
+    let diff = extract_write_diff(&serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "content": "fn new_func() {\n    let x = 2;\n}\n"
+    }));
+
+    assert!(!diff.is_empty());
+    assert!(diff.iter().any(|line| line.contains("-") && line.contains("old_func")));
+    assert!(diff.iter().any(|line| line.contains("+") && line.contains("new_func")));
+}
+
 #[tokio::test]
 async fn resumed_compacted_session_replays_all_prompts_and_replies() {
     use harness_core::{Message, SessionStore, SqliteSessionStore};

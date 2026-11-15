@@ -12,11 +12,11 @@ use harness_core::tools::delegate::SubagentTaskEventNotifier;
 use harness_core::{SessionStore, SqliteSessionStore};
 
 use super::render::{
-    bounded_tool_output_for, clean_user_query_for_transcript, compaction_report, extract_patch_diff,
-    format_delegate_duration, format_delegate_notification, format_delegate_title,
+    bounded_tool_output_for, clean_user_query_for_transcript, compaction_report,
+    extract_tool_diff, format_delegate_duration, format_delegate_notification, format_delegate_title,
     format_live_tool_output, format_tool_call, format_tool_result, format_tool_result_for,
-    has_verdict, is_non_tool_event, is_pty_tool, right_aligned_user_message, OutputBlockKind,
-    TurnProcessItem, LUNA_LABEL,
+    has_verdict, is_diff_or_write_tool, is_non_tool_event, is_pty_tool, right_aligned_user_message,
+    OutputBlockKind, TurnProcessItem, LUNA_LABEL,
 };
 use super::todo;
 use super::turn;
@@ -159,8 +159,8 @@ impl ObserverState {
         } else {
             format_tool_call(&name, &arguments)
         };
-        let diff_lines = if name == "patch" || name == "edit" || name == "apply_patch" {
-            extract_patch_diff(&arguments)
+        let diff_lines = if is_diff_or_write_tool(&name) {
+            extract_tool_diff(&name, &arguments)
         } else {
             Vec::new()
         };
@@ -232,7 +232,7 @@ impl ObserverState {
                 item.is_error = is_error;
                 item.duration_secs = elapsed_secs;
                 let diff =
-                    if !is_error && (name == "patch" || name == "edit" || name == "apply_patch") {
+                    if !is_error && is_diff_or_write_tool(&name) {
                         item.diff_lines.clone()
                     } else {
                         Vec::new()
