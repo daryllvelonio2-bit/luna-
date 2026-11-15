@@ -397,19 +397,28 @@ def format_result(tool: str, result: Any) -> str:
 
     if tool == "pty_start":
         info = result.get("info", {})
+        wait_info = dict(result.get("wait") or {})
+        wait_info.pop("screen", None)
+        wait_info.pop("tail", None)
         return (
             f"session {result.get('session_id')} started "
             f"(pid {info.get('pid')}, {info.get('cols')}x{info.get('rows')})\n"
             f"argv: {' '.join(info.get('argv') or [])}\n"
-            f"wait: {_json(result.get('wait'))}\n\n"
+            f"wait: {_json(wait_info)}\n\n"
             f"--- screen ---\n{result.get('screen', '')}"
         )
 
-    if tool == "pty_send":
-        return _json(result)
-
-    if tool == "pty_keys":
-        return _json(result)
+    if tool in ("pty_send", "pty_keys", "pty_idle"):
+        data = dict(result) if isinstance(result, dict) else {}
+        screen = data.pop("screen", None)
+        if "wait" in data and isinstance(data["wait"], dict):
+            data["wait"] = dict(data["wait"])
+            data["wait"].pop("screen", None)
+            data["wait"].pop("tail", None)
+        res_str = _json(data)
+        if screen:
+            return f"{res_str}\n\n--- screen ---\n{screen}"
+        return res_str
 
     if tool == "pty_screen":
         header = (
@@ -430,21 +439,18 @@ def format_result(tool: str, result: Any) -> str:
         )
 
     if tool == "pty_wait":
+        screen = result.get("screen") or ""
         if result.get("matched"):
             return (
                 f"matched '{result.get('pattern')}' after {result.get('elapsed_ms')}ms\n"
                 f"line: {result.get('line')}\n\n"
-                f"--- screen ---\n{result.get('screen', '')}"
+                f"--- screen ---\n{screen}"
             )
         return (
             f"NOT matched '{result.get('pattern')}' after {result.get('elapsed_ms')}ms\n"
             f"exited: {result.get('exited')} (code {result.get('exit_code')})\n\n"
-            f"--- screen tail ---\n{result.get('tail', '')}\n\n"
-            f"--- screen ---\n{result.get('screen', '')}"
+            f"--- screen ---\n{screen}"
         )
-
-    if tool == "pty_idle":
-        return _json(result)
 
     if tool == "pty_assert":
         verdict = "PASS" if result.get("passed") else "FAIL"

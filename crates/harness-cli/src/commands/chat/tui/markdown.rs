@@ -1014,12 +1014,24 @@ pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
     if !line.contains('\x1b') {
         let clean = clean_terminal_text(line);
         let truncated = truncate_cells(&clean, max_width);
-        return Line::from(Span::styled(
-            truncated,
-            Style::default()
-                .fg(TEXT_PRIMARY)
-                .bg(crate::commands::chat::tui::theme::BG_SURFACE),
-        ));
+        let tw = truncated.width();
+        let pad = if tw < max_width {
+            " ".repeat(max_width - tw)
+        } else {
+            String::new()
+        };
+        return Line::from(vec![
+            Span::styled(
+                truncated,
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .bg(crate::commands::chat::tui::theme::BG_SURFACE),
+            ),
+            Span::styled(
+                pad,
+                Style::default().bg(crate::commands::chat::tui::theme::BG_SURFACE),
+            ),
+        ]);
     }
     let mut clean_line = String::with_capacity(line.len());
     for ch in line.chars() {
@@ -1048,11 +1060,19 @@ pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
         } else if total_width < max_width {
             let remain = max_width - total_width;
             let cut = truncate_cells(&span.content, remain);
+            total_width += cut.width();
             truncated_spans.push(Span::styled(cut, span.style));
             break;
         } else {
             break;
         }
+    }
+    if total_width < max_width {
+        let pad = " ".repeat(max_width - total_width);
+        truncated_spans.push(Span::styled(
+            pad,
+            Style::default().bg(crate::commands::chat::tui::theme::BG_SURFACE),
+        ));
     }
     Line::from(truncated_spans)
 }

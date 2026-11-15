@@ -175,12 +175,58 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
     }
 }
 
+fn strip_terminal_indent(lines: &[String]) -> Vec<String> {
+    let non_empty: Vec<&str> = lines
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return lines.to_vec();
+    }
+    let mut indents: Vec<usize> = non_empty
+        .iter()
+        .map(|s| s.len().saturating_sub(s.trim_start().len()))
+        .collect();
+    let min_indent = indents.iter().copied().min().unwrap_or(0);
+    if min_indent >= 2 {
+        return lines
+            .iter()
+            .map(|s| {
+                if s.len() >= min_indent {
+                    s[min_indent..].to_string()
+                } else {
+                    s.trim_start().to_string()
+                }
+            })
+            .collect();
+    }
+    indents.sort_unstable();
+    let cutoff = indents[indents.len() / 3];
+    if cutoff >= 4 {
+        return lines
+            .iter()
+            .map(|s| {
+                let lead = s.len().saturating_sub(s.trim_start().len());
+                if lead >= cutoff {
+                    s[cutoff..].to_string()
+                } else {
+                    s.clone()
+                }
+            })
+            .collect();
+    }
+    lines.to_vec()
+}
+
 /// The live pty mirror: the last screen the agent's pty session reported.
 ///
 /// The session survives the call that opened it, so this pane is drawn from its own snapshot, not
 /// from the running tool. Escape sequences and `\r` overwrites are already resolved by the pty
 /// bridge, which is what makes a TUI read like a screen instead of raw control bytes.
 fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
+    frame.render_widget(Clear, rect);
+
     let title = format!(
         " pty · {} ",
         truncate_to_cells(&pane.title, rect.width.saturating_sub(12) as usize)
@@ -223,36 +269,38 @@ fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
     let lines = &pane.lines;
     let mut rows: Vec<Line<'static>> = Vec::with_capacity(avail);
     if lines.is_empty() {
-        rows.push(Line::from(Span::styled(
+        rows.push(parse_terminal_line(
             if pane.running {
                 "waiting for screen…"
             } else {
                 "no screen captured"
             },
-            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-        )));
-    } else if lines.len() > avail {
-        let shown = avail.saturating_sub(1).max(1);
-        let start = lines.len().saturating_sub(shown);
-        rows.push(Line::from(Span::styled(
-            format!("… {start} earlier lines"),
-            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-        )));
-        for line in &lines[start..] {
-            rows.push(parse_terminal_line(line, width));
-        }
+            width,
+        ));
     } else {
-        // Pad the top so the newest line sits on the bottom row, where a terminal cursor would
-        // be: a pane that fills downward would leave a moving gap between text and status.
-        for _ in 0..avail.saturating_sub(lines.len()) {
-            rows.push(Line::from(""));
-        }
-        for line in lines {
-            rows.push(parse_terminal_line(line, width));
+        let slice = if lines.len() > avail {
+            let shown = avail.saturating_sub(1).max(1);
+            let start = lines.len().saturating_sub(shown);
+            rows.push(parse_terminal_line(
+                &format!("… {start} earlier lines"),
+                width,
+            ));
+            &lines[start..]
+        } else {
+            for _ in 0..avail.saturating_sub(lines.len()) {
+                rows.push(parse_terminal_line("", width));
+            }
+            lines.as_slice()
+        };
+        for line in strip_terminal_indent(slice) {
+            rows.push(parse_terminal_line(&line, width));
         }
     }
 
-    frame.render_widget(Paragraph::new(rows), inner);
+    frame.render_widget(
+        Paragraph::new(rows).style(Style::default().bg(BG_SURFACE)),
+        inner,
+    );
 }
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_session_id: &str) {
@@ -2267,7 +2315,17 @@ fn push_completed_tool_card(
             );
         }
     } else if !item.output.trim().is_empty() {
-        let raw_lines: Vec<&str> = item.output.trim().lines().collect();
+        let mut raw_lines: Vec<String> = Vec::new();
+        let mut prev_empty = false;
+        for line in item.output.trim().lines() {
+            let trimmed = line.trim_end();
+            let is_empty = trimmed.trim().is_empty();
+            if is_empty && prev_empty {
+                continue;
+            }
+            raw_lines.push(trimmed.to_string());
+            prev_empty = is_empty;
+        }
         if !raw_lines.is_empty() {
             push_card_blank_row(
                 out,
@@ -4733,6 +4791,19 @@ mod tests {
             text.contains("running"),
             "the pane says the session is still live:\n{text}"
         );
+    }
+
+    #[test]
+    fn strip_terminal_indent_removes_common_padding() {
+        let lines = vec![
+            "                       ┃".to_string(),
+            "                       ┃  Ask anything…".to_string(),
+            "                       ┃  Build auto".to_string(),
+        ];
+        let stripped = strip_terminal_indent(&lines);
+        assert_eq!(stripped[0], "┃");
+        assert_eq!(stripped[1], "┃  Ask anything…");
+        assert_eq!(stripped[2], "┃  Build auto");
     }
 
     #[test]

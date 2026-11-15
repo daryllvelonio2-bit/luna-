@@ -172,7 +172,10 @@ pub fn bounded_tool_output_for(tool_name: Option<&str>, output: &str) -> (String
     }
 
     let is_shell = tool_name
-        .map(|t| matches!(t, "terminal" | "shell" | "bash" | "exec" | "pty"))
+        .map(|t| {
+            matches!(t, "terminal" | "shell" | "bash" | "exec" | "pty")
+                || super::tools::is_pty_tool(t)
+        })
         .unwrap_or(false);
 
     if !is_shell && (trimmed.starts_with('{') || trimmed.starts_with('[')) {

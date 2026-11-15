@@ -618,7 +618,6 @@ class PtySession:
                     "pattern": pattern,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "tail": _tail(text),
-                    "screen": text,
                     "exited": self.exited(),
                     "exit_code": self.exit_code(),
                 }
