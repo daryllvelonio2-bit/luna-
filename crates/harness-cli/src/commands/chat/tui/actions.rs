@@ -2318,7 +2318,13 @@ pub async fn submit_composer(
     }
 
     if st.active_turn.is_some() {
-        match env.interrupt_handle.interrupt(&submitted.expanded_text) {
+        let text = submitted.expanded_text;
+        env.in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(TurnProcessItem::user_message(&text));
+        st.scroll_from_bottom = 0;
+        match env.interrupt_handle.interrupt(&text) {
             harness_core::InterruptOutcome::Streaming => {
                 st.system_notices.push(SystemNotice::new(
                     "↳ Redirecting — stopping this reply to take your message",
@@ -2330,7 +2336,7 @@ pub async fn submit_composer(
                 ));
             }
             harness_core::InterruptOutcome::Idle => {
-                st.queue.push_back(submitted.expanded_text);
+                st.queue.push_back(text);
                 env.ui.set_queue_depth(st.queue.len());
             }
         }

@@ -1795,6 +1795,13 @@ async fn resumed_compacted_session_replays_all_prompts_and_replies() {
 }
 
 #[test]
+fn user_message_process_item_renders_as_user_card() {
+    let item = TurnProcessItem::user_message("change of direction");
+    assert!(item.is_user_message());
+    assert_eq!(item.output, "change of direction");
+}
+
+#[test]
 fn a_finished_job_reads_as_a_notice_and_a_model_message() {
     use harness_core::tasks::JobCompletion;
 

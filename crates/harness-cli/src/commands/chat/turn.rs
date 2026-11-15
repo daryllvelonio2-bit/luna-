@@ -56,7 +56,11 @@ pub(super) fn turn_records(
     for notice in interruptions {
         let reasoning = notice.reasoning.trim();
         let tool_end = notice.tool_count.min(final_tool_items.len());
-        let segment_tools = final_tool_items[tool_cursor..tool_end].to_vec();
+        let segment_tools: Vec<TurnProcessItem> = final_tool_items[tool_cursor..tool_end]
+            .iter()
+            .filter(|it| !it.is_user_message())
+            .cloned()
+            .collect();
         tool_cursor = tool_end;
         let segment_reasoning = if segment_tools.iter().any(|it| it.is_thinking()) {
             None
@@ -74,7 +78,11 @@ pub(super) fn turn_records(
         segment_query = notice.text;
         segment_start = notice.at;
     }
-    let final_segment_tools = final_tool_items[tool_cursor..].to_vec();
+    let final_segment_tools: Vec<TurnProcessItem> = final_tool_items[tool_cursor..]
+        .iter()
+        .filter(|it| !it.is_user_message())
+        .cloned()
+        .collect();
     let final_segment_reasoning = if final_segment_tools.iter().any(|it| it.is_thinking()) {
         None
     } else {
@@ -533,17 +541,7 @@ pub(super) async fn handle_composer_command(
                 in_flight_tools
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(TurnProcessItem {
-                        tool_name: "steer".to_string(),
-                        call_formatted: line.clone(),
-                        result_formatted: String::new(),
-                        diff_lines: Vec::new(),
-                        output: String::new(),
-                        output_dropped: 0,
-                        arguments: None,
-                        duration_secs: None,
-                        is_error: false,
-                    });
+                    .push(TurnProcessItem::user_message(format!("Steer: {text}")));
                 ui.emit_above(&line);
             } else {
                 ui.emit_above(&format!(

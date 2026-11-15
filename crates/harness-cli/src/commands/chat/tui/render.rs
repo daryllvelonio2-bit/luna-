@@ -1614,6 +1614,12 @@ fn render_completed_turn_process(
                 }
                 out.push(Line::default());
             }
+        } else if item.is_user_message() {
+            let trimmed = item.output.trim();
+            if !trimmed.is_empty() {
+                push_user_card(out, trimmed, width, card_inner_w);
+                out.push(Line::default());
+            }
         } else {
             let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
             let click_target = if item.tool_name == "delegate_task" {
@@ -1659,7 +1665,7 @@ fn render_active_turn_process(
     // fold away, so the working view stays on the tool.
     let tool_active = snap.activity_call.is_some()
         || in_flight_tools.iter().any(|item| {
-            !item.is_thinking() && !item.is_assistant_text() && item.result_formatted.is_empty()
+            !item.is_thinking() && !item.is_assistant_text() && !item.is_user_message() && item.result_formatted.is_empty()
         });
     let auto_hide_thinking = auto_hide_thinking && tool_active;
 
@@ -1690,6 +1696,14 @@ fn render_active_turn_process(
                     spans.extend(mline.spans);
                     out.push(Line::from(spans));
                 }
+                out.push(Line::default());
+            }
+            continue;
+        }
+        if item.is_user_message() {
+            let trimmed = item.output.trim();
+            if !trimmed.is_empty() {
+                push_user_card(out, trimmed, width, card_inner_w);
                 out.push(Line::default());
             }
             continue;
@@ -2129,6 +2143,15 @@ fn push_completed_tool_card(
     width: usize,
     card_inner_w: usize,
 ) {
+    if item.is_user_message() {
+        let trimmed = item.output.trim();
+        if !trimmed.is_empty() {
+            push_user_card(out, trimmed, width, card_inner_w);
+            out.push(Line::default());
+        }
+        return;
+    }
+
     if item.tool_name == "steer" || item.tool_name == "approval" {
         let clean = clean_terminal_text(&item.call_formatted);
         if !clean.trim().is_empty() {

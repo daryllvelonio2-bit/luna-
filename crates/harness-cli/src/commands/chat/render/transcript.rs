@@ -15,6 +15,9 @@ pub const THINKING_TOOL_NAME: &str = "__thinking__";
 /// Synthetic `tool_name` for intermediate assistant prose emitted before a tool call.
 pub const ASSISTANT_TEXT_TOOL_NAME: &str = "__assistant_text__";
 
+/// Synthetic `tool_name` for user messages injected/steered into an active turn.
+pub const USER_MESSAGE_TOOL_NAME: &str = "__user_message__";
+
 /// Formatted tool execution lines for a single tool call (or chronological process event) within a turn's process.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnProcessItem {
@@ -71,6 +74,22 @@ impl TurnProcessItem {
         }
     }
 
+    /// Construct an injected user message card emitted into an active turn.
+    pub fn user_message(text: impl Into<String>) -> Self {
+        let content = text.into();
+        Self {
+            tool_name: USER_MESSAGE_TOOL_NAME.to_string(),
+            call_formatted: format!("👤 {}", content.trim()),
+            result_formatted: "✓ delivered".to_string(),
+            diff_lines: Vec::new(),
+            output: content,
+            output_dropped: 0,
+            arguments: None,
+            duration_secs: None,
+            is_error: false,
+        }
+    }
+
     /// Whether this item represents an inline reasoning segment rather than a tool call.
     pub fn is_thinking(&self) -> bool {
         self.tool_name == THINKING_TOOL_NAME
@@ -79,6 +98,11 @@ impl TurnProcessItem {
     /// Whether this item represents intermediate assistant prose rather than a tool call.
     pub fn is_assistant_text(&self) -> bool {
         self.tool_name == ASSISTANT_TEXT_TOOL_NAME
+    }
+
+    /// Whether this item represents an injected/steered user message rather than a tool call.
+    pub fn is_user_message(&self) -> bool {
+        self.tool_name == USER_MESSAGE_TOOL_NAME
     }
 }
 
@@ -644,13 +668,14 @@ fn turn_tool_names(turn: &TurnRecord) -> Vec<String> {
     } else {
         turn.tool_items
             .iter()
-            .filter(|it| !it.is_thinking())
+            .filter(|it| !it.is_thinking() && !it.is_assistant_text() && !it.is_user_message())
             .filter_map(|it| {
                 let plain = dialoguer::console::strip_ansi_codes(&it.call_formatted);
                 if plain.starts_with('⏩')
                     || plain.starts_with('✖')
                     || plain.starts_with('✔')
                     || plain.starts_with('💭')
+                    || plain.starts_with('👤')
                 {
                     None
                 } else {
@@ -680,6 +705,10 @@ fn push_expanded_process(lines: &mut Vec<String>, turn: &TurnRecord, width: usiz
         } else if item.is_assistant_text() {
             if !item.output.trim().is_empty() {
                 push_rows(lines, item.output.trim());
+            }
+        } else if item.is_user_message() {
+            if !item.output.trim().is_empty() {
+                push_rows(lines, &right_aligned_user_message(&item.output, width));
             }
         } else {
             push_tool_item(lines, item, width);
@@ -773,6 +802,7 @@ pub fn is_non_tool_event(call: &str) -> bool {
         || plain.starts_with('✖')
         || plain.starts_with('✔')
         || plain.starts_with('💭')
+        || plain.starts_with('👤')
 }
 
 /// Whether a formatted call already carries a verdict.

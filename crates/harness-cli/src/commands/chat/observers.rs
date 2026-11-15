@@ -269,7 +269,26 @@ impl ObserverState {
         // The reasoning produced before the cut is already in the live region; settle it so
         // it stays on screen instead of disappearing when the next call starts.
         self.settle_reasoning_for_next_step();
-        if !self.ui.is_tui_mode() {
+        if self.ui.is_tui_mode() {
+            if let Some(prose) = self.ui.take_live_content() {
+                if !prose.trim().is_empty() {
+                    self.in_flight_tools
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(TurnProcessItem::assistant_text(prose));
+                }
+            } else if !partial.trim().is_empty() {
+                self.in_flight_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(TurnProcessItem::assistant_text(&partial));
+            }
+            let mut tools = self.in_flight_tools.lock().unwrap_or_else(|e| e.into_inner());
+            if !tools.iter().any(|t| t.is_user_message() && t.output == shown) {
+                tools.push(TurnProcessItem::user_message(&shown));
+            }
+            self.ui.notify_tui();
+        } else {
             // Reply text is not streamed live, so the part the model had written would go
             // unseen. Show it now, before the user's line that cut it off.
             if !partial.trim().is_empty() {
@@ -285,8 +304,6 @@ impl ObserverState {
             self.ui.begin_block(OutputBlockKind::User);
             self.ui
                 .emit_above(&right_aligned_user_message(&shown, get_terminal_width()));
-        } else {
-            self.ui.notify_tui();
         }
         let tool_count = self
             .in_flight_tools
@@ -308,20 +325,10 @@ impl ObserverState {
     fn handle_steered(&self, text: &str) {
         self.settle_reasoning_for_next_step();
         let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
-        self.in_flight_tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(TurnProcessItem {
-                tool_name: "steer".to_string(),
-                call_formatted: line.clone(),
-                result_formatted: String::new(),
-                diff_lines: Vec::new(),
-                output: String::new(),
-                output_dropped: 0,
-                arguments: None,
-                duration_secs: None,
-                is_error: false,
-            });
+        let mut tools = self.in_flight_tools.lock().unwrap_or_else(|e| e.into_inner());
+        if !tools.iter().any(|t| t.is_user_message() && (t.output == text || t.output == format!("Steer: {text}"))) {
+            tools.push(TurnProcessItem::user_message(format!("Steer: {text}")));
+        }
         self.ui.emit_above(&line);
     }
 
