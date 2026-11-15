@@ -12,7 +12,7 @@ use harness_core::tools::delegate::SubagentTaskEventNotifier;
 use harness_core::{SessionStore, SqliteSessionStore};
 
 use super::render::{
-    bounded_tool_output, clean_user_query_for_transcript, compaction_report, extract_patch_diff,
+    bounded_tool_output_for, clean_user_query_for_transcript, compaction_report, extract_patch_diff,
     format_delegate_duration, format_delegate_notification, format_delegate_title,
     format_live_tool_output, format_tool_call, format_tool_result, format_tool_result_for,
     has_verdict, is_non_tool_event, is_pty_tool, right_aligned_user_message, OutputBlockKind,
@@ -226,7 +226,7 @@ impl ObserverState {
             if let Some(item) = target {
                 item.call_formatted.push_str(&status);
                 item.result_formatted = format_tool_result_for(Some(&name), is_error, &output);
-                let (bounded, dropped) = bounded_tool_output(&output);
+                let (bounded, dropped) = bounded_tool_output_for(Some(&name), &output);
                 item.output = bounded;
                 item.output_dropped = dropped;
                 item.is_error = is_error;

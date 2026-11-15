@@ -2010,6 +2010,30 @@ fn format_opencode_tool_header(
                 }
             }
         }
+        "memory_search" => {
+            if let Some(q) = arg_str("query") {
+                return ("🔍 ", format!("Memory search: \"{q}\""));
+            }
+            return ("🔍 ", "Memory search".to_string());
+        }
+        "search_notes" => {
+            if let Some(q) = arg_str("query") {
+                return ("📝 ", format!("Search notes: \"{q}\""));
+            }
+            return ("📝 ", "Search notes".to_string());
+        }
+        "read_note" => {
+            if let Some(id) = arg_str("id") {
+                return ("📝 ", format!("Read note: {id}"));
+            }
+            return ("📝 ", "Read note".to_string());
+        }
+        "save_memory" => {
+            if let Some(s) = arg_str("subject") {
+                return ("🧠 ", format!("Save memory: {s}"));
+            }
+            return ("🧠 ", "Save memory".to_string());
+        }
         _ => {}
     }
 

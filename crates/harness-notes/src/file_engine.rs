@@ -678,6 +678,35 @@ fn write_note_with_chunks(dir: &Path, note: &Note) -> Result<PathBuf, HarnessErr
     write_note(dir, &parent, false)
 }
 
+fn word_matches(haystack_word: &str, term: &str) -> bool {
+    if haystack_word == term {
+        return true;
+    }
+    if term.len() >= 3 && haystack_word.len() >= 3 {
+        if let Some(stripped) = term.strip_suffix('s') {
+            if stripped == haystack_word {
+                return true;
+            }
+        }
+        if let Some(stripped) = haystack_word.strip_suffix('s') {
+            if stripped == term {
+                return true;
+            }
+        }
+        if let Some(stripped) = term.strip_suffix("es") {
+            if stripped == haystack_word {
+                return true;
+            }
+        }
+        if let Some(stripped) = haystack_word.strip_suffix("es") {
+            if stripped == term {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[async_trait]
 impl NotesEngine for FileNotesEngine {
     async fn save_note(
@@ -815,17 +844,28 @@ impl NotesEngine for FileNotesEngine {
             let haystack =
                 format!("{}\n{}\n{}", note.title, note.content, note.tags.join(" ")).to_lowercase();
             let exact = haystack.matches(&needle).count();
-            let distinct = terms
-                .iter()
-                .filter(|term| haystack.contains(term.as_str()))
-                .count();
-            if exact == 0 && distinct == 0 {
-                continue;
+
+            let words: Vec<&str> = haystack
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            let mut distinct = 0;
+            let mut occurrences = 0;
+            for term in &terms {
+                let count = words.iter().filter(|w| word_matches(w, term)).count();
+                if count > 0 {
+                    distinct += 1;
+                    occurrences += count;
+                }
             }
-            let occurrences: usize = terms
-                .iter()
-                .map(|term| haystack.matches(term.as_str()).count())
-                .sum();
+
+            if exact == 0 {
+                if distinct == 0 || (terms.len() >= 3 && distinct < 2) {
+                    continue;
+                }
+            }
+
             let score = exact * 10_000 + distinct * 100 + occurrences;
             scored.push((score, note));
         }

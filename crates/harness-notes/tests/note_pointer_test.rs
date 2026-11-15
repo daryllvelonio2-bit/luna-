@@ -109,6 +109,31 @@ async fn test_delete_missing_note_is_not_an_error() {
 }
 
 #[tokio::test]
+async fn test_search_notes_does_not_substring_match_unrelated_words() {
+    let engine = FileNotesEngine::in_memory().unwrap();
+
+    engine
+        .save_note(
+            "Stickman video teardown",
+            "Content licensing model and base model settings.",
+            &["video".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // "mode" should not match "model", and multi-term query should not match
+    let results = engine
+        .search_notes("develop mode cutting cargo tests and clippy", 5)
+        .await
+        .unwrap();
+    assert!(results.is_empty(), "unrelated note should not match");
+
+    // Exact word "model" should match
+    let model_results = engine.search_notes("model", 5).await.unwrap();
+    assert_eq!(model_results.len(), 1);
+}
+
+#[tokio::test]
 async fn test_list_notes_orders_by_updated_and_paginates() {
     let engine = std::sync::Arc::new(FileNotesEngine::in_memory().unwrap());
 

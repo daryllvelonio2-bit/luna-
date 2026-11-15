@@ -88,14 +88,82 @@ pub(crate) const MAX_RETAINED_OUTPUT_LINES: usize = 40;
 /// Hard cap on retained output characters, so a single-line payload cannot pin megabytes.
 pub(crate) const MAX_RETAINED_OUTPUT_CHARS: usize = 8 * 1024;
 
+fn format_memory_search_display(val: &serde_json::Value) -> Option<String> {
+    let results = val.get("results").and_then(|r| r.as_array());
+    let notes = val.get("notes").and_then(|n| n.as_array());
+    if results.is_none() && notes.is_none() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    if let Some(recs) = results {
+        for r in recs {
+            let subj = r.get("subject").and_then(|s| s.as_str()).unwrap_or("");
+            let obj = r.get("object").and_then(|o| o.as_str()).unwrap_or("");
+            if !subj.is_empty() && !obj.is_empty() {
+                lines.push(format!("• [Memory] {subj}: {obj}"));
+            } else if let Some(txt) = r.get("text").and_then(|t| t.as_str()) {
+                let first = txt.lines().next().unwrap_or(txt);
+                lines.push(format!("• [Memory] {first}"));
+            }
+        }
+    }
+    if let Some(note_arr) = notes {
+        for n in note_arr {
+            let title = n.get("title").and_then(|t| t.as_str()).unwrap_or("Untitled");
+            let summary = n.get("summary_pointer").and_then(|s| s.as_str()).unwrap_or("");
+            if !summary.is_empty() && summary != title {
+                lines.push(format!("• [Note] \"{title}\" — {summary}"));
+            } else {
+                lines.push(format!("• [Note] \"{title}\""));
+            }
+        }
+    }
+    if lines.is_empty() {
+        let q = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        if !q.is_empty() {
+            lines.push(format!("No memories or notes found for \"{q}\"."));
+        } else {
+            lines.push("0 memories or notes found.".to_string());
+        }
+    }
+    Some(lines.join("\n"))
+}
+
 /// Keep the newest lines of a tool result, plus a count of what was dropped.
 ///
 /// The end of a build or test run is where the verdict is; the beginning is already represented by
 /// [`format_tool_result`]'s first-line summary.
-pub fn bounded_tool_output(output: &str) -> (String, usize) {
-    let trimmed = output.trim_end();
+pub fn bounded_tool_output_for(tool_name: Option<&str>, output: &str) -> (String, usize) {
+    let trimmed = output.trim();
     if trimmed.is_empty() {
         return (String::new(), 0);
+    }
+
+    if tool_name == Some("memory_search") || trimmed.starts_with('{') {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(formatted) = format_memory_search_display(&val) {
+                return (formatted, 0);
+            }
+        }
+    }
+
+    let is_shell = tool_name
+        .map(|t| matches!(t, "terminal" | "shell" | "bash" | "exec" | "pty"))
+        .unwrap_or(false);
+
+    if !is_shell && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let end = lines.len().min(MAX_RETAINED_OUTPUT_LINES);
+        let mut kept = lines[..end].join("\n");
+        let dropped = lines.len() - end;
+        if kept.len() > MAX_RETAINED_OUTPUT_CHARS {
+            let mut cut = MAX_RETAINED_OUTPUT_CHARS;
+            while cut > 0 && !kept.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            kept = kept[..cut].to_string();
+        }
+        return (kept, dropped);
     }
 
     let lines: Vec<&str> = trimmed.lines().collect();
@@ -114,6 +182,11 @@ pub fn bounded_tool_output(output: &str) -> (String, usize) {
     }
 
     (kept, dropped)
+}
+
+#[allow(dead_code)]
+pub fn bounded_tool_output(output: &str) -> (String, usize) {
+    bounded_tool_output_for(None, output)
 }
 
 /// A completed turn in the chat session, holding its query, intermediate reasoning, tool calls, and final reply.
@@ -482,7 +555,8 @@ fn apply_tool_message(msg: &Message, current_tools: &mut [TurnProcessItem]) {
         target.call_formatted.push_str(&status);
         target.result_formatted =
             format_tool_result_for(Some(&target.tool_name), res.is_error, &res.content);
-        (target.output, target.output_dropped) = bounded_tool_output(&res.content);
+        (target.output, target.output_dropped) =
+            bounded_tool_output_for(Some(&target.tool_name), &res.content);
         target.is_error = res.is_error;
     }
 }

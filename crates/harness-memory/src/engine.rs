@@ -595,6 +595,35 @@ fn keyword_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+fn word_matches(haystack_word: &str, term: &str) -> bool {
+    if haystack_word == term {
+        return true;
+    }
+    if term.len() >= 3 && haystack_word.len() >= 3 {
+        if let Some(stripped) = term.strip_suffix('s') {
+            if stripped == haystack_word {
+                return true;
+            }
+        }
+        if let Some(stripped) = haystack_word.strip_suffix('s') {
+            if stripped == term {
+                return true;
+            }
+        }
+        if let Some(stripped) = term.strip_suffix("es") {
+            if stripped == haystack_word {
+                return true;
+            }
+        }
+        if let Some(stripped) = haystack_word.strip_suffix("es") {
+            if stripped == term {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Score every active memory not already in `existing` by term overlap, highest first.
 fn score_by_keywords(
     conn: &Connection,
@@ -624,11 +653,15 @@ fn score_by_keywords(
             m.path.as_deref().unwrap_or("")
         )
         .to_lowercase();
+        let words: Vec<&str> = haystack
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
         let matches = terms
             .iter()
-            .filter(|t| haystack.contains(t.as_str()))
+            .filter(|t| words.iter().any(|w| word_matches(w, t)))
             .count();
-        if matches > 0 {
+        if matches > 0 && (terms.len() < 3 || matches >= 2) {
             scored.push((matches, m));
         }
     }

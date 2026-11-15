@@ -52,8 +52,9 @@ pub use results::{
     format_tool_result_for,
 };
 pub use tools::{format_tool_call, is_pty_tool, tool_activity_detail};
+#[allow(unused_imports)]
 pub use transcript::{
-    bounded_tool_output, clean_user_query_for_transcript, has_verdict, is_non_tool_event,
+    bounded_tool_output, bounded_tool_output_for, clean_user_query_for_transcript, has_verdict, is_non_tool_event,
     parse_turns_from_history, render_all_turns, render_transcript, render_turn_lines,
     reply_for_display, TurnProcessItem, TurnRecord,
 };

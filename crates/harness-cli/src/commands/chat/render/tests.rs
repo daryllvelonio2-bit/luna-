@@ -617,6 +617,32 @@ fn bounded_output_keeps_the_newest_lines_and_counts_the_dropped_ones() {
 }
 
 #[test]
+fn bounded_output_for_memory_search_formats_clean_lines() {
+    let json_data = serde_json::json!({
+        "query": "build test speed",
+        "results": [
+            {
+                "subject": "user.preference.build_and_test_speed",
+                "object": "develop mode cutting cargo tests and clippy to seconds"
+            }
+        ],
+        "notes": [
+            {
+                "title": "Build instructions",
+                "summary_pointer": "cargo commands"
+            }
+        ],
+        "count": 2
+    })
+    .to_string();
+
+    let (kept, dropped) = bounded_tool_output_for(Some("memory_search"), &json_data);
+    assert_eq!(dropped, 0);
+    assert!(kept.contains("• [Memory] user.preference.build_and_test_speed: develop mode cutting cargo tests and clippy to seconds"));
+    assert!(kept.contains("• [Note] \"Build instructions\" — cargo commands"));
+}
+
+#[test]
 fn expanded_transcript_keeps_a_finished_tools_output() {
     use harness_core::{Message, ToolResult};
 

@@ -395,6 +395,31 @@ fn format_json_result(trimmed: &str) -> Option<String> {
             ));
         }
     }
+    if val.get("results").is_some() || val.get("notes").is_some() {
+        let memories_count = val
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let notes_count = val
+            .get("notes")
+            .and_then(|n| n.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let total = memories_count + notes_count;
+        if total == 0 {
+            return Some(format!("  {} {}", "✓".green(), "0 matches found".dimmed()));
+        }
+        let mem_label = if memories_count == 1 { "memory" } else { "memories" };
+        let note_label = if notes_count == 1 { "note" } else { "notes" };
+        let desc = match (memories_count > 0, notes_count > 0) {
+            (true, true) => format!("{memories_count} {mem_label}, {notes_count} {note_label} found"),
+            (true, false) => format!("{memories_count} {mem_label} found"),
+            (false, true) => format!("{notes_count} {note_label} found"),
+            (false, false) => "0 matches found".to_string(),
+        };
+        return Some(format!("  {} {}", "✓".green(), desc.dimmed()));
+    }
     None
 }
 
