@@ -1221,6 +1221,13 @@ fn render_composer_hint_row(
         ));
     }
 
+    if let Some(ref project) = st.memory_project_filter {
+        right_spans.push(Span::styled(
+            format!("memory: {project} · "),
+            Style::default().fg(CYAN_LINK).bg(BG_CANVAS),
+        ));
+    }
+
     if let Some(s) = snap {
         if s.memory_distilling.is_some() {
             right_spans.push(Span::styled(
@@ -4762,6 +4769,7 @@ mod tests {
                 ))
             },
             background_sessions: std::collections::HashMap::new(),
+            memory_project_filter: None,
         };
 
         let in_flight = Vec::new();
@@ -5290,6 +5298,7 @@ mod tests {
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
             template_agent: agent,
             background_sessions: std::collections::HashMap::new(),
+            memory_project_filter: None,
         }
     }
 }

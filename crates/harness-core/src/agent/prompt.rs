@@ -105,7 +105,14 @@ where
         if !self.config.memory_enabled {
             return Ok(String::new());
         }
-        let query = if let Some(root) = &self.config.workspace_root {
+        let project_filter = self.config.memory_project_filter.as_deref();
+        let query = if let Some(filter) = project_filter {
+            if !user_input.contains(filter) {
+                format!("{user_input} {filter}")
+            } else {
+                user_input.to_string()
+            }
+        } else if let Some(root) = &self.config.workspace_root {
             let project_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !project_name.is_empty() && !user_input.contains(project_name) {
                 format!("{user_input} {project_name}")
@@ -115,7 +122,10 @@ where
         } else {
             user_input.to_string()
         };
-        let relevant_memories = self.memory.retrieve_cards(&query, 12).await?;
+        let relevant_memories = self
+            .memory
+            .retrieve_cards_scoped(&query, project_filter, 12)
+            .await?;
         Ok(self.memory.format_as_system_prompt(&relevant_memories))
     }
 

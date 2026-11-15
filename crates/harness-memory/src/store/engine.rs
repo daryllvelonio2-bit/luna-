@@ -422,6 +422,20 @@ impl MemoryEngine for MarkdownMemoryEngine {
         self.store.retrieve_cards(query, limit)
     }
 
+    async fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.store
+            .retrieve_cards_scoped(query, project_filter, limit)
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        self.store.list_projects()
+    }
+
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         save_record(&self.store, record)
     }
@@ -512,6 +526,23 @@ impl MemoryEngine for DaemonWriteEngine {
     ) -> Result<Vec<MemoryRecord>, HarnessError> {
         self.direct.store().reload()?;
         self.direct.retrieve_cards(query, limit).await
+    }
+
+    async fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.direct.store().reload()?;
+        self.direct
+            .retrieve_cards_scoped(query, project_filter, limit)
+            .await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        self.direct.store().reload()?;
+        self.direct.list_projects().await
     }
 
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {

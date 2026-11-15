@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use harness_core::{
-    CompactionSetup, HarnessError, ReasoningEffort, SessionBinding, SessionStore, TurnOutcome,
+    CompactionSetup, HarnessError, MemoryEngine, ReasoningEffort, SessionBinding, SessionStore,
+    TurnOutcome,
 };
 use harness_providers::{GenericProviderClient, RotationStrategy};
 use ratatui::backend::CrosstermBackend;
@@ -15,7 +16,7 @@ use ratatui::Terminal;
 use super::super::commands::{
     apply_auto_compact_values, apply_dir_choice, command_entries, connected_providers,
     execute_slash_command, handle_settings_command, list_keys_text, looks_like_path,
-    parse_dir_args, provider_id_of, provider_items, reset_workspace, SlashOutcome,
+    parse_dir_args, provider_id_of, provider_items, reset_workspace, Feature, SlashOutcome,
     RESERVED_COMMAND_NAMES,
 };
 use super::super::helpers::{finish_slash_command, IdleMemoryPass};
@@ -189,6 +190,7 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         idle_pass: std::mem::replace(&mut st.idle_pass, fresh_idle),
         pending_images: st.pending_images.clone(),
         pending_job_turn: st.pending_job_turn.take(),
+        memory_project_filter: st.memory_project_filter.take(),
     };
     st.background_sessions.insert(old_id, slot);
 }
@@ -232,6 +234,7 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.idle_pass = slot.idle_pass;
     st.pending_images = slot.pending_images;
     st.pending_job_turn = slot.pending_job_turn;
+    st.memory_project_filter = slot.memory_project_filter;
 
     env.todo_scope.set_session(env.session_id.as_str());
     todo::refresh_panel(&env.ui, &env.todo_scope);
@@ -425,6 +428,7 @@ pub async fn switch_to_session(
     st.selection_notice = None;
     st.idle_pass = IdleMemoryPass::new(initial_len);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
+    st.memory_project_filter = None;
 
     env.ui.set_status(&target_model, 0, ctx_max);
     env.ui.set_session_name(&record.name);
@@ -506,6 +510,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.selection_notice = None;
     st.idle_pass = IdleMemoryPass::new(0);
     st.pending_images = Arc::new(Mutex::new(Vec::new()));
+    st.memory_project_filter = None;
 
     env.ui.set_status(&model, 0, ctx_max);
     env.ui.set_session_name("");
@@ -1116,6 +1121,57 @@ fn open_settings_menu(st: &mut TuiState, config: &harness_core::Config) {
         ],
         selected: 0,
         action: SelectAction::SettingsMain,
+    };
+}
+
+fn open_memory_modal(env: &Env<'_>, st: &mut TuiState) {
+    let enabled = env.feature_toggles.enabled(Feature::Memory);
+    let toggle_label = if enabled {
+        "● Memory: ON (Enter to turn off)".to_string()
+    } else {
+        "○ Memory: OFF (Enter to turn on)".to_string()
+    };
+    let scope_label = st
+        .memory_project_filter
+        .as_deref()
+        .unwrap_or("All projects (default)");
+    st.modal = ActiveModal::SelectModal {
+        title: "Memory Settings".to_string(),
+        items: vec![
+            toggle_label,
+            format!("Filter by project · {scope_label}"),
+            "Reset to default (All projects)".to_string(),
+        ],
+        selected: 0,
+        action: SelectAction::MemoryMain,
+    };
+}
+
+async fn open_memory_project_picker(st: &mut TuiState) {
+    let projects = st
+        .template_agent
+        .memory_engine()
+        .list_projects()
+        .await
+        .unwrap_or_default();
+    let active = st.memory_project_filter.as_deref();
+    let mut items = Vec::with_capacity(projects.len() + 2);
+    let default_mark = if active.is_none() { "● " } else { "" };
+    items.push(format!("{default_mark}★ All projects (default / reset)"));
+    for proj in &projects {
+        let mark = if active == Some(proj.as_str()) {
+            "● "
+        } else {
+            "  "
+        };
+        items.push(format!("{mark}{proj}"));
+    }
+    items.push("✎ Custom project name…".to_string());
+    st.modal = ActiveModal::SelectModal {
+        title: "Select Project Memory Scope".to_string(),
+        items,
+        selected: 0,
+        action: SelectAction::MemoryProject { projects },
     };
 }
 
@@ -1921,6 +1977,53 @@ pub async fn run_select_action(
                 .unwrap_or_else(|_| format!("No log yet for {id}."));
             show_text_modal(st, &format!("Task {id}"), &body);
         }
+        SelectAction::MemoryMain => match choice {
+            0 => {
+                let next = !env.feature_toggles.enabled(Feature::Memory);
+                env.feature_toggles.set(Feature::Memory, next);
+                env.agent.lock().await.set_memory_enabled(next);
+                let state = if next { "ON" } else { "OFF" };
+                st.system_notices.push(SystemNotice::new(format!(
+                    "✓ Memory is {state} for this session"
+                )));
+            }
+            1 => open_memory_project_picker(st).await,
+            2 => {
+                st.memory_project_filter = None;
+                env.agent.lock().await.set_memory_project_filter(None);
+                st.system_notices.push(SystemNotice::new(
+                    "✓ Memory scope reset to all projects (default)",
+                ));
+            }
+            _ => {}
+        },
+        SelectAction::MemoryProject { projects } => {
+            if choice == 0 {
+                st.memory_project_filter = None;
+                env.agent.lock().await.set_memory_project_filter(None);
+                st.system_notices.push(SystemNotice::new(
+                    "✓ Memory scope reset to all projects (default)",
+                ));
+            } else if choice <= projects.len() {
+                let project = projects[choice - 1].clone();
+                st.memory_project_filter = Some(project.clone());
+                env.agent
+                    .lock()
+                    .await
+                    .set_memory_project_filter(Some(project.clone()));
+                st.system_notices.push(SystemNotice::new(format!(
+                    "✓ Memory scoped to '{project}' for this session"
+                )));
+            } else {
+                st.modal = ActiveModal::InputModal {
+                    title: "Filter Memory by Project".to_string(),
+                    prompt: "Project name / slug (blank resets to all projects)".to_string(),
+                    value: st.memory_project_filter.clone().unwrap_or_default(),
+                    secret: false,
+                    action: InputAction::MemoryCustomProject,
+                };
+            }
+        }
     }
 }
 
@@ -2204,6 +2307,31 @@ pub async fn run_input_action(
                 value.trim().to_string()
             };
             open_profile_create_providers(st, name, summary);
+        }
+        InputAction::MemoryCustomProject => {
+            let trimmed = value.trim();
+            if trimmed.is_empty()
+                || matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "reset" | "all" | "default" | "clear"
+                )
+            {
+                st.memory_project_filter = None;
+                env.agent.lock().await.set_memory_project_filter(None);
+                st.system_notices.push(SystemNotice::new(
+                    "✓ Memory scope reset to all projects (default)",
+                ));
+            } else {
+                let project = trimmed.to_string();
+                st.memory_project_filter = Some(project.clone());
+                env.agent
+                    .lock()
+                    .await
+                    .set_memory_project_filter(Some(project.clone()));
+                st.system_notices.push(SystemNotice::new(format!(
+                    "✓ Memory scoped to '{project}' for this session"
+                )));
+            }
         }
     }
 }
@@ -2707,6 +2835,30 @@ pub async fn run_slash_command(
             if !is_reset {
                 open_provider_picker_for(env, st, ModelTarget::BgSaver).await;
                 return Ok(Flow::Continue);
+            }
+        }
+        "/memory" => {
+            let trimmed = arg.map(str::trim).filter(|s| !s.is_empty());
+            match trimmed {
+                None => {
+                    open_memory_modal(env, st);
+                    return Ok(Flow::Continue);
+                }
+                Some(val) => {
+                    let lower = val.to_ascii_lowercase();
+                    if matches!(lower.as_str(), "list" | "projects") {
+                        open_memory_project_picker(st).await;
+                        return Ok(Flow::Continue);
+                    }
+                    if matches!(lower.as_str(), "reset" | "all" | "default" | "clear") {
+                        st.memory_project_filter = None;
+                    } else if !matches!(
+                        lower.as_str(),
+                        "on" | "off" | "enable" | "disable" | "enabled" | "disabled" | "true" | "false"
+                    ) {
+                        st.memory_project_filter = Some(val.to_string());
+                    }
+                }
             }
         }
         "/worker" => {

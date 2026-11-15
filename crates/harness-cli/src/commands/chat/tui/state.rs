@@ -94,6 +94,10 @@ pub enum SelectAction {
     TaskList {
         tasks: Vec<(String, String)>,
     },
+    MemoryMain,
+    MemoryProject {
+        projects: Vec<String>,
+    },
 }
 
 /// Text a generic TUI input modal hands back to the action layer.
@@ -127,6 +131,7 @@ pub enum InputAction {
     ProfileCreateSummary {
         name: String,
     },
+    MemoryCustomProject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -926,6 +931,7 @@ pub struct BackgroundSession {
     pub idle_pass: IdleMemoryPass,
     pub pending_images: Arc<Mutex<Vec<String>>>,
     pub pending_job_turn: Option<(String, std::time::Instant)>,
+    pub memory_project_filter: Option<String>,
 }
 
 /// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).
@@ -1401,6 +1407,8 @@ pub struct TuiState {
     pub template_agent: Arc<ChatAgent>,
     /// Other sessions kept live in memory (including any running background turns).
     pub background_sessions: HashMap<String, BackgroundSession>,
+    /// Active project filter for memories in this session (`None` = all memories passed).
+    pub memory_project_filter: Option<String>,
 }
 
 impl TuiState {

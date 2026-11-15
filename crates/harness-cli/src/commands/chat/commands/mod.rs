@@ -26,7 +26,7 @@ pub use catalog::{command_entries, CommandEntry, SlashCommand, SLASH_COMMANDS};
 pub(crate) use dispatch::{execute_slash_command, SlashOutcome};
 use features::parse_profile_command;
 pub(crate) use features::{
-    handle_feature_toggle, is_bare_feature_command, Feature, FeatureToggles,
+    handle_feature_toggle, handle_memory_command, is_bare_feature_command, Feature, FeatureToggles,
 };
 pub(crate) use models::{
     apply_compact_model_choice, apply_default_model_choice, handle_compact_model_switch,

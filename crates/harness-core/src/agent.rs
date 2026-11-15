@@ -144,6 +144,10 @@ pub struct AgentConfig {
     /// Mode for memory and note persistence: Session writer vs Background saver.
     #[serde(default)]
     pub memory_mode: crate::config::MemoryMode,
+    /// Optional project scope filter for active memories in this session.
+    /// `None` means all memories are passed (the default).
+    #[serde(default)]
+    pub memory_project_filter: Option<String>,
     /// Whether automatic compaction is enabled when transcript crosses threshold.
     #[serde(default = "default_auto_compact_enabled")]
     pub auto_compact_enabled: bool,
@@ -247,6 +251,7 @@ impl Default for AgentConfig {
             mcp_enabled: true,
             workspace_root: None,
             memory_mode: crate::config::MemoryMode::Session,
+            memory_project_filter: None,
             auto_compact_enabled: true,
             auto_compact_threshold: 150_000,
             auto_compact_percent: None,
@@ -862,6 +867,23 @@ where
         if let Some(hook) = self.saver.as_ref() {
             hook.saver.set_memory_enabled(enabled);
         }
+    }
+
+    /// Set or clear the project scope filter for active memories.
+    pub fn set_memory_project_filter(&mut self, filter: Option<String>) {
+        self.config.memory_project_filter = filter
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+
+    /// The current memory project filter, if any.
+    pub fn memory_project_filter(&self) -> Option<&str> {
+        self.config.memory_project_filter.as_deref()
+    }
+
+    /// Access the underlying memory engine.
+    pub fn memory_engine(&self) -> Arc<M> {
+        self.memory.clone()
     }
 
     /// Enable or disable note tools and the note protocol for this session.

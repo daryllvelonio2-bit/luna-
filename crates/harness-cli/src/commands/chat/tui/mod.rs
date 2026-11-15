@@ -660,6 +660,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         live_reasoning_cache: state::LiveReasoningCache::default(),
         template_agent,
         background_sessions: HashMap::new(),
+        memory_project_filter: None,
     };
     refresh_tabs(env, &mut st).await;
     Ok(st)

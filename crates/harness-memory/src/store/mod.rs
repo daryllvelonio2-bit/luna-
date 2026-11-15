@@ -964,6 +964,78 @@ impl MemoryStore {
         Ok(memories)
     }
 
+    /// Retrieve records for the prompt block, optionally scoped to a single project.
+    pub fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        let Some(filter) = project_filter else {
+            return self.retrieve_cards(query, limit);
+        };
+        let norm = filter.trim().to_ascii_lowercase().replace('_', "-");
+        if norm.is_empty() || norm == "all" || norm == "default" || norm == "reset" {
+            return self.retrieve_cards(query, limit);
+        }
+
+        let candidates = self.retrieve_cards(query, limit.saturating_mul(6).max(60))?;
+        let filtered: Vec<MemoryRecord> = candidates
+            .into_iter()
+            .filter(|rec| crate::engine::record_matches_project(rec, &norm))
+            .take(limit)
+            .collect();
+        Ok(filtered)
+    }
+
+    /// Enumerate all project names discovered in active records.
+    pub fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        let mut projects = std::collections::BTreeSet::new();
+        let active = self.active_records()?;
+        for r in active {
+            if r.category == MemoryCategory::Transcript {
+                continue;
+            }
+            if let Some(ref name) = r.name {
+                let norm = name.trim().to_ascii_lowercase().replace('_', "-");
+                if !norm.is_empty()
+                    && norm != "-"
+                    && norm != "memory"
+                    && norm != "note"
+                    && norm != "transcript"
+                    && norm != "user"
+                {
+                    projects.insert(norm);
+                }
+            }
+            if let Some(rest) = r.subject.strip_prefix("project.") {
+                let slug = rest.split('.').next().unwrap_or(rest);
+                let norm = slug.trim().to_ascii_lowercase().replace('_', "-");
+                if !norm.is_empty() {
+                    projects.insert(norm);
+                }
+            }
+            if r.domain.eq_ignore_ascii_case("project") && !r.topic.is_empty() {
+                let norm = r.topic.trim().to_ascii_lowercase().replace('_', "-");
+                if !norm.is_empty() {
+                    projects.insert(norm);
+                }
+            }
+            if let Some(ref path) = r.path {
+                let lower = path.to_ascii_lowercase();
+                if let Some(pos) = lower.find("/github/") {
+                    let after = &path[pos + "/github/".len()..];
+                    let folder = after.split('/').next().unwrap_or(after);
+                    let norm = folder.trim().to_ascii_lowercase().replace('_', "-");
+                    if !norm.is_empty() {
+                        projects.insert(norm);
+                    }
+                }
+            }
+        }
+        Ok(projects.into_iter().collect())
+    }
+
     /// Records rendered into the system-prompt block. Kept byte-compatible
     /// with the SQLite engine so prompt caching and model behavior do not shift.
     pub fn format_as_system_prompt(&self, memories: &[MemoryRecord]) -> String {

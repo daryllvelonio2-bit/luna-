@@ -69,6 +69,39 @@ impl MemoryEngine for MemoryEngineKind {
         }
     }
 
+    async fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        match self {
+            Self::Sqlite(engine) => {
+                engine
+                    .retrieve_cards_scoped(query, project_filter, limit)
+                    .await
+            }
+            Self::Markdown(engine) => {
+                engine
+                    .retrieve_cards_scoped(query, project_filter, limit)
+                    .await
+            }
+            Self::Daemon(engine) => {
+                engine
+                    .retrieve_cards_scoped(query, project_filter, limit)
+                    .await
+            }
+        }
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        match self {
+            Self::Sqlite(engine) => engine.list_projects().await,
+            Self::Markdown(engine) => engine.list_projects().await,
+            Self::Daemon(engine) => engine.list_projects().await,
+        }
+    }
+
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
         match self {
             Self::Sqlite(engine) => engine.save(record).await,

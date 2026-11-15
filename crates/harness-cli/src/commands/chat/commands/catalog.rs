@@ -199,7 +199,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/memory",
-        details: "Turn saved memory on/off for this session (/memory on|off)",
+        details: "Toggle memory on/off, scope to a project, or reset (/memory [on|off|<project>|reset])",
     },
     SlashCommand {
         name: "/notes",

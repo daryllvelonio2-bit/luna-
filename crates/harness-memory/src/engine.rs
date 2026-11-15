@@ -709,6 +709,86 @@ fn append_recent(
     Ok(())
 }
 
+fn normalize_slug(s: &str) -> String {
+    s.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+/// Whether a memory record matches a target project filter.
+/// General user profile and universal preferences are preserved;
+/// records explicitly affiliated with other projects are excluded.
+pub fn record_matches_project(record: &MemoryRecord, project_filter: &str) -> bool {
+    let target = normalize_slug(project_filter);
+    if target.is_empty() || target == "all" || target == "default" || target == "reset" {
+        return true;
+    }
+
+    // 1. Direct project name match
+    if let Some(ref name) = record.name {
+        let norm_name = normalize_slug(name);
+        if !norm_name.is_empty()
+            && norm_name != "-"
+            && norm_name != "memory"
+            && norm_name != "note"
+        {
+            if norm_name == target {
+                return true;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    // 2. Subject check: if subject starts with "project."
+    if let Some(rest) = record.subject.strip_prefix("project.") {
+        let slug = rest.split('.').next().unwrap_or(rest);
+        let norm_slug = normalize_slug(slug);
+        if norm_slug == target {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    // 3. Path check: does path reference the target project or another project?
+    if let Some(ref path) = record.path {
+        let norm_path = path.to_ascii_lowercase();
+        let target_needle = format!("/{}/", target);
+        let target_needle_alt = format!("/{}/", target.replace('-', "_"));
+        let target_end = format!("/{}", target);
+        let target_end_alt = format!("/{}", target.replace('-', "_"));
+        if norm_path.contains(&target_needle)
+            || norm_path.contains(&target_needle_alt)
+            || norm_path.ends_with(&target_end)
+            || norm_path.ends_with(&target_end_alt)
+        {
+            return true;
+        }
+        if let Some(pos) = norm_path.find("/documents/github/") {
+            let after = &norm_path[pos + "/documents/github/".len()..];
+            let folder = after.split('/').next().unwrap_or(after);
+            let norm_folder = normalize_slug(folder);
+            if !norm_folder.is_empty() && norm_folder != target {
+                return false;
+            }
+        }
+    }
+
+    // 4. Content / Object check: if raw content specifically names target and doesn't belong to another
+    let norm_content = record.raw_content.to_ascii_lowercase();
+    let norm_object = record.object.to_ascii_lowercase();
+    let target_raw = target.replace('-', " ");
+    if norm_content.contains(&target)
+        || norm_content.contains(&target_raw)
+        || norm_object.contains(&target)
+        || norm_object.contains(&target_raw)
+    {
+        return true;
+    }
+
+    // 5. Universal preferences / developer tools / profile items
+    true
+}
+
 #[async_trait]
 impl MemoryEngine for SqliteMemoryEngine {
     async fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>, HarnessError> {
@@ -794,6 +874,143 @@ impl MemoryEngine for SqliteMemoryEngine {
         }
 
         Ok(memories)
+    }
+
+    async fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        let Some(filter) = project_filter else {
+            return self.retrieve_cards(query, limit).await;
+        };
+        let target = normalize_slug(filter);
+        if target.is_empty() || target == "all" || target == "default" || target == "reset" {
+            return self.retrieve_cards(query, limit).await;
+        }
+
+        let conn = self.conn.lock().await;
+        let mut candidates: Vec<MemoryRecord> = Vec::new();
+        let candidate_limit = limit.saturating_mul(5).max(40);
+
+        // 1. L0/L1 Priority candidates
+        append_new_records(&mut candidates, l0_l1_priority(&conn, candidate_limit)?.into_iter());
+
+        // 2. Query-specific matches
+        let trimmed_query = query.trim();
+        if !trimmed_query.is_empty() {
+            let query_pattern = format!("%{}%", trimmed_query);
+            append_new_records(
+                &mut candidates,
+                query_matches(&conn, &query_pattern, candidate_limit)?.into_iter(),
+            );
+
+            let terms = keyword_terms(trimmed_query);
+            if !terms.is_empty() {
+                let mut scored =
+                    score_by_keywords(&conn, &terms, &candidates, ACTIVE_NON_TRANSCRIPT_SQL)?;
+                scored.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then_with(|| {
+                            b.1.confidence
+                                .partial_cmp(&a.1.confidence)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| b.1.updated_at.cmp(&a.1.updated_at))
+                });
+                push_scored(&mut candidates, scored, candidate_limit);
+            }
+        }
+
+        // 3. Recency fallback
+        append_recent(&conn, &mut candidates, candidate_limit, RECENT_NON_TRANSCRIPT_SQL)?;
+
+        let filtered: Vec<MemoryRecord> = candidates
+            .into_iter()
+            .filter(|rec| record_matches_project(rec, &target))
+            .take(limit)
+            .collect();
+
+        Ok(filtered)
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        let conn = self.conn.lock().await;
+        let mut projects = std::collections::BTreeSet::new();
+
+        // 1. From memories.name
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT name FROM memories
+                 WHERE is_active = 1
+                   AND name IS NOT NULL
+                   AND trim(name) != ''
+                   AND trim(name) != '-'
+                   AND category != 'transcript'",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for name in rows.flatten() {
+            let norm = normalize_slug(&name);
+            if !norm.is_empty()
+                && norm != "memory"
+                && norm != "note"
+                && norm != "transcript"
+                && norm != "user"
+            {
+                projects.insert(norm);
+            }
+        }
+
+        // 2. From memories.subject starting with 'project.'
+        let mut subj_stmt = conn
+            .prepare(
+                "SELECT DISTINCT subject FROM memories
+                 WHERE is_active = 1
+                   AND subject LIKE 'project.%'",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let subj_rows = subj_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for subj in subj_rows.flatten() {
+            if let Some(rest) = subj.strip_prefix("project.") {
+                let slug = rest.split('.').next().unwrap_or(rest);
+                let norm = normalize_slug(slug);
+                if !norm.is_empty() {
+                    projects.insert(norm);
+                }
+            }
+        }
+
+        // 3. From memories.path containing /GitHub/
+        let mut path_stmt = conn
+            .prepare(
+                "SELECT DISTINCT path FROM memories
+                 WHERE is_active = 1
+                   AND path IS NOT NULL
+                   AND path LIKE '%/GitHub/%'",
+            )
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        let path_rows = path_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| HarnessError::MemoryError(e.to_string()))?;
+        for path in path_rows.flatten() {
+            let lower = path.to_ascii_lowercase();
+            if let Some(pos) = lower.find("/github/") {
+                let after = &path[pos + "/github/".len()..];
+                let folder = after.split('/').next().unwrap_or(after);
+                let norm = normalize_slug(folder);
+                if !norm.is_empty() {
+                    projects.insert(norm);
+                }
+            }
+        }
+
+        Ok(projects.into_iter().collect())
     }
 
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError> {
@@ -1299,5 +1516,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn list_projects_and_scoped_retrieval_filter_foreign_projects() {
+        let engine = SqliteMemoryEngine::in_memory().expect("in-memory db");
+        let now = Utc::now();
+
+        let user_pref = MemoryRecord {
+            id: "user.pref.speed".to_string(),
+            subject: "user.preference.speed".to_string(),
+            predicate: "approach".to_string(),
+            object: "prefer fast builds".to_string(),
+            name: None,
+            path: None,
+            raw_content: "prefer fast builds".to_string(),
+            category: MemoryCategory::UserProfile,
+            confidence: 1.0,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            superseded_by: None,
+        };
+        let game_rec = MemoryRecord {
+            id: "proj.game.restart".to_string(),
+            subject: "project.custom_game.workflow".to_string(),
+            predicate: "restart".to_string(),
+            object: "restart game on update".to_string(),
+            name: Some("custom-game".to_string()),
+            path: Some("/home/janelle/Documents/GitHub/custom-game".to_string()),
+            raw_content: "restart game on update".to_string(),
+            category: MemoryCategory::WorkflowRule,
+            confidence: 1.0,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            superseded_by: None,
+        };
+        let web_rec = MemoryRecord {
+            id: "proj.web.run".to_string(),
+            subject: "project.smartlab.run_command".to_string(),
+            predicate: "command".to_string(),
+            object: "./run.sh".to_string(),
+            name: Some("smartlab".to_string()),
+            path: Some("/home/janelle/Documents/GitHub/smartlab".to_string()),
+            raw_content: "smartlab ./run.sh".to_string(),
+            category: MemoryCategory::WorkflowRule,
+            confidence: 1.0,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            superseded_by: None,
+        };
+
+        engine.save(&user_pref).await.unwrap();
+        engine.save(&game_rec).await.unwrap();
+        engine.save(&web_rec).await.unwrap();
+
+        let projects = engine.list_projects().await.unwrap();
+        assert_eq!(
+            projects,
+            vec!["custom-game".to_string(), "smartlab".to_string()]
+        );
+
+        // Default (None): returns all 3
+        let all = engine.retrieve_cards_scoped("", None, 12).await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Scoped to custom-game: returns user_pref + game_rec, excludes web_rec
+        let scoped = engine
+            .retrieve_cards_scoped("", Some("custom-game"), 12)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = scoped.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"user.pref.speed"));
+        assert!(ids.contains(&"proj.game.restart"));
+        assert!(!ids.contains(&"proj.web.run"));
     }
 }

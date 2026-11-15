@@ -48,7 +48,7 @@ impl<'a> SlashContext<'a> {
         &mut self,
         arg: Option<&str>,
     ) -> Result<SlashOutcome, HarnessError> {
-        handle_feature_toggle(self.ui, self.toggles, self.agent, Feature::Memory, arg).await;
+        handle_memory_command(self.ui, self.toggles, self.agent, arg).await;
         Ok(SlashOutcome::Continue)
     }
 

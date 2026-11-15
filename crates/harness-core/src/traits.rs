@@ -106,6 +106,21 @@ pub trait MemoryEngine: Send + Sync {
         self.retrieve(query, limit).await
     }
 
+    /// Retrieve records for the always-loaded prompt block, optionally filtered to a project scope.
+    async fn retrieve_cards_scoped(
+        &self,
+        query: &str,
+        _project_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, HarnessError> {
+        self.retrieve_cards(query, limit).await
+    }
+
+    /// Enumerate all project names known to memory.
+    async fn list_projects(&self) -> Result<Vec<String>, HarnessError> {
+        Ok(Vec::new())
+    }
+
     /// Save a new memory record, resolving contradictions and superseding previous matches
     async fn save(&self, record: &MemoryRecord) -> Result<(), HarnessError>;
 

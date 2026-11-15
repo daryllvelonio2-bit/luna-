@@ -2,6 +2,7 @@
 //! switch that must move with them, and the argument parsers for the toggle commands.
 
 use colored::Colorize;
+use harness_core::MemoryEngine;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -181,6 +182,120 @@ pub(crate) async fn handle_feature_toggle(
     ));
 }
 
+/// Handle `/memory` in CLI/piped mode:
+/// - `/memory` (no arg): prints current state & project scope
+/// - `/memory on|off`: toggles memory on/off
+/// - `/memory reset|all|default`: clears project scope back to all memories
+/// - `/memory list|projects`: lists known project scopes
+/// - `/memory <project>`: sets project scope for this session
+pub(crate) async fn handle_memory_command(
+    ui: &ChatUi,
+    toggles: &FeatureToggles,
+    agent: &Arc<tokio::sync::Mutex<ChatAgent>>,
+    arg: Option<&str>,
+) {
+    let raw = arg.unwrap_or("").trim();
+    if raw.is_empty() {
+        let enabled = toggles.enabled(Feature::Memory);
+        let scope = {
+            let ag = agent.lock().await;
+            ag.memory_project_filter().map(str::to_string)
+        };
+        let state = if enabled {
+            "ON".green().bold().to_string()
+        } else {
+            "OFF".dimmed().to_string()
+        };
+        let scope_label = scope.as_deref().unwrap_or("all projects (default)");
+        ui.emit_above(&format!(
+            "{} Memory is {} for this session (scope: {})",
+            "•".cyan(),
+            state,
+            scope_label.bold()
+        ));
+        ui.emit_above(&format!(
+            "{} Usage: /memory [on|off|list|<project>|reset]",
+            "•".dimmed()
+        ));
+        return;
+    }
+
+    if let Ok(Some(enabled)) = parse_feature_arg(Some(raw)) {
+        toggles.set(Feature::Memory, enabled);
+        agent.lock().await.set_memory_enabled(enabled);
+        let state = if enabled {
+            "ON".green().bold().to_string()
+        } else {
+            "OFF".dimmed().to_string()
+        };
+        ui.emit_above(&format!(
+            "{} Memory is {} for this session",
+            "•".cyan(),
+            state
+        ));
+        return;
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    if matches!(lower.as_str(), "reset" | "all" | "default" | "clear") {
+        agent.lock().await.set_memory_project_filter(None);
+        ui.emit_above(&format!(
+            "{} Memory scope reset to {} for this session",
+            "•".cyan(),
+            "all projects".bold()
+        ));
+        return;
+    }
+
+    if matches!(lower.as_str(), "list" | "projects") {
+        let (engine, current_scope) = {
+            let ag = agent.lock().await;
+            (
+                ag.memory_engine(),
+                ag.memory_project_filter().map(str::to_string),
+            )
+        };
+        match engine.list_projects().await {
+            Ok(projects) if projects.is_empty() => {
+                ui.emit_above(&format!(
+                    "{} No project-specific memories found yet.",
+                    "•".dimmed()
+                ));
+            }
+            Ok(projects) => {
+                ui.emit_above(&format!("{} Known memory projects:", "•".cyan()));
+                for proj in projects {
+                    let marker = if current_scope.as_deref() == Some(proj.as_str()) {
+                        "●".green().to_string()
+                    } else {
+                        "○".dimmed().to_string()
+                    };
+                    ui.emit_above(&format!("  {} {}", marker, proj));
+                }
+            }
+            Err(err) => {
+                ui.emit_above(&format!(
+                    "{} Failed to list memory projects: {}",
+                    "✖".red().bold(),
+                    err
+                ));
+            }
+        }
+        return;
+    }
+
+    // Otherwise treat `raw` as a project name filter
+    agent
+        .lock()
+        .await
+        .set_memory_project_filter(Some(raw.to_string()));
+    ui.emit_above(&format!(
+        "{} Memory scoped to project '{}' for this session",
+        "•".cyan(),
+        raw.bold()
+    ));
+}
+
 /// Whether a line that does NOT begin with `/` is a bare feature toggle command like `memory off`
 /// or `notes status` or `skills off`.
 pub(crate) fn is_bare_feature_command(line: &str) -> bool {
@@ -289,5 +404,67 @@ mod feature_toggle_tests {
         assert!(!is_bare_feature_command("notes off please"));
         assert!(!is_bare_feature_command("memory is a programming concept"));
         assert!(!is_bare_feature_command("fix this bug"));
+    }
+
+    #[tokio::test]
+    async fn handle_memory_command_toggles_scopes_and_resets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
+            harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
+        ));
+        let notes = std::sync::Arc::new(
+            harness_notes::FileNotesEngine::new(tmp.path().join("notes"), None).unwrap(),
+        );
+        let registry = std::sync::Arc::new(harness_core::DefaultToolRegistry::new());
+        let creds = harness_providers::CredentialManager::new(None).unwrap();
+        let discovery = std::sync::Arc::new(harness_providers::ModelDiscovery::new(
+            None,
+            0,
+            Default::default(),
+        ));
+        let provider = std::sync::Arc::new(
+            harness_providers::GenericProviderClient::new(
+                "openai".to_string(),
+                "gpt-4o".to_string(),
+                creds,
+                discovery,
+                None,
+            )
+            .unwrap(),
+        );
+        let agent = std::sync::Arc::new(tokio::sync::Mutex::new(harness_core::Agent::new(
+            provider,
+            memory,
+            notes,
+            registry,
+            harness_core::AgentConfig::default(),
+        )));
+        let ui = ChatUi::new(false);
+        let toggles = FeatureToggles::default();
+
+        // Default is ON and no project filter
+        assert!(toggles.enabled(Feature::Memory));
+        assert_eq!(agent.lock().await.memory_project_filter(), None);
+
+        // Toggle off
+        handle_memory_command(&ui, &toggles, &agent, Some("off")).await;
+        assert!(!toggles.enabled(Feature::Memory));
+        assert!(!agent.lock().await.config().memory_enabled);
+
+        // Toggle on
+        handle_memory_command(&ui, &toggles, &agent, Some("on")).await;
+        assert!(toggles.enabled(Feature::Memory));
+        assert!(agent.lock().await.config().memory_enabled);
+
+        // Scope to a project
+        handle_memory_command(&ui, &toggles, &agent, Some("rust-agent-harness")).await;
+        assert_eq!(
+            agent.lock().await.memory_project_filter(),
+            Some("rust-agent-harness")
+        );
+
+        // Reset scope back to default
+        handle_memory_command(&ui, &toggles, &agent, Some("reset")).await;
+        assert_eq!(agent.lock().await.memory_project_filter(), None);
     }
 }
