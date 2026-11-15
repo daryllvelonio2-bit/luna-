@@ -48,6 +48,10 @@ pub enum SelectAction {
     SettingsBlockLimit,
     SettingsCollapse,
     SettingsThinking,
+    SettingsFeature {
+        feature: super::super::commands::Feature,
+    },
+    SettingsMemoryMode,
     DirScope {
         path: String,
     },
@@ -94,7 +98,6 @@ pub enum SelectAction {
     TaskList {
         tasks: Vec<(String, String)>,
     },
-    MemoryMain,
     MemoryProject {
         projects: Vec<String>,
     },
@@ -132,6 +135,9 @@ pub enum InputAction {
         name: String,
     },
     MemoryCustomProject,
+    FeatureDisableDays {
+        feature: super::super::commands::Feature,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -932,6 +938,7 @@ pub struct BackgroundSession {
     pub pending_images: Arc<Mutex<Vec<String>>>,
     pub pending_job_turn: Option<(String, std::time::Instant)>,
     pub memory_project_filter: Option<String>,
+    pub feature_toggles: (bool, bool, bool, bool),
 }
 
 /// A transient notice in the TUI transcript (compaction reports, queue notices, goal updates).

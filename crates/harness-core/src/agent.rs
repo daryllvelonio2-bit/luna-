@@ -272,11 +272,14 @@ impl AgentConfig {
             return self.mcp_enabled;
         }
         match name {
-            "save_memory" | "update_memory" | "forget_memory" | "memory_search" => {
-                self.memory_enabled
+            "save_memory" | "update_memory" | "forget_memory" => {
+                self.memory_enabled && !self.memory_mode.is_background()
             }
-            "save_note" | "update_note" | "read_note" | "search_notes" | "list_notes"
-            | "delete_note" => self.notes_enabled,
+            "memory_search" => self.memory_enabled,
+            "save_note" | "update_note" | "delete_note" => {
+                self.notes_enabled && !self.memory_mode.is_background()
+            }
+            "read_note" | "search_notes" | "list_notes" => self.notes_enabled,
             "skill_view" | "skills_list" => self.skills_enabled,
             _ => true,
         }
@@ -1016,6 +1019,40 @@ mod tests {
         config.mcp_enabled = false;
         assert!(!config.tool_enabled("mcp__server__tool"));
         assert!(config.tool_enabled("read_file"));
+    }
+
+    #[test]
+    fn background_mode_disables_only_memory_and_note_write_tools() {
+        let mut config = AgentConfig::default();
+        config.memory_mode = crate::config::MemoryMode::Background;
+
+        // Write tools are suppressed in background mode
+        for write_tool in [
+            "save_memory",
+            "update_memory",
+            "forget_memory",
+            "save_note",
+            "update_note",
+            "delete_note",
+        ] {
+            assert!(
+                !config.tool_enabled(write_tool),
+                "{write_tool} should be hidden in background mode"
+            );
+        }
+
+        // Read tools remain enabled while their parent feature is enabled
+        for read_tool in ["memory_search", "read_note", "search_notes", "list_notes"] {
+            assert!(
+                config.tool_enabled(read_tool),
+                "{read_tool} should stay enabled in background mode"
+            );
+        }
+
+        config.memory_enabled = false;
+        assert!(!config.tool_enabled("memory_search"));
+        config.notes_enabled = false;
+        assert!(!config.tool_enabled("read_note"));
     }
 
     /// A configured bar above the model window is clamped below it; a bar that already fits, or a

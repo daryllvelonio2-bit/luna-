@@ -382,6 +382,10 @@ pub async fn run_gateway(
                         agent_cfg.profile_behavior = config.agent.profile_behavior.clone();
                         agent_cfg.workspace_root = Some(config.paths.workspace_root.clone());
                         agent_cfg.memory_mode = config.memory.mode;
+                        agent_cfg.memory_enabled = config.memory_effective_enabled();
+                        agent_cfg.notes_enabled = config.notes_effective_enabled();
+                        agent_cfg.skills_enabled = config.skills_effective_enabled();
+                        agent_cfg.mcp_enabled = config.mcp_effective_enabled();
                         agent_cfg.context_window = Some(
                             crate::commands::context_window::context_window_for(
                                 &config,

@@ -97,6 +97,21 @@ impl<'a> SlashContext<'a> {
             "on" | "off" | "enable" | "disable" | "enabled" | "disabled" | "true" | "false"
         ) {
             handle_feature_toggle(self.ui, self.toggles, self.agent, Feature::Mcp, Some(sub)).await;
+            if self.toggles.enabled(Feature::Mcp) {
+                let registry = self.agent.lock().await.registry().clone();
+                if let Err(err) = crate::commands::chat::helpers::ensure_mcp_servers_registered(
+                    &registry,
+                    self.config,
+                )
+                .await
+                {
+                    self.ui.emit_above(&format!(
+                        "{} Failed to start MCP servers: {}",
+                        "✖".red().bold(),
+                        err
+                    ));
+                }
+            }
             return Ok(SlashOutcome::Continue);
         }
         if !self.toggles.enabled(Feature::Mcp) {

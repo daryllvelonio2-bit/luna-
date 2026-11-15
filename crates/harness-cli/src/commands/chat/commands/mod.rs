@@ -40,7 +40,7 @@ pub(crate) use session_ops::{
     handle_new_command, handle_rewind_command, handle_sessions_switch,
     handle_summarize_and_new_command,
 };
-pub(crate) use settings::handle_settings_command;
+pub(crate) use settings::{format_settings_summary, handle_settings_command};
 
 pub(crate) use super::connect::{
     connected_providers, list_keys_text, provider_id_of, provider_items,

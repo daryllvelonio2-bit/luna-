@@ -15,9 +15,9 @@ use ratatui::Terminal;
 
 use super::super::commands::{
     apply_auto_compact_values, apply_dir_choice, command_entries, connected_providers,
-    execute_slash_command, handle_settings_command, list_keys_text, looks_like_path,
-    parse_dir_args, provider_id_of, provider_items, reset_workspace, Feature, SlashOutcome,
-    RESERVED_COMMAND_NAMES,
+    execute_slash_command, format_settings_summary, handle_settings_command, list_keys_text,
+    looks_like_path, parse_dir_args, provider_id_of, provider_items, reset_workspace, Feature,
+    SlashOutcome, RESERVED_COMMAND_NAMES,
 };
 use super::super::helpers::{finish_slash_command, IdleMemoryPass};
 use super::super::history::append_prompt_history;
@@ -191,6 +191,7 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         pending_images: st.pending_images.clone(),
         pending_job_turn: st.pending_job_turn.take(),
         memory_project_filter: st.memory_project_filter.take(),
+        feature_toggles: env.feature_toggles.snapshot(),
     };
     st.background_sessions.insert(old_id, slot);
 }
@@ -235,6 +236,7 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.pending_images = slot.pending_images;
     st.pending_job_turn = slot.pending_job_turn;
     st.memory_project_filter = slot.memory_project_filter;
+    env.feature_toggles.restore(slot.feature_toggles);
 
     env.todo_scope.set_session(env.session_id.as_str());
     todo::refresh_panel(&env.ui, &env.todo_scope);
@@ -317,6 +319,42 @@ fn instantiate_session_runtime(
             }));
         }
     }
+
+    if env.config.memory.mode.is_background() {
+        let memory_dyn: Arc<dyn MemoryEngine> = st.template_agent.memory().clone();
+        let notes_dyn: Arc<dyn harness_core::NotesEngine> = st.template_agent.notes().clone();
+        let saver_provider = env
+            .config
+            .memory
+            .background_provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(provider);
+        let saver_model = env
+            .config
+            .memory
+            .background_model
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(model);
+        if let Ok(saver) = crate::commands::chat::memory_writer::build_saver_for(
+            env.config,
+            &memory_dyn,
+            notes_dyn,
+            saver_provider,
+            saver_model,
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+        ) {
+            ag.set_background_saver(Some(Arc::new(saver)));
+        }
+    } else {
+        ag.set_background_saver(None);
+    }
+    ag.set_memory_enabled(env.feature_toggles.enabled(Feature::Memory));
+    ag.set_notes_enabled(env.feature_toggles.enabled(Feature::Notes));
+    ag.set_skills_enabled(env.feature_toggles.enabled(Feature::Skills));
+    ag.set_mcp_enabled(env.feature_toggles.enabled(Feature::Mcp));
 
     let steer_handle = ag.steer_handle();
     let interrupt_handle = ag.interrupt_handle();
@@ -468,6 +506,8 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     let model = env.current_model.clone();
     let _ = env.store.set_model(&new_id, &provider, &model).await;
 
+    let saved_toggles = env.feature_toggles.snapshot();
+    env.feature_toggles.sync_from_config(env.config);
     let (
         agent,
         ui,
@@ -477,9 +517,19 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
         interrupt_handle,
         compacting,
         ctx_max,
-    ) = instantiate_session_runtime(env, st, &new_id, &provider, &model, st.reasoning_effort)?;
+    ) = match instantiate_session_runtime(env, st, &new_id, &provider, &model, st.reasoning_effort)
+    {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            env.feature_toggles.restore(saved_toggles);
+            return Err(err);
+        }
+    };
+    let new_toggles = env.feature_toggles.snapshot();
+    env.feature_toggles.restore(saved_toggles);
 
     park_current_session(env, st);
+    env.feature_toggles.restore(new_toggles);
 
     *env.session_id = new_id.clone();
     env.agent = agent;
@@ -1095,7 +1145,54 @@ fn show_text_modal(st: &mut TuiState, title: &str, body: &str) {
     };
 }
 
-fn open_settings_menu(st: &mut TuiState, config: &harness_core::Config) {
+fn notify_setting_change(st: &mut TuiState, msg: impl Into<String>) {
+    let text = msg.into();
+    if st.turns.is_empty() {
+        st.selection_notice = Some((text, std::time::Instant::now()));
+    } else {
+        st.system_notices.push(SystemNotice::new(text));
+    }
+}
+
+fn feature_status_badge(env: &Env<'_>, feature: Feature) -> String {
+    let live_on = env.feature_toggles.enabled(feature);
+    let (global_on, until) = match feature {
+        Feature::Mcp => (
+            env.config.mcp.enabled && env.config.agent.mcp_enabled,
+            env.config.features.mcp_disabled_until,
+        ),
+        Feature::Skills => (
+            env.config.agent.skills_enabled,
+            env.config.features.skills_disabled_until,
+        ),
+        Feature::Memory => (
+            env.config.agent.memory_enabled,
+            env.config.features.memory_disabled_until,
+        ),
+        Feature::Notes => (
+            env.config.agent.notes_enabled,
+            env.config.features.notes_disabled_until,
+        ),
+    };
+    let now = harness_core::Config::current_unix_secs();
+    if live_on {
+        if !global_on || until.is_some_and(|u| u > now) {
+            "ON (this session)".to_string()
+        } else {
+            "ON".to_string()
+        }
+    } else if let Some(u) = until.filter(|&u| u > now) {
+        let days = (u - now).div_ceil(86_400);
+        format!("OFF ({days}d left)")
+    } else if !global_on {
+        "OFF (global)".to_string()
+    } else {
+        "OFF (this session)".to_string()
+    }
+}
+
+fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
+    let config = &env.config;
     let limit = match config.display.block_limit {
         None => "uncapped".to_string(),
         Some(1) => "1 line".to_string(),
@@ -1111,39 +1208,60 @@ fn open_settings_menu(st: &mut TuiState, config: &harness_core::Config) {
     } else {
         "off"
     };
+    let saver = match config.memory.mode {
+        harness_core::MemoryMode::Session => "Session writer",
+        harness_core::MemoryMode::Background => "Background saver",
+    };
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
         items: vec![
             format!("Display block limit · {limit}"),
             format!("Auto-collapse on turn finish · {collapse}"),
             format!("Auto-collapse thinking while a tool runs · {thinking}"),
+            format!("MCP · {}", feature_status_badge(env, Feature::Mcp)),
+            format!("Skills · {}", feature_status_badge(env, Feature::Skills)),
+            format!("Memory · {}", feature_status_badge(env, Feature::Memory)),
+            format!("Notes · {}", feature_status_badge(env, Feature::Notes)),
+            format!("Memory saver · {saver}"),
             "View current settings summary".to_string(),
         ],
-        selected: 0,
+        selected: selected.min(8),
         action: SelectAction::SettingsMain,
     };
 }
 
-fn open_memory_modal(env: &Env<'_>, st: &mut TuiState) {
-    let enabled = env.feature_toggles.enabled(Feature::Memory);
-    let toggle_label = if enabled {
-        "● Memory: ON (Enter to turn off)".to_string()
-    } else {
-        "○ Memory: OFF (Enter to turn on)".to_string()
-    };
-    let scope_label = st
-        .memory_project_filter
-        .as_deref()
-        .unwrap_or("All projects (default)");
+fn open_feature_settings_modal(env: &Env<'_>, st: &mut TuiState, feature: Feature) {
+    let badge = feature_status_badge(env, feature);
+    let enabled = env.feature_toggles.enabled(feature);
+    let default_sel = if enabled { 2 } else { 1 };
     st.modal = ActiveModal::SelectModal {
-        title: "Memory Settings".to_string(),
+        title: format!("{} Settings · {badge}", feature.title()),
         items: vec![
-            toggle_label,
-            format!("Filter by project · {scope_label}"),
-            "Reset to default (All projects)".to_string(),
+            "Turn ON · this session".to_string(),
+            "Turn ON · globally".to_string(),
+            "Turn OFF · this session".to_string(),
+            "Turn OFF · globally".to_string(),
+            "Turn OFF · for [N] days…".to_string(),
+            "Back to Settings".to_string(),
         ],
-        selected: 0,
-        action: SelectAction::MemoryMain,
+        selected: default_sel,
+        action: SelectAction::SettingsFeature { feature },
+    };
+}
+
+fn open_memory_mode_modal(env: &Env<'_>, st: &mut TuiState) {
+    let is_bg = env.config.memory.mode.is_background();
+    let sess_mark = if !is_bg { "● " } else { "  " };
+    let bg_mark = if is_bg { "● " } else { "  " };
+    st.modal = ActiveModal::SelectModal {
+        title: "Memory Saver Mode".to_string(),
+        items: vec![
+            format!("{sess_mark}Session writer — agent saves memories/notes mid-turn"),
+            format!("{bg_mark}Background saver — independent model distills after reply"),
+            "Back to Settings".to_string(),
+        ],
+        selected: usize::from(is_bg),
+        action: SelectAction::SettingsMemoryMode,
     };
 }
 
@@ -1685,21 +1803,101 @@ pub async fn run_select_action(
                     action: SelectAction::SettingsThinking,
                 };
             }
+            3 => open_feature_settings_modal(env, st, Feature::Mcp),
+            4 => open_feature_settings_modal(env, st, Feature::Skills),
+            5 => open_feature_settings_modal(env, st, Feature::Memory),
+            6 => open_feature_settings_modal(env, st, Feature::Notes),
+            7 => open_memory_mode_modal(env, st),
             _ => {
-                if let Err(error) = handle_settings_command(
-                    None,
-                    &env.ui,
-                    env.config,
-                    &env.display_settings,
-                    &mut st.process_expanded,
-                    Some("show"),
-                )
-                .await
+                let summary = format_settings_summary(env.config, Some(env.feature_toggles));
+                show_text_modal(st, "Current CLI Settings", &summary);
+            }
+        },
+        SelectAction::SettingsFeature { feature } => {
+            let return_idx = match feature {
+                Feature::Mcp => 3,
+                Feature::Skills => 4,
+                Feature::Memory => 5,
+                Feature::Notes => 6,
+            };
+            match choice {
+                0 => {
+                    apply_feature_live(env, feature, true).await;
+                    notify_setting_change(
+                        st,
+                        format!("{} turned ON for this session", feature.title()),
+                    );
+                    open_settings_menu(env, st, return_idx);
+                }
+                1 => {
+                    if let Err(err) = apply_feature_global(env, feature, true, None).await {
+                        env.ui
+                            .set_transient_error(Some(format!("Settings failed: {err}")));
+                    } else {
+                        notify_setting_change(
+                            st,
+                            format!("{} turned ON globally", feature.title()),
+                        );
+                    }
+                    open_settings_menu(env, st, return_idx);
+                }
+                2 => {
+                    apply_feature_live(env, feature, false).await;
+                    notify_setting_change(
+                        st,
+                        format!("{} turned OFF for this session", feature.title()),
+                    );
+                    open_settings_menu(env, st, return_idx);
+                }
+                3 => {
+                    if let Err(err) = apply_feature_global(env, feature, false, None).await {
+                        env.ui
+                            .set_transient_error(Some(format!("Settings failed: {err}")));
+                    } else {
+                        notify_setting_change(
+                            st,
+                            format!("{} turned OFF globally", feature.title()),
+                        );
+                    }
+                    open_settings_menu(env, st, return_idx);
+                }
+                4 => {
+                    st.modal = ActiveModal::InputModal {
+                        title: format!("Turn OFF {} for Days", feature.title()),
+                        prompt: "Number of days to keep disabled (e.g. 1, 7, 30; blank cancels)"
+                            .to_string(),
+                        value: String::new(),
+                        secret: false,
+                        action: InputAction::FeatureDisableDays { feature },
+                    };
+                }
+                _ => open_settings_menu(env, st, return_idx),
+            }
+        }
+        SelectAction::SettingsMemoryMode => match choice {
+            0 => {
+                if let Err(err) =
+                    apply_memory_mode_choice(env, harness_core::MemoryMode::Session).await
                 {
                     env.ui
-                        .set_transient_error(Some(format!("Settings failed: {error}")));
+                        .set_transient_error(Some(format!("Memory saver switch failed: {err}")));
+                } else {
+                    notify_setting_change(st, "Memory saver set to Session writer (saved)");
                 }
+                open_settings_menu(env, st, 7);
             }
+            1 => {
+                if let Err(err) =
+                    apply_memory_mode_choice(env, harness_core::MemoryMode::Background).await
+                {
+                    env.ui
+                        .set_transient_error(Some(format!("Memory saver switch failed: {err}")));
+                } else {
+                    notify_setting_change(st, "Memory saver set to Background saver (saved)");
+                }
+                open_settings_menu(env, st, 7);
+            }
+            _ => open_settings_menu(env, st, 7),
         },
         SelectAction::SettingsBlockLimit => {
             let arg = if choice == 0 {
@@ -1979,26 +2177,6 @@ pub async fn run_select_action(
                 .unwrap_or_else(|_| format!("No log yet for {id}."));
             show_text_modal(st, &format!("Task {id}"), &body);
         }
-        SelectAction::MemoryMain => match choice {
-            0 => {
-                let next = !env.feature_toggles.enabled(Feature::Memory);
-                env.feature_toggles.set(Feature::Memory, next);
-                env.agent.lock().await.set_memory_enabled(next);
-                let state = if next { "ON" } else { "OFF" };
-                st.system_notices.push(SystemNotice::new(format!(
-                    "✓ Memory is {state} for this session"
-                )));
-            }
-            1 => open_memory_project_picker(st).await,
-            2 => {
-                st.memory_project_filter = None;
-                env.agent.lock().await.set_memory_project_filter(None);
-                st.system_notices.push(SystemNotice::new(
-                    "✓ Memory scope reset to all projects (default)",
-                ));
-            }
-            _ => {}
-        },
         SelectAction::MemoryProject { projects } => {
             if choice == 0 {
                 st.memory_project_filter = None;
@@ -2345,7 +2523,180 @@ pub async fn run_input_action(
                 )));
             }
         }
+        InputAction::FeatureDisableDays { feature } => {
+            let return_idx = match feature {
+                Feature::Mcp => 3,
+                Feature::Skills => 4,
+                Feature::Memory => 5,
+                Feature::Notes => 6,
+            };
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                open_feature_settings_modal(env, st, feature);
+                return;
+            }
+            match trimmed.parse::<u64>() {
+                Ok(days) if (1..=3650).contains(&days) => {
+                    let until = harness_core::Config::current_unix_secs()
+                        .saturating_add(days.saturating_mul(86_400));
+                    if let Err(err) = apply_feature_global(env, feature, true, Some(until)).await {
+                        env.ui
+                            .set_transient_error(Some(format!("Settings failed: {err}")));
+                    } else {
+                        let date = chrono::DateTime::<chrono::Utc>::from_timestamp(until as i64, 0)
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| format!("{days}d"));
+                        notify_setting_change(
+                            st,
+                            format!(
+                                "{} turned OFF for {days} day(s) (until {date})",
+                                feature.title()
+                            ),
+                        );
+                    }
+                    open_settings_menu(env, st, return_idx);
+                }
+                _ => {
+                    env.ui.set_transient_error(Some(
+                        "Enter a whole number of days between 1 and 3650".to_string(),
+                    ));
+                    st.modal = ActiveModal::InputModal {
+                        title: format!("Turn OFF {} for Days", feature.title()),
+                        prompt: "Invalid number. Enter days between 1 and 3650:".to_string(),
+                        value,
+                        secret: false,
+                        action: InputAction::FeatureDisableDays { feature },
+                    };
+                }
+            }
+        }
     }
+}
+
+async fn apply_feature_live(env: &Env<'_>, feature: Feature, enabled: bool) {
+    env.feature_toggles.set(feature, enabled);
+    let registry = {
+        let mut ag = env.agent.lock().await;
+        match feature {
+            Feature::Memory => ag.set_memory_enabled(enabled),
+            Feature::Notes => ag.set_notes_enabled(enabled),
+            Feature::Skills => ag.set_skills_enabled(enabled),
+            Feature::Mcp => ag.set_mcp_enabled(enabled),
+        }
+        ag.registry().clone()
+    };
+    if enabled && feature == Feature::Mcp {
+        if let Err(err) =
+            crate::commands::chat::helpers::ensure_mcp_servers_registered(&registry, env.config)
+                .await
+        {
+            env.ui
+                .set_transient_error(Some(format!("Failed to start MCP servers: {err}")));
+        }
+    }
+}
+
+async fn apply_feature_global(
+    env: &mut Env<'_>,
+    feature: Feature,
+    enabled: bool,
+    disabled_until: Option<u64>,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let flag_str = if enabled { "true" } else { "false" };
+    let (agent_key, until_key) = match feature {
+        Feature::Mcp => ("agent.mcp_enabled", "features.mcp_disabled_until"),
+        Feature::Skills => ("agent.skills_enabled", "features.skills_disabled_until"),
+        Feature::Memory => ("agent.memory_enabled", "features.memory_disabled_until"),
+        Feature::Notes => ("agent.notes_enabled", "features.notes_disabled_until"),
+    };
+
+    harness_core::config::set_in_file(&layers, agent_key, flag_str)?;
+    if feature == Feature::Mcp {
+        harness_core::config::set_in_file(&layers, "mcp.enabled", flag_str)?;
+    }
+    match disabled_until {
+        Some(until) => {
+            harness_core::config::set_in_file(&layers, until_key, &until.to_string())?;
+        }
+        None => {
+            let _ = harness_core::config::unset_in_file(&layers, until_key)?;
+        }
+    }
+
+    match feature {
+        Feature::Mcp => {
+            env.config.mcp.enabled = enabled;
+            env.config.agent.mcp_enabled = enabled;
+            env.config.features.mcp_disabled_until = disabled_until;
+        }
+        Feature::Skills => {
+            env.config.agent.skills_enabled = enabled;
+            env.config.features.skills_disabled_until = disabled_until;
+        }
+        Feature::Memory => {
+            env.config.agent.memory_enabled = enabled;
+            env.config.features.memory_disabled_until = disabled_until;
+        }
+        Feature::Notes => {
+            env.config.agent.notes_enabled = enabled;
+            env.config.features.notes_disabled_until = disabled_until;
+        }
+    }
+
+    let now = harness_core::Config::current_unix_secs();
+    let effective = enabled && !disabled_until.is_some_and(|u| now < u);
+    apply_feature_live(env, feature, effective).await;
+    Ok(())
+}
+
+async fn apply_memory_mode_choice(
+    env: &mut Env<'_>,
+    mode: harness_core::MemoryMode,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    if mode.is_background() {
+        let (memory_dyn, notes_dyn) = {
+            let ag = env.agent.lock().await;
+            let mem: Arc<dyn MemoryEngine> = ag.memory().clone();
+            let notes: Arc<dyn harness_core::NotesEngine> = ag.notes().clone();
+            (mem, notes)
+        };
+        let provider = env
+            .config
+            .memory
+            .background_provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(env.current_provider.as_str());
+        let model = env
+            .config
+            .memory
+            .background_model
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(env.current_model.as_str());
+        let saver = crate::commands::chat::memory_writer::build_saver_for(
+            env.config,
+            &memory_dyn,
+            notes_dyn,
+            provider,
+            model,
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+        )?;
+        harness_core::config::set_in_file(&layers, "memory.mode", mode.as_str())?;
+        env.config.memory.mode = mode;
+        let mut ag = env.agent.lock().await;
+        ag.set_background_saver(Some(Arc::new(saver)));
+        ag.set_memory_enabled(env.feature_toggles.enabled(Feature::Memory));
+        ag.set_notes_enabled(env.feature_toggles.enabled(Feature::Notes));
+    } else {
+        harness_core::config::set_in_file(&layers, "memory.mode", mode.as_str())?;
+        env.config.memory.mode = mode;
+        env.agent.lock().await.set_background_saver(None);
+    }
+    Ok(())
 }
 
 pub async fn apply_thinking_selection(
@@ -2716,7 +3067,7 @@ pub async fn run_slash_command(
             return Ok(Flow::Continue);
         }
         "/settings" if arg.is_none() => {
-            open_settings_menu(st, env.config);
+            open_settings_menu(env, st, 0);
             return Ok(Flow::Continue);
         }
         "/auto-compact" | "/autocompact" if arg.is_none() => {
@@ -2853,7 +3204,7 @@ pub async fn run_slash_command(
             let trimmed = arg.map(str::trim).filter(|s| !s.is_empty());
             match trimmed {
                 None => {
-                    open_memory_modal(env, st);
+                    open_memory_project_picker(st).await;
                     return Ok(Flow::Continue);
                 }
                 Some(val) => {

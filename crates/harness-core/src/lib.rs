@@ -36,9 +36,10 @@ pub use checkpoint::{
     TurnSnapshot, DEFAULT_KEEP_TURNS,
 };
 pub use config::{
-    resolve, CheckpointSettings, Config, DisplaySettings, GoalSettings, HooksSettings, Layers,
-    MemoryMode, MemorySettings, ModelSettings, PathsSettings, ProviderOverride, Resolved,
-    SessionSettings, Source, ToolsSettings, WorkerProfile, WORKER_NAME_MAX_CHARS,
+    resolve, CheckpointSettings, Config, DisplaySettings, FeatureSettings, GoalSettings,
+    HooksSettings, Layers, MemoryMode, MemorySettings, ModelSettings, PathsSettings,
+    ProviderOverride, Resolved, SessionSettings, Source, ToolsSettings, WorkerProfile,
+    WORKER_NAME_MAX_CHARS,
 };
 pub use error::HarnessError;
 pub use goal::{

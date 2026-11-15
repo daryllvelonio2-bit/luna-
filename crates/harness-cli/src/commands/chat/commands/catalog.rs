@@ -199,8 +199,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/memory",
-        details:
-            "Toggle memory on/off, scope to a project, or reset (/memory [on|off|<project>|reset])",
+        details: "Scope memory to a project or reset (/memory [<project>|reset|list])",
     },
     SlashCommand {
         name: "/notes",
@@ -293,7 +292,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/settings",
-        details: "Configure CLI display limits, collapse behavior, and preferences",
+        details: "Configure display, MCP, skills, memory, notes, and saver mode",
     },
     SlashCommand {
         name: "/exit",

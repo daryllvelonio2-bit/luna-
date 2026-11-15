@@ -30,12 +30,37 @@ use super::theme::{
 };
 use ratatui::style::Color;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureLandingItem {
+    pub enabled: bool,
+    pub disabled_days_left: Option<u64>,
+}
+
+impl Default for FeatureLandingItem {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            disabled_days_left: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LandingFeaturesStatus {
+    pub mcp: FeatureLandingItem,
+    pub skills: FeatureLandingItem,
+    pub memory: FeatureLandingItem,
+    pub notes: FeatureLandingItem,
+    pub memory_mode: harness_core::MemoryMode,
+}
+
 pub struct FooterInfo<'a> {
     pub provider: &'a str,
     pub model: &'a str,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub session_id: &'a str,
     pub in_flight_tools: &'a [super::super::render::TurnProcessItem],
+    pub features: LandingFeaturesStatus,
 }
 
 /// Minimum transcript size required before the live pty mirror is placed.
@@ -454,9 +479,10 @@ fn render_landing(
     let chrome_lines = build_chrome_lines(st, snap, box_width as usize);
     let chrome_h = chrome_lines.len().min(4) as u16;
 
-    // Total vertical lockup: logo (3) + gap (2) + optional update (2) + chrome + card + hint (1)
+    // Total vertical lockup: logo (3) + gap (2) + optional update (2) + chrome + card + hint (1) + gap (1) + status (2)
+    let status_rows: u16 = if area.width < 58 { 3 } else { 2 };
     let update_rows: u16 = if st.update_notice.is_some() { 2 } else { 0 };
-    let total_h = 3 + 2 + update_rows + chrome_h + card_h + 1;
+    let total_h = 3 + 2 + update_rows + chrome_h + card_h + 1 + 1 + status_rows;
     let top_y = area.y + area.height.saturating_sub(total_h + 1) / 2;
 
     // 1. Centered `luna` block logo
@@ -563,8 +589,28 @@ fn render_landing(
         );
     }
 
-    // 5. Bottom-right version tag (`0.1.8`)
+    // 5. Feature & memory-saver status strip below hint row
     let ver_y = area.y + area.height.saturating_sub(1);
+    let status_lines = build_landing_status_lines(&info.features, area.width as usize);
+    for (idx, (line, line_w)) in status_lines.into_iter().enumerate() {
+        let sy = hint_y + 2 + idx as u16;
+        if sy >= ver_y {
+            break;
+        }
+        let draw_w = (line_w as u16).min(area.width);
+        let sx = area.x + area.width.saturating_sub(draw_w) / 2;
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: sx,
+                y: sy,
+                width: draw_w,
+                height: 1,
+            },
+        );
+    }
+
+    // 6. Bottom-right version tag (`0.1.8`)
     let ver_w = (st.version.width() + 2) as u16;
     if ver_y > hint_y && area.width > ver_w {
         let ver_x = area.x + area.width - ver_w;
@@ -583,6 +629,91 @@ fn render_landing(
     }
 
     composer_rect
+}
+
+fn feature_status_spans(name: &str, item: FeatureLandingItem) -> (Vec<Span<'static>>, usize) {
+    if item.enabled {
+        let text_len = 2 + name.width() + 3;
+        (
+            vec![
+                Span::styled("● ", Style::default().fg(GREEN_OK).bg(BG_CANVAS)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+                ),
+                Span::styled(" on", Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
+            ],
+            text_len,
+        )
+    } else {
+        let suffix = match item.disabled_days_left {
+            Some(days) => format!(" off ({days}d)"),
+            None => " off".to_string(),
+        };
+        let text_len = 2 + name.width() + suffix.width();
+        (
+            vec![
+                Span::styled("○ ", Style::default().fg(TEXT_DIM).bg(BG_CANVAS)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+                ),
+                Span::styled(suffix, Style::default().fg(TEXT_DIM).bg(BG_CANVAS)),
+            ],
+            text_len,
+        )
+    }
+}
+
+fn join_feature_spans(items: &[(&str, FeatureLandingItem)]) -> (Line<'static>, usize) {
+    let mut spans = Vec::new();
+    let mut width = 0usize;
+    for (idx, (name, item)) in items.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+            ));
+            width += 3;
+        }
+        let (part, part_w) = feature_status_spans(name, *item);
+        spans.extend(part);
+        width += part_w;
+    }
+    (Line::from(spans), width)
+}
+
+fn build_landing_status_lines(
+    features: &LandingFeaturesStatus,
+    avail_width: usize,
+) -> Vec<(Line<'static>, usize)> {
+    let entries = [
+        ("mcp", features.mcp),
+        ("skills", features.skills),
+        ("memory", features.memory),
+        ("notes", features.notes),
+    ];
+    let mut lines = Vec::new();
+    if avail_width < 58 {
+        lines.push(join_feature_spans(&entries[..2]));
+        lines.push(join_feature_spans(&entries[2..]));
+    } else {
+        lines.push(join_feature_spans(&entries));
+    }
+
+    let (saver_label, saver_color) = match features.memory_mode {
+        harness_core::MemoryMode::Session => ("session", TEXT_PRIMARY),
+        harness_core::MemoryMode::Background => ("background saver", CYAN_LINK),
+    };
+    let saver_w = "saver: ".width() + saver_label.width();
+    lines.push((
+        Line::from(vec![
+            Span::styled("saver: ", Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
+            Span::styled(saver_label, Style::default().fg(saver_color).bg(BG_CANVAS)),
+        ]),
+        saver_w,
+    ));
+    lines
 }
 
 fn render_conversation(
@@ -4794,6 +4925,7 @@ mod tests {
             reasoning_effort: None,
             session_id: "s1",
             in_flight_tools: &in_flight,
+            features: Default::default(),
         };
 
         ensure_settled_transcript(&mut st, &info, 84, 80);
@@ -5224,6 +5356,41 @@ mod tests {
         assert!(chrome_text.contains("Distilling memory · claude-3-5-sonnet… (1.4s)"));
         assert!(chrome_text.contains("🧠 memory user.preference.theme saved: dark mode enabled"));
         assert!(chrome_text.contains("📝 note Architecture Decision updated"));
+    }
+
+    #[test]
+    fn landing_status_lines_show_features_and_saver_mode() {
+        let features = LandingFeaturesStatus {
+            mcp: FeatureLandingItem {
+                enabled: true,
+                disabled_days_left: None,
+            },
+            skills: FeatureLandingItem {
+                enabled: false,
+                disabled_days_left: Some(3),
+            },
+            memory: FeatureLandingItem {
+                enabled: false,
+                disabled_days_left: None,
+            },
+            notes: FeatureLandingItem {
+                enabled: true,
+                disabled_days_left: None,
+            },
+            memory_mode: harness_core::MemoryMode::Background,
+        };
+
+        let wide = build_landing_status_lines(&features, 100);
+        let wide_text: Vec<String> = wide.iter().map(|(l, _)| line_text(l)).collect();
+        assert_eq!(wide_text.len(), 2);
+        assert_eq!(
+            wide_text[0],
+            "● mcp on · ○ skills off (3d) · ○ memory off · ● notes on"
+        );
+        assert_eq!(wide_text[1], "saver: background saver");
+
+        let narrow = build_landing_status_lines(&features, 48);
+        assert_eq!(narrow.len(), 3);
     }
 
     fn test_dummy_tui_state() -> TuiState {

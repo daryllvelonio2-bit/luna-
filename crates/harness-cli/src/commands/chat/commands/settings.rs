@@ -303,6 +303,19 @@ fn apply_auto_hide_thinking(
 }
 
 fn show_settings(ui: &ChatUi, config: &Config) {
+    let summary = format_settings_summary(config, None);
+    ui.emit_above(&format!(
+        "\n{}\n{}\n",
+        "Current CLI Settings:".bold(),
+        summary
+    ));
+}
+
+/// Plain-text summary of CLI, feature toggle, and memory saver settings.
+pub(crate) fn format_settings_summary(
+    config: &Config,
+    toggles: Option<&super::FeatureToggles>,
+) -> String {
     let limit_str = match config.display.block_limit {
         None => "Uncapped (display everything)".to_string(),
         Some(1) => "1 line".to_string(),
@@ -318,24 +331,73 @@ fn show_settings(ui: &ChatUi, config: &Config) {
     } else {
         "Disabled (keep thinking visible)"
     };
+    let compact_str = if config.auto_compact_enabled {
+        "Enabled"
+    } else {
+        "Disabled"
+    };
+    let saver_str = match config.memory.mode {
+        harness_core::MemoryMode::Session => "Session writer (saves mid-turn)",
+        harness_core::MemoryMode::Background => "Background saver (distills after reply)",
+    };
 
-    let report = format!(
-        "\n{}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n",
-        "Current CLI Settings:".bold(),
-        "Display Block Limit:".dimmed(),
-        limit_str.cyan(),
-        "Auto-collapse on Finish:".dimmed(),
-        collapse_str.cyan(),
-        "Auto-collapse Thinking:".dimmed(),
-        thinking_str.cyan(),
-        "Auto-compact Context:".dimmed(),
-        if config.auto_compact_enabled {
-            "Enabled".green()
+    let feat_line = |f: super::Feature| -> String {
+        let live = toggles.map(|t| t.enabled(f));
+        let (global_on, until) = match f {
+            super::Feature::Mcp => (
+                config.mcp.enabled && config.agent.mcp_enabled,
+                config.features.mcp_disabled_until,
+            ),
+            super::Feature::Skills => (
+                config.agent.skills_enabled,
+                config.features.skills_disabled_until,
+            ),
+            super::Feature::Memory => (
+                config.agent.memory_enabled,
+                config.features.memory_disabled_until,
+            ),
+            super::Feature::Notes => (
+                config.agent.notes_enabled,
+                config.features.notes_disabled_until,
+            ),
+        };
+        let now = Config::current_unix_secs();
+        let active = live.unwrap_or_else(|| global_on && !until.is_some_and(|u| now < u));
+        if active {
+            if !global_on || until.is_some_and(|u| now < u) {
+                "ON (this session)".to_string()
+            } else {
+                "ON".to_string()
+            }
+        } else if let Some(u) = until.filter(|&u| u > now) {
+            let days = (u - now).div_ceil(86_400);
+            format!("OFF ({days}d remaining)")
+        } else if !global_on {
+            "OFF (global)".to_string()
         } else {
-            "Disabled".yellow()
-        },
-        "Memory Mode:".dimmed(),
-        format!("{:?}", config.memory.mode).cyan(),
-    );
-    ui.emit_above(&report);
+            "OFF (this session)".to_string()
+        }
+    };
+
+    format!(
+        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
+        "Display Block Limit:",
+        limit_str,
+        "Auto-collapse on Finish:",
+        collapse_str,
+        "Auto-collapse Thinking:",
+        thinking_str,
+        "Auto-compact Context:",
+        compact_str,
+        "Memory Saver Mode:",
+        saver_str,
+        "MCP:",
+        feat_line(super::Feature::Mcp),
+        "Skills:",
+        feat_line(super::Feature::Skills),
+        "Memory:",
+        feat_line(super::Feature::Memory),
+        "Notes:",
+        feat_line(super::Feature::Notes),
+    )
 }

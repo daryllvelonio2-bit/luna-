@@ -677,3 +677,23 @@ fn display_settings_round_trip_through_file() {
     let cfg = resolve(&layers).unwrap().into_config();
     assert_eq!(cfg.display.block_limit, None);
 }
+
+#[test]
+fn feature_timed_disables_honor_expiry_and_persist_in_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layers = layers(Some(config_path(&tmp)));
+
+    set_in_file(&layers, "mcp.enabled", "true").unwrap();
+    set_in_file(&layers, "features.mcp_disabled_until", "2000").unwrap();
+    set_in_file(&layers, "agent.skills_enabled", "false").unwrap();
+    set_in_file(&layers, "features.skills_disabled_until", "2000").unwrap();
+
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert!(!cfg.mcp_effective_enabled_at(1999));
+    assert!(cfg.mcp_effective_enabled_at(2000));
+    assert!(cfg.mcp_effective_enabled_at(2500));
+
+    // Base false stays disabled even after the timed window expires
+    assert!(!cfg.skills_effective_enabled_at(1500));
+    assert!(!cfg.skills_effective_enabled_at(2500));
+}

@@ -216,6 +216,27 @@ pub(crate) async fn register_mcp_servers(
     Ok(())
 }
 
+/// Spawn and register MCP servers on demand if none are currently registered yet.
+pub(crate) async fn ensure_mcp_servers_registered(
+    registry: &Arc<DefaultToolRegistry>,
+    config: &Config,
+) -> Result<(), HarnessError> {
+    if config.mcp.servers.is_empty() {
+        return Ok(());
+    }
+    let has_mcp_tools = registry
+        .list_tools()
+        .await?
+        .iter()
+        .any(|tool| tool.name.starts_with("mcp__"));
+    if has_mcp_tools {
+        return Ok(());
+    }
+    let mut forced = config.clone();
+    forced.mcp.enabled = true;
+    register_mcp_servers(registry, &forced).await
+}
+
 /// Whether a keypress can be handled without moving the mark.
 ///
 /// Typing, deleting and moving the caret only rewrite the prompt row, which the landing repaint

@@ -113,6 +113,9 @@ pub struct Config {
     /// Autonomous `/goal` and `luna goal` loop defaults.
     #[serde(default)]
     pub goal: GoalSettings,
+    /// Persistent timed-disable schedules for optional features (`mcp`, `skills`, `memory`, `notes`).
+    #[serde(default)]
+    pub features: FeatureSettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -167,11 +170,73 @@ impl Default for Config {
             workers: BTreeMap::new(),
             display: DisplaySettings::default(),
             goal: GoalSettings::default(),
+            features: FeatureSettings::default(),
         }
     }
 }
 
 impl Config {
+    /// Current wall-clock time as Unix epoch seconds.
+    pub fn current_unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Whether MCP is effectively enabled right now (considering global flags and timed disable).
+    pub fn mcp_effective_enabled(&self) -> bool {
+        self.mcp_effective_enabled_at(Self::current_unix_secs())
+    }
+
+    pub fn mcp_effective_enabled_at(&self, now_secs: u64) -> bool {
+        self.mcp.enabled
+            && self.agent.mcp_enabled
+            && !self
+                .features
+                .mcp_disabled_until
+                .is_some_and(|until| now_secs < until)
+    }
+
+    /// Whether skills are effectively enabled right now (considering global flag and timed disable).
+    pub fn skills_effective_enabled(&self) -> bool {
+        self.skills_effective_enabled_at(Self::current_unix_secs())
+    }
+
+    pub fn skills_effective_enabled_at(&self, now_secs: u64) -> bool {
+        self.agent.skills_enabled
+            && !self
+                .features
+                .skills_disabled_until
+                .is_some_and(|until| now_secs < until)
+    }
+
+    /// Whether memory is effectively enabled right now (considering global flag and timed disable).
+    pub fn memory_effective_enabled(&self) -> bool {
+        self.memory_effective_enabled_at(Self::current_unix_secs())
+    }
+
+    pub fn memory_effective_enabled_at(&self, now_secs: u64) -> bool {
+        self.agent.memory_enabled
+            && !self
+                .features
+                .memory_disabled_until
+                .is_some_and(|until| now_secs < until)
+    }
+
+    /// Whether notes are effectively enabled right now (considering global flag and timed disable).
+    pub fn notes_effective_enabled(&self) -> bool {
+        self.notes_effective_enabled_at(Self::current_unix_secs())
+    }
+
+    pub fn notes_effective_enabled_at(&self, now_secs: u64) -> bool {
+        self.agent.notes_enabled
+            && !self
+                .features
+                .notes_disabled_until
+                .is_some_and(|until| now_secs < until)
+    }
+
     /// Validate configuration invariants (e.g. thresholds, bounds).
     pub fn validate(&self) -> Result<(), HarnessError> {
         if self.auto_compact_threshold < AUTO_COMPACT_MIN_THRESHOLD
@@ -986,6 +1051,20 @@ impl Default for GoalSettings {
             max_iterations: crate::goal::DEFAULT_GOAL_MAX_ITERATIONS,
         }
     }
+}
+
+/// Persistent timed-disable schedules for optional features (`mcp`, `skills`, `memory`, `notes`).
+///
+/// Each field stores an optional Unix timestamp (seconds since epoch) until which the feature
+/// stays disabled across new sessions and restarts. Once the clock passes that timestamp, the
+/// feature resumes its configured `enabled` state automatically.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeatureSettings {
+    pub mcp_disabled_until: Option<u64>,
+    pub skills_disabled_until: Option<u64>,
+    pub memory_disabled_until: Option<u64>,
+    pub notes_disabled_until: Option<u64>,
 }
 
 /// Which layer produced a value.

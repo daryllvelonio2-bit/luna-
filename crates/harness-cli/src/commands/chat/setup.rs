@@ -323,7 +323,7 @@ async fn build_tooling(
     // Runtime feature switches (`/memory off`, `/notes off`, `/skills off`, `/mcp off`). The agent
     // holds the authoritative flags; these atomics let the menu and the piped loop read them
     // without taking the agent lock.
-    let feature_toggles = FeatureToggles::default();
+    let feature_toggles = FeatureToggles::from_config(config);
 
     let registry = Arc::new(DefaultToolRegistry::new());
     let tool_setup = register_tools(
@@ -470,6 +470,10 @@ fn assemble_agent(
     let mut agent_config = config.agent.clone();
     agent_config.workspace_root = Some(config.paths.workspace_root.clone());
     agent_config.memory_mode = config.memory.mode;
+    agent_config.memory_enabled = config.memory_effective_enabled();
+    agent_config.notes_enabled = config.notes_effective_enabled();
+    agent_config.skills_enabled = config.skills_effective_enabled();
+    agent_config.mcp_enabled = config.mcp_effective_enabled();
 
     let agent = Agent::new(provider, memory, notes, registry, agent_config.clone())
         .with_permissions(harness_core::PermissionEngine::validate(
@@ -734,30 +738,31 @@ async fn register_memory_and_note_tools(
     registry: &Arc<DefaultToolRegistry>,
     memory: &Arc<MemoryEngineKind>,
     notes: &Arc<FileNotesEngine>,
-    background_mode: bool,
+    _background_mode: bool,
     memory_saver_present: bool,
     feature_toggles: &FeatureToggles,
 ) -> Result<(), HarnessError> {
-    if !background_mode {
-        registry
-            .register(Arc::new(SaveMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
-            .await?;
-        registry
-            .register(Arc::new(SaveNoteTool::new(notes.clone())))
-            .await?;
-        registry
-            .register(Arc::new(UpdateNoteTool::new(notes.clone())))
-            .await?;
-        registry
-            .register(Arc::new(DeleteNoteTool::new(notes.clone())))
-            .await?;
-    }
+    // Register the write tools regardless of initial mode so switching between Session and
+    // Background modes in `/settings` works at runtime; `AgentConfig::tool_enabled` withholds them
+    // whenever `memory_mode` is `Background`.
+    registry
+        .register(Arc::new(SaveMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(ForgetMemoryTool::new(memory.clone())))
+        .await?;
+    registry
+        .register(Arc::new(SaveNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(UpdateNoteTool::new(notes.clone())))
+        .await?;
+    registry
+        .register(Arc::new(DeleteNoteTool::new(notes.clone())))
+        .await?;
 
     // Read-only note tools are always available so the agent can reference existing knowledge:
     registry
@@ -893,8 +898,10 @@ async fn register_task_and_core_tools(
     )
     .await?;
 
-    // Register MCP servers from config
-    register_mcp_servers(registry, config).await?;
+    // Register MCP servers from config when MCP is effectively enabled
+    if config.mcp_effective_enabled() {
+        register_mcp_servers(registry, config).await?;
+    }
 
     Ok((bg_queue, delegate_tool, sudo_rx))
 }

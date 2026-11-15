@@ -68,6 +68,38 @@ impl Default for FeatureToggles {
 }
 
 impl FeatureToggles {
+    pub(crate) fn from_config(config: &harness_core::Config) -> Self {
+        Self {
+            memory: Arc::new(AtomicBool::new(config.memory_effective_enabled())),
+            notes: Arc::new(AtomicBool::new(config.notes_effective_enabled())),
+            skills: Arc::new(AtomicBool::new(config.skills_effective_enabled())),
+            mcp: Arc::new(AtomicBool::new(config.mcp_effective_enabled())),
+        }
+    }
+
+    pub(crate) fn sync_from_config(&self, config: &harness_core::Config) {
+        self.set(Feature::Memory, config.memory_effective_enabled());
+        self.set(Feature::Notes, config.notes_effective_enabled());
+        self.set(Feature::Skills, config.skills_effective_enabled());
+        self.set(Feature::Mcp, config.mcp_effective_enabled());
+    }
+
+    pub(crate) fn snapshot(&self) -> (bool, bool, bool, bool) {
+        (
+            self.enabled(Feature::Memory),
+            self.enabled(Feature::Notes),
+            self.enabled(Feature::Skills),
+            self.enabled(Feature::Mcp),
+        )
+    }
+
+    pub(crate) fn restore(&self, snap: (bool, bool, bool, bool)) {
+        self.set(Feature::Memory, snap.0);
+        self.set(Feature::Notes, snap.1);
+        self.set(Feature::Skills, snap.2);
+        self.set(Feature::Mcp, snap.3);
+    }
+
     pub(crate) fn enabled(&self, feature: Feature) -> bool {
         match feature {
             Feature::Memory => self.memory.load(Ordering::Relaxed),
@@ -466,5 +498,33 @@ mod feature_toggle_tests {
         // Reset scope back to default
         handle_memory_command(&ui, &toggles, &agent, Some("reset")).await;
         assert_eq!(agent.lock().await.memory_project_filter(), None);
+    }
+
+    #[test]
+    fn feature_toggles_snapshot_restore_and_sync_from_config() {
+        let mut cfg = harness_core::Config::default();
+        cfg.mcp.enabled = false;
+        cfg.agent.skills_enabled = true;
+        cfg.features.skills_disabled_until = Some(u64::MAX);
+
+        let toggles = FeatureToggles::from_config(&cfg);
+        assert!(!toggles.enabled(Feature::Mcp));
+        assert!(!toggles.enabled(Feature::Skills));
+        assert!(toggles.enabled(Feature::Memory));
+        assert!(toggles.enabled(Feature::Notes));
+
+        let saved = toggles.snapshot();
+        toggles.set(Feature::Mcp, true);
+        toggles.set(Feature::Memory, false);
+        assert!(toggles.enabled(Feature::Mcp));
+        assert!(!toggles.enabled(Feature::Memory));
+
+        toggles.restore(saved);
+        assert!(!toggles.enabled(Feature::Mcp));
+        assert!(toggles.enabled(Feature::Memory));
+
+        cfg.mcp.enabled = true;
+        toggles.sync_from_config(&cfg);
+        assert!(toggles.enabled(Feature::Mcp));
     }
 }

@@ -33,6 +33,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio_util::sync::CancellationToken;
 
+use super::commands::Feature;
 use super::helpers::IdleMemoryPass;
 use super::history::load_prompt_history;
 use super::interactive::state::{Env, Flow};
@@ -48,7 +49,7 @@ use super::turn::{can_auto_resume, drain_queue, launch_internal_turn};
 use super::ui::ANIMATION_INTERVAL;
 use crate::commands::context_window::context_window;
 use actions::{drain_tui_notices, handle_background_turn_end, handle_turn_end, refresh_tabs};
-use render::{draw, FooterInfo};
+use render::{draw, FeatureLandingItem, FooterInfo, LandingFeaturesStatus};
 use state::{
     ActiveModal, AgentMode, BackgroundSession, ComposerState, LiveThinkingView, SlashPopupState,
     TuiState, TurnMeta,
@@ -159,12 +160,38 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let now_secs = harness_core::Config::current_unix_secs();
+            let days_left = |until: Option<u64>| -> Option<u64> {
+                until
+                    .filter(|&u| u > now_secs)
+                    .map(|u| (u - now_secs).div_ceil(86_400))
+            };
+            let features = LandingFeaturesStatus {
+                mcp: FeatureLandingItem {
+                    enabled: env.feature_toggles.enabled(Feature::Mcp),
+                    disabled_days_left: days_left(env.config.features.mcp_disabled_until),
+                },
+                skills: FeatureLandingItem {
+                    enabled: env.feature_toggles.enabled(Feature::Skills),
+                    disabled_days_left: days_left(env.config.features.skills_disabled_until),
+                },
+                memory: FeatureLandingItem {
+                    enabled: env.feature_toggles.enabled(Feature::Memory),
+                    disabled_days_left: days_left(env.config.features.memory_disabled_until),
+                },
+                notes: FeatureLandingItem {
+                    enabled: env.feature_toggles.enabled(Feature::Notes),
+                    disabled_days_left: days_left(env.config.features.notes_disabled_until),
+                },
+                memory_mode: env.config.memory.mode,
+            };
             let info = FooterInfo {
                 provider: env.current_provider,
                 model: env.current_model,
                 reasoning_effort,
                 session_id: env.session_id,
                 in_flight_tools: &tools_snapshot,
+                features,
             };
             terminal.draw(|frame| draw(frame, &mut st, &snap, &info))?;
             trace_event(&format!("draw {:?}", t_draw.elapsed()));
