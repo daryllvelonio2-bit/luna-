@@ -777,13 +777,20 @@ fn available_provider_catalog(
     for id in loaded {
         let clean = provider_id_of(id);
         if clean != "custom" && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(clean)) {
-            catalog.push(harness_providers::catalog::custom_provider_descriptor(clean, ""));
+            catalog.push(harness_providers::catalog::custom_provider_descriptor(
+                clean, "",
+            ));
         }
     }
     if !current_provider.is_empty()
-        && !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(current_provider))
+        && !catalog
+            .iter()
+            .any(|p| p.id.eq_ignore_ascii_case(current_provider))
     {
-        catalog.push(harness_providers::catalog::custom_provider_descriptor(current_provider, ""));
+        catalog.push(harness_providers::catalog::custom_provider_descriptor(
+            current_provider,
+            "",
+        ));
     }
 
     let configured: Vec<_> = catalog

@@ -143,7 +143,9 @@ pub(crate) async fn list_keys_text(cred_manager: &CredentialManager) -> String {
     for id in &loaded {
         let clean = provider_id_of(id);
         if !catalog.iter().any(|p| p.id.eq_ignore_ascii_case(clean)) {
-            catalog.push(harness_providers::catalog::custom_provider_descriptor(clean, ""));
+            catalog.push(harness_providers::catalog::custom_provider_descriptor(
+                clean, "",
+            ));
         }
     }
     for provider in catalog {
@@ -184,7 +186,9 @@ pub(crate) async fn list_keys_text(cred_manager: &CredentialManager) -> String {
 /// The providers a key can be added for, with the ones already connected marked.
 pub(crate) async fn provider_items(
     cred_manager: &CredentialManager,
-    config_providers: Option<&std::collections::BTreeMap<String, harness_core::config::ProviderOverride>>,
+    config_providers: Option<
+        &std::collections::BTreeMap<String, harness_core::config::ProviderOverride>,
+    >,
 ) -> Vec<(String, bool)> {
     let loaded = cred_manager.get_loaded_providers().await;
     let mut catalog = get_provider_catalog();
@@ -210,7 +214,9 @@ pub(crate) async fn provider_items(
         }
     }
     for id in custom_ids {
-        catalog.push(harness_providers::catalog::custom_provider_descriptor(&id, ""));
+        catalog.push(harness_providers::catalog::custom_provider_descriptor(
+            &id, "",
+        ));
     }
 
     catalog
@@ -242,15 +248,26 @@ async fn add_key(
     let provider_id = provider_id_of(&providers[index].0).to_string();
 
     let (target_provider, default_label) = if provider_id == "custom" {
-        let Some(name) = super::commands::input_from_rx(key_rx, "Custom provider name (e.g. coarena, vllm)").await else {
+        let Some(name) =
+            super::commands::input_from_rx(key_rx, "Custom provider name (e.g. coarena, vllm)")
+                .await
+        else {
             return Ok(());
         };
         let name = name.trim().to_lowercase();
         if name.is_empty() {
-            ui.emit_above(&format!("{} No provider name entered — cancelled", "•".dimmed()));
+            ui.emit_above(&format!(
+                "{} No provider name entered — cancelled",
+                "•".dimmed()
+            ));
             return Ok(());
         }
-        let Some(endpoint) = super::commands::input_from_rx(key_rx, &format!("Base URL endpoint for {name} (e.g. https://api.example.com/v1)")).await else {
+        let Some(endpoint) = super::commands::input_from_rx(
+            key_rx,
+            &format!("Base URL endpoint for {name} (e.g. https://api.example.com/v1)"),
+        )
+        .await
+        else {
             return Ok(());
         };
         let endpoint = endpoint.trim().to_string();
@@ -258,9 +275,14 @@ async fn add_key(
             ui.emit_above(&format!("{} No endpoint entered — cancelled", "•".dimmed()));
             return Ok(());
         }
-        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+        let layers =
+            harness_core::config::process_layers(crate::commands::config::catalog_defaults());
         if let Ok(ref layers) = layers {
-            let _ = harness_core::config::set_in_file(layers, &format!("providers.{name}.base_url"), &endpoint);
+            let _ = harness_core::config::set_in_file(
+                layers,
+                &format!("providers.{name}.base_url"),
+                &endpoint,
+            );
         }
         (name.clone(), format!("{name}-primary"))
     } else {
@@ -307,7 +329,11 @@ async fn add_key(
 
 /// The provider id out of a rendered menu label like `NVIDIA NIM (nvidia)`.
 pub(crate) fn provider_id_of(label: &str) -> &str {
-    let clean = label.trim_end().strip_suffix("[connected]").unwrap_or(label).trim();
+    let clean = label
+        .trim_end()
+        .strip_suffix("[connected]")
+        .unwrap_or(label)
+        .trim();
     match clean.rfind('(') {
         Some(open) => clean[open + 1..].trim_end_matches(')').trim(),
         None => clean,
@@ -816,10 +842,7 @@ mod tests {
     #[test]
     fn a_provider_id_is_read_out_of_its_menu_label() {
         assert_eq!(provider_id_of("NVIDIA NIM (nvidia)"), "nvidia");
-        assert_eq!(
-            provider_id_of("NVIDIA NIM (nvidia) [connected]"),
-            "nvidia"
-        );
+        assert_eq!(provider_id_of("NVIDIA NIM (nvidia) [connected]"), "nvidia");
         assert_eq!(
             provider_id_of("Custom (OpenAI-compatible) (custom)"),
             "custom"

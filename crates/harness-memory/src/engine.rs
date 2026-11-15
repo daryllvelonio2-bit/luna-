@@ -725,10 +725,7 @@ pub fn record_matches_project(record: &MemoryRecord, project_filter: &str) -> bo
     // 1. Direct project name match
     if let Some(ref name) = record.name {
         let norm_name = normalize_slug(name);
-        if !norm_name.is_empty()
-            && norm_name != "-"
-            && norm_name != "memory"
-            && norm_name != "note"
+        if !norm_name.is_empty() && norm_name != "-" && norm_name != "memory" && norm_name != "note"
         {
             if norm_name == target {
                 return true;
@@ -895,7 +892,10 @@ impl MemoryEngine for SqliteMemoryEngine {
         let candidate_limit = limit.saturating_mul(5).max(40);
 
         // 1. L0/L1 Priority candidates
-        append_new_records(&mut candidates, l0_l1_priority(&conn, candidate_limit)?.into_iter());
+        append_new_records(
+            &mut candidates,
+            l0_l1_priority(&conn, candidate_limit)?.into_iter(),
+        );
 
         // 2. Query-specific matches
         let trimmed_query = query.trim();
@@ -924,7 +924,12 @@ impl MemoryEngine for SqliteMemoryEngine {
         }
 
         // 3. Recency fallback
-        append_recent(&conn, &mut candidates, candidate_limit, RECENT_NON_TRANSCRIPT_SQL)?;
+        append_recent(
+            &conn,
+            &mut candidates,
+            candidate_limit,
+            RECENT_NON_TRANSCRIPT_SQL,
+        )?;
 
         let filtered: Vec<MemoryRecord> = candidates
             .into_iter()

@@ -436,14 +436,9 @@ pub enum AgentEvent {
         status: SaveStatus,
     },
     /// A background memory distillation pass has begun.
-    MemoryPassStarted {
-        model: String,
-    },
+    MemoryPassStarted { model: String },
     /// A background memory distillation pass has completed.
-    MemoryPassFinished {
-        memories: usize,
-        notes: usize,
-    },
+    MemoryPassFinished { memories: usize, notes: usize },
 }
 
 pub type AgentObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;

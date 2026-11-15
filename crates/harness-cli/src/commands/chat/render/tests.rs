@@ -1728,8 +1728,14 @@ fn write_file_shows_diff_lines_in_transcript_and_tui() {
     let turn = &turns[0];
     assert_eq!(turn.tool_items.len(), 1);
     let tool = &turn.tool_items[0];
-    assert!(!tool.diff_lines.is_empty(), "write_file must populate diff_lines");
-    assert!(tool.diff_lines.iter().any(|line| line.contains("+") && line.contains("pub struct Terrain")));
+    assert!(
+        !tool.diff_lines.is_empty(),
+        "write_file must populate diff_lines"
+    );
+    assert!(tool
+        .diff_lines
+        .iter()
+        .any(|line| line.contains("+") && line.contains("pub struct Terrain")));
 }
 
 #[test]
@@ -1744,8 +1750,12 @@ fn extract_write_diff_unified_diff_against_existing_file() {
     }));
 
     assert!(!diff.is_empty());
-    assert!(diff.iter().any(|line| line.contains("-") && line.contains("old_func")));
-    assert!(diff.iter().any(|line| line.contains("+") && line.contains("new_func")));
+    assert!(diff
+        .iter()
+        .any(|line| line.contains("-") && line.contains("old_func")));
+    assert!(diff
+        .iter()
+        .any(|line| line.contains("+") && line.contains("new_func")));
 }
 
 #[tokio::test]

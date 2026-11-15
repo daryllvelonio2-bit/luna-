@@ -19,14 +19,14 @@ use super::markdown::{
 };
 use super::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
-    PaletteItem, ProviderPickerItem, SubagentUiEntry, TabHitBox, TabHitTarget, TranscriptClickTarget,
-    TranscriptHitBox, TuiState, TurnMeta,
+    PaletteItem, ProviderPickerItem, SubagentUiEntry, TabHitBox, TabHitTarget,
+    TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
     friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
-    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, CYAN_LINK, GREEN_OK,
-    LOGO_GRAY, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
-    YELLOW_WARN,
+    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, CYAN_LINK,
+    GREEN_OK, LOGO_GRAY, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED,
+    TEXT_PRIMARY, YELLOW_WARN,
 };
 use ratatui::style::Color;
 
@@ -529,7 +529,10 @@ fn render_landing(
             height: chrome_h,
         };
         let take_from = chrome_lines.len().saturating_sub(chrome_h as usize);
-        frame.render_widget(Paragraph::new(chrome_lines[take_from..].to_vec()), chrome_rect);
+        frame.render_widget(
+            Paragraph::new(chrome_lines[take_from..].to_vec()),
+            chrome_rect,
+        );
         cur_y += chrome_h;
     }
 
@@ -794,7 +797,8 @@ fn render_conversation(
         let visible_chrome = &chrome_lines[take_from..];
         for (i, line) in visible_chrome.iter().enumerate() {
             let row_y = cur_y + i as u16;
-            if snap.delegate_count > 0 && line.spans.iter().any(|s| s.content.contains("Subagent")) {
+            if snap.delegate_count > 0 && line.spans.iter().any(|s| s.content.contains("Subagent"))
+            {
                 st.transcript_hit_boxes.push(TranscriptHitBox {
                     y: row_y,
                     x_start: content_x,
@@ -1148,10 +1152,7 @@ fn render_composer_card(
                     .bg(BG_SURFACE)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " · ",
-                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-            ),
+            Span::styled(" · ", Style::default().fg(TEXT_MUTED).bg(BG_SURFACE)),
             Span::styled(
                 model_display,
                 Style::default()
@@ -1449,10 +1450,7 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
                             .add_modifier(Modifier::BOLD)
                             .bg(BG_CANVAS),
                     ),
-                    Span::styled(
-                        hint,
-                        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
-                    ),
+                    Span::styled(hint, Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
                 ]
             } else {
                 vec![Span::styled(
@@ -1820,7 +1818,10 @@ fn render_active_turn_process(
     // fold away, so the working view stays on the tool.
     let tool_active = snap.activity_call.is_some()
         || in_flight_tools.iter().any(|item| {
-            !item.is_thinking() && !item.is_assistant_text() && !item.is_user_message() && item.result_formatted.is_empty()
+            !item.is_thinking()
+                && !item.is_assistant_text()
+                && !item.is_user_message()
+                && item.result_formatted.is_empty()
         });
     let auto_hide_thinking = auto_hide_thinking && tool_active;
 
@@ -3457,10 +3458,7 @@ fn render_subagents_modal(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ".repeat(pad), Style::default().bg(BG_ELEVATED)),
-        Span::styled(
-            count_label,
-            Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
-        ),
+        Span::styled(count_label, Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED)),
         Span::styled(" ", Style::default().bg(BG_ELEVATED)),
     ]));
     rows.push(Line::default());
@@ -3517,7 +3515,10 @@ fn render_subagents_modal(
                         .fg(if is_sel { ACCENT_CORAL } else { TEXT_MUTED })
                         .bg(bg),
                 ),
-                Span::styled(format!("{status_icon} "), Style::default().fg(status_color).bg(bg)),
+                Span::styled(
+                    format!("{status_icon} "),
+                    Style::default().fg(status_color).bg(bg),
+                ),
                 Span::styled(
                     agent_badge,
                     Style::default()
@@ -3525,15 +3526,9 @@ fn render_subagents_modal(
                         .add_modifier(Modifier::BOLD)
                         .bg(bg),
                 ),
-                Span::styled(
-                    title_trunc,
-                    Style::default().fg(TEXT_PRIMARY).bg(bg),
-                ),
+                Span::styled(title_trunc, Style::default().fg(TEXT_PRIMARY).bg(bg)),
                 Span::styled(" ".repeat(row_pad), Style::default().bg(bg)),
-                Span::styled(
-                    elapsed_str,
-                    Style::default().fg(TEXT_MUTED).bg(bg),
-                ),
+                Span::styled(elapsed_str, Style::default().fg(TEXT_MUTED).bg(bg)),
                 Span::styled(" ", Style::default().bg(bg)),
             ]));
         }
@@ -3683,7 +3678,11 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
 
     for (turn_idx, turn) in item.turns.iter().enumerate() {
         if !turn.user_query.trim().is_empty() {
-            let label = if turn_idx == 0 { "Task Goal" } else { "Follow-up" };
+            let label = if turn_idx == 0 {
+                "Task Goal"
+            } else {
+                "Follow-up"
+            };
             lines.push(Line::from(vec![
                 Span::styled("▎ ", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
                 Span::styled(
@@ -3720,7 +3719,9 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
         if let Some(ref reasoning) = turn.reasoning {
             lines.push(Line::from(Span::styled(
                 "  ◈ Thinking",
-                Style::default().fg(TEXT_MUTED).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(TEXT_MUTED)
+                    .add_modifier(Modifier::ITALIC),
             )));
             for rline in wrap_plain_text(reasoning, card_inner_w) {
                 lines.push(Line::from(Span::styled(
@@ -3742,7 +3743,12 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                 };
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(glyph, Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        glyph,
+                        Style::default()
+                            .fg(glyph_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(
                         truncate_str(desc, card_inner_w.saturating_sub(4)),
                         Style::default().fg(TEXT_PRIMARY),
@@ -3770,13 +3776,23 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                 let glyph_color = if tool.is_error { RED_ERR } else { GREEN_OK };
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(glyph, Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
                     Span::styled(
-                        truncate_str(&tool.name, 24),
-                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                        glyph,
+                        Style::default()
+                            .fg(glyph_color)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!(" {}", truncate_str(&tool.output, card_inner_w.saturating_sub(28))),
+                        truncate_str(&tool.name, 24),
+                        Style::default()
+                            .fg(TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            " {}",
+                            truncate_str(&tool.output, card_inner_w.saturating_sub(28))
+                        ),
                         Style::default().fg(TEXT_MUTED),
                     ),
                 ]));
@@ -4535,24 +4551,23 @@ mod tests {
         let mut hits = Vec::new();
         let empty_set = std::collections::HashSet::new();
         render_single_settled_turn(
-            &mut out,
-            &mut hits,
-            0,
-            &turn,
-            None,
-            false,
-            &empty_set,
-            &empty_set,
-            "Build",
-            "gpt-4o",
-            80,
-            76,
+            &mut out, &mut hits, 0, &turn, None, false, &empty_set, &empty_set, "Build", "gpt-4o",
+            80, 76,
         );
         let text: Vec<String> = out.iter().map(line_text).collect();
         let all_text = text.join("\n");
-        assert!(all_text.contains("⚡ Context Compacted"), "expected banner in {all_text}");
-        assert!(all_text.contains("Compacted ·"), "expected footer in {all_text}");
-        assert!(all_text.contains("Summarized context"), "expected markdown summary in {all_text}");
+        assert!(
+            all_text.contains("⚡ Context Compacted"),
+            "expected banner in {all_text}"
+        );
+        assert!(
+            all_text.contains("Compacted ·"),
+            "expected footer in {all_text}"
+        );
+        assert!(
+            all_text.contains("Summarized context"),
+            "expected markdown summary in {all_text}"
+        );
     }
 
     #[test]
@@ -5039,10 +5054,16 @@ mod tests {
     #[test]
     fn push_card_row_clamps_content_to_width() {
         let mut out = Vec::new();
-        let spans = vec![Span::raw("\tlong_text_with_tabs\t\t\t\t\tthat_is_very_long")];
+        let spans = vec![Span::raw(
+            "\tlong_text_with_tabs\t\t\t\t\tthat_is_very_long",
+        )];
         push_card_row(&mut out, None, None, Color::Blue, 40, spans);
         assert_eq!(out.len(), 1);
-        let row_w = out[0].spans.iter().map(|s| s.content.width()).sum::<usize>();
+        let row_w = out[0]
+            .spans
+            .iter()
+            .map(|s| s.content.width())
+            .sum::<usize>();
         assert!(row_w <= 40, "row width {row_w} exceeded 40");
         assert!(
             !out[0].spans.iter().any(|s| s.content.contains('\t')),
@@ -5074,8 +5095,12 @@ mod tests {
             tool_name: "terminal".to_string(),
             call_formatted: "gh run view\t23908298717\t--log".to_string(),
             result_formatted: "✔ ok\tcompleted".to_string(),
-            diff_lines: vec!["+\treturn\t\ttrue;".to_string(), "-\treturn\t\tfalse;".to_string()],
-            output: "\tJob\t123\tsuccess\n\tStep\tbuild\tpassed\r\n\tStep\ttest\tpassed".to_string(),
+            diff_lines: vec![
+                "+\treturn\t\ttrue;".to_string(),
+                "-\treturn\t\tfalse;".to_string(),
+            ],
+            output: "\tJob\t123\tsuccess\n\tStep\tbuild\tpassed\r\n\tStep\ttest\tpassed"
+                .to_string(),
             output_dropped: 0,
             arguments: None,
             duration_secs: Some(0.5),

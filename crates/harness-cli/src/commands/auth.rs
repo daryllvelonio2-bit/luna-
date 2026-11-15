@@ -782,7 +782,8 @@ async fn interactive_add(cred_manager: Arc<CredentialManager>) -> Result<(), Har
             .trim()
             .to_string();
 
-        let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+        let layers =
+            harness_core::config::process_layers(crate::commands::config::catalog_defaults());
         if let Ok(ref layers) = layers {
             if let Err(e) = harness_core::config::set_in_file(
                 layers,

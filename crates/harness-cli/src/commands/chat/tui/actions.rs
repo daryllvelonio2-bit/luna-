@@ -558,7 +558,9 @@ pub async fn open_provider_picker_with_query(env: &Env<'_>, st: &mut TuiState, q
 /// and probes the OpenCode daemon/binary, neither of which belongs on the render loop.
 pub async fn build_provider_items(
     cred_manager: Arc<harness_providers::CredentialManager>,
-    config_providers: Option<&std::collections::BTreeMap<String, harness_core::config::ProviderOverride>>,
+    config_providers: Option<
+        &std::collections::BTreeMap<String, harness_core::config::ProviderOverride>,
+    >,
     current_provider: &str,
 ) -> Vec<ProviderPickerItem> {
     let loaded = cred_manager.get_loaded_providers().await;
@@ -623,7 +625,9 @@ pub async fn build_provider_items(
         }
     }
     for id in custom_ids {
-        configured.push(harness_providers::catalog::custom_provider_descriptor(&id, ""));
+        configured.push(harness_providers::catalog::custom_provider_descriptor(
+            &id, "",
+        ));
     }
 
     let available = if configured.is_empty() {
@@ -684,12 +688,8 @@ pub async fn open_provider_picker_with_target(
     let current_provider = env.current_provider.clone();
     let config_providers = env.config.providers.clone();
     tokio::spawn(async move {
-        let items = build_provider_items(
-            cred_manager,
-            Some(&config_providers),
-            &current_provider,
-        )
-        .await;
+        let items =
+            build_provider_items(cred_manager, Some(&config_providers), &current_provider).await;
         let _ = tx.send(super::state::PickerLoad::Providers(items));
     });
 }
@@ -1414,7 +1414,9 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
             if let Some(pos) = stripped.find(':') {
                 let cand = stripped[..pos].trim();
                 if !cand.is_empty()
-                    && cand.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && cand
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
                 {
                     cand.to_string()
                 } else {
@@ -1522,7 +1524,9 @@ pub async fn interrupt_subagent(env: &Env<'_>, st: &mut TuiState, id: &str) {
                 item.activity = "cancelled by user".to_string();
             }
         }
-        ActiveModal::SubagentInspector { items, current_idx, .. } => {
+        ActiveModal::SubagentInspector {
+            items, current_idx, ..
+        } => {
             if let Some(item) = items.get_mut(*current_idx) {
                 if item.id == id {
                     item.status = "cancelled".to_string();
@@ -1537,9 +1541,7 @@ pub async fn interrupt_subagent(env: &Env<'_>, st: &mut TuiState, id: &str) {
 pub async fn refresh_subagents_if_open(env: &Env<'_>, st: &mut TuiState) {
     match &mut st.modal {
         ActiveModal::SubagentInspector {
-            items,
-            current_idx,
-            ..
+            items, current_idx, ..
         } => {
             if let Some(item) = items.get_mut(*current_idx) {
                 if item.status == "running" {
@@ -2153,7 +2155,10 @@ pub async fn run_input_action(
                 open_connect_menu(st);
                 return;
             }
-            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 env.ui.set_transient_error(Some(
                     "Provider name may only contain alphanumeric characters, hyphens, and underscores"
                         .to_string(),
@@ -2187,10 +2192,7 @@ pub async fn run_input_action(
                 prompt: format!("API key for {provider} (masked, leave blank if unauthenticated)"),
                 value: String::new(),
                 secret: true,
-                action: InputAction::CustomProviderApiKey {
-                    provider,
-                    endpoint,
-                },
+                action: InputAction::CustomProviderApiKey { provider, endpoint },
             };
         }
         InputAction::CustomProviderApiKey { provider, endpoint } => {
@@ -2201,14 +2203,17 @@ pub async fn run_input_action(
             };
             let label = format!("{provider}-primary");
 
-            let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults());
+            let layers =
+                harness_core::config::process_layers(crate::commands::config::catalog_defaults());
             if let Ok(ref layers) = layers {
                 if let Err(err) = harness_core::config::set_in_file(
                     layers,
                     &format!("providers.{provider}.base_url"),
                     &endpoint,
                 ) {
-                    tracing::warn!("Failed to persist custom provider base_url to config file: {err}");
+                    tracing::warn!(
+                        "Failed to persist custom provider base_url to config file: {err}"
+                    );
                 }
             }
 
@@ -2218,17 +2223,24 @@ pub async fn run_input_action(
                 timeout_secs: None,
                 context_window: None,
             };
-            env.config.providers.insert(provider.clone(), override_cfg.clone());
+            env.config
+                .providers
+                .insert(provider.clone(), override_cfg.clone());
             env.discovery.set_override(&provider, override_cfg);
 
-            match env.cred_manager.add_credential(&provider, &label, &key, true).await {
+            match env
+                .cred_manager
+                .add_credential(&provider, &label, &key, true)
+                .await
+            {
                 Ok(id) => {
                     env.ui.emit_above(&format!(
                         "✔ Custom provider '{provider}' ({endpoint}) created with credential '{label}' ({id})"
                     ));
                 }
                 Err(error) => {
-                    env.ui.set_transient_error(Some(format!("Add credential failed: {error}")));
+                    env.ui
+                        .set_transient_error(Some(format!("Add credential failed: {error}")));
                 }
             }
 
@@ -2854,7 +2866,13 @@ pub async fn run_slash_command(
                         st.memory_project_filter = None;
                     } else if !matches!(
                         lower.as_str(),
-                        "on" | "off" | "enable" | "disable" | "enabled" | "disabled" | "true" | "false"
+                        "on" | "off"
+                            | "enable"
+                            | "disable"
+                            | "enabled"
+                            | "disabled"
+                            | "true"
+                            | "false"
                     ) {
                         st.memory_project_filter = Some(val.to_string());
                     }

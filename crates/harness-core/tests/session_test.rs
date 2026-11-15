@@ -2645,7 +2645,10 @@ async fn fold_boundary_tokens_lands_on_budget_in_large_transcript() {
         .iter()
         .map(|stored| heuristic_tokens(std::slice::from_ref(&stored.message)) as usize)
         .sum();
-    assert!(kept_tokens <= 25_000, "kept {kept_tokens} tokens, expected around 20k");
+    assert!(
+        kept_tokens <= 25_000,
+        "kept {kept_tokens} tokens, expected around 20k"
+    );
 }
 
 #[tokio::test]

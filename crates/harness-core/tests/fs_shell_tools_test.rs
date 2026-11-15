@@ -2132,9 +2132,12 @@ async fn patch_handles_crlf_and_trailing_whitespace_differences() {
 
     // File with trailing whitespace on line 2
     let file_path = root.join("whitespace.rs");
-    tokio::fs::write(&file_path, "fn test() {\n    let val = 42;   \n    println!(\"{val}\");\n}\n")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        &file_path,
+        "fn test() {\n    let val = 42;   \n    println!(\"{val}\");\n}\n",
+    )
+    .await
+    .unwrap();
 
     // Read first
     reader
@@ -2155,7 +2158,11 @@ async fn patch_handles_crlf_and_trailing_whitespace_differences() {
         )
         .await
         .unwrap();
-    assert!(!patch_res.is_error, "Patch with trailing whitespace difference should succeed: {}", patch_res.content);
+    assert!(
+        !patch_res.is_error,
+        "Patch with trailing whitespace difference should succeed: {}",
+        patch_res.content
+    );
 
     let updated = tokio::fs::read_to_string(&file_path).await.unwrap();
     assert!(updated.contains("let val = 100;"));
@@ -2180,13 +2187,21 @@ async fn file_tools_require_workspace_relative_paths() {
         .execute("r1", &json!({ "path": "my-crate/lib.rs" }), &cancel)
         .await
         .unwrap();
-    assert!(res.is_error, "Should not guess subcrate path: {}", res.content);
+    assert!(
+        res.is_error,
+        "Should not guess subcrate path: {}",
+        res.content
+    );
 
     // Explicit workspace-relative path succeeds
     let res2 = reader
         .execute("r2", &json!({ "path": "crates/my-crate/lib.rs" }), &cancel)
         .await
         .unwrap();
-    assert!(!res2.is_error, "Should resolve workspace-relative path: {}", res2.content);
+    assert!(
+        !res2.is_error,
+        "Should resolve workspace-relative path: {}",
+        res2.content
+    );
     assert!(res2.content.contains("pub fn hello()"));
 }

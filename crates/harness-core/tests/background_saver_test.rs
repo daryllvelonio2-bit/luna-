@@ -306,22 +306,20 @@ async fn memory_pass_started_and_finished_events_are_announced_to_the_observer()
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_obs = events.clone();
-    let agent = agent(saver).with_observer(Arc::new(move |event| {
-        match event {
-            AgentEvent::MemoryPassStarted { model } => {
-                events_obs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(format!("started:{model}"));
-            }
-            AgentEvent::MemoryPassFinished { memories, notes } => {
-                events_obs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(format!("finished:{memories}:{notes}"));
-            }
-            _ => {}
+    let agent = agent(saver).with_observer(Arc::new(move |event| match event {
+        AgentEvent::MemoryPassStarted { model } => {
+            events_obs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("started:{model}"));
         }
+        AgentEvent::MemoryPassFinished { memories, notes } => {
+            events_obs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("finished:{memories}:{notes}"));
+        }
+        _ => {}
     }));
 
     agent

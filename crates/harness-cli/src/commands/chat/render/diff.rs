@@ -81,7 +81,14 @@ pub fn extract_write_diff(arguments: &serde_json::Value) -> Vec<String> {
         None
     };
 
-    let new_content = text_any(&["content", "contents", "text", "new_string", "newString", "code"]);
+    let new_content = text_any(&[
+        "content",
+        "contents",
+        "text",
+        "new_string",
+        "newString",
+        "code",
+    ]);
     let path = text_any(&["path", "filePath", "filepath", "file"]);
 
     let Some(new) = new_content else {
@@ -89,7 +96,14 @@ pub fn extract_write_diff(arguments: &serde_json::Value) -> Vec<String> {
     };
 
     // If explicit old content was provided in arguments
-    if let Some(old) = text_any(&["old_content", "oldContent", "old_string", "oldString", "old_str", "old"]) {
+    if let Some(old) = text_any(&[
+        "old_content",
+        "oldContent",
+        "old_string",
+        "oldString",
+        "old_str",
+        "old",
+    ]) {
         return format_patch_diff(old, new);
     }
 
@@ -134,7 +148,10 @@ pub fn extract_write_diff(arguments: &serde_json::Value) -> Vec<String> {
     let mut diff = format_patch_diff("", new);
     if diff.len() > 2000 {
         diff.truncate(2000);
-        diff.push(format!("\x1b[2m    ... ({} more lines omitted)\x1b[0m", diff.len().saturating_sub(2000)));
+        diff.push(format!(
+            "\x1b[2m    ... ({} more lines omitted)\x1b[0m",
+            diff.len().saturating_sub(2000)
+        ));
     }
     diff
 }

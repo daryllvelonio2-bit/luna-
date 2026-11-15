@@ -402,7 +402,10 @@ fn compaction_animates_between_start_and_finish() {
     let (taken_notice, _dur) = taken.unwrap();
     assert_eq!(taken_notice.turns, 5);
     assert_eq!(taken_notice.messages, 10);
-    assert_eq!(taken_notice.summary.as_deref(), Some("Summary of older conversation"));
+    assert_eq!(
+        taken_notice.summary.as_deref(),
+        Some("Summary of older conversation")
+    );
 }
 
 /// Replays the shape of a turn: the composer is drawn, the agent answers, the

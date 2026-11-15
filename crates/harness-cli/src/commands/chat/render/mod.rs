@@ -57,9 +57,9 @@ pub use results::{
 pub use tools::{format_tool_call, is_pty_tool, tool_activity_detail};
 #[allow(unused_imports)]
 pub use transcript::{
-    bounded_tool_output, bounded_tool_output_for, clean_user_query_for_transcript, has_verdict, is_non_tool_event,
-    parse_turns_from_history, render_all_turns, render_transcript, render_turn_lines,
-    reply_for_display, TurnProcessItem, TurnRecord,
+    bounded_tool_output, bounded_tool_output_for, clean_user_query_for_transcript, has_verdict,
+    is_non_tool_event, parse_turns_from_history, render_all_turns, render_transcript,
+    render_turn_lines, reply_for_display, TurnProcessItem, TurnRecord,
 };
 
 /// Helpers the rendering tests reach through the facade. They are internal to the module, so

@@ -133,8 +133,14 @@ fn format_memory_search_display(val: &serde_json::Value) -> Option<String> {
     }
     if let Some(note_arr) = notes {
         for n in note_arr {
-            let title = n.get("title").and_then(|t| t.as_str()).unwrap_or("Untitled");
-            let summary = n.get("summary_pointer").and_then(|s| s.as_str()).unwrap_or("");
+            let title = n
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Untitled");
+            let summary = n
+                .get("summary_pointer")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
             if !summary.is_empty() && summary != title {
                 lines.push(format!("• [Note] \"{title}\" — {summary}"));
             } else {

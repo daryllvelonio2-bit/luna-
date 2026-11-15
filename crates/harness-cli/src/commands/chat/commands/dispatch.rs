@@ -26,10 +26,10 @@ use super::{
     handle_compact_command, handle_compact_model_switch, handle_default_model_switch,
     handle_delete_command, handle_diff_command, handle_dir_command, handle_feature_toggle,
     handle_fork_command, handle_goal_command, handle_memory_command, handle_model_switch,
-    handle_name_command,
-    handle_new_command, handle_reasoning_switch, handle_rewind_command, handle_sessions_switch,
-    handle_settings_command, handle_summarize_and_new_command, handle_thinking_switch,
-    handle_usage_command, parse_profile_command, profile_wizard, worker, Feature, FeatureToggles,
+    handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
+    handle_sessions_switch, handle_settings_command, handle_summarize_and_new_command,
+    handle_thinking_switch, handle_usage_command, parse_profile_command, profile_wizard, worker,
+    Feature, FeatureToggles,
 };
 
 mod context;

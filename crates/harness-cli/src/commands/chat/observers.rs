@@ -12,8 +12,8 @@ use harness_core::tools::delegate::SubagentTaskEventNotifier;
 use harness_core::{SessionStore, SqliteSessionStore};
 
 use super::render::{
-    bounded_tool_output_for, clean_user_query_for_transcript, compaction_report,
-    extract_tool_diff, format_delegate_duration, format_delegate_notification, format_delegate_title,
+    bounded_tool_output_for, clean_user_query_for_transcript, compaction_report, extract_tool_diff,
+    format_delegate_duration, format_delegate_notification, format_delegate_title,
     format_live_tool_output, format_tool_call, format_tool_result, format_tool_result_for,
     has_verdict, is_diff_or_write_tool, is_non_tool_event, is_pty_tool, right_aligned_user_message,
     OutputBlockKind, TurnProcessItem, LUNA_LABEL,
@@ -119,7 +119,8 @@ impl ObserverState {
             }
             harness_core::AgentEvent::CompactionStarted { forced } => {
                 // Keep compacting flag live for TUI animation and composer queueing.
-                self.compacting.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.compacting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 self.ui.start_compaction(forced);
             }
             harness_core::AgentEvent::CompactionFinished { folded, error } => {
@@ -237,12 +238,11 @@ impl ObserverState {
                 item.output_dropped = dropped;
                 item.is_error = is_error;
                 item.duration_secs = elapsed_secs;
-                let diff =
-                    if !is_error && is_diff_or_write_tool(&name) {
-                        item.diff_lines.clone()
-                    } else {
-                        Vec::new()
-                    };
+                let diff = if !is_error && is_diff_or_write_tool(&name) {
+                    item.diff_lines.clone()
+                } else {
+                    Vec::new()
+                };
                 (item.call_formatted.clone(), diff)
             } else {
                 (
@@ -289,8 +289,14 @@ impl ObserverState {
                     .unwrap_or_else(|e| e.into_inner())
                     .push(TurnProcessItem::assistant_text(&partial));
             }
-            let mut tools = self.in_flight_tools.lock().unwrap_or_else(|e| e.into_inner());
-            if !tools.iter().any(|t| t.is_user_message() && t.output == shown) {
+            let mut tools = self
+                .in_flight_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !tools
+                .iter()
+                .any(|t| t.is_user_message() && t.output == shown)
+            {
                 tools.push(TurnProcessItem::user_message(&shown));
             }
             self.ui.notify_tui();
@@ -331,8 +337,13 @@ impl ObserverState {
     fn handle_steered(&self, text: &str) {
         self.settle_reasoning_for_next_step();
         let line = format!("{} Delivered steer into turn: {}", "⏩".cyan().bold(), text);
-        let mut tools = self.in_flight_tools.lock().unwrap_or_else(|e| e.into_inner());
-        if !tools.iter().any(|t| t.is_user_message() && (t.output == text || t.output == format!("Steer: {text}"))) {
+        let mut tools = self
+            .in_flight_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !tools.iter().any(|t| {
+            t.is_user_message() && (t.output == text || t.output == format!("Steer: {text}"))
+        }) {
             tools.push(TurnProcessItem::user_message(format!("Steer: {text}")));
         }
         self.ui.emit_above(&line);

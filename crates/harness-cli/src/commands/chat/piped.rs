@@ -14,11 +14,10 @@ use super::commands::{
     command_entries, handle_auto_compact_command, handle_compact_command,
     handle_compact_model_switch, handle_default_model_switch, handle_delete_command,
     handle_diff_command, handle_feature_toggle, handle_fork_command, handle_memory_command,
-    handle_model_switch,
-    handle_name_command, handle_new_command, handle_reasoning_switch, handle_rewind_command,
-    handle_sessions_switch, handle_settings_command, handle_summarize_and_new_command,
-    handle_thinking_switch, handle_usage_command, is_bare_feature_command, looks_like_path,
-    Feature,
+    handle_model_switch, handle_name_command, handle_new_command, handle_reasoning_switch,
+    handle_rewind_command, handle_sessions_switch, handle_settings_command,
+    handle_summarize_and_new_command, handle_thinking_switch, handle_usage_command,
+    is_bare_feature_command, looks_like_path, Feature,
 };
 use super::render::{reply_for_display, TurnRecord, LUNA_LABEL, PROMPT};
 use super::setup::ChatRuntime;
@@ -262,13 +261,7 @@ async fn handle_help_and_feature_commands(
     if query == "/memory" || query.starts_with("/memory ") {
         let arg = query.strip_prefix("/memory").unwrap_or("").trim();
         let arg = if arg.is_empty() { None } else { Some(arg) };
-        handle_memory_command(
-            rt.ui.as_ref(),
-            &rt.feature_toggles,
-            &rt.agent,
-            arg,
-        )
-        .await;
+        handle_memory_command(rt.ui.as_ref(), &rt.feature_toggles, &rt.agent, arg).await;
         return Ok(true);
     }
     if query == "/notes" || query.starts_with("/notes ") {

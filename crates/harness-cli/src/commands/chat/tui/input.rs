@@ -177,7 +177,9 @@ async fn handle_mouse(
                 ActiveModal::ThinkingPicker { selected, .. } => {
                     *selected = (*selected + 1).min(6);
                 }
-                ActiveModal::SubagentsModal { items, selected, .. } => {
+                ActiveModal::SubagentsModal {
+                    items, selected, ..
+                } => {
                     *selected = (*selected + 1).min(items.len().saturating_sub(1));
                 }
                 ActiveModal::TextModal { lines, scroll, .. } => {
@@ -1825,8 +1827,7 @@ async fn handle_modal_key(
                         active_only,
                     };
                 }
-                KeyCode::Tab
-                | KeyCode::Char('a')
+                KeyCode::Tab | KeyCode::Char('a')
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.code == KeyCode::Tab =>
                 {
@@ -1853,8 +1854,7 @@ async fn handle_modal_key(
                         };
                     }
                 }
-                KeyCode::Char('x')
-                | KeyCode::Char('c')
+                KeyCode::Char('x') | KeyCode::Char('c')
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.code == KeyCode::Char('x') =>
                 {
@@ -1918,8 +1918,7 @@ async fn handle_modal_key(
                 }
                 KeyCode::BackTab => {
                     if !items.is_empty() {
-                        current_idx =
-                            (current_idx + items.len().saturating_sub(1)) % items.len();
+                        current_idx = (current_idx + items.len().saturating_sub(1)) % items.len();
                         scroll = 0;
                     }
                     st.modal = ActiveModal::SubagentInspector {
@@ -1976,8 +1975,7 @@ async fn handle_modal_key(
                         scroll,
                     };
                 }
-                KeyCode::Char('x')
-                | KeyCode::Char('c')
+                KeyCode::Char('x') | KeyCode::Char('c')
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.code == KeyCode::Char('x') =>
                 {

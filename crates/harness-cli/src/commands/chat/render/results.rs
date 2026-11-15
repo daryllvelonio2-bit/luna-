@@ -410,10 +410,16 @@ fn format_json_result(trimmed: &str) -> Option<String> {
         if total == 0 {
             return Some(format!("  {} {}", "✓".green(), "0 matches found".dimmed()));
         }
-        let mem_label = if memories_count == 1 { "memory" } else { "memories" };
+        let mem_label = if memories_count == 1 {
+            "memory"
+        } else {
+            "memories"
+        };
         let note_label = if notes_count == 1 { "note" } else { "notes" };
         let desc = match (memories_count > 0, notes_count > 0) {
-            (true, true) => format!("{memories_count} {mem_label}, {notes_count} {note_label} found"),
+            (true, true) => {
+                format!("{memories_count} {mem_label}, {notes_count} {note_label} found")
+            }
             (true, false) => format!("{memories_count} {mem_label} found"),
             (false, true) => format!("{notes_count} {note_label} found"),
             (false, false) => "0 matches found".to_string(),

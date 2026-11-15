@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 use super::{Agent, AgentEvent, CompactionNotice, FoldInFlight, FoldPolicy, FoldTarget};
 use crate::error::HarnessError;
 use crate::session::{
-    compact, compact_percent, compact_tokens, estimate_tokens, heuristic_tokens, last_fold_seq, CompactionOutcome,
-    SessionStore, StoredMessage,
+    compact, compact_percent, compact_tokens, estimate_tokens, heuristic_tokens, last_fold_seq,
+    CompactionOutcome, SessionStore, StoredMessage,
 };
 use crate::traits::*;
 use crate::types::Message;

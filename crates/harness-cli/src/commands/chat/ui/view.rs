@@ -174,7 +174,10 @@ impl ChatUi {
         std::mem::take(&mut *self.tui_notices.lock().unwrap_or_else(|e| e.into_inner()))
     }
     pub fn active_delegate_tasks(&self) -> Vec<(String, String, String)> {
-        let tasks = self.delegate_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let tasks = self
+            .delegate_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         tasks
             .iter()
             .map(|t| (t.id.clone(), t.goal.clone(), t.activity.clone()))
