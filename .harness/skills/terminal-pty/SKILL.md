@@ -169,6 +169,13 @@ sets `passed: false`, and returns the screen that failed it.
   and prints the report (with the failing screen) to **stderr**. A verification
   that reports success when the screen disagrees is worse than no verification.
 
+## Interactive harnesses and live mirror
+
+When running an interactive harness or TUI (e.g. `opencode`, `claude`, `codex`, `htop`):
+- Luna automatically opens a live split-pane terminal view taking the full height beside the conversation, mirroring the child session in real time with ANSI colors and box-drawing.
+- After starting a program or sending keystrokes, use `pty_wait` (with a pattern like `"Ask"` or `">"`) or `pty_idle` so the child process finishes rendering before reading.
+- Use `pty_screenshot` when you or the user need an image capture of the terminal UI with full true-color fidelity.
+
 ## Waiting, correctly
 
 `idle` is the primitive to reach for: it returns once the child has produced no

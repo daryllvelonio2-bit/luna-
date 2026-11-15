@@ -209,11 +209,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 needs_redraw = true;
                 drain_tui_notices(&env, &mut st);
                 if env.ui.take_compaction_completed() {
-                    if let Ok(replayed) = env.store.replay(env.session_id, 200).await {
-                        st.turns = parse_turns_from_history(&replayed.history);
-                        st.settled_cache.clear();
-                        actions::sync_turn_meta_len(&env, &mut st);
-                    }
+                    actions::apply_compaction_completed(&env, &mut st).await;
                 }
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
@@ -247,17 +243,15 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             _ = animation.tick(), if st.active_turn.is_some()
                 || has_bg_active
                 || env.compacting.load(Ordering::SeqCst)
+                || env.ui.is_compacting()
+                || snap.compacting.is_some()
                 || snap.delegate_count > 0
                 || !st.queue.is_empty() => {
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
                 st.prune_stale_notices();
                 if env.ui.take_compaction_completed() {
-                    if let Ok(replayed) = env.store.replay(env.session_id, 200).await {
-                        st.turns = parse_turns_from_history(&replayed.history);
-                        st.settled_cache.clear();
-                        actions::sync_turn_meta_len(&env, &mut st);
-                    }
+                    actions::apply_compaction_completed(&env, &mut st).await;
                 }
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)
@@ -285,11 +279,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 needs_redraw = true;
                 st.prune_stale_notices();
                 if env.ui.take_compaction_completed() {
-                    if let Ok(replayed) = env.store.replay(env.session_id, 200).await {
-                        st.turns = parse_turns_from_history(&replayed.history);
-                        st.settled_cache.clear();
-                        actions::sync_turn_meta_len(&env, &mut st);
-                    }
+                    actions::apply_compaction_completed(&env, &mut st).await;
                 }
                 if st.active_turn.is_none()
                     && !env.compacting.load(Ordering::SeqCst)

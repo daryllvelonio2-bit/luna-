@@ -23,6 +23,7 @@ Tool Selection:
 - Shell tool restriction: Do not use terminal for file reading, searching, or editing.
 - Read before write: Inspect target files via read_file before calling patch or write_file.
 - Patch context: When calling patch, include 2-4 lines of exact, verbatim surrounding context in old_string to ensure an unambiguous unique match.
+- Path resolution: All filesystem tool paths (path) are workspace-relative. Never omit the subfolder or crate path prefix. Always use paths relative to the workspace root shown in RUNTIME ENVIRONMENT.
 - Terminal workdir: terminal runs from the workspace root by default. Always provide workdir when targeting commands to a specific repository or project subfolder.
 - Terminal timeouts: For long builds or comprehensive test suites, specify timeout_s (e.g. timeout_s: 300) or run with background: true.
 - Non-zero exits: Append || true to exploratory shell commands where exit code 1 represents an expected empty match.

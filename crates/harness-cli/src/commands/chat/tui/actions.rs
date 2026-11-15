@@ -22,7 +22,9 @@ use super::super::helpers::{finish_slash_command, IdleMemoryPass};
 use super::super::history::append_prompt_history;
 use super::super::interactive::state::{Env, Flow};
 use super::super::observers::agent_observer;
-use super::super::render::{parse_turns_from_history, TurnProcessItem};
+use super::super::render::{
+    compaction_report, parse_turns_from_history, TurnProcessItem, TurnRecord,
+};
 use super::super::status::refresh_antigravity_status_if_needed;
 use super::super::todo;
 use super::super::turn::{
@@ -2238,6 +2240,52 @@ pub async fn run_slash_command(
             open_auto_compact_threshold(env, st).await;
             return Ok(Flow::Continue);
         }
+        "/compact" if arg.is_none() => {
+            if st.active_turn.is_some()
+                || env.compacting.load(Ordering::SeqCst)
+                || env.ui.is_compacting()
+            {
+                env.ui.set_transient_error(Some(
+                    "Cannot compact while a turn is running or compaction is in progress"
+                        .to_string(),
+                ));
+                return Ok(Flow::Continue);
+            }
+            env.ui.start_compaction(true);
+            env.compacting.store(true, Ordering::SeqCst);
+            env.ui.notify_tui();
+            let ui = env.ui.clone();
+            let agent = env.agent.clone();
+            let compacting = env.compacting.clone();
+            let context_max = crate::commands::context_window::context_window(
+                env.config,
+                env.discovery.as_ref(),
+                env.current_provider,
+                env.current_model,
+            );
+            tokio::spawn(async move {
+                let Ok(ag) = agent.try_lock() else {
+                    compacting.store(false, Ordering::SeqCst);
+                    ui.finish_compaction();
+                    ui.emit_above(
+                        "✖ Cannot compact while a turn is running: interrupt it, then run /compact",
+                    );
+                    return;
+                };
+                match ag.compact_current_session().await {
+                    Ok(_notice) => {
+                        let context_used = ag.estimate_session_tokens().await.unwrap_or(0);
+                        ui.update_status(context_used, context_max);
+                    }
+                    Err(e) => {
+                        compacting.store(false, Ordering::SeqCst);
+                        ui.finish_compaction();
+                        ui.emit_above(&format!("✖ Failed to compact session: {e}"));
+                    }
+                }
+            });
+            return Ok(Flow::Continue);
+        }
         "/connect" => {
             open_connect_menu(st);
             return Ok(Flow::Continue);
@@ -3056,6 +3104,37 @@ pub fn sync_turn_meta_len(env: &Env<'_>, st: &mut TuiState) {
     if st.turn_meta.len() > st.turns.len() {
         st.turn_meta.truncate(st.turns.len());
     }
+}
+
+pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
+    let result = env.ui.take_compaction_result();
+    if let Ok(replayed) = env
+        .store
+        .replay_transcript(
+            env.session_id.as_str(),
+            env.config.session.resume_max_messages,
+        )
+        .await
+    {
+        st.turns = parse_turns_from_history(&replayed.history);
+    }
+    if let Some((notice, dur)) = result {
+        if let Some(summary) = notice.summary.clone() {
+            st.turns.push(TurnRecord {
+                user_query: "Compaction".to_string(),
+                reasoning: None,
+                tools: Vec::new(),
+                tool_items: Vec::new(),
+                duration: dur,
+                reply: summary,
+            });
+        }
+        let report = compaction_report(&notice);
+        st.system_notices.push(SystemNotice::new(report));
+    }
+    st.settled_cache.clear();
+    sync_turn_meta_len(env, st);
+    st.scroll_from_bottom = 0;
 }
 
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.

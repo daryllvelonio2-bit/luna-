@@ -386,6 +386,23 @@ fn compaction_animates_between_start_and_finish() {
     // Finishing with nothing running is a no-op, not a panic.
     ui.finish_compaction();
     assert!(!ui.is_compacting());
+
+    ui.start_compaction(true);
+    let notice = harness_core::CompactionNotice {
+        session_id: "s1".to_string(),
+        turns: 5,
+        messages: 10,
+        summary: Some("Summary of older conversation".to_string()),
+    };
+    ui.finish_compaction_with_result(notice.clone());
+    assert!(!ui.is_compacting());
+    assert!(ui.take_compaction_completed());
+    let taken = ui.take_compaction_result();
+    assert!(taken.is_some());
+    let (taken_notice, _dur) = taken.unwrap();
+    assert_eq!(taken_notice.turns, 5);
+    assert_eq!(taken_notice.messages, 10);
+    assert_eq!(taken_notice.summary.as_deref(), Some("Summary of older conversation"));
 }
 
 /// Replays the shape of a turn: the composer is drawn, the agent answers, the

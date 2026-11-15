@@ -986,6 +986,77 @@ pub fn clean_terminal_text(s: &str) -> String {
     out
 }
 
+/// Truncate a string to at most `max_cells` terminal display width, appending ellipsis if cut.
+pub fn truncate_cells(s: &str, max_cells: usize) -> String {
+    if s.width() <= max_cells {
+        return s.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw + 1 > max_cells {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out
+}
+
+/// Parse a terminal screen line into styled spans, preserving ANSI SGR colors and styles
+/// while cleanly truncating to `max_width` cells. Non-ANSI text is stripped of control codes.
+pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
+    if !line.contains('\x1b') {
+        let clean = clean_terminal_text(line);
+        let truncated = truncate_cells(&clean, max_width);
+        return Line::from(Span::styled(
+            truncated,
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .bg(crate::commands::chat::tui::theme::BG_SURFACE),
+        ));
+    }
+    let mut clean_line = String::with_capacity(line.len());
+    for ch in line.chars() {
+        if ch == '\t' {
+            clean_line.push_str("    ");
+        } else if ch == '\x1b' || (!ch.is_control() && ch != '\r') {
+            clean_line.push(ch);
+        }
+    }
+    let mut spans = Vec::new();
+    let mut lexer = AnsiLexer::default();
+    lexer.feed(
+        &clean_line,
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .bg(crate::commands::chat::tui::theme::BG_SURFACE),
+        &mut spans,
+    );
+    let mut total_width = 0;
+    let mut truncated_spans = Vec::new();
+    for span in spans {
+        let span_width = span.content.width();
+        if total_width + span_width <= max_width {
+            total_width += span_width;
+            truncated_spans.push(span);
+        } else if total_width < max_width {
+            let remain = max_width - total_width;
+            let cut = truncate_cells(&span.content, remain);
+            truncated_spans.push(Span::styled(cut, span.style));
+            break;
+        } else {
+            break;
+        }
+    }
+    Line::from(truncated_spans)
+}
+
 /// Strip ANSI escape codes from legacy command output so it renders cleanly in `ratatui`.
 pub fn strip_ansi(s: &str) -> String {
     if !s.contains('\x1b') {

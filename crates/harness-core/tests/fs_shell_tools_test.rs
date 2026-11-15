@@ -2162,7 +2162,7 @@ async fn patch_handles_crlf_and_trailing_whitespace_differences() {
 }
 
 #[tokio::test]
-async fn file_tools_resolve_subcrate_relative_paths() {
+async fn file_tools_require_workspace_relative_paths() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let cache = ReadCache::new();
@@ -2175,11 +2175,18 @@ async fn file_tools_resolve_subcrate_relative_paths() {
         .unwrap();
 
     let reader = ReadFileTool::new(root.clone(), 100_000, cache.clone());
-    // Passing "my-crate/lib.rs" should resolve to crates/my-crate/lib.rs
+    // Passing "my-crate/lib.rs" should fail because paths are strictly workspace-relative
     let res = reader
-        .execute("r2", &json!({ "path": "my-crate/lib.rs" }), &cancel)
+        .execute("r1", &json!({ "path": "my-crate/lib.rs" }), &cancel)
         .await
         .unwrap();
-    assert!(!res.is_error, "Should resolve in crates subdirectory: {}", res.content);
-    assert!(res.content.contains("pub fn hello()"));
+    assert!(res.is_error, "Should not guess subcrate path: {}", res.content);
+
+    // Explicit workspace-relative path succeeds
+    let res2 = reader
+        .execute("r2", &json!({ "path": "crates/my-crate/lib.rs" }), &cancel)
+        .await
+        .unwrap();
+    assert!(!res2.is_error, "Should resolve workspace-relative path: {}", res2.content);
+    assert!(res2.content.contains("pub fn hello()"));
 }

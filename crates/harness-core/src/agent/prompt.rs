@@ -202,12 +202,41 @@ where
     fn runtime_environment(&self) -> String {
         if let Some(ref root) = self.config.workspace_root {
             let cwd = std::env::current_dir().unwrap_or_else(|_| root.clone());
-            format!(
-                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root. Changing directory with cd in terminal does not persist to native tools or across turns; specify workdir on terminal calls when running commands in subdirectories.",
+            let mut env = format!(
+                "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}",
                 root.display(),
                 cwd.display(),
                 std::env::consts::OS,
-            )
+            );
+            if let Ok(rel) = cwd.strip_prefix(root) {
+                if !rel.as_os_str().is_empty() {
+                    env.push_str(&format!(
+                        "\n- Note: Current working directory is inside the workspace at '{}'. All relative tool paths (read_file, search_files, patch, write_file, list_files) resolve against the workspace root ('{}'), NOT the current working directory. Prefix tool paths with '{}/' when targeting files in the current working directory.",
+                        rel.display(),
+                        root.display(),
+                        rel.display(),
+                    ));
+                } else {
+                    env.push_str("\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root.");
+                }
+            } else if let Ok(rel) = root.strip_prefix(&cwd) {
+                if !rel.as_os_str().is_empty() {
+                    env.push_str(&format!(
+                        "\n- Note: Workspace root is at '{}' relative to current working directory. All relative tool paths resolve against the workspace root ('{}').",
+                        rel.display(),
+                        root.display(),
+                    ));
+                } else {
+                    env.push_str("\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root.");
+                }
+            } else {
+                env.push_str(&format!(
+                    "\n- Note: All relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root ('{}'), NOT the current working directory.",
+                    root.display(),
+                ));
+            }
+            env.push_str("\nChanging directory with cd in terminal does not persist to native tools or across turns; specify workdir on terminal calls when running commands in subdirectories.");
+            env
         } else if let Ok(cwd) = std::env::current_dir() {
             format!(
                 "\n\nRUNTIME ENVIRONMENT:\n- Workspace root: {}\n- Current working directory: {}\n- Operating system: {}\nAll relative tool paths (read_file, search_files, patch, write_file) resolve against the workspace root.",

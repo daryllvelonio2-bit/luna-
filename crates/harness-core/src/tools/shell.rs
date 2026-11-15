@@ -614,53 +614,20 @@ impl Tool for TerminalTool {
             self.workspace_root.clone(),
             self.extra_roots.clone(),
         );
-        let mut resolved_workdir = match sandbox.resolve(workdir_str) {
+        let resolved_workdir = match sandbox.resolve(workdir_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
 
         if !resolved_workdir.exists() {
-            if let Ok(alt) = crate::tools::fs::resolve_existing_path(&sandbox, &self.workspace_root, workdir_str) {
-                if alt.exists() && alt.is_dir() {
-                    resolved_workdir = alt;
-                }
-            }
-        }
-
-        // Auto-detect project working directory when workdir was default (".") and running project commands
-        if workdir_str == "." && resolved_workdir == self.workspace_root {
-            let cmd_trimmed = effective_command.trim();
-            if let Ok(cwd) = std::env::current_dir() {
-                if sandbox.allows(&cwd) {
-                    let needs_cargo = cmd_trimmed.starts_with("cargo ") || cmd_trimmed == "cargo";
-                    let needs_git = cmd_trimmed.starts_with("git ") || cmd_trimmed == "git";
-                    let needs_node = cmd_trimmed.starts_with("npm ")
-                        || cmd_trimmed.starts_with("pnpm ")
-                        || cmd_trimmed.starts_with("yarn ")
-                        || cmd_trimmed.starts_with("bun ");
-                    let needs_python = cmd_trimmed.starts_with("pytest")
-                        || cmd_trimmed.starts_with("python ")
-                        || cmd_trimmed.starts_with("pip ");
-
-                    if (needs_cargo
-                        && !resolved_workdir.join("Cargo.toml").exists()
-                        && cwd.join("Cargo.toml").exists())
-                        || (needs_git
-                            && !resolved_workdir.join(".git").exists()
-                            && cwd.join(".git").exists())
-                        || (needs_node
-                            && !resolved_workdir.join("package.json").exists()
-                            && cwd.join("package.json").exists())
-                        || (needs_python
-                            && !resolved_workdir.join("pyproject.toml").exists()
-                            && !resolved_workdir.join("requirements.txt").exists()
-                            && (cwd.join("pyproject.toml").exists()
-                                || cwd.join("requirements.txt").exists()))
-                    {
-                        resolved_workdir = cwd;
-                    }
-                }
-            }
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Directory not found: '{}' (relative to workspace root '{}')",
+                    workdir_str,
+                    self.workspace_root.display()
+                ),
+            ));
         }
 
         let background = args

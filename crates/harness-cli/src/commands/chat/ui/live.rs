@@ -206,6 +206,31 @@ impl ChatUi {
             self.notify_tui();
         }
     }
+    pub fn finish_compaction_with_result(&self, notice: harness_core::CompactionNotice) {
+        let dur = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            live.compaction
+                .take()
+                .map(|c| c.started.elapsed())
+                .unwrap_or_default()
+        };
+        *self
+            .compaction_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((notice, dur));
+        self.compaction_completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.animate_tick();
+        self.notify_tui();
+    }
+    pub fn take_compaction_result(
+        &self,
+    ) -> Option<(harness_core::CompactionNotice, std::time::Duration)> {
+        self.compaction_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
     pub fn take_compaction_completed(&self) -> bool {
         self.compaction_completed
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -348,7 +373,15 @@ fn pty_screen_lines(output: &str, allow_raw: bool) -> Option<Vec<String>> {
             .or_else(|| value.get("text").and_then(|v| v.as_str()))?
             .to_string(),
         Err(_) if !allow_raw => return None,
-        Err(_) => trimmed.to_string(),
+        Err(_) => {
+            if let Some(pos) = trimmed.find("--- screen ---\n") {
+                trimmed[pos + "--- screen ---\n".len()..].to_string()
+            } else if let Some(pos) = trimmed.find("--- screen tail ---\n") {
+                trimmed[pos + "--- screen tail ---\n".len()..].to_string()
+            } else {
+                return None;
+            }
+        }
     };
     let mut lines: Vec<String> = text
         .lines()
@@ -356,6 +389,9 @@ fn pty_screen_lines(output: &str, allow_raw: bool) -> Option<Vec<String>> {
         .collect();
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
+    }
+    if lines.is_empty() {
+        return None;
     }
     if lines.len() > PTY_PANE_MAX_LINES {
         lines.drain(..lines.len() - PTY_PANE_MAX_LINES);

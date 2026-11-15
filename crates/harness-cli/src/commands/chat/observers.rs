@@ -118,9 +118,8 @@ impl ObserverState {
                 self.handle_steered(&text);
             }
             harness_core::AgentEvent::CompactionStarted { forced } => {
-                // Only a fold that rewrites what the composer would send holds the composer.
-                self.compacting
-                    .store(forced, std::sync::atomic::Ordering::SeqCst);
+                // Keep compacting flag live for TUI animation and composer queueing.
+                self.compacting.store(true, std::sync::atomic::Ordering::SeqCst);
                 self.ui.start_compaction(forced);
             }
             harness_core::AgentEvent::CompactionFinished { folded, error } => {
@@ -331,19 +330,18 @@ impl ObserverState {
         folded: Option<harness_core::CompactionNotice>,
         error: Option<String>,
     ) {
-        self.ui.finish_compaction();
         self.compacting
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(err) = error {
+            self.ui.finish_compaction();
             self.ui
                 .emit_above(&format!("{} Compaction failed: {}", "✖".red(), err));
         } else if let Some(notice) = folded {
-            // A fold really retired history, so the gauge may fall — but not while this
-            // turn is still on the transcript it replaced. Defer the drop to the boundary,
-            // where it lands if the turn never adopts the fold. A turn that does adopt it
-            // reports the folded size with `reset: true` and the gauge drops immediately.
+            self.ui.finish_compaction_with_result(notice.clone());
             self.ui.defer_context_drop();
             self.ui.emit_above(&compaction_report(&notice));
+        } else {
+            self.ui.finish_compaction();
         }
     }
 }

@@ -14,7 +14,9 @@ use super::super::render::{
     SPINNER_FRAMES,
 };
 use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
-use super::markdown::{clean_terminal_text, render_markdown, strip_ansi, wrap_plain_text};
+use super::markdown::{
+    clean_terminal_text, parse_terminal_line, render_markdown, strip_ansi, wrap_plain_text,
+};
 use super::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
     PaletteItem, ProviderPickerItem, TabHitBox, TabHitTarget, TranscriptClickTarget,
@@ -40,38 +42,48 @@ pub struct FooterInfo<'a> {
 ///
 /// The pane is an overlay in the transcript's bottom-right corner, so it hides text rather than
 /// shrinking the conversation. Below this size it would hide most of the visible lines, and the
-/// small screen is not worth the cost.
-const PTY_PANE_MIN_TRANSCRIPT_WIDTH: u16 = 56;
-const PTY_PANE_MIN_TRANSCRIPT_HEIGHT: u16 = 16;
-/// The pane stays a monitor, not a workspace: one third of the transcript, within these bounds.
-const PTY_PANE_MIN_WIDTH: u16 = 30;
-const PTY_PANE_MAX_WIDTH: u16 = 38;
-/// Rows the pty pane occupies, borders included.
-const PTY_PANE_ROWS: u16 = 12;
+/// Minimum width and height to split the body into side-by-side columns for the live terminal pane.
+const PTY_SPLIT_MIN_WIDTH: u16 = 76;
+const PTY_SPLIT_MIN_HEIGHT: u16 = 10;
+const PTY_SPLIT_MIN_MAIN_WIDTH: u16 = 40;
+const PTY_PANE_MIN_WIDTH: u16 = 34;
+const PTY_PANE_MAX_WIDTH: u16 = 100;
 
-/// Where the live pty mirror sits: the bottom-right corner of the visible transcript.
-///
-/// `None` when the transcript is too small to spare the corner, which keeps a narrow window's
-/// conversation readable instead of covering it with a terminal.
-fn pty_pane_rect(transcript: Rect) -> Option<Rect> {
-    if transcript.width < PTY_PANE_MIN_TRANSCRIPT_WIDTH
-        || transcript.height < PTY_PANE_MIN_TRANSCRIPT_HEIGHT
-    {
-        return None;
+/// Splits `body_area` into `(main_area, Some(pane_area))` when a live terminal is open and the window
+/// is wide enough, giving the terminal a full-height column on the right like a normal split terminal.
+fn pty_split_layout(area: Rect, has_pane: bool) -> (Rect, Option<Rect>) {
+    if !has_pane || area.height < 5 {
+        return (area, None);
     }
-    let width = (transcript.width / 3)
-        .clamp(PTY_PANE_MIN_WIDTH, PTY_PANE_MAX_WIDTH)
-        .min(transcript.width.saturating_sub(2));
-    let height = PTY_PANE_ROWS.min(transcript.height.saturating_sub(2));
-    if width < 20 || height < 5 {
-        return None;
+    if area.width >= PTY_SPLIT_MIN_WIDTH && area.height >= PTY_SPLIT_MIN_HEIGHT {
+        let pane_width = (area.width * 9 / 20)
+            .clamp(PTY_PANE_MIN_WIDTH, PTY_PANE_MAX_WIDTH)
+            .min(area.width.saturating_sub(PTY_SPLIT_MIN_MAIN_WIDTH));
+        let main_width = area.width.saturating_sub(pane_width);
+        if main_width >= PTY_SPLIT_MIN_MAIN_WIDTH && pane_width >= PTY_PANE_MIN_WIDTH {
+            return (
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: main_width,
+                    height: area.height,
+                },
+                Some(Rect {
+                    x: area.x + main_width,
+                    y: area.y,
+                    width: pane_width,
+                    height: area.height,
+                }),
+            );
+        }
     }
-    Some(Rect {
-        x: transcript.x + transcript.width - width,
-        y: transcript.y + transcript.height - height,
-        width,
-        height,
-    })
+    (area, None)
+}
+
+/// Fallback or test helper returning the live terminal pane's rect inside `area`.
+#[cfg(test)]
+fn pty_pane_rect(area: Rect) -> Option<Rect> {
+    pty_split_layout(area, true).1
 }
 
 /// Draw one complete TUI frame.
@@ -119,9 +131,8 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         && !has_visible_notices
         && snap.transient_error.is_none();
 
-    // The pty mirror is an overlay in the transcript corner, so the conversation keeps the whole
-    // body and the composer never moves when a session opens.
-    let pty_pane_open = snap.pty_pane.is_some();
+    // The pty mirror splits the body into side-by-side columns on wide windows, or docks cleanly.
+    let (main_area, pty_pane_area) = pty_split_layout(body_area, snap.pty_pane.is_some());
 
     let composer_rect = if show_landing {
         st.transcript_hit_boxes.clear();
@@ -130,24 +141,13 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
         st.transcript_visible_text.clear();
         st.selection = None;
         st.pending_transcript_click = None;
-        render_landing(frame, body_area, st, info)
+        render_landing(frame, main_area, st, info)
     } else {
-        render_conversation(frame, body_area, st, snap, info, pty_pane_open)
+        render_conversation(frame, main_area, st, snap, info, pty_pane_area.is_some())
     };
 
-    if let Some(pane) = &snap.pty_pane {
-        let transcript = Rect {
-            x: st.transcript_area.0,
-            y: st.transcript_area.1,
-            width: st.transcript_area.2,
-            height: st.transcript_area.3,
-        };
-        if let Some(rect) = pty_pane_rect(transcript) {
-            // The pane covers this corner: a click there must not toggle the text underneath.
-            st.transcript_hit_boxes
-                .retain(|hit| hit.y < rect.y || hit.y >= rect.y + rect.height);
-            render_pty_pane(frame, rect, pane);
-        }
+    if let (Some(pane), Some(rect)) = (&snap.pty_pane, pty_pane_area) {
+        render_pty_pane(frame, rect, pane);
     }
 
     // Slash autocomplete popup sits directly above the composer when typing `/...`.
@@ -231,33 +231,26 @@ fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
             },
             Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
         )));
-    } else if lines.len() > avail {
-        let shown = avail.saturating_sub(1).max(1);
-        let start = lines.len().saturating_sub(shown);
-        rows.push(Line::from(Span::styled(
-            format!("… {start} earlier lines"),
-            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
-        )));
-        append_terminal_rows(&mut rows, &lines[start..], width);
     } else {
-        // Pad the top so the newest line sits on the bottom row, where a terminal cursor would
-        // be: a pane that fills downward would leave a moving gap between text and status.
-        for _ in 0..avail.saturating_sub(lines.len()) {
+        let start = if lines.len() > avail {
+            if lines.len() <= 45 {
+                0
+            } else {
+                lines.len().saturating_sub(avail)
+            }
+        } else {
+            0
+        };
+        let end = (start + avail).min(lines.len());
+        for line in &lines[start..end] {
+            rows.push(parse_terminal_line(line, width));
+        }
+        for _ in (end - start)..avail {
             rows.push(Line::from(""));
         }
-        append_terminal_rows(&mut rows, lines, width);
     }
 
     frame.render_widget(Paragraph::new(rows), inner);
-}
-
-fn append_terminal_rows(rows: &mut Vec<Line<'static>>, lines: &[String], width: usize) {
-    for line in lines {
-        rows.push(Line::from(Span::styled(
-            truncate_str(line, width),
-            Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
-        )));
-    }
 }
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_session_id: &str) {
@@ -1315,9 +1308,14 @@ fn render_single_settled_turn(
     width: usize,
     card_inner_w: usize,
 ) {
-    // 1. User message card (`#1e1e20` + coral `▎` left bar)
+    let is_compaction = turn.user_query == "Compaction" || turn.user_query == "/compact";
+    // 1. User message card (`#1e1e20` + coral `▎` left bar) or Compaction banner
     if !turn.user_query.trim().is_empty() {
-        push_user_card(out, &turn.user_query, width, card_inner_w);
+        if is_compaction {
+            push_compaction_card(out, width);
+        } else {
+            push_user_card(out, &turn.user_query, width, card_inner_w);
+        }
         out.push(Line::default());
     }
 
@@ -1348,7 +1346,16 @@ fn render_single_settled_turn(
     }
 
     // 5. Turn footer (`Build · Model Name · 2.2s · 5.6 tok/s`)
-    let mode_str = meta.map(|m| m.mode.as_str()).unwrap_or(fallback_mode);
+    let mode_str = if is_compaction {
+        "Compacted"
+    } else {
+        meta.map(|m| m.mode.as_str()).unwrap_or(fallback_mode)
+    };
+    let mode_color = if is_compaction {
+        YELLOW_WARN
+    } else {
+        mode_accent(mode_str)
+    };
     let model_raw = meta.map(|m| m.model.as_str()).unwrap_or(fallback_model);
     let model_disp = friendly_model_name(model_raw);
     let dur_secs = turn.duration.as_secs_f64();
@@ -1362,7 +1369,7 @@ fn render_single_settled_turn(
         Span::styled("  ", Style::default().bg(BG_CANVAS)),
         Span::styled(
             mode_str.to_string(),
-            Style::default().fg(mode_accent(mode_str)).bg(BG_CANVAS),
+            Style::default().fg(mode_color).bg(BG_CANVAS),
         ),
         Span::styled(
             format!(" · {model_disp} · {dur_label}"),
@@ -2349,6 +2356,32 @@ fn push_running_tool_card(
 
     push_card_blank_row(out, None, None, ACCENT_CORAL, width);
     out.push(Line::default());
+}
+
+fn push_compaction_card(out: &mut Vec<Line<'static>>, width: usize) {
+    let blank_fill = " ".repeat(width.saturating_sub(1));
+    out.push(Line::from(vec![
+        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
+        Span::styled(blank_fill.clone(), Style::default().bg(BG_SURFACE)),
+    ]));
+    let label = "⚡ Context Compacted";
+    let pad = width.saturating_sub(4 + label.len());
+    out.push(Line::from(vec![
+        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
+        Span::styled("  ", Style::default().bg(BG_SURFACE)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(YELLOW_WARN)
+                .bg(BG_SURFACE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)),
+    ]));
+    out.push(Line::from(vec![
+        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
+        Span::styled(blank_fill, Style::default().bg(BG_SURFACE)),
+    ]));
 }
 
 fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: usize, inner_w: usize) {
@@ -3820,6 +3853,40 @@ mod tests {
     }
 
     #[test]
+    fn compaction_turn_renders_yellow_card_and_compacted_footer() {
+        let turn = TurnRecord {
+            user_query: "Compaction".to_string(),
+            reasoning: None,
+            tools: Vec::new(),
+            tool_items: Vec::new(),
+            duration: std::time::Duration::from_millis(1500),
+            reply: "## Objective\nSummarized context.".to_string(),
+        };
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        let empty_set = std::collections::HashSet::new();
+        render_single_settled_turn(
+            &mut out,
+            &mut hits,
+            0,
+            &turn,
+            None,
+            false,
+            &empty_set,
+            &empty_set,
+            "Build",
+            "gpt-4o",
+            80,
+            76,
+        );
+        let text: Vec<String> = out.iter().map(line_text).collect();
+        let all_text = text.join("\n");
+        assert!(all_text.contains("⚡ Context Compacted"), "expected banner in {all_text}");
+        assert!(all_text.contains("Compacted ·"), "expected footer in {all_text}");
+        assert!(all_text.contains("Summarized context"), "expected markdown summary in {all_text}");
+    }
+
+    #[test]
     fn completed_turn_renders_interleaved_thinking_prose_and_tool_cards() {
         let turn = TurnRecord {
             user_query: "what is this repo about".to_string(),
@@ -4083,32 +4150,22 @@ mod tests {
     }
 
     #[test]
-    fn pty_pane_is_a_small_box_in_the_transcript_corner() {
-        let transcript = Rect {
+    fn pty_pane_splits_wide_body_into_side_by_side_columns() {
+        let body = Rect {
             x: 2,
             y: 3,
             width: 120,
             height: 30,
         };
-        let pane = pty_pane_rect(transcript).expect("a roomy transcript gets the mirror");
-
-        assert_eq!(pane.width, PTY_PANE_MAX_WIDTH, "the pane stays a monitor");
-        assert_eq!(pane.height, PTY_PANE_ROWS);
-        assert!(
-            pane.width < transcript.width / 2,
-            "the conversation keeps most of its width"
-        );
-        assert_eq!(
-            pane.x + pane.width,
-            transcript.x + transcript.width,
-            "the pane hugs the right edge"
-        );
-        assert_eq!(
-            pane.y + pane.height,
-            transcript.y + transcript.height,
-            "the pane hugs the bottom edge"
-        );
-        assert_eq!(pane.y, transcript.y + transcript.height - pane.height);
+        let (main, pane) = pty_split_layout(body, true);
+        let pane = pane.expect("a roomy body gets a split terminal pane");
+        assert_eq!(main.width + pane.width, body.width);
+        assert_eq!(pane.x, main.x + main.width);
+        assert_eq!(pane.y, body.y);
+        assert_eq!(pane.height, body.height);
+        assert!(main.width >= PTY_SPLIT_MIN_MAIN_WIDTH);
+        assert!(pane.width >= PTY_PANE_MIN_WIDTH);
+        assert_eq!(pane.x + pane.width, body.x + body.width);
     }
 
     #[test]
@@ -4116,7 +4173,7 @@ mod tests {
         let narrow = Rect {
             x: 0,
             y: 1,
-            width: PTY_PANE_MIN_TRANSCRIPT_WIDTH - 1,
+            width: PTY_SPLIT_MIN_WIDTH - 1,
             height: 30,
         };
         assert!(pty_pane_rect(narrow).is_none());
@@ -4125,20 +4182,20 @@ mod tests {
             x: 0,
             y: 1,
             width: 120,
-            height: PTY_PANE_MIN_TRANSCRIPT_HEIGHT - 1,
+            height: PTY_SPLIT_MIN_HEIGHT - 1,
         };
         assert!(pty_pane_rect(short).is_none());
 
-        // Half of a roomy 176-column window is still wide enough for the overlay.
+        // Half of a roomy 176-column window is 88 columns, wide enough for split.
         let half = Rect {
             x: 0,
             y: 1,
-            width: 84,
+            width: 88,
             height: 24,
         };
         let pane = pty_pane_rect(half).expect("half screen is still enough");
-        assert_eq!(pane.width, PTY_PANE_MIN_WIDTH);
-        assert_eq!(pane.height, PTY_PANE_ROWS);
+        assert!(pane.width >= PTY_PANE_MIN_WIDTH);
+        assert_eq!(pane.height, half.height);
         assert_eq!(pane.x + pane.width, half.width);
     }
 
@@ -4147,7 +4204,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let backend = TestBackend::new(40, 12);
+        let backend = TestBackend::new(60, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let pane = pty_pane(
             "start · chat",
@@ -4192,7 +4249,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_pane_does_not_stretch_on_very_wide_windows() {
+    fn pty_pane_caps_width_on_very_wide_windows() {
         let wide = Rect {
             x: 0,
             y: 1,
@@ -4202,9 +4259,9 @@ mod tests {
         let pane = pty_pane_rect(wide).expect("pane");
         assert_eq!(
             pane.width, PTY_PANE_MAX_WIDTH,
-            "a wide window keeps the pane small instead of widening it"
+            "a wide window caps the terminal width cleanly"
         );
-        assert_eq!(pane.height, PTY_PANE_ROWS);
+        assert_eq!(pane.height, wide.height);
         assert_eq!(pane.x + pane.width, wide.width);
     }
 

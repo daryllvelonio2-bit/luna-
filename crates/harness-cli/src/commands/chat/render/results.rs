@@ -333,6 +333,10 @@ pub fn format_tool_result_for(tool: Option<&str>, is_error: bool, output: &str) 
         return format!("  {} {}", "✓".green(), "done".dimmed());
     }
 
+    if tool.map(super::tools::is_pty_tool).unwrap_or(false) {
+        return format_pty_result(trimmed);
+    }
+
     if let Some(result) = format_json_result(trimmed) {
         return result;
     }
@@ -424,6 +428,22 @@ fn format_summary_result(trimmed: &str) -> String {
         truncate_visible(first, MAX_TOOL_ARG_CHARS).dimmed(),
         format!("(+{} lines)", line_count - 1).dimmed()
     )
+}
+
+fn format_pty_result(trimmed: &str) -> String {
+    let first = trimmed.lines().next().unwrap_or("").trim();
+    if let Some(pos) = trimmed.find("--- screen ---\n") {
+        let screen = &trimmed[pos + "--- screen ---\n".len()..];
+        let non_empty = screen.lines().filter(|l| !l.trim().is_empty()).count();
+        format!(
+            "  {} {} {}",
+            "✓".green(),
+            truncate_visible(first, MAX_TOOL_ARG_CHARS).dimmed(),
+            format!("({non_empty} screen rows)").dimmed()
+        )
+    } else {
+        format_summary_result(trimmed)
+    }
 }
 
 fn is_search_tool(tool: Option<&str>, output: &str) -> bool {

@@ -87,42 +87,6 @@ pub fn resolve_path(workspace_root: &Path, user_path: &str) -> Result<PathBuf, S
     Sandbox::workspace(workspace_root.to_path_buf()).resolve(user_path)
 }
 
-/// Resolves a user-supplied path relative to `workspace_root` and refuses anything outside it.
-/// If not found directly, checks if it exists relative to the current working directory or under
-/// subcrates, provided the target is within the sandbox boundaries.
-pub(crate) fn resolve_existing_path(
-    sandbox: &Sandbox,
-    workspace_root: &Path,
-    user_path: &str,
-) -> Result<PathBuf, String> {
-    let resolved = sandbox.resolve(user_path)?;
-    if resolved.exists() {
-        return Ok(resolved);
-    }
-
-    let clean = user_path.trim().trim_start_matches("./");
-
-    // 1. Try relative to process current_dir if allowed by sandbox
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_candidate = cwd.join(clean);
-        if cwd_candidate.exists() && sandbox.allows(&cwd_candidate) {
-            return Ok(cwd_candidate);
-        }
-        let cwd_crates = cwd.join("crates").join(clean);
-        if cwd_crates.exists() && sandbox.allows(&cwd_crates) {
-            return Ok(cwd_crates);
-        }
-    }
-
-    // 2. Try workspace_root/crates/...
-    let crates_alt = workspace_root.join("crates").join(clean);
-    if crates_alt.exists() && sandbox.allows(&crates_alt) {
-        return Ok(crates_alt);
-    }
-
-    Ok(resolved)
-}
-
 /// Look for an exact unique match of `old_str` in `content` ignoring trailing whitespace on each line.
 /// Returns byte range `(start, end)` in `content` if and only if exactly one match is found.
 fn find_unique_line_trimmed_match(content: &str, old_str: &str) -> Option<(usize, usize)> {
@@ -294,7 +258,7 @@ impl Tool for ReadFileTool {
             }
         };
 
-        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -459,7 +423,7 @@ impl Tool for WriteFileTool {
             }
         };
 
-        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -562,7 +526,7 @@ impl Tool for PatchTool {
             .and_then(|r| r.as_bool())
             .unwrap_or(false);
 
-        let resolved = resolve_existing_path(&self.sandbox(), &self.workspace_root, path).ok()?;
+        let resolved = self.sandbox().resolve(path).ok()?;
         let current = std::fs::read_to_string(&resolved).ok()?;
 
         let mut target_old = old_str.to_string();
@@ -652,7 +616,7 @@ impl Tool for PatchTool {
             .and_then(|r| r.as_bool())
             .unwrap_or(false);
 
-        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -949,7 +913,7 @@ impl Tool for SearchFilesTool {
             .and_then(|m| m.as_str())
             .unwrap_or("content");
 
-        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, search_path_str) {
+        let resolved = match self.sandbox().resolve(search_path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
@@ -1286,7 +1250,7 @@ impl Tool for ListFilesTool {
             .map(|depth| (depth as usize).clamp(1, MAX_LIST_DEPTH))
             .unwrap_or(DEFAULT_LIST_DEPTH);
 
-        let resolved = match resolve_existing_path(&self.sandbox(), &self.workspace_root, path_str) {
+        let resolved = match self.sandbox().resolve(path_str) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(call_id, e)),
         };
