@@ -860,10 +860,8 @@ impl NotesEngine for FileNotesEngine {
                 }
             }
 
-            if exact == 0 {
-                if distinct == 0 || (terms.len() >= 3 && distinct < 2) {
-                    continue;
-                }
+            if exact == 0 && (distinct == 0 || (terms.len() >= 3 && distinct < 2)) {
+                continue;
             }
 
             let score = exact * 10_000 + distinct * 100 + occurrences;

@@ -187,7 +187,7 @@ async fn handle_mouse(
                     *scroll = (*scroll + 3).min(max_s);
                 }
                 ActiveModal::SubagentInspector { scroll, .. } => {
-                    *scroll = *scroll + 3;
+                    *scroll += 3;
                 }
                 _ => {}
             },

@@ -729,9 +729,8 @@ pub fn record_matches_project(record: &MemoryRecord, project_filter: &str) -> bo
         {
             if norm_name == target {
                 return true;
-            } else {
-                return false;
             }
+            return false;
         }
     }
 
@@ -741,11 +740,9 @@ pub fn record_matches_project(record: &MemoryRecord, project_filter: &str) -> bo
         let norm_slug = normalize_slug(slug);
         if norm_slug == target {
             return true;
-        } else {
-            return false;
         }
+        return false;
     }
-
     // 3. Path check: does path reference the target project or another project?
     if let Some(ref path) = record.path {
         let norm_path = path.to_ascii_lowercase();

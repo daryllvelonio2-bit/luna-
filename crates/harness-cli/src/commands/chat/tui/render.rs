@@ -5310,12 +5310,14 @@ mod tests {
     #[test]
     fn test_subagents_chrome_strip_and_hint_counter() {
         let st = test_dummy_tui_state();
-        let mut snap = TuiLiveSnapshot::default();
-        snap.delegate_count = 2;
-        snap.delegate_last = Some((
-            "Review pull request changes".to_string(),
-            "search_files running".to_string(),
-        ));
+        let snap = TuiLiveSnapshot {
+            delegate_count: 2,
+            delegate_last: Some((
+                "Review pull request changes".to_string(),
+                "search_files running".to_string(),
+            )),
+            ..Default::default()
+        };
 
         let chrome = build_chrome_lines(&st, &snap, 80);
         let chrome_text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");
@@ -5334,22 +5336,24 @@ mod tests {
     #[test]
     fn test_background_memory_saver_chrome_and_notices() {
         let st = test_dummy_tui_state();
-        let mut snap = TuiLiveSnapshot::default();
-        snap.memory_distilling = Some(("claude-3-5-sonnet".to_string(), 1.4));
-        snap.memory_notices = vec![
-            (
-                "memory".to_string(),
-                "user.preference.theme".to_string(),
-                Some("dark mode enabled".to_string()),
-                "saved".to_string(),
-            ),
-            (
-                "note".to_string(),
-                "Architecture Decision".to_string(),
-                None,
-                "updated".to_string(),
-            ),
-        ];
+        let snap = TuiLiveSnapshot {
+            memory_distilling: Some(("claude-3-5-sonnet".to_string(), 1.4)),
+            memory_notices: vec![
+                (
+                    "memory".to_string(),
+                    "user.preference.theme".to_string(),
+                    Some("dark mode enabled".to_string()),
+                    "saved".to_string(),
+                ),
+                (
+                    "note".to_string(),
+                    "Architecture Decision".to_string(),
+                    None,
+                    "updated".to_string(),
+                ),
+            ],
+            ..Default::default()
+        };
 
         let chrome = build_chrome_lines(&st, &snap, 80);
         let chrome_text = chrome.iter().map(line_text).collect::<Vec<_>>().join("\n");

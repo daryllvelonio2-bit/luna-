@@ -368,10 +368,8 @@ fn pty_title(name: &str, arguments: &serde_json::Value) -> String {
                         .collect::<Vec<_>>()
                         .join(" "),
                 )
-            } else if let Some(s) = v.as_str() {
-                Some(s.to_string())
             } else {
-                None
+                v.as_str().map(|s| s.to_string())
             }
         })
         .filter(|s| !s.is_empty());
