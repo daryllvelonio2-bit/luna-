@@ -342,22 +342,9 @@ async fn handle_auth_copy_antigravity(
     cred_manager: &CredentialManager,
 ) -> Result<(), HarnessError> {
     let creds = harness_providers::detect_antigravity_credentials()?;
-    let label = creds
-        .email
-        .clone()
-        .unwrap_or_else(|| "antigravity-user".to_string());
-    let secret_payload =
-        serde_json::to_string(&creds).unwrap_or_else(|_| creds.access_token.clone());
-
-    let id = cred_manager
-        .add_credential("antigravity", &label, &secret_payload, true)
-        .await?;
-    let _ = cred_manager
-        .set_rotation_strategy(
-            "antigravity",
-            harness_providers::RotationStrategy::FillFirst,
-        )
-        .await;
+    let http_client = harness_providers::build_http_client(10)?;
+    let (id, label) =
+        harness_providers::store_antigravity_credentials(cred_manager, &http_client, creds).await?;
 
     println!(
         "{} Successfully copied Antigravity credentials for '{}' into Luna!",

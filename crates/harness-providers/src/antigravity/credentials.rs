@@ -19,6 +19,29 @@ pub struct AntigravityCredentials {
     pub expiry: Option<String>,
 }
 
+/// Parse the JSON structure returned by `secret-tool lookup service gemini username antigravity`.
+pub(crate) fn parse_secret_tool_antigravity_json(
+    val: &serde_json::Value,
+) -> Option<AntigravityCredentials> {
+    let tok = val.get("token").unwrap_or(val);
+    let access = tok.get("access_token").and_then(|a| a.as_str())?;
+    let refresh = tok
+        .get("refresh_token")
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string());
+    let expiry = tok
+        .get("expiry")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string());
+    let email = extract_email_from_jwt(val);
+    Some(AntigravityCredentials {
+        access_token: access.to_string(),
+        refresh_token: refresh,
+        email,
+        expiry,
+    })
+}
+
 /// Detect and copy logged-in Antigravity credentials from SecretService or Shiina.
 pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, HarnessError> {
     // 1. Try Linux secret-tool (service: gemini, username: antigravity)
@@ -30,23 +53,8 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !stdout.is_empty() {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                    let tok = val.get("token").unwrap_or(&val);
-                    if let Some(access) = tok.get("access_token").and_then(|a| a.as_str()) {
-                        let refresh = tok
-                            .get("refresh_token")
-                            .and_then(|r| r.as_str())
-                            .map(|s| s.to_string());
-                        let expiry = tok
-                            .get("expiry")
-                            .and_then(|e| e.as_str())
-                            .map(|s| s.to_string());
-                        let email = extract_email_from_jwt(&val);
-                        return Ok(AntigravityCredentials {
-                            access_token: access.to_string(),
-                            refresh_token: refresh,
-                            email,
-                            expiry,
-                        });
+                    if let Some(creds) = parse_secret_tool_antigravity_json(&val) {
+                        return Ok(creds);
                     }
                 }
             }
@@ -76,10 +84,7 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
                                 .get("refresh_token")
                                 .and_then(|r| r.as_str())
                                 .map(|s| s.to_string());
-                            let email = agy
-                                .get("email")
-                                .and_then(|e| e.as_str())
-                                .map(|s| s.to_string());
+                            let email = extract_email_from_jwt(agy);
                             return Ok(AntigravityCredentials {
                                 access_token: access.to_string(),
                                 refresh_token: refresh,
@@ -117,18 +122,35 @@ pub fn detect_antigravity_credentials() -> Result<AntigravityCredentials, Harnes
     })
 }
 
+fn non_empty_str(val: Option<&serde_json::Value>) -> Option<String> {
+    val.and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
 fn extract_email_from_jwt(val: &serde_json::Value) -> Option<String> {
-    if let Some(email) = val.get("email").and_then(|e| e.as_str()) {
-        return Some(email.to_string());
+    for candidate in [
+        val.get("email"),
+        val.get("id_token_email"),
+        val.get("token").and_then(|t| t.get("email")),
+        val.get("token").and_then(|t| t.get("id_token_email")),
+    ] {
+        if let Some(email) = non_empty_str(candidate) {
+            return Some(email);
+        }
     }
-    if let Some(id_tok) = val.get("id_token").and_then(|t| t.as_str()) {
+
+    let id_tok = non_empty_str(val.get("id_token"))
+        .or_else(|| non_empty_str(val.get("token").and_then(|t| t.get("id_token"))));
+    if let Some(id_tok) = id_tok {
         let parts: Vec<&str> = id_tok.split('.').collect();
         if parts.len() >= 2 {
             let padded = format!("{}{}", parts[1], "=".repeat((4 - parts[1].len() % 4) % 4));
             if let Ok(decoded) = base64_url_decode(&padded) {
                 if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) {
-                    if let Some(email) = claims.get("email").and_then(|e| e.as_str()) {
-                        return Some(email.to_string());
+                    if let Some(email) = non_empty_str(claims.get("email")) {
+                        return Some(email);
                     }
                 }
             }
@@ -356,9 +378,116 @@ pub async fn resolve_antigravity_email_strict(
             }
         }
         // 3. Email property on JSON object
-        if let Some(email) = val.get("email").and_then(|e| e.as_str()) {
-            return Some(email.to_string());
+        for candidate in [
+            val.get("email"),
+            val.get("id_token_email"),
+            tok.get("email"),
+            tok.get("id_token_email"),
+        ] {
+            if let Some(email) = non_empty_str(candidate) {
+                return Some(email);
+            }
         }
     }
     None
+}
+
+fn credentials_match_same_account(existing_raw: &str, creds: &AntigravityCredentials) -> bool {
+    let (existing_access, existing_refresh) = extract_bearer_token(existing_raw);
+    match (&existing_refresh, &creds.refresh_token) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a == b,
+        _ => !existing_access.is_empty() && existing_access == creds.access_token,
+    }
+}
+
+fn next_fallback_antigravity_label(
+    existing: &[crate::auth::CredentialEntry],
+    creds: &AntigravityCredentials,
+) -> String {
+    if let Some(matched) = existing
+        .iter()
+        .find(|entry| credentials_match_same_account(&entry.api_key, creds))
+    {
+        return matched.label.clone();
+    }
+    if !existing
+        .iter()
+        .any(|entry| entry.label == "antigravity-user")
+    {
+        return "antigravity-user".to_string();
+    }
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("antigravity-user-{index}");
+        if !existing.iter().any(|entry| entry.label == candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+/// Store a detected Antigravity credential in `cred_manager` without clobbering other accounts.
+///
+/// Resolves the Google account e-mail (from the credential payload first, then via tokeninfo) so
+/// multiple accounts stay keyed by their distinct e-mails. When no e-mail can be resolved offline,
+/// picks a non-colliding fallback label (`antigravity-user`, `antigravity-user-2`, …) unless the
+/// token matches an existing entry. Returns `(credential_id, label)`.
+pub async fn store_antigravity_credentials(
+    cred_manager: &crate::auth::CredentialManager,
+    http_client: &reqwest::Client,
+    mut creds: AntigravityCredentials,
+) -> Result<(String, String), HarnessError> {
+    creds.email = creds
+        .email
+        .take()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut secret_payload =
+        serde_json::to_string(&creds).unwrap_or_else(|_| creds.access_token.clone());
+
+    if creds.email.is_none() {
+        if let Some(resolved_email) =
+            resolve_antigravity_email_strict(http_client, &secret_payload).await
+        {
+            let trimmed = resolved_email.trim().to_string();
+            if !trimmed.is_empty() {
+                creds.email = Some(trimmed);
+                secret_payload =
+                    serde_json::to_string(&creds).unwrap_or_else(|_| creds.access_token.clone());
+            }
+        }
+    }
+
+    let existing = cred_manager.get_credentials("antigravity").await;
+    let had_any = !existing.is_empty();
+
+    let label = match creds.email.clone() {
+        Some(email) => {
+            if let Some(legacy) = existing
+                .iter()
+                .find(|entry| entry.label == "antigravity-user")
+            {
+                if credentials_match_same_account(&legacy.api_key, &creds) {
+                    let _ = cred_manager
+                        .remove_credential("antigravity", "antigravity-user")
+                        .await;
+                }
+            }
+            email
+        }
+        None => next_fallback_antigravity_label(&existing, &creds),
+    };
+
+    let id = cred_manager
+        .add_credential("antigravity", &label, &secret_payload, true)
+        .await?;
+
+    if !had_any {
+        let _ = cred_manager
+            .set_rotation_strategy("antigravity", crate::auth::RotationStrategy::FillFirst)
+            .await;
+    }
+
+    Ok((id, label))
 }

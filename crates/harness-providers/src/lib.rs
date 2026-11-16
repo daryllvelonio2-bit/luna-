@@ -13,8 +13,9 @@ pub mod thought_signature;
 pub use antigravity::{
     detect_antigravity_credentials, execute_antigravity_completion, extract_bearer_token,
     fetch_antigravity_models, refresh_antigravity_token, resolve_antigravity_email_strict,
-    retrieve_antigravity_quota, AntigravityCredentials, AntigravityModelQuotaInfo,
-    AntigravityQuotaBucket, AntigravityQuotaGroup, AntigravityQuotaSummary, QuotaLine, QuotaWindow,
+    retrieve_antigravity_quota, store_antigravity_credentials, AntigravityCredentials,
+    AntigravityModelQuotaInfo, AntigravityQuotaBucket, AntigravityQuotaGroup,
+    AntigravityQuotaSummary, QuotaLine, QuotaWindow,
 };
 pub use auth::{CredentialEntry, CredentialManager, RotationStrategy};
 pub use capability::{

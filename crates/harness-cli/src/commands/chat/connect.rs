@@ -618,23 +618,15 @@ pub(crate) async fn import_antigravity(
     cred_manager: &Arc<CredentialManager>,
 ) -> Result<(), HarnessError> {
     let detected = harness_providers::detect_antigravity_credentials()?;
-    let label = detected
-        .email
-        .clone()
-        .unwrap_or_else(|| "antigravity-user".to_string());
-    let payload =
-        serde_json::to_string(&detected).unwrap_or_else(|_| detected.access_token.clone());
-
-    let id = cred_manager
-        .add_credential("antigravity", &label, &payload, true)
-        .await?;
-    let _ = cred_manager
-        .set_rotation_strategy("antigravity", RotationStrategy::FillFirst)
-        .await;
+    let http_client = harness_providers::build_http_client(10)?;
+    let (id, label) =
+        harness_providers::store_antigravity_credentials(cred_manager, &http_client, detected)
+            .await?;
 
     ui.emit_above(&format!(
-        "{} Antigravity credentials imported ({})",
+        "{} Antigravity credentials imported for {} ({})",
         "✔".green().bold(),
+        label.bold(),
         id.dimmed()
     ));
     Ok(())

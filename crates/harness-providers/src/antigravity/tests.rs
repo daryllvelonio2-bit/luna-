@@ -1277,3 +1277,119 @@ fn parallel_function_calls_get_sequential_indices_across_chunks() {
     assert_eq!(calls[2].1.as_deref(), Some("call_3"));
     assert_eq!(calls[2].2.as_deref(), Some("list_files"));
 }
+
+#[test]
+fn secret_tool_json_extracts_id_token_email() {
+    let payload = json!({
+        "token": {
+            "access_token": "ya29.test-access",
+            "token_type": "Bearer",
+            "refresh_token": "1//test-refresh",
+            "expiry": "2026-12-01T00:00:00Z"
+        },
+        "auth_method": "consumer",
+        "id_token_email": "alice@gmail.com"
+    });
+
+    let creds = super::credentials::parse_secret_tool_antigravity_json(&payload)
+        .expect("secret-tool payload parses");
+    assert_eq!(creds.access_token, "ya29.test-access");
+    assert_eq!(creds.refresh_token.as_deref(), Some("1//test-refresh"));
+    assert_eq!(creds.email.as_deref(), Some("alice@gmail.com"));
+}
+
+#[tokio::test]
+async fn storing_two_antigravity_accounts_keeps_both_and_migrates_legacy_label() {
+    let dir = std::env::temp_dir().join(format!("luna-agy-multi-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let store_path = dir.join("credentials.json");
+    let mgr = crate::auth::CredentialManager::new(Some(store_path.clone())).expect("manager");
+    let http_client = reqwest::Client::new();
+
+    // Seed a legacy unlabeled entry for account A (what older builds wrote when id_token_email
+    // was ignored).
+    let legacy_payload = json!({
+        "access_token": "old-access-a",
+        "refresh_token": "refresh-a",
+        "email": null,
+        "expiry": null
+    })
+    .to_string();
+    mgr.add_credential("antigravity", "antigravity-user", &legacy_payload, true)
+        .await
+        .expect("seed legacy");
+
+    // Re-copying account A with its resolved email replaces the legacy unlabeled row cleanly.
+    let (_, label_a) = super::store_antigravity_credentials(
+        &mgr,
+        &http_client,
+        super::AntigravityCredentials {
+            access_token: "fresh-access-a".to_string(),
+            refresh_token: Some("refresh-a".to_string()),
+            email: Some("alice@gmail.com".to_string()),
+            expiry: None,
+        },
+    )
+    .await
+    .expect("store A");
+    assert_eq!(label_a, "alice@gmail.com");
+    assert_eq!(mgr.get_credentials("antigravity").await.len(), 1);
+
+    // Copying account B keeps both alice@gmail.com and bob@gmail.com in the pool.
+    let (_, label_b) = super::store_antigravity_credentials(
+        &mgr,
+        &http_client,
+        super::AntigravityCredentials {
+            access_token: "access-b".to_string(),
+            refresh_token: Some("refresh-b".to_string()),
+            email: Some("bob@gmail.com".to_string()),
+            expiry: None,
+        },
+    )
+    .await
+    .expect("store B");
+    assert_eq!(label_b, "bob@gmail.com");
+
+    // Even if a third account has no email resolvable offline, it still gets a distinct label.
+    let (_, label_c) = super::store_antigravity_credentials(
+        &mgr,
+        &http_client,
+        super::AntigravityCredentials {
+            access_token: "access-c".to_string(),
+            refresh_token: Some("refresh-c".to_string()),
+            email: None,
+            expiry: None,
+        },
+    )
+    .await
+    .expect("store C");
+    assert_eq!(label_c, "antigravity-user");
+
+    let (_, label_d) = super::store_antigravity_credentials(
+        &mgr,
+        &http_client,
+        super::AntigravityCredentials {
+            access_token: "access-d".to_string(),
+            refresh_token: Some("refresh-d".to_string()),
+            email: None,
+            expiry: None,
+        },
+    )
+    .await
+    .expect("store D");
+    assert_eq!(label_d, "antigravity-user-2");
+
+    let stored = mgr.get_credentials("antigravity").await;
+    let labels: Vec<&str> = stored.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "alice@gmail.com",
+            "bob@gmail.com",
+            "antigravity-user",
+            "antigravity-user-2"
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
