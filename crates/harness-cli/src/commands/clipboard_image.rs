@@ -526,6 +526,16 @@ mod tests {
 
     #[test]
     fn write_and_read_clipboard_text_round_trip() {
+        // A clipboard needs a graphical session. Linux CI runners have neither an X
+        // nor a Wayland display, so the round trip cannot run there; skip instead of
+        // failing the whole suite on an environment the feature cannot use.
+        if cfg!(target_os = "linux")
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
+            eprintln!("skipping clipboard round trip: no DISPLAY or WAYLAND_DISPLAY");
+            return;
+        }
         let test_str = "luna clipboard roundtrip test";
         let res = write_clipboard_text(test_str);
         let read = read_clipboard_text();
