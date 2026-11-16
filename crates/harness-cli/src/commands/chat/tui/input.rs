@@ -356,7 +356,7 @@ fn begin_left_down(env: &Env<'_>, st: &mut TuiState, mouse: MouseEvent) {
             st.selection = Some(TextSelection {
                 anchor: (line, start_col),
                 cursor: (line, end_col.saturating_sub(1)),
-                dragging: false,
+                dragging: true,
             });
             st.pending_transcript_click = None;
             copy_selection_to_clipboard(env, st);
@@ -373,11 +373,8 @@ fn begin_left_down(env: &Env<'_>, st: &mut TuiState, mouse: MouseEvent) {
             return;
         }
 
-        st.selection = Some(TextSelection {
-            anchor: (line, column),
-            cursor: (line, column),
-            dragging: true,
-        });
+        // Single click does not start text selection; only double-tap (and drag) highlights text.
+        st.selection = None;
         st.pending_transcript_click = hit;
     } else {
         st.selection = None;
@@ -436,7 +433,7 @@ async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
         return;
     }
 
-    if selection.is_range() {
+    if selection.is_range() || st.click_count >= 2 {
         copy_selection_to_clipboard(env, st);
         st.selection = Some(TextSelection {
             dragging: false,
@@ -444,7 +441,7 @@ async fn finish_left_up(env: &mut Env<'_>, st: &mut TuiState) {
         });
         st.pending_transcript_click = None;
     } else {
-        // A plain click: drop the one-cell selection and run the click target, if any.
+        // A plain click: drop the selection and run the click target, if any.
         st.selection = None;
         if let Some(target) = st.pending_transcript_click.take() {
             apply_transcript_click(env, st, target).await;
@@ -456,7 +453,7 @@ fn copy_selection_to_clipboard(env: &Env<'_>, st: &mut TuiState) {
     let Some(selection) = st.selection else {
         return;
     };
-    if selection.is_range() {
+    if selection.is_range() || st.click_count >= 2 {
         let text = selection_text(st, selection);
         if !text.is_empty() {
             match crate::commands::clipboard_image::write_clipboard_text(&text) {
