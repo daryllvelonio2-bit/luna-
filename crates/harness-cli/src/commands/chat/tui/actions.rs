@@ -1230,39 +1230,148 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     };
 }
 
-fn open_feature_settings_modal(env: &Env<'_>, st: &mut TuiState, feature: Feature) {
-    let badge = feature_status_badge(env, feature);
-    let enabled = env.feature_toggles.enabled(feature);
-    let default_sel = if enabled { 2 } else { 1 };
-    st.modal = ActiveModal::SelectModal {
-        title: format!("{} Settings · {badge}", feature.title()),
-        items: vec![
-            "Turn ON · this session".to_string(),
-            "Turn ON · globally".to_string(),
-            "Turn OFF · this session".to_string(),
-            "Turn OFF · globally".to_string(),
-            "Turn OFF · for [N] days…".to_string(),
-            "Back to Settings".to_string(),
-        ],
-        selected: default_sel,
-        action: SelectAction::SettingsFeature { feature },
-    };
-}
+/// Rotate/toggle a single row of the `CLI Settings` modal in place using Space (or Enter).
+pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, choice: usize) {
+    match choice {
+        0 => {
+            let next = match env.config.display.block_limit {
+                None => Some(1),
+                Some(n) if n < 10 => Some(n + 1),
+                Some(_) => None,
+            };
+            let arg = match next {
+                None => "limit all".to_string(),
+                Some(n) => format!("limit {n}"),
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(&arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+            open_settings_menu(env, st, 0);
+        }
+        1 => {
+            let arg = if env.config.display.auto_collapse {
+                "collapse off"
+            } else {
+                "collapse on"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+            open_settings_menu(env, st, 1);
+        }
+        2 => {
+            let arg = if env.config.display.auto_hide_thinking {
+                "thinking off"
+            } else {
+                "thinking on"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            }
+            st.auto_hide_thinking = env.config.display.auto_hide_thinking;
+            open_settings_menu(env, st, 2);
+        }
+        3..=6 => {
+            let feature = match choice {
+                3 => Feature::Mcp,
+                4 => Feature::Skills,
+                5 => Feature::Memory,
+                _ => Feature::Notes,
+            };
+            let live_on = env.feature_toggles.enabled(feature);
+            let (global_on, until) = match feature {
+                Feature::Mcp => (
+                    env.config.agent.mcp_enabled,
+                    env.config.features.mcp_disabled_until,
+                ),
+                Feature::Skills => (
+                    env.config.agent.skills_enabled,
+                    env.config.features.skills_disabled_until,
+                ),
+                Feature::Memory => (
+                    env.config.agent.memory_enabled,
+                    env.config.features.memory_disabled_until,
+                ),
+                Feature::Notes => (
+                    env.config.agent.notes_enabled,
+                    env.config.features.notes_disabled_until,
+                ),
+            };
+            let timed_off = until.is_some_and(|u| u > harness_core::Config::current_unix_secs());
 
-fn open_memory_mode_modal(env: &Env<'_>, st: &mut TuiState) {
-    let is_bg = env.config.memory.mode.is_background();
-    let sess_mark = if !is_bg { "● " } else { "  " };
-    let bg_mark = if is_bg { "● " } else { "  " };
-    st.modal = ActiveModal::SelectModal {
-        title: "Memory Saver Mode".to_string(),
-        items: vec![
-            format!("{sess_mark}Session writer — agent saves memories/notes mid-turn"),
-            format!("{bg_mark}Background saver — independent model distills after reply"),
-            "Back to Settings".to_string(),
-        ],
-        selected: usize::from(is_bg),
-        action: SelectAction::SettingsMemoryMode,
-    };
+            if live_on && global_on && !timed_off {
+                apply_feature_live(env, feature, false).await;
+                notify_setting_change(
+                    st,
+                    format!("{} turned OFF for this session", feature.title()),
+                );
+            } else if !live_on && global_on && !timed_off {
+                if let Err(err) = apply_feature_global(env, feature, false, None).await {
+                    env.ui
+                        .set_transient_error(Some(format!("Settings failed: {err}")));
+                } else {
+                    notify_setting_change(st, format!("{} turned OFF globally", feature.title()));
+                }
+            } else if let Err(err) = apply_feature_global(env, feature, true, None).await {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {err}")));
+            } else {
+                notify_setting_change(st, format!("{} turned ON", feature.title()));
+            }
+            open_settings_menu(env, st, choice);
+        }
+        7 => {
+            let next_mode = if env.config.memory.mode.is_background() {
+                harness_core::MemoryMode::Session
+            } else {
+                harness_core::MemoryMode::Background
+            };
+            let label = match next_mode {
+                harness_core::MemoryMode::Session => "Session writer",
+                harness_core::MemoryMode::Background => "Background saver",
+            };
+            if let Err(err) = apply_memory_mode_choice(env, next_mode).await {
+                env.ui
+                    .set_transient_error(Some(format!("Memory saver switch failed: {err}")));
+            } else {
+                notify_setting_change(st, format!("Memory saver set to {label} (saved)"));
+            }
+            open_settings_menu(env, st, 7);
+        }
+        _ => {
+            open_settings_menu(env, st, choice);
+        }
+    }
 }
 
 async fn open_memory_project_picker(st: &mut TuiState) {
@@ -1779,125 +1888,11 @@ pub async fn run_select_action(
                     action: SelectAction::SettingsBlockLimit,
                 };
             }
-            1 => {
-                let enabled = env.config.display.auto_collapse;
-                st.modal = ActiveModal::SelectModal {
-                    title: "Auto-collapse on Turn Completion".to_string(),
-                    items: vec![
-                        "Enabled (collapse when finished)".to_string(),
-                        "Disabled (keep expanded)".to_string(),
-                    ],
-                    selected: if enabled { 0 } else { 1 },
-                    action: SelectAction::SettingsCollapse,
-                };
-            }
-            2 => {
-                let enabled = env.config.display.auto_hide_thinking;
-                st.modal = ActiveModal::SelectModal {
-                    title: "Auto-collapse Thinking During Tool Calls".to_string(),
-                    items: vec![
-                        "Enabled (hide thinking while a tool runs)".to_string(),
-                        "Disabled (keep thinking visible)".to_string(),
-                    ],
-                    selected: if enabled { 0 } else { 1 },
-                    action: SelectAction::SettingsThinking,
-                };
-            }
-            3 => open_feature_settings_modal(env, st, Feature::Mcp),
-            4 => open_feature_settings_modal(env, st, Feature::Skills),
-            5 => open_feature_settings_modal(env, st, Feature::Memory),
-            6 => open_feature_settings_modal(env, st, Feature::Notes),
-            7 => open_memory_mode_modal(env, st),
+            1..=7 => toggle_settings_main_item(env, st, choice).await,
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
             }
-        },
-        SelectAction::SettingsFeature { feature } => {
-            let return_idx = match feature {
-                Feature::Mcp => 3,
-                Feature::Skills => 4,
-                Feature::Memory => 5,
-                Feature::Notes => 6,
-            };
-            match choice {
-                0 => {
-                    apply_feature_live(env, feature, true).await;
-                    notify_setting_change(
-                        st,
-                        format!("{} turned ON for this session", feature.title()),
-                    );
-                    open_settings_menu(env, st, return_idx);
-                }
-                1 => {
-                    if let Err(err) = apply_feature_global(env, feature, true, None).await {
-                        env.ui
-                            .set_transient_error(Some(format!("Settings failed: {err}")));
-                    } else {
-                        notify_setting_change(
-                            st,
-                            format!("{} turned ON globally", feature.title()),
-                        );
-                    }
-                    open_settings_menu(env, st, return_idx);
-                }
-                2 => {
-                    apply_feature_live(env, feature, false).await;
-                    notify_setting_change(
-                        st,
-                        format!("{} turned OFF for this session", feature.title()),
-                    );
-                    open_settings_menu(env, st, return_idx);
-                }
-                3 => {
-                    if let Err(err) = apply_feature_global(env, feature, false, None).await {
-                        env.ui
-                            .set_transient_error(Some(format!("Settings failed: {err}")));
-                    } else {
-                        notify_setting_change(
-                            st,
-                            format!("{} turned OFF globally", feature.title()),
-                        );
-                    }
-                    open_settings_menu(env, st, return_idx);
-                }
-                4 => {
-                    st.modal = ActiveModal::InputModal {
-                        title: format!("Turn OFF {} for Days", feature.title()),
-                        prompt: "Number of days to keep disabled (e.g. 1, 7, 30; blank cancels)"
-                            .to_string(),
-                        value: String::new(),
-                        secret: false,
-                        action: InputAction::FeatureDisableDays { feature },
-                    };
-                }
-                _ => open_settings_menu(env, st, return_idx),
-            }
-        }
-        SelectAction::SettingsMemoryMode => match choice {
-            0 => {
-                if let Err(err) =
-                    apply_memory_mode_choice(env, harness_core::MemoryMode::Session).await
-                {
-                    env.ui
-                        .set_transient_error(Some(format!("Memory saver switch failed: {err}")));
-                } else {
-                    notify_setting_change(st, "Memory saver set to Session writer (saved)");
-                }
-                open_settings_menu(env, st, 7);
-            }
-            1 => {
-                if let Err(err) =
-                    apply_memory_mode_choice(env, harness_core::MemoryMode::Background).await
-                {
-                    env.ui
-                        .set_transient_error(Some(format!("Memory saver switch failed: {err}")));
-                } else {
-                    notify_setting_change(st, "Memory saver set to Background saver (saved)");
-                }
-                open_settings_menu(env, st, 7);
-            }
-            _ => open_settings_menu(env, st, 7),
         },
         SelectAction::SettingsBlockLimit => {
             let arg = if choice == 0 {
@@ -1918,47 +1913,6 @@ pub async fn run_select_action(
                 env.ui
                     .set_transient_error(Some(format!("Settings failed: {error}")));
             }
-        }
-        SelectAction::SettingsCollapse => {
-            let arg = if choice == 0 {
-                "collapse on"
-            } else {
-                "collapse off"
-            };
-            if let Err(error) = handle_settings_command(
-                None,
-                &env.ui,
-                env.config,
-                &env.display_settings,
-                &mut st.process_expanded,
-                Some(arg),
-            )
-            .await
-            {
-                env.ui
-                    .set_transient_error(Some(format!("Settings failed: {error}")));
-            }
-        }
-        SelectAction::SettingsThinking => {
-            let arg = if choice == 0 {
-                "thinking on"
-            } else {
-                "thinking off"
-            };
-            if let Err(error) = handle_settings_command(
-                None,
-                &env.ui,
-                env.config,
-                &env.display_settings,
-                &mut st.process_expanded,
-                Some(arg),
-            )
-            .await
-            {
-                env.ui
-                    .set_transient_error(Some(format!("Settings failed: {error}")));
-            }
-            st.auto_hide_thinking = env.config.display.auto_hide_thinking;
         }
         SelectAction::DirScope { path } => {
             let is_global = choice == 1;
@@ -2521,53 +2475,6 @@ pub async fn run_input_action(
                 st.system_notices.push(SystemNotice::new(format!(
                     "✓ Memory scoped to '{project}' for this session"
                 )));
-            }
-        }
-        InputAction::FeatureDisableDays { feature } => {
-            let return_idx = match feature {
-                Feature::Mcp => 3,
-                Feature::Skills => 4,
-                Feature::Memory => 5,
-                Feature::Notes => 6,
-            };
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                open_feature_settings_modal(env, st, feature);
-                return;
-            }
-            match trimmed.parse::<u64>() {
-                Ok(days) if (1..=3650).contains(&days) => {
-                    let until = harness_core::Config::current_unix_secs()
-                        .saturating_add(days.saturating_mul(86_400));
-                    if let Err(err) = apply_feature_global(env, feature, true, Some(until)).await {
-                        env.ui
-                            .set_transient_error(Some(format!("Settings failed: {err}")));
-                    } else {
-                        let date = chrono::DateTime::<chrono::Utc>::from_timestamp(until as i64, 0)
-                            .map(|dt| dt.format("%Y-%m-%d").to_string())
-                            .unwrap_or_else(|| format!("{days}d"));
-                        notify_setting_change(
-                            st,
-                            format!(
-                                "{} turned OFF for {days} day(s) (until {date})",
-                                feature.title()
-                            ),
-                        );
-                    }
-                    open_settings_menu(env, st, return_idx);
-                }
-                _ => {
-                    env.ui.set_transient_error(Some(
-                        "Enter a whole number of days between 1 and 3650".to_string(),
-                    ));
-                    st.modal = ActiveModal::InputModal {
-                        title: format!("Turn OFF {} for Days", feature.title()),
-                        prompt: "Invalid number. Enter days between 1 and 3650:".to_string(),
-                        value,
-                        secret: false,
-                        action: InputAction::FeatureDisableDays { feature },
-                    };
-                }
             }
         }
     }

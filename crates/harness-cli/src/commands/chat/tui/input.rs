@@ -1338,6 +1338,19 @@ async fn handle_modal_key(
                         action,
                     };
                 }
+                KeyCode::Char(' ') => {
+                    if matches!(action, super::state::SelectAction::SettingsMain) {
+                        let choice = selected.min(items.len().saturating_sub(1));
+                        super::actions::toggle_settings_main_item(env, st, choice).await;
+                    } else {
+                        st.modal = ActiveModal::SelectModal {
+                            title,
+                            items,
+                            selected,
+                            action,
+                        };
+                    }
+                }
                 KeyCode::Enter => {
                     let choice = selected.min(items.len().saturating_sub(1));
                     super::actions::run_select_action(env, st, action, choice).await;

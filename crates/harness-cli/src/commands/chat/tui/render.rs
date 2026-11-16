@@ -3149,12 +3149,17 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             title,
             items,
             selected,
-            ..
+            action,
         } => {
             let w = screen.width.saturating_sub(6).clamp(46, 76);
             let h = screen.height.saturating_sub(4).clamp(8, 20);
             let rect = centered_rect(screen, w, h);
-            let inner = draw_modal_frame(frame, rect, title, "↑/↓ · enter · esc");
+            let hint = if matches!(action, super::state::SelectAction::SettingsMain) {
+                "↑/↓ · space toggle · enter · esc"
+            } else {
+                "↑/↓ · enter · esc"
+            };
+            let inner = draw_modal_frame(frame, rect, title, hint);
             let list_h = inner.height as usize;
             let sel = (*selected).min(items.len().saturating_sub(1));
             let scroll = sel.saturating_sub(list_h.saturating_sub(1));

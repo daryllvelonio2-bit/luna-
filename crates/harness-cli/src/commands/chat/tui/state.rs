@@ -46,12 +46,6 @@ pub enum ModelTarget {
 pub enum SelectAction {
     SettingsMain,
     SettingsBlockLimit,
-    SettingsCollapse,
-    SettingsThinking,
-    SettingsFeature {
-        feature: super::super::commands::Feature,
-    },
-    SettingsMemoryMode,
     DirScope {
         path: String,
     },
@@ -135,9 +129,6 @@ pub enum InputAction {
         name: String,
     },
     MemoryCustomProject,
-    FeatureDisableDays {
-        feature: super::super::commands::Feature,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
