@@ -587,8 +587,12 @@ impl Tool for SkillsListTool {
         _args: &serde_json::Value,
         _cancel_token: &CancellationToken,
     ) -> Result<ToolResult, HarnessError> {
+        let install_hint = "To install a skill from GitHub or the web, run `luna skill install <source>` via terminal (accepts `owner/repo[@ref]`, GitHub repo/tree/blob URL, or raw `SKILL.md` URL; use `web_search` first if you only have a skill name).";
         if self.skills.is_empty() {
-            return Ok(ToolResult::success(call_id, "No skills available."));
+            return Ok(ToolResult::success(
+                call_id,
+                format!("No skills available.\n\n{install_hint}"),
+            ));
         }
 
         let lines: Vec<String> = self
@@ -600,8 +604,9 @@ impl Tool for SkillsListTool {
         Ok(ToolResult::success(
             call_id,
             format!(
-                "Available skills (load with skill_view):\n{}",
-                lines.join("\n")
+                "Available skills (load with skill_view):\n{}\n\n{}",
+                lines.join("\n"),
+                install_hint
             ),
         ))
     }
@@ -710,6 +715,7 @@ Test instructions
         assert!(list_res
             .content
             .contains("security: Security review checklist"));
+        assert!(list_res.content.contains("luna skill install"));
 
         let view_tool = SkillViewTool::new(skills);
         let view_res = view_tool

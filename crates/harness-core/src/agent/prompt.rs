@@ -38,7 +38,7 @@ where
         // procedure only enters the context when `skill_view` loads it. The instruction is what
         // makes that discovery reliable — without it the model has no reason to look.
         let skills_protocol = if self.config.skills_enabled {
-            "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions. Load companion reference files directly with `skill_view(name, path)` or `skill_view(\"skill/path\")`."
+            "- Skills: if `skills_list` is available, call it before starting a task that could match an installed skill; when one matches, load it with `skill_view(name)` and follow its instructions. Load companion reference files directly with `skill_view(name, path)` or `skill_view(\"skill/path\")`.\n  To install a skill from GitHub or the web, run `luna skill install <source>` via `terminal` (accepts `owner/repo[@ref]`, a GitHub repo/tree/blob URL, or a raw `SKILL.md` URL; use `--skill <name>` to pick specific skills and `--force` to overwrite). If given only a skill name, use `web_search` first to find its GitHub repository or URL. Never clone or download skills manually into `/tmp` or `~/.config/luna/skills`; `luna skill install` validates and installs directly into the configured skills directory (`luna skill list` shows installed paths)."
         } else {
             ""
         };
