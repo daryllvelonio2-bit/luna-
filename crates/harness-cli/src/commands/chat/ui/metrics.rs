@@ -1,7 +1,7 @@
 use super::super::render::reasoning_rows;
 use super::consts::MIN_LIVE_REASONING_ROWS;
 use super::panels::LiveRegion;
-use super::tail::TOOL_TAIL_BUFFER_LINES;
+use super::tail::{TOOL_TAIL_BUFFER_LINES, TOOL_TAIL_LINES};
 use super::terminal::get_terminal_height;
 
 pub fn visible_width(s: &str) -> usize {
@@ -20,10 +20,8 @@ pub fn visible_width(s: &str) -> usize {
 pub(super) fn tool_tail_limit(live: &LiveRegion) -> usize {
     if live.tool_output_expanded {
         TOOL_TAIL_BUFFER_LINES
-    } else if let Some(limit) = live.block_limit {
-        limit
     } else {
-        TOOL_TAIL_BUFFER_LINES
+        TOOL_TAIL_LINES
     }
 }
 
@@ -37,9 +35,13 @@ pub(super) fn reasoning_window(live: &LiveRegion, width: usize, chrome: usize) -
     let reserved = usize::from(live.activity.is_some())
         + usize::from(live.compaction.is_some())
         + live.tool_output.rows(width, tool_tail_limit(live)).len();
-    let budget = height
+    let height_budget = height
         .saturating_sub(chrome + reserved + 1)
         .max(MIN_LIVE_REASONING_ROWS);
+    let budget = match live.block_limit {
+        Some(limit) => height_budget.min(limit),
+        None => height_budget,
+    };
     let start = all.len().saturating_sub(budget);
     all[start..].to_vec()
 }

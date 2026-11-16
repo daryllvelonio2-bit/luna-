@@ -157,7 +157,7 @@ impl ChatUi {
         self.animate_tick();
         expanded
     }
-    /// Update the display block limit for running tool tails and execution blocks.
+    /// Update the display block limit for thinking blocks.
     pub fn set_display_block_limit(&self, limit: Option<usize>) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         live.block_limit = limit;

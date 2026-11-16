@@ -1631,6 +1631,7 @@ fn render_single_settled_turn(
     turn: &super::super::render::TurnRecord,
     meta: Option<&TurnMeta>,
     process_expanded: bool,
+    block_limit: Option<usize>,
     expanded_thinking: &std::collections::HashSet<(usize, usize)>,
     expanded_tools: &std::collections::HashSet<(usize, usize)>,
     fallback_mode: &str,
@@ -1656,6 +1657,7 @@ fn render_single_settled_turn(
         idx,
         turn,
         process_expanded,
+        block_limit,
         expanded_thinking,
         expanded_tools,
         width,
@@ -1730,6 +1732,7 @@ fn ensure_settled_transcript(
         && st.settled_cache.width == width
         && st.settled_cache.card_inner_w == card_inner_w
         && st.settled_cache.process_expanded == st.process_expanded
+        && st.settled_cache.block_limit == st.block_limit
         && st.settled_cache.expanded_thinking == st.expanded_thinking
         && st.settled_cache.expanded_tools == st.expanded_tools;
 
@@ -1744,6 +1747,7 @@ fn ensure_settled_transcript(
         st.settled_cache.width = width;
         st.settled_cache.card_inner_w = card_inner_w;
         st.settled_cache.process_expanded = st.process_expanded;
+        st.settled_cache.block_limit = st.block_limit;
         st.settled_cache.expanded_thinking = st.expanded_thinking.clone();
         st.settled_cache.expanded_tools = st.expanded_tools.clone();
         st.settled_cache.lines.clear();
@@ -1765,6 +1769,7 @@ fn ensure_settled_transcript(
             turn,
             meta.as_ref(),
             st.process_expanded,
+            st.block_limit,
             &st.expanded_thinking,
             &st.expanded_tools,
             &fallback_mode,
@@ -1825,6 +1830,7 @@ fn build_active_and_notice_lines(
             info.in_flight_tools,
             st.process_expanded,
             st.auto_hide_thinking,
+            st.block_limit,
             &st.expanded_live_thinking,
             &st.expanded_live_tools,
             st.live_thinking_view,
@@ -1847,6 +1853,7 @@ fn render_completed_turn_process(
     turn_idx: usize,
     turn: &super::super::render::TurnRecord,
     process_expanded: bool,
+    block_limit: Option<usize>,
     expanded_thinking: &std::collections::HashSet<(usize, usize)>,
     expanded_tools: &std::collections::HashSet<(usize, usize)>,
     width: usize,
@@ -1857,13 +1864,20 @@ fn render_completed_turn_process(
     if let Some(ref reasoning) = turn.reasoning {
         let trimmed = reasoning.trim();
         if !trimmed.is_empty() {
-            let open = process_expanded || expanded_thinking.contains(&(turn_idx, thinking_idx));
+            let explicitly_expanded = expanded_thinking.contains(&(turn_idx, thinking_idx));
+            let open = process_expanded || explicitly_expanded;
+            let thinking_limit = if explicitly_expanded {
+                None
+            } else {
+                block_limit
+            };
             push_settled_thinking_block(
                 out,
                 hit_targets,
                 trimmed,
                 None,
                 open,
+                thinking_limit,
                 TranscriptClickTarget::ToggleTurnThinking(turn_idx, thinking_idx),
                 card_inner_w,
             );
@@ -1875,14 +1889,20 @@ fn render_completed_turn_process(
         if item.is_thinking() {
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
-                let open =
-                    process_expanded || expanded_thinking.contains(&(turn_idx, thinking_idx));
+                let explicitly_expanded = expanded_thinking.contains(&(turn_idx, thinking_idx));
+                let open = process_expanded || explicitly_expanded;
+                let thinking_limit = if explicitly_expanded {
+                    None
+                } else {
+                    block_limit
+                };
                 push_settled_thinking_block(
                     out,
                     hit_targets,
                     trimmed,
                     item.duration_secs,
                     open,
+                    thinking_limit,
                     TranscriptClickTarget::ToggleTurnThinking(turn_idx, thinking_idx),
                     card_inner_w,
                 );
@@ -1935,6 +1955,7 @@ fn render_active_turn_process(
     in_flight_tools: &[super::super::render::TurnProcessItem],
     process_expanded: bool,
     auto_hide_thinking: bool,
+    block_limit: Option<usize>,
     collapsed_live_thinking: &std::collections::HashSet<usize>,
     expanded_live_tools: &std::collections::HashSet<usize>,
     live_thinking_view: LiveThinkingView,
@@ -1969,6 +1990,7 @@ fn render_active_turn_process(
                     trimmed,
                     item.duration_secs,
                     open,
+                    block_limit,
                     TranscriptClickTarget::ToggleLiveThinkingStep(step_idx),
                     card_inner_w,
                 );
@@ -2094,8 +2116,10 @@ fn render_active_turn_process(
                 }
                 let skip = if view_mode == LiveThinkingView::Expanded {
                     0
+                } else if let Some(limit) = block_limit {
+                    live_reasoning_cache.lines.len().saturating_sub(limit)
                 } else {
-                    live_reasoning_cache.lines.len().saturating_sub(10)
+                    0
                 };
                 for rline in live_reasoning_cache.lines.iter().skip(skip) {
                     let mut spans = vec![Span::styled(
@@ -2116,12 +2140,18 @@ fn render_active_turn_process(
             out.push(Line::default());
         } else {
             let open = view_mode != LiveThinkingView::Collapsed;
+            let thinking_limit = if view_mode == LiveThinkingView::Expanded {
+                None
+            } else {
+                block_limit
+            };
             push_settled_thinking_block(
                 out,
                 hit_targets,
                 trimmed,
                 snap.reasoning_secs,
                 open,
+                thinking_limit,
                 TranscriptClickTarget::ToggleLiveThinking,
                 card_inner_w,
             );
@@ -2159,12 +2189,14 @@ fn render_active_turn_process(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_settled_thinking_block(
     out: &mut Vec<Line<'static>>,
     hit_targets: &mut Vec<(usize, TranscriptClickTarget)>,
     trimmed: &str,
     duration_secs: Option<f32>,
     open: bool,
+    block_limit: Option<usize>,
     click_target: TranscriptClickTarget,
     card_inner_w: usize,
 ) {
@@ -2185,7 +2217,13 @@ fn push_settled_thinking_block(
             Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
         )));
         hit_targets.push((spacer_idx, click_target.clone()));
-        for rline in render_markdown(trimmed, card_inner_w.saturating_sub(2)) {
+        let rendered = render_markdown(trimmed, card_inner_w.saturating_sub(2));
+        let total = rendered.len();
+        let show = match block_limit {
+            Some(limit) => total.min(limit),
+            None => total,
+        };
+        for rline in rendered.into_iter().take(show) {
             let mut spans = vec![Span::styled(
                 "  │ ",
                 Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
@@ -2198,6 +2236,18 @@ fn push_settled_thinking_block(
             }
             let row_idx = out.len();
             out.push(Line::from(spans));
+            hit_targets.push((row_idx, click_target.clone()));
+        }
+        let hidden = total.saturating_sub(show);
+        if hidden > 0 {
+            let row_idx = out.len();
+            out.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+                Span::styled(
+                    format!("… ({hidden} more lines)"),
+                    Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+                ),
+            ]));
             hit_targets.push((row_idx, click_target.clone()));
         }
         out.push(Line::default());
@@ -4440,6 +4490,7 @@ mod tests {
             &in_flight,
             false,
             false,
+            None,
             &collapsed_steps,
             &expanded_tools,
             LiveThinkingView::Tail,
@@ -4530,6 +4581,7 @@ mod tests {
                 &in_flight,
                 false,
                 auto_hide,
+                None,
                 &HashSet::new(),
                 &HashSet::new(),
                 LiveThinkingView::Tail,
@@ -4657,6 +4709,7 @@ mod tests {
             "one line of reasoning",
             Some(1.2),
             false,
+            None,
             TranscriptClickTarget::JumpToLatest,
             80,
         );
@@ -4687,8 +4740,8 @@ mod tests {
         let mut hits = Vec::new();
         let empty_set = std::collections::HashSet::new();
         render_single_settled_turn(
-            &mut out, &mut hits, 0, &turn, None, false, &empty_set, &empty_set, "Build", "gpt-4o",
-            80, 76,
+            &mut out, &mut hits, 0, &turn, None, false, None, &empty_set, &empty_set, "Build",
+            "gpt-4o", 80, 76,
         );
         let text: Vec<String> = out.iter().map(line_text).collect();
         let all_text = text.join("\n");
@@ -4757,6 +4810,7 @@ mod tests {
             0,
             &turn,
             false,
+            None,
             &expanded_thinking,
             &expanded_tools,
             84,
@@ -4813,16 +4867,140 @@ mod tests {
         let mut hits = Vec::new();
         let empty = HashSet::new();
 
-        render_completed_turn_process(&mut out, &mut hits, 0, &turn, false, &empty, &empty, 84, 80);
+        render_completed_turn_process(
+            &mut out, &mut hits, 0, &turn, false, None, &empty, &empty, 84, 80,
+        );
         let collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(collapsed.contains("▸ Thought (1 line)"), "{collapsed}");
         assert!(!collapsed.contains("hidden thought body"), "{collapsed}");
 
         out.clear();
         hits.clear();
-        render_completed_turn_process(&mut out, &mut hits, 0, &turn, true, &empty, &empty, 84, 80);
+        render_completed_turn_process(
+            &mut out, &mut hits, 0, &turn, true, None, &empty, &empty, 84, 80,
+        );
         let expanded = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(expanded.contains("hidden thought body"), "{expanded}");
+    }
+
+    #[test]
+    fn block_limit_caps_thinking_blocks_while_tool_cards_stay_capped_at_ten() {
+        let long_thought = (1..=15)
+            .map(|i| format!("thought line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let long_read = (1..=20)
+            .map(|i| format!("file line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let turn = TurnRecord {
+            user_query: "inspect".to_string(),
+            reasoning: Some(long_thought.clone()),
+            tools: Vec::new(),
+            tool_items: vec![TurnProcessItem {
+                tool_name: "read_file".to_string(),
+                call_formatted: "read_file(path: \"src/lib.rs\")".to_string(),
+                result_formatted: "✔ ok".to_string(),
+                diff_lines: Vec::new(),
+                output: long_read,
+                output_dropped: 0,
+                arguments: Some(serde_json::json!({ "path": "src/lib.rs" })),
+                duration_secs: None,
+                is_error: false,
+            }],
+            duration: Duration::from_secs(2),
+            reply: "Done.".to_string(),
+        };
+
+        let empty = HashSet::new();
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        // With block_limit = Some(3) and process_expanded = true (auto-collapse off):
+        // thinking is capped at 3 lines, while the collapsed tool card stays capped at 10 lines.
+        render_completed_turn_process(
+            &mut out,
+            &mut hits,
+            0,
+            &turn,
+            true,
+            Some(3),
+            &empty,
+            &empty,
+            84,
+            80,
+        );
+        let capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(capped.contains("thought line 1"), "{capped}");
+        assert!(!capped.contains("thought line 15"), "{capped}");
+        assert!(capped.contains("more lines)"), "{capped}");
+
+        // Even with block_limit = None (uncapped), a collapsed tool card is still capped at 10 lines.
+        out.clear();
+        hits.clear();
+        render_completed_turn_process(
+            &mut out, &mut hits, 0, &turn, false, None, &empty, &empty, 84, 80,
+        );
+        let tool_capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(tool_capped.contains("file line 10"), "{tool_capped}");
+        assert!(!tool_capped.contains("file line 11"), "{tool_capped}");
+        assert!(tool_capped.contains("(10 more lines)"), "{tool_capped}");
+
+        // Live streaming thinking: uncapped (`None`) shows all 15 lines, `Some(4)` shows newest 4.
+        let snap = TuiLiveSnapshot {
+            reasoning: long_thought,
+            reasoning_secs: Some(1.5),
+            ..Default::default()
+        };
+        let mut c_cache = super::super::state::LiveContentCache::default();
+        let mut r_cache = super::super::state::LiveReasoningCache::default();
+        let empty_live: HashSet<usize> = HashSet::new();
+        out.clear();
+        render_active_turn_process(
+            &mut out,
+            &mut hits,
+            &mut c_cache,
+            &mut r_cache,
+            &snap,
+            &[],
+            false,
+            false,
+            None,
+            &empty_live,
+            &empty_live,
+            LiveThinkingView::Tail,
+            0,
+            1.5,
+            84,
+            80,
+            false,
+        );
+        let live_uncapped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(live_uncapped.contains("thought line 1"), "{live_uncapped}");
+        assert!(live_uncapped.contains("thought line 15"), "{live_uncapped}");
+
+        out.clear();
+        render_active_turn_process(
+            &mut out,
+            &mut hits,
+            &mut c_cache,
+            &mut r_cache,
+            &snap,
+            &[],
+            false,
+            false,
+            Some(4),
+            &empty_live,
+            &empty_live,
+            LiveThinkingView::Tail,
+            0,
+            1.5,
+            84,
+            80,
+            false,
+        );
+        let live_capped = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(!live_capped.contains("thought line 1\n"), "{live_capped}");
+        assert!(live_capped.contains("thought line 15"), "{live_capped}");
     }
 
     #[test]
@@ -4858,6 +5036,7 @@ mod tests {
             system_notices: Vec::new(),
             process_expanded: false,
             auto_hide_thinking: true,
+            block_limit: None,
             expanded_thinking: HashSet::new(),
             expanded_tools: HashSet::new(),
             expanded_live_thinking: HashSet::new(),
@@ -5469,6 +5648,7 @@ mod tests {
             system_notices: Vec::new(),
             process_expanded: false,
             auto_hide_thinking: true,
+            block_limit: None,
             expanded_thinking: HashSet::new(),
             expanded_tools: HashSet::new(),
             expanded_live_thinking: HashSet::new(),

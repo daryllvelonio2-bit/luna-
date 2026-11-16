@@ -53,6 +53,7 @@ struct ObserverState {
     interruptions: Arc<Mutex<Vec<turn::InterruptNotice>>>,
     todo_scope: harness_core::tools::TodoScope,
     compacting: Arc<AtomicBool>,
+    #[allow(dead_code)]
     display_settings: Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
 }
 
@@ -256,12 +257,9 @@ impl ObserverState {
             return;
         }
         self.ui.emit_above(&line);
-        let block_limit = self
-            .display_settings
-            .read()
-            .ok()
-            .and_then(|s| s.block_limit);
-        let live_output = format_live_tool_output(Some(&name), is_error, &output, block_limit);
+        // Tool/diff output is always capped at 10 lines by default (expandable for detail);
+        // `display.block_limit` controls thinking blocks instead.
+        let live_output = format_live_tool_output(Some(&name), is_error, &output, Some(10));
         for out_line in live_output {
             self.ui.emit_above(&out_line);
         }

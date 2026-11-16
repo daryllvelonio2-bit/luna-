@@ -1017,8 +1017,8 @@ impl Default for SessionSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DisplaySettings {
-    /// Limit on lines displayed per execution block while in progress.
-    /// `None` means uncapped (display everything). `Some(1..=10)` caps output.
+    /// Limit on lines displayed in thinking blocks.
+    /// `None` means uncapped (display everything). `Some(1..=10)` caps thinking output.
     pub block_limit: Option<usize>,
     /// Whether process blocks collapse when a turn completes. Defaults to true.
     pub auto_collapse: bool,

@@ -150,8 +150,9 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         if needs_redraw {
             let t_draw = std::time::Instant::now();
             // Render current frame (never await env.agent.lock() here — the running turn holds it!).
-            // Keep the thinking auto-collapse toggle in step with `/settings` changes.
+            // Keep the thinking display settings in step with `/settings` changes.
             st.auto_hide_thinking = env.config.display.auto_hide_thinking;
+            st.block_limit = env.config.display.block_limit;
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
             snap = env.ui.tui_snapshot(w);
             let reasoning_effort = st.reasoning_effort;
@@ -622,6 +623,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         system_notices: Vec::new(),
         process_expanded: !env.config.display.auto_collapse,
         auto_hide_thinking: env.config.display.auto_hide_thinking,
+        block_limit: env.config.display.block_limit,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),
         expanded_live_thinking: HashSet::new(),

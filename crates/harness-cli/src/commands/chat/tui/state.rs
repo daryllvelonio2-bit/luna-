@@ -861,6 +861,7 @@ pub struct SettledTranscriptCache {
     pub card_inner_w: usize,
     pub turns_len: usize,
     pub process_expanded: bool,
+    pub block_limit: Option<usize>,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
     pub lines: Vec<Line<'static>>,
@@ -1325,6 +1326,8 @@ pub struct TuiState {
     /// Collapse a thinking block as soon as the next tool call starts (mirrors
     /// `display.auto_hide_thinking`; the settings modal keeps it in sync).
     pub auto_hide_thinking: bool,
+    /// Line limit for thinking blocks (`None` = uncapped, `Some(1..=10)`).
+    pub block_limit: Option<usize>,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
     pub expanded_live_thinking: HashSet<usize>,
