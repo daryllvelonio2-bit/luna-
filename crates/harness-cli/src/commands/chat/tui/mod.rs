@@ -620,7 +620,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         turns,
         turn_meta,
         system_notices: Vec::new(),
-        process_expanded: false,
+        process_expanded: !env.config.display.auto_collapse,
         auto_hide_thinking: env.config.display.auto_hide_thinking,
         expanded_thinking: HashSet::new(),
         expanded_tools: HashSet::new(),

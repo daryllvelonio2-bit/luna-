@@ -1276,6 +1276,8 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
             {
                 env.ui
                     .set_transient_error(Some(format!("Settings failed: {error}")));
+            } else {
+                set_all_process_expanded(st, !env.config.display.auto_collapse);
             }
             open_settings_menu(env, st, 1);
         }

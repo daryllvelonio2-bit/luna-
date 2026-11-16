@@ -1847,7 +1847,7 @@ fn render_completed_turn_process(
     turn_idx: usize,
     turn: &super::super::render::TurnRecord,
     process_expanded: bool,
-    collapsed_thinking: &std::collections::HashSet<(usize, usize)>,
+    expanded_thinking: &std::collections::HashSet<(usize, usize)>,
     expanded_tools: &std::collections::HashSet<(usize, usize)>,
     width: usize,
     card_inner_w: usize,
@@ -1857,7 +1857,7 @@ fn render_completed_turn_process(
     if let Some(ref reasoning) = turn.reasoning {
         let trimmed = reasoning.trim();
         if !trimmed.is_empty() {
-            let open = process_expanded || !collapsed_thinking.contains(&(turn_idx, thinking_idx));
+            let open = process_expanded || expanded_thinking.contains(&(turn_idx, thinking_idx));
             push_settled_thinking_block(
                 out,
                 hit_targets,
@@ -1876,7 +1876,7 @@ fn render_completed_turn_process(
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 let open =
-                    process_expanded || !collapsed_thinking.contains(&(turn_idx, thinking_idx));
+                    process_expanded || expanded_thinking.contains(&(turn_idx, thinking_idx));
                 push_settled_thinking_block(
                     out,
                     hit_targets,
@@ -4746,8 +4746,9 @@ mod tests {
 
         let mut out = Vec::new();
         let mut hits = Vec::new();
-        let mut collapsed_thinking = HashSet::new();
-        collapsed_thinking.insert((0, 0));
+        let mut expanded_thinking = HashSet::new();
+        expanded_thinking.insert((0, 1));
+        expanded_thinking.insert((0, 2));
         let expanded_tools = HashSet::new();
 
         render_completed_turn_process(
@@ -4756,7 +4757,7 @@ mod tests {
             0,
             &turn,
             false,
-            &collapsed_thinking,
+            &expanded_thinking,
             &expanded_tools,
             84,
             80,
@@ -4796,6 +4797,32 @@ mod tests {
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleTurnThinking(0, 2))));
+    }
+
+    #[test]
+    fn completed_turn_thinking_collapses_when_process_collapsed() {
+        let turn = TurnRecord {
+            user_query: "hi luna".to_string(),
+            reasoning: Some("hidden thought body".to_string()),
+            tools: Vec::new(),
+            tool_items: Vec::new(),
+            duration: Duration::from_secs(2),
+            reply: "Hello.".to_string(),
+        };
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        let empty = HashSet::new();
+
+        render_completed_turn_process(&mut out, &mut hits, 0, &turn, false, &empty, &empty, 84, 80);
+        let collapsed = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(collapsed.contains("▸ Thought (1 line)"), "{collapsed}");
+        assert!(!collapsed.contains("hidden thought body"), "{collapsed}");
+
+        out.clear();
+        hits.clear();
+        render_completed_turn_process(&mut out, &mut hits, 0, &turn, true, &empty, &empty, 84, 80);
+        let expanded = out.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(expanded.contains("hidden thought body"), "{expanded}");
     }
 
     #[test]
