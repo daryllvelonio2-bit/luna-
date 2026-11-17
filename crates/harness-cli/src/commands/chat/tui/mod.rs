@@ -431,6 +431,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                         env.current_provider.clone(),
                         env.current_model.clone(),
                         env.cred_manager.clone(),
+                        Some(env.session_id.clone()),
                     ));
                 }
                 // Background job auto-resume + idle memory pass
@@ -656,6 +657,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         env.current_provider.as_str(),
         env.current_model.as_str(),
         &env.cred_manager,
+        Some(env.session_id.as_str()),
     )
     .await;
 

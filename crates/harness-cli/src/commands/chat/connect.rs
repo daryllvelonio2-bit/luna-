@@ -59,6 +59,7 @@ pub(crate) async fn handle_connect_command(
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
+    session_id: Option<&str>,
 ) -> Result<(), HarnessError> {
     // The chat's own keys are read from this channel, so anything already queued belongs to the
     // command line the user just typed, not to this menu.
@@ -75,7 +76,7 @@ pub(crate) async fn handle_connect_command(
         let outcome = match action {
             ConnectAction::AddKey => add_key(key_rx, ui, cred_manager).await,
             ConnectAction::ListKeys => list_keys(ui, cred_manager).await,
-            ConnectAction::SetPriority => set_priority(key_rx, ui, cred_manager).await,
+            ConnectAction::SetPriority => set_priority(key_rx, ui, cred_manager, session_id).await,
             ConnectAction::RemoveKey => remove_key(key_rx, ui, cred_manager).await,
             ConnectAction::ImportAntigravity => import_antigravity(ui, cred_manager).await,
             ConnectAction::ImportOpencode => import_opencode(ui, cred_manager).await,
@@ -499,6 +500,7 @@ async fn set_priority(
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
     cred_manager: &Arc<CredentialManager>,
+    session_id: Option<&str>,
 ) -> Result<(), HarnessError> {
     let mut connected: Vec<String> = Vec::new();
     for provider in get_provider_catalog() {
@@ -583,12 +585,50 @@ async fn set_priority(
     };
 
     let target = &creds[cred_index];
-    let updated = cred_manager
-        .set_priority_credential(&provider, &target.id)
-        .await?;
 
-    if updated {
-        // Ensure strategy is FillFirst or Never so the priority credential is used
+    let is_session = if let Some(sid) = session_id {
+        let has_override = cred_manager
+            .get_session_priority_credential(sid, &provider)
+            .is_some();
+        let mut scope_items = vec![
+            "This session only".to_string(),
+            "Globally (default for all sessions)".to_string(),
+        ];
+        if has_override {
+            scope_items.push("Clear session priority (use global default)".to_string());
+        }
+        let Some(choice) = super::commands::select_from_rx(
+            key_rx,
+            ui,
+            &format!("Prioritize {} ({}) for", target.label, provider),
+            &scope_items,
+            0,
+            false,
+            false,
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        match choice {
+            0 => Some(true),
+            1 => Some(false),
+            _ => {
+                cred_manager.clear_session_priority_credential(sid, &provider);
+                ui.emit_above(&format!(
+                    "{} Cleared session priority override for {} (following global default)",
+                    "✔".green().bold(),
+                    provider.cyan()
+                ));
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
+    if let (Some(true), Some(sid)) = (is_session, session_id) {
+        cred_manager.set_session_priority_credential(sid, &provider, &target.id);
         let current_strat = cred_manager.get_rotation_strategy(&provider).await;
         if current_strat != RotationStrategy::FillFirst && current_strat != RotationStrategy::Never
         {
@@ -596,18 +636,42 @@ async fn set_priority(
                 .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
                 .await;
         }
-
         ui.emit_above(&format!(
-            "{} Credential '{}' set as priority for {}",
+            "{} Credential '{}' set as priority for this session ({})",
             "✔".green().bold(),
             target.label.green(),
             provider.cyan()
         ));
     } else {
-        ui.emit_above(&format!(
-            "{} Failed to set priority credential",
-            "✖".red().bold()
-        ));
+        if let Some(sid) = session_id {
+            cred_manager.clear_session_priority_credential(sid, &provider);
+        }
+        let updated = cred_manager
+            .set_priority_credential(&provider, &target.id)
+            .await?;
+
+        if updated {
+            let current_strat = cred_manager.get_rotation_strategy(&provider).await;
+            if current_strat != RotationStrategy::FillFirst
+                && current_strat != RotationStrategy::Never
+            {
+                let _ = cred_manager
+                    .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
+                    .await;
+            }
+
+            ui.emit_above(&format!(
+                "{} Credential '{}' set as priority globally for {}",
+                "✔".green().bold(),
+                target.label.green(),
+                provider.cyan()
+            ));
+        } else {
+            ui.emit_above(&format!(
+                "{} Failed to set priority credential",
+                "✖".red().bold()
+            ));
+        }
     }
     Ok(())
 }

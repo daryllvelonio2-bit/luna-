@@ -104,6 +104,7 @@ struct SessionSetup {
     record_compact_model: Option<(String, String)>,
     compact_provider: Option<String>,
     compact_model: Option<String>,
+    record_credential_priorities: std::collections::HashMap<String, String>,
 }
 
 struct ProviderSetup {
@@ -226,6 +227,7 @@ async fn prepare_session(
         record_compact_model: record.compact_model,
         compact_provider,
         compact_model,
+        record_credential_priorities: record.credential_priorities,
     })
 }
 
@@ -235,13 +237,20 @@ fn build_provider_setup(
     discovery: &Arc<ModelDiscovery>,
     session: &SessionSetup,
 ) -> Result<ProviderSetup, HarnessError> {
-    let provider = Arc::new(GenericProviderClient::new(
-        session.current_provider.clone(),
-        session.current_model.clone(),
-        cred_manager.clone(),
-        discovery.clone(),
-        config.providers.get(&session.current_provider),
-    )?);
+    for (prov, cred_id) in &session.record_credential_priorities {
+        cred_manager.set_session_priority_credential(&session.session_id, prov, cred_id);
+    }
+
+    let provider = Arc::new(
+        GenericProviderClient::new(
+            session.current_provider.clone(),
+            session.current_model.clone(),
+            cred_manager.clone(),
+            discovery.clone(),
+            config.providers.get(&session.current_provider),
+        )?
+        .with_session_id(&session.session_id),
+    );
 
     // Compaction model: priority is session-specific override -> config setting -> active model
     let (compaction_provider_id, compaction_model) = match &session.record_compact_model {
@@ -270,7 +279,8 @@ fn build_provider_setup(
         config.providers.get(&compaction_provider_id),
     ) {
         Ok(client) => {
-            let compaction_provider: Arc<dyn ModelProvider> = Arc::new(client);
+            let compaction_provider: Arc<dyn ModelProvider> =
+                Arc::new(client.with_session_id(&session.session_id));
             Some(harness_core::CompactionSetup {
                 provider: compaction_provider,
                 model: compaction_model,

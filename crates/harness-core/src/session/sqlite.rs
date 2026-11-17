@@ -32,13 +32,14 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id            TEXT PRIMARY KEY,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    title         TEXT NOT NULL DEFAULT '',
-    name          TEXT NOT NULL DEFAULT '',
-    model         TEXT NOT NULL DEFAULT '',
-    compact_model TEXT NOT NULL DEFAULT ''
+    id                    TEXT PRIMARY KEY,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    title                 TEXT NOT NULL DEFAULT '',
+    name                  TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT '',
+    compact_model         TEXT NOT NULL DEFAULT '',
+    credential_priorities TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -164,6 +165,22 @@ impl SqliteSessionStore {
             )
             .map_err(|error| {
                 session_error("failed to add the session compact_model column", error)
+            })?;
+        }
+
+        let has_credential_priorities = columns
+            .iter()
+            .any(|column| column == "credential_priorities");
+        if !has_credential_priorities {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN credential_priorities TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| {
+                session_error(
+                    "failed to add the session credential_priorities column",
+                    error,
+                )
             })?;
         }
 
@@ -499,7 +516,8 @@ fn count_ordinary(conn: &Connection, session_id: &str) -> Result<usize, HarnessE
 }
 
 fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessError> {
-    let (created_at, updated_at, title, name, model, compact_model): (
+    let (created_at, updated_at, title, name, model, compact_model, credential_priorities): (
+        String,
         String,
         String,
         String,
@@ -508,7 +526,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
         String,
     ) = conn
         .query_row(
-            "SELECT created_at, updated_at, title, name, model, compact_model FROM sessions WHERE id = ?1",
+            "SELECT created_at, updated_at, title, name, model, compact_model, credential_priorities FROM sessions WHERE id = ?1",
             params![id],
             |row| {
                 Ok((
@@ -518,10 +536,14 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 ))
             },
         )
         .map_err(|error| session_error(&format!("session '{}' not found", id), error))?;
+
+    let parsed_priorities: std::collections::HashMap<String, String> =
+        serde_json::from_str(&credential_priorities).unwrap_or_default();
 
     Ok(SessionRecord {
         id: id.to_string(),
@@ -540,6 +562,7 @@ fn read_session(conn: &Connection, id: &str) -> Result<SessionRecord, HarnessErr
             .split_once(MODEL_FIELD_SEPARATOR)
             .filter(|(provider, m)| !provider.is_empty() && !m.is_empty())
             .map(|(provider, m)| (provider.to_string(), m.to_string())),
+        credential_priorities: parsed_priorities,
     })
 }
 
@@ -659,6 +682,100 @@ impl SessionStore for SqliteSessionStore {
                 )
                 .map_err(|error| {
                     session_error("failed to clear the session compact model", error)
+                })?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_credential_priority(
+        &self,
+        id: &str,
+        provider: &str,
+        credential_id: &str,
+    ) -> Result<(), HarnessError> {
+        let id = id.to_string();
+        let provider = provider.to_lowercase();
+        let credential_id = credential_id.to_string();
+        self.with_conn(move |conn| {
+            let current_raw: Option<String> = conn
+                .query_row(
+                    "SELECT credential_priorities FROM sessions WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    session_error("failed to query session credential priorities", error)
+                })?;
+
+            let mut map: std::collections::HashMap<String, String> = current_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default();
+            map.insert(provider, credential_id);
+            let serialized = serde_json::to_string(&map).unwrap_or_default();
+
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET credential_priorities = ?1 WHERE id = ?2",
+                    params![serialized, id],
+                )
+                .map_err(|error| {
+                    session_error("failed to update session credential priorities", error)
+                })?;
+            if updated == 0 {
+                return Err(HarnessError::SessionError(format!(
+                    "session '{}' not found",
+                    id
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn clear_credential_priority(
+        &self,
+        id: &str,
+        provider: &str,
+    ) -> Result<(), HarnessError> {
+        let id = id.to_string();
+        let provider = provider.to_lowercase();
+        self.with_conn(move |conn| {
+            let current_raw: Option<String> = conn
+                .query_row(
+                    "SELECT credential_priorities FROM sessions WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    session_error("failed to query session credential priorities", error)
+                })?;
+
+            let mut map: std::collections::HashMap<String, String> = current_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default();
+            map.remove(&provider);
+            let serialized = if map.is_empty() {
+                String::new()
+            } else {
+                serde_json::to_string(&map).unwrap_or_default()
+            };
+
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET credential_priorities = ?1 WHERE id = ?2",
+                    params![serialized, id],
+                )
+                .map_err(|error| {
+                    session_error("failed to clear session credential priority", error)
                 })?;
             if updated == 0 {
                 return Err(HarnessError::SessionError(format!(
@@ -967,9 +1084,9 @@ impl SessionStore for SqliteSessionStore {
         let source_id = source_id.to_string();
         let new_title = new_title.map(str::to_string);
         self.with_conn(move |conn| {
-            let (title, name, model, compact_model) = conn
+            let (title, name, model, compact_model, credential_priorities) = conn
                 .query_row(
-                    "SELECT title, name, model, compact_model FROM sessions WHERE id = ?1",
+                    "SELECT title, name, model, compact_model, credential_priorities FROM sessions WHERE id = ?1",
                     params![source_id],
                     |row| {
                         Ok((
@@ -977,6 +1094,7 @@ impl SessionStore for SqliteSessionStore {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                         ))
                     },
                 )
@@ -1002,9 +1120,9 @@ impl SessionStore for SqliteSessionStore {
 
             transaction
                 .execute(
-                    "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![new_id, now, now, forked_title, name, model, compact_model],
+                    "INSERT INTO sessions (id, created_at, updated_at, title, name, model, compact_model, credential_priorities)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![new_id, now, now, forked_title, name, model, compact_model, credential_priorities],
                 )
                 .map_err(|e| session_error("failed to create forked session record", e))?;
 

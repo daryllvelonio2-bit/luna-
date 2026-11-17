@@ -56,6 +56,8 @@ pub struct SessionRecord {
     /// The provider and model this session uses for compaction (`/compact-model`). `None`
     /// until a session-specific compaction model is set; defaults to global config or the active model.
     pub compact_model: Option<(String, String)>,
+    /// Provider -> credential_id map for session-specific priority credentials.
+    pub credential_priorities: std::collections::HashMap<String, String>,
 }
 
 /// A message as it is stored: the row id and sequence number matter, because compaction marks the
@@ -117,6 +119,18 @@ pub trait SessionStore: Send + Sync {
 
     /// Clear the custom compaction model for this session, reverting to global config or the active model.
     async fn clear_compact_model(&self, id: &str) -> Result<(), HarnessError>;
+
+    /// Record the priority credential for a provider in this session.
+    async fn set_credential_priority(
+        &self,
+        id: &str,
+        provider: &str,
+        credential_id: &str,
+    ) -> Result<(), HarnessError>;
+
+    /// Clear the priority credential for a provider in this session.
+    async fn clear_credential_priority(&self, id: &str, provider: &str)
+        -> Result<(), HarnessError>;
 
     /// Append one message, assigning the next `seq` and updating the session's `updated_at`.
     /// Returns the new row id.

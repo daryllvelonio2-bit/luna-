@@ -63,3 +63,67 @@ async fn test_luna_auth_rotation_strategies() {
     let n4 = manager.acquire_credential("openai").await.unwrap();
     assert_eq!(n4.expose_secret(), "sk-22222");
 }
+
+#[tokio::test]
+async fn test_session_scoped_priority_credentials() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cred_path = temp_dir.path().join("credentials.json");
+
+    let manager = CredentialManager::new(Some(cred_path)).unwrap();
+
+    manager
+        .add_credential("antigravity", "account-a", "token-aaa", true)
+        .await
+        .unwrap();
+    manager
+        .add_credential("antigravity", "account-b", "token-bbb", false)
+        .await
+        .unwrap();
+
+    manager
+        .set_rotation_strategy("antigravity", RotationStrategy::FillFirst)
+        .await
+        .unwrap();
+
+    // Default global priority is account-a
+    let global_key = manager.acquire_credential("antigravity").await.unwrap();
+    assert_eq!(global_key.expose_secret(), "token-aaa");
+
+    // Session 1 overrides to account-b
+    manager.set_session_priority_credential("session-1", "antigravity", "account-b");
+
+    let s1_key = manager
+        .acquire_credential_for_session("antigravity", "session-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        s1_key.expose_secret(),
+        "token-bbb",
+        "session-1 must acquire its session-scoped priority credential"
+    );
+
+    // Session 2 has no override, so it uses global priority account-a
+    let s2_key = manager
+        .acquire_credential_for_session("antigravity", "session-2")
+        .await
+        .unwrap();
+    assert_eq!(
+        s2_key.expose_secret(),
+        "token-aaa",
+        "session-2 must fall back to global priority"
+    );
+
+    // Clear session-1 override, now it uses global priority
+    let cleared = manager.clear_session_priority_credential("session-1", "antigravity");
+    assert!(cleared);
+
+    let s1_after_clear = manager
+        .acquire_credential_for_session("antigravity", "session-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        s1_after_clear.expose_secret(),
+        "token-aaa",
+        "session-1 must use global priority after clearing override"
+    );
+}

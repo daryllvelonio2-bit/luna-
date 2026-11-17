@@ -73,6 +73,7 @@ struct StoreLock;
 pub struct CredentialManager {
     storage_path: PathBuf,
     state: RwLock<LunaAuthStorage>,
+    session_priorities: std::sync::RwLock<HashMap<(String, String), String>>,
 }
 
 /// The indices of the credentials that have not been retired.
@@ -167,6 +168,7 @@ impl CredentialManager {
         Ok(Arc::new(Self {
             storage_path: path.clone(),
             state: RwLock::new(Self::load_from_disk(&path)?),
+            session_priorities: std::sync::RwLock::new(HashMap::new()),
         }))
     }
 
@@ -674,6 +676,49 @@ impl CredentialManager {
         Ok(found)
     }
 
+    /// Set a session-specific priority credential for a provider.
+    pub fn set_session_priority_credential(
+        &self,
+        session_id: &str,
+        provider: &str,
+        label_or_id: &str,
+    ) {
+        let mut priorities = self
+            .session_priorities
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        priorities.insert(
+            (session_id.to_string(), provider.to_lowercase()),
+            label_or_id.to_string(),
+        );
+    }
+
+    /// Retrieve the session-specific priority credential for a provider if configured.
+    pub fn get_session_priority_credential(
+        &self,
+        session_id: &str,
+        provider: &str,
+    ) -> Option<String> {
+        let priorities = self
+            .session_priorities
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        priorities
+            .get(&(session_id.to_string(), provider.to_lowercase()))
+            .cloned()
+    }
+
+    /// Clear the session-specific priority credential for a provider.
+    pub fn clear_session_priority_credential(&self, session_id: &str, provider: &str) -> bool {
+        let mut priorities = self
+            .session_priorities
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        priorities
+            .remove(&(session_id.to_string(), provider.to_lowercase()))
+            .is_some()
+    }
+
     /// Atomically updates a credential's secret (used for OAuth token rotation).
     pub async fn update_credential_key(
         &self,
@@ -726,7 +771,29 @@ impl CredentialManager {
     }
 
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
+        self.acquire_credential_inner(provider, None).await
+    }
+
+    /// Acquire the credential for a provider, prioritizing any session-specific priority credential.
+    pub async fn acquire_credential_for_session(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<SecretString, HarnessError> {
+        self.acquire_credential_inner(provider, Some(session_id))
+            .await
+    }
+
+    async fn acquire_credential_inner(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<SecretString, HarnessError> {
         let p_lower = provider.to_lowercase();
+        let session_override = match session_id {
+            Some(sid) => self.get_session_priority_credential(sid, &p_lower),
+            None => None,
+        };
         // The file is the source of truth: another process may have added, removed or promoted a
         // credential since this process last looked, and the key it hands out must be the one
         // the user last arranged. A stale in-memory view is how a deleted key kept coming back
@@ -761,7 +828,29 @@ impl CredentialManager {
             });
         }
 
-        let selected_index = select_credential_index(provider_state, &active_credentials);
+        let selected_index = if let Some(ref target) = session_override {
+            if let Some(pos) = active_credentials.iter().copied().find(|&i| {
+                let c = &provider_state.credentials[i];
+                &c.id == target || &c.label == target
+            }) {
+                pos
+            } else if provider_state.strategy == RotationStrategy::Never {
+                if let Some(idx) = provider_state
+                    .credentials
+                    .iter()
+                    .position(|c| &c.id == target || &c.label == target)
+                {
+                    provider_state.credentials[idx].is_temporarily_disabled = false;
+                    idx
+                } else {
+                    select_credential_index(provider_state, &active_credentials)
+                }
+            } else {
+                select_credential_index(provider_state, &active_credentials)
+            }
+        } else {
+            select_credential_index(provider_state, &active_credentials)
+        };
 
         let cred = &mut provider_state.credentials[selected_index];
         cred.usage_count += 1;

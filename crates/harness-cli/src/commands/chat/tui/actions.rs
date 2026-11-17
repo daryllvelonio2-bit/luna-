@@ -266,13 +266,16 @@ fn instantiate_session_runtime(
     model: &str,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<SessionRuntimeBundle, HarnessError> {
-    let client = Arc::new(GenericProviderClient::new(
-        provider.to_string(),
-        model.to_string(),
-        env.cred_manager.clone(),
-        env.discovery.clone(),
-        env.config.providers.get(provider),
-    )?);
+    let client = Arc::new(
+        GenericProviderClient::new(
+            provider.to_string(),
+            model.to_string(),
+            env.cred_manager.clone(),
+            env.discovery.clone(),
+            env.config.providers.get(provider),
+        )?
+        .with_session_id(session_id),
+    );
     let ctx_max = context_window(env.config, env.discovery.as_ref(), provider, model);
 
     let ui = Arc::new(ChatUi::new_with_tui_notify(
@@ -316,7 +319,7 @@ fn instantiate_session_runtime(
             env.config.providers.get(provider),
         ) {
             ag.set_compaction(Some(CompactionSetup {
-                provider: Arc::new(comp_client),
+                provider: Arc::new(comp_client.with_session_id(session_id)),
                 model: model.to_string(),
             }));
         }
@@ -388,6 +391,21 @@ pub async fn switch_to_session(
         park_current_session(env, st);
         restore_background_session(env, st, existing);
         sync_delegate_wiring(env).await;
+        let ui_bg = env.ui.clone();
+        let prov_bg = env.current_provider.clone();
+        let mod_bg = env.current_model.clone();
+        let cred_bg = env.cred_manager.clone();
+        let sid_bg = env.session_id.clone();
+        tokio::spawn(async move {
+            refresh_antigravity_status_if_needed(
+                &ui_bg,
+                &prov_bg,
+                &mod_bg,
+                &cred_bg,
+                Some(&sid_bg),
+            )
+            .await;
+        });
         if !st.tabs.iter().any(|t| t.id == *env.session_id) {
             refresh_tabs(env, st).await;
         }
@@ -395,6 +413,10 @@ pub async fn switch_to_session(
     }
 
     let record = env.store.get(target_id).await?;
+    for (prov, cred_id) in &record.credential_priorities {
+        env.cred_manager
+            .set_session_priority_credential(target_id, prov, cred_id);
+    }
     let (target_provider, target_model) = match record.model.clone() {
         Some((p, m)) if !p.is_empty() && !m.is_empty() => (p, m),
         _ => (env.current_provider.clone(), env.current_model.clone()),
@@ -493,8 +515,10 @@ pub async fn switch_to_session(
     let prov_bg = target_provider.clone();
     let mod_bg = target_model.clone();
     let cred_bg = env.cred_manager.clone();
+    let sid_bg = target_id.to_string();
     tokio::spawn(async move {
-        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg, Some(&sid_bg))
+            .await;
     });
 
     if !st.tabs.iter().any(|t| t.id == *env.session_id) {
@@ -576,8 +600,16 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
         let prov_bg = provider;
         let mod_bg = model;
         let cred_bg = env.cred_manager.clone();
+        let sid_bg = new_id.clone();
         tokio::spawn(async move {
-            refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+            refresh_antigravity_status_if_needed(
+                &ui_bg,
+                &prov_bg,
+                &mod_bg,
+                &cred_bg,
+                Some(&sid_bg),
+            )
+            .await;
         });
     }
     refresh_tabs(env, st).await;
@@ -988,8 +1020,10 @@ pub async fn apply_model_selection(
     let prov_bg = provider.to_string();
     let mod_bg = model.to_string();
     let cred_bg = env.cred_manager.clone();
+    let sid_bg = env.session_id.clone();
     tokio::spawn(async move {
-        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg, Some(&sid_bg))
+            .await;
     });
 
     if persist {
@@ -1808,18 +1842,30 @@ async fn open_connect_priority_credential(env: &Env<'_>, st: &mut TuiState, prov
         open_connect_menu(st);
         return;
     }
+    let session_override = env
+        .cred_manager
+        .get_session_priority_credential(env.session_id, &provider);
     let mut selected = 0;
     let ids: Vec<String> = creds.iter().map(|cred| cred.id.clone()).collect();
     let items: Vec<String> = creds
         .iter()
         .enumerate()
         .map(|(index, cred)| {
-            if cred.is_priority {
+            let is_session_prio = session_override.as_deref() == Some(&cred.id)
+                || session_override.as_deref() == Some(&cred.label);
+            if is_session_prio || (session_override.is_none() && cred.is_priority) {
                 selected = index;
             }
             let mut tags = Vec::new();
+            if is_session_prio {
+                tags.push("session priority");
+            }
             if cred.is_priority {
-                tags.push("current priority");
+                tags.push(if session_override.is_some() {
+                    "global priority"
+                } else {
+                    "current priority"
+                });
             }
             if cred.is_temporarily_disabled {
                 tags.push("cooldown");
@@ -2488,9 +2534,16 @@ pub async fn run_select_action(
                     let prov_bg = env.current_provider.clone();
                     let mod_bg = env.current_model.clone();
                     let cred_bg = env.cred_manager.clone();
+                    let sid_bg = env.session_id.clone();
                     tokio::spawn(async move {
-                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
-                            .await;
+                        refresh_antigravity_status_if_needed(
+                            &ui_bg,
+                            &prov_bg,
+                            &mod_bg,
+                            &cred_bg,
+                            Some(&sid_bg),
+                        )
+                        .await;
                     });
                 }
                 Ok(false) => env
@@ -2508,15 +2561,57 @@ pub async fn run_select_action(
             }
         }
         SelectAction::ConnectPriorityCredential { provider, ids } => {
-            let Some(id) = ids.get(choice) else {
+            let Some(id) = ids.get(choice).cloned() else {
                 return;
             };
-            match env
+            let creds = env.cred_manager.get_credentials(&provider).await;
+            let label = creds
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.label.clone())
+                .unwrap_or_else(|| id.clone());
+
+            let has_override = env
                 .cred_manager
-                .set_priority_credential(&provider, id)
-                .await
-            {
-                Ok(true) => {
+                .get_session_priority_credential(env.session_id, &provider)
+                .is_some();
+
+            let mut items = vec![
+                "This session only".to_string(),
+                "Globally (default for all sessions)".to_string(),
+            ];
+            if has_override {
+                items.push("Clear session priority (use global default)".to_string());
+            }
+
+            st.modal = ActiveModal::SelectModal {
+                title: format!("Prioritize {label} ({provider}) for"),
+                items,
+                selected: 0,
+                action: SelectAction::ConnectPriorityScope {
+                    provider,
+                    id,
+                    has_override,
+                },
+            };
+        }
+        SelectAction::ConnectPriorityScope {
+            provider,
+            id,
+            has_override,
+        } => {
+            match choice {
+                0 => {
+                    // This session only
+                    env.cred_manager.set_session_priority_credential(
+                        env.session_id,
+                        &provider,
+                        &id,
+                    );
+                    let _ = env
+                        .store
+                        .set_credential_priority(env.session_id, &provider, &id)
+                        .await;
                     let current = env.cred_manager.get_rotation_strategy(&provider).await;
                     if current != RotationStrategy::FillFirst && current != RotationStrategy::Never
                     {
@@ -2525,23 +2620,103 @@ pub async fn run_select_action(
                             .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
                             .await;
                     }
-                    env.ui
-                        .emit_above(&format!("✔ Priority credential set for {provider}"));
+                    env.ui.emit_above(&format!(
+                        "✔ Priority credential set for this session ({provider})"
+                    ));
                     let ui_bg = env.ui.clone();
                     let prov_bg = env.current_provider.clone();
                     let mod_bg = env.current_model.clone();
                     let cred_bg = env.cred_manager.clone();
+                    let sid_bg = env.session_id.clone();
                     tokio::spawn(async move {
-                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
-                            .await;
+                        refresh_antigravity_status_if_needed(
+                            &ui_bg,
+                            &prov_bg,
+                            &mod_bg,
+                            &cred_bg,
+                            Some(&sid_bg),
+                        )
+                        .await;
                     });
                 }
-                Ok(false) => env
-                    .ui
-                    .set_transient_error(Some("Failed to set priority credential".to_string())),
-                Err(error) => env
-                    .ui
-                    .set_transient_error(Some(format!("Priority failed: {error}"))),
+                1 => {
+                    // Globally (all sessions)
+                    match env
+                        .cred_manager
+                        .set_priority_credential(&provider, &id)
+                        .await
+                    {
+                        Ok(true) => {
+                            env.cred_manager
+                                .clear_session_priority_credential(env.session_id, &provider);
+                            let _ = env
+                                .store
+                                .clear_credential_priority(env.session_id, &provider)
+                                .await;
+                            let current = env.cred_manager.get_rotation_strategy(&provider).await;
+                            if current != RotationStrategy::FillFirst
+                                && current != RotationStrategy::Never
+                            {
+                                let _ = env
+                                    .cred_manager
+                                    .set_rotation_strategy(&provider, RotationStrategy::FillFirst)
+                                    .await;
+                            }
+                            env.ui.emit_above(&format!(
+                                "✔ Priority credential set globally for {provider}"
+                            ));
+                            let ui_bg = env.ui.clone();
+                            let prov_bg = env.current_provider.clone();
+                            let mod_bg = env.current_model.clone();
+                            let cred_bg = env.cred_manager.clone();
+                            let sid_bg = env.session_id.clone();
+                            tokio::spawn(async move {
+                                refresh_antigravity_status_if_needed(
+                                    &ui_bg,
+                                    &prov_bg,
+                                    &mod_bg,
+                                    &cred_bg,
+                                    Some(&sid_bg),
+                                )
+                                .await;
+                            });
+                        }
+                        Ok(false) => env.ui.set_transient_error(Some(
+                            "Failed to set priority credential".to_string(),
+                        )),
+                        Err(error) => env
+                            .ui
+                            .set_transient_error(Some(format!("Priority failed: {error}"))),
+                    }
+                }
+                2 if has_override => {
+                    // Clear session priority
+                    env.cred_manager
+                        .clear_session_priority_credential(env.session_id, &provider);
+                    let _ = env
+                        .store
+                        .clear_credential_priority(env.session_id, &provider)
+                        .await;
+                    env.ui.emit_above(&format!(
+                        "✔ Cleared session priority override for {provider} (following global default)"
+                    ));
+                    let ui_bg = env.ui.clone();
+                    let prov_bg = env.current_provider.clone();
+                    let mod_bg = env.current_model.clone();
+                    let cred_bg = env.cred_manager.clone();
+                    let sid_bg = env.session_id.clone();
+                    tokio::spawn(async move {
+                        refresh_antigravity_status_if_needed(
+                            &ui_bg,
+                            &prov_bg,
+                            &mod_bg,
+                            &cred_bg,
+                            Some(&sid_bg),
+                        )
+                        .await;
+                    });
+                }
+                _ => {}
             }
             open_connect_menu(st);
         }
@@ -2588,9 +2763,16 @@ pub async fn run_select_action(
                     let prov_bg = env.current_provider.clone();
                     let mod_bg = env.current_model.clone();
                     let cred_bg = env.cred_manager.clone();
+                    let sid_bg = env.session_id.clone();
                     tokio::spawn(async move {
-                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
-                            .await;
+                        refresh_antigravity_status_if_needed(
+                            &ui_bg,
+                            &prov_bg,
+                            &mod_bg,
+                            &cred_bg,
+                            Some(&sid_bg),
+                        )
+                        .await;
                     });
                 }
                 Err(error) => env
@@ -2679,8 +2861,10 @@ async fn finish_connect_action(
     let prov_bg = env.current_provider.clone();
     let mod_bg = env.current_model.clone();
     let cred_bg = env.cred_manager.clone();
+    let sid_bg = env.session_id.clone();
     tokio::spawn(async move {
-        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg, Some(&sid_bg))
+            .await;
     });
     open_connect_menu(st);
 }
@@ -2774,8 +2958,16 @@ pub async fn run_input_action(
             let prov_bg = env.current_provider.clone();
             let mod_bg = env.current_model.clone();
             let cred_bg = env.cred_manager.clone();
+            let sid_bg = env.session_id.clone();
             tokio::spawn(async move {
-                refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+                refresh_antigravity_status_if_needed(
+                    &ui_bg,
+                    &prov_bg,
+                    &mod_bg,
+                    &cred_bg,
+                    Some(&sid_bg),
+                )
+                .await;
             });
             st.provider_items = build_provider_items(
                 env.cred_manager.clone(),
@@ -4191,6 +4383,7 @@ pub async fn handle_turn_end(
         env.current_provider.clone(),
         env.current_model.clone(),
         env.cred_manager.clone(),
+        Some(env.session_id.clone()),
     ));
 
     // Any line the user submitted while the turn was finishing may still be held by the interrupt
@@ -4744,5 +4937,42 @@ mod tests {
         assert!(prompt.contains("Target: src/main.rs"));
         assert!(prompt.contains("+new"));
         assert!(prompt.contains("Is +new safe?"));
+    }
+
+    #[tokio::test]
+    async fn priority_scope_modal_actions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cred_path = temp_dir.path().join("credentials.json");
+        let cred_mgr = harness_providers::CredentialManager::new(Some(cred_path)).unwrap();
+        cred_mgr
+            .add_credential("antigravity", "account-1", "token-1", true)
+            .await
+            .unwrap();
+        cred_mgr
+            .add_credential("antigravity", "account-2", "token-2", false)
+            .await
+            .unwrap();
+
+        // 1. Session scope overrides for session s1
+        cred_mgr.set_session_priority_credential("s1", "antigravity", "account-2");
+        assert_eq!(
+            cred_mgr.get_session_priority_credential("s1", "antigravity"),
+            Some("account-2".to_string())
+        );
+        assert_eq!(
+            cred_mgr.get_session_priority_credential("s2", "antigravity"),
+            None
+        );
+
+        // 2. Global scope clears session override for s1 and sets global priority
+        cred_mgr
+            .set_priority_credential("antigravity", "account-2")
+            .await
+            .unwrap();
+        cred_mgr.clear_session_priority_credential("s1", "antigravity");
+        assert_eq!(
+            cred_mgr.get_session_priority_credential("s1", "antigravity"),
+            None
+        );
     }
 }

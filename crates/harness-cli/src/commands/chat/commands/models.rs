@@ -94,6 +94,7 @@ pub(crate) async fn handle_model_switch(
         cred_manager,
         &chosen_provider,
         &chosen_model,
+        Some(session_id),
     )
     .await;
 
@@ -244,6 +245,7 @@ async fn redraw_model_status(
     cred_manager: &Arc<CredentialManager>,
     chosen_provider: &str,
     chosen_model: &str,
+    session_id: Option<&str>,
 ) {
     let context_max = context_window(config, discovery, chosen_provider, chosen_model);
     // Switching models does not touch the transcript, so keep the real usage rather than resetting
@@ -255,7 +257,14 @@ async fn redraw_model_status(
         .await
         .unwrap_or(0);
     ui.set_model(chosen_model, context_used, context_max);
-    refresh_antigravity_status_if_needed(ui, chosen_provider, chosen_model, cred_manager).await;
+    refresh_antigravity_status_if_needed(
+        ui,
+        chosen_provider,
+        chosen_model,
+        cred_manager,
+        session_id,
+    )
+    .await;
     ui.clear_box_on_exit();
     ui.draw_initial_box();
 }
@@ -529,6 +538,7 @@ async fn apply_default_model_live(
     compact_model: &Option<String>,
     chosen_provider: String,
     chosen_model: String,
+    session_id: Option<&str>,
 ) {
     // Keep compaction on the active model while no dedicated compaction model is configured,
     // matching `/model`.
@@ -558,8 +568,16 @@ async fn apply_default_model_live(
     let prov_bg = chosen_provider.clone();
     let mod_bg = chosen_model.clone();
     let cred_bg = cred_manager.clone();
+    let sid_bg = session_id.map(str::to_string);
     tokio::spawn(async move {
-        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+        refresh_antigravity_status_if_needed(
+            &ui_bg,
+            &prov_bg,
+            &mod_bg,
+            &cred_bg,
+            sid_bg.as_deref(),
+        )
+        .await;
     });
 
     let ui_tokens = ui.clone();
@@ -898,6 +916,7 @@ pub(crate) async fn apply_default_model_choice(
         compact_model,
         chosen_provider.clone(),
         chosen_model.clone(),
+        Some(session_id),
     )
     .await;
 
