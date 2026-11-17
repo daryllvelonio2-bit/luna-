@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { ProviderInfo } from '../types';
-import { X, Key, Cpu, ShieldCheck } from 'lucide-react';
+import { X, Key, Cpu } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;

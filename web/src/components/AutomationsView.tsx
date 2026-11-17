@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { ScheduleTask } from '../types';
-import { Clock, Plus, Trash2, ToggleLeft, ToggleRight, Play } from 'lucide-react';
+import { Clock, Plus, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
 
 interface AutomationsViewProps {
   tasks: ScheduleTask[];

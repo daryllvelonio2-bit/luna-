@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { PluginBuilderSpec } from '../types';
-import { Hammer, X, Plus, Trash2 } from 'lucide-react';
+import { Hammer, X } from 'lucide-react';
 
 interface PluginBuilderModalProps {
   isOpen: boolean;

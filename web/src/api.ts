@@ -4,7 +4,6 @@ import type {
   GuiSessionItem,
   MemoryFact,
   NoteEntry,
-  PluginAgentEntry,
   PluginBuilderSpec,
   PluginSummary,
   ProviderInfo,

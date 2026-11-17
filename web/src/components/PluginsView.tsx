@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React from 'react';
 import type { PluginSummary } from '../types';
-import { Layers, Plus, ToggleLeft, ToggleRight, Hammer, CheckCircle2 } from 'lucide-react';
+import { ToggleLeft, ToggleRight, Hammer } from 'lucide-react';
 
 interface PluginsViewProps {
   plugins: PluginSummary[];
