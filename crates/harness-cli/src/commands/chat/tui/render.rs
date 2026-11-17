@@ -7103,9 +7103,7 @@ mod tests {
             features: Default::default(),
         };
         let mut snap = TuiLiveSnapshot {
-            is_thinking: true,
-            status_text: "Generating".to_string(),
-            live_content: "Initial streamed line".to_string(),
+            content: "Initial streamed line".to_string(),
             ..Default::default()
         };
         let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
@@ -7126,12 +7124,13 @@ mod tests {
         assert!(st.scroll_from_bottom > 0);
         let pinned_lines = st.transcript_visible_text.clone();
 
-        // Agent streams many more lines AND shows a todo strip that shrinks transcript height.
-        snap.live_content = (0..40)
+        // Agent streams many more lines AND shows a subagent strip that shrinks transcript height.
+        snap.content = (0..40)
             .map(|n| format!("New streamed output line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        snap.todo_panel = Some("1. Step one\n2. Step two".to_string());
+        snap.delegate_count = 1;
+        snap.delegate_last = Some(("worker".to_string(), "running".to_string()));
         term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
         assert_eq!(
             st.transcript_start, 0,
@@ -7150,7 +7149,7 @@ mod tests {
         let mid_lines = st.transcript_visible_text.clone();
         assert!(mid_start > 0);
 
-        snap.live_content
+        snap.content
             .push_str("\nEven more lines\nLine A\nLine B\nLine C");
         term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
         assert_eq!(st.transcript_start, mid_start);
