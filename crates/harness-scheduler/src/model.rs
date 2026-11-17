@@ -8,8 +8,12 @@ pub const MAX_DELIVERY_HISTORY: usize = 25;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryTarget {
-    ExistingSession { session_id: String },
-    SingleNewSession { session_id: Option<String> },
+    ExistingSession {
+        session_id: String,
+    },
+    SingleNewSession {
+        session_id: Option<String>,
+    },
     #[default]
     NewSessionEachRun,
 }
@@ -66,10 +70,7 @@ pub fn compute_next_run(rule: &str, after: DateTime<Utc>) -> Result<Option<DateT
     if let Some(hm) = trimmed.strip_prefix("daily:") {
         let time = NaiveTime::parse_from_str(hm.trim(), "%H:%M")
             .map_err(|e| format!("invalid daily HH:MM '{hm}': {e}"))?;
-        let today_dt = after
-            .date_naive()
-            .and_time(time)
-            .and_utc();
+        let today_dt = after.date_naive().and_time(time).and_utc();
         let next = if today_dt > after {
             today_dt
         } else {

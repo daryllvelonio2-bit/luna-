@@ -37,11 +37,7 @@ pub async fn register_mcp_servers(
         {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(
-                    "failed to start MCP server '{}': {}",
-                    server_config.name,
-                    e
-                );
+                tracing::warn!("failed to start MCP server '{}': {}", server_config.name, e);
                 continue;
             }
         };

@@ -24,6 +24,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::error::HarnessError;
 use crate::types::Message;
@@ -37,7 +38,7 @@ pub use compaction::{
 pub use transcript::{last_fold_seq, sendable_messages, trim_messages_to_tokens};
 
 /// One chat session as `luna sessions list` reports it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -62,7 +63,7 @@ pub struct SessionRecord {
 
 /// A message as it is stored: the row id and sequence number matter, because compaction marks the
 /// folded rows by id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: i64,
     pub seq: i64,

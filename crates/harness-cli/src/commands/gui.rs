@@ -108,11 +108,7 @@ fn show_status(config: &Config) {
     println!("GUI directory: {}", config.paths.gui_dir.display());
     println!("Platform artifact: {}", platform_artifact_name());
     match installed_binary_path(config) {
-        Some(bin) => println!(
-            "Status: {} ({})",
-            "installed".green().bold(),
-            bin.display()
-        ),
+        Some(bin) => println!("Status: {} ({})", "installed".green().bold(), bin.display()),
         None => println!(
             "Status: {} (run `luna gui install` to download)",
             "not installed".yellow()
@@ -131,7 +127,11 @@ fn launch_gui(config: &Config) -> Result<(), HarnessError> {
     Command::new(&bin)
         .spawn()
         .map_err(|e| HarnessError::Io(format!("failed to launch {}: {}", bin.display(), e)))?;
-    println!("{} Launched Luna Desktop ({})", "✔".green().bold(), bin.display());
+    println!(
+        "{} Launched Luna Desktop ({})",
+        "✔".green().bold(),
+        bin.display()
+    );
     Ok(())
 }
 

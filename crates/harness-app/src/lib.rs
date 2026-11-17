@@ -24,7 +24,5 @@ pub use features::{Feature, FeatureToggles};
 pub use mcp::{ensure_mcp_servers_registered, register_mcp_servers};
 pub use prompts::ChannelSudoPrompter;
 pub use runtime::{AppAgent, AppRuntime, AppSessionChannels, AppSessionOptions};
-pub use session::{
-    create_session, find_by_name, open_store, resolve_session, SessionSelection,
-};
+pub use session::{create_session, find_by_name, open_store, resolve_session, SessionSelection};
 pub use usage::UsageRecorder;

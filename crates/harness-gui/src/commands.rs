@@ -153,7 +153,7 @@ pub async fn get_session_transcript(
     Ok(outcome
         .history
         .into_iter()
-        .map(message_to_dto)
+        .map(|sm| message_to_dto(sm.message))
         .collect())
 }
 
@@ -175,7 +175,7 @@ fn message_to_dto(m: Message) -> TranscriptMessageDto {
         content: m.content,
         reasoning: m.reasoning,
         tool_calls,
-        tool_call_id: m.tool_call_id,
+        tool_call_id: m.tool_result.as_ref().map(|tr| tr.call_id.clone()),
     }
 }
 
@@ -249,7 +249,7 @@ pub async fn send_message(
         if let Ok(mut q) = rt.steer_handle.lock() {
             q.push_back(message.clone());
         }
-        rt.interrupt_handle.request_interrupt();
+        rt.interrupt_handle.interrupt(&message);
         return Ok(());
     }
 

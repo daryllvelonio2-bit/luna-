@@ -56,7 +56,10 @@ impl SchedulerService {
     }
 
     /// Check for due tasks once and deliver them sequentially.
-    pub async fn tick_once(&self, handler: &ScheduleDeliveryHandler) -> Vec<Result<ScheduleTask, String>> {
+    pub async fn tick_once(
+        &self,
+        handler: &ScheduleDeliveryHandler,
+    ) -> Vec<Result<ScheduleTask, String>> {
         let due = match self.store.due_tasks(Utc::now()) {
             Ok(d) => d,
             Err(e) => return vec![Err(e)],
@@ -68,7 +71,11 @@ impl SchedulerService {
         results
     }
 
-    pub async fn run_now(&self, id: &str, handler: &ScheduleDeliveryHandler) -> Result<ScheduleTask, String> {
+    pub async fn run_now(
+        &self,
+        id: &str,
+        handler: &ScheduleDeliveryHandler,
+    ) -> Result<ScheduleTask, String> {
         let task = self.store.get(id)?;
         self.run_task(task, handler).await
     }

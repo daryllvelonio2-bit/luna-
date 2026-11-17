@@ -69,8 +69,9 @@ impl PluginRuntimeHandle {
         js_code: String,
     ) -> Result<Self, String> {
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
-        let (init_tx, init_rx) =
-            std::sync::mpsc::channel::<Result<(PluginRegistrations, mpsc::UnboundedSender<ActorCmd>), String>>();
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<
+            Result<(PluginRegistrations, mpsc::UnboundedSender<ActorCmd>), String>,
+        >();
 
         let plugin_id = manifest.id.clone();
         let thread_name = format!("luna-plugin-{}", plugin_id);
@@ -113,7 +114,11 @@ impl PluginRuntimeHandle {
             .map_err(|_| format!("plugin '{}' dropped tool response", self.plugin_id))?
     }
 
-    pub async fn call_command(&self, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    pub async fn call_command(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         let args_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
         self.cmd_tx
@@ -398,7 +403,10 @@ fn run_plugin_actor(
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ActorCmd>();
-    let regs_snapshot = registrations.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let regs_snapshot = registrations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if init_tx.send(Ok((regs_snapshot, cmd_tx))).is_err() {
         return;
     }
@@ -482,37 +490,43 @@ fn install_host_bindings<'js>(
         let regs = regs.clone();
         host.set(
             "registerTool",
-            Function::new(ctx.clone(), move |json_str: String| -> rquickjs::Result<()> {
-                let val: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
-                let name = val
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let description = val
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let parameters = val
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
-                let is_mutating = val.get("mutating").and_then(|v| v.as_bool()).unwrap_or(false);
-                if !name.is_empty() {
-                    regs.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .tools
-                        .push(RegisteredPluginTool {
-                            plugin_id: pid.clone(),
-                            name,
-                            description,
-                            parameters,
-                            is_mutating,
-                        });
-                }
-                Ok(())
-            })?,
+            Function::new(
+                ctx.clone(),
+                move |json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let description = val
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let parameters = val
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+                    let is_mutating = val
+                        .get("mutating")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !name.is_empty() {
+                        regs.lock().unwrap_or_else(|e| e.into_inner()).tools.push(
+                            RegisteredPluginTool {
+                                plugin_id: pid.clone(),
+                                name,
+                                description,
+                                parameters,
+                                is_mutating,
+                            },
+                        );
+                    }
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -522,68 +536,72 @@ fn install_host_bindings<'js>(
         let regs = regs.clone();
         host.set(
             "registerAgent",
-            Function::new(ctx.clone(), move |json_str: String| -> rquickjs::Result<()> {
-                let val: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
-                let id = val
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pid)
-                    .to_string();
-                let name = val
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pid)
-                    .to_string();
-                let description = val
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let icon = val
-                    .get("icon")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("puzzle")
-                    .to_string();
-                let system_prompt = val
-                    .get("systemPrompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let model = val
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let registered_tools = val
-                    .get("tools")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let panel_ids = val
-                    .get("panelId")
-                    .and_then(|v| v.as_str())
-                    .map(|s| vec![s.to_string()])
-                    .unwrap_or_default();
+            Function::new(
+                ctx.clone(),
+                move |json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let id = val
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&pid)
+                        .to_string();
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&pid)
+                        .to_string();
+                    let description = val
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let icon = val
+                        .get("icon")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("puzzle")
+                        .to_string();
+                    let system_prompt = val
+                        .get("systemPrompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let model = val
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let registered_tools = val
+                        .get("tools")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let panel_ids = val
+                        .get("panelId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| vec![s.to_string()])
+                        .unwrap_or_default();
 
-                regs.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .agents
-                    .push(PluginAgentEntry {
-                        plugin_id: pid.clone(),
-                        id,
-                        name,
-                        description,
-                        icon,
-                        system_prompt,
-                        model,
-                        registered_tools,
-                        panel_ids,
-                    });
-                Ok(())
-            })?,
+                    regs.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .agents
+                        .push(PluginAgentEntry {
+                            plugin_id: pid.clone(),
+                            id,
+                            name,
+                            description,
+                            icon,
+                            system_prompt,
+                            model,
+                            registered_tools,
+                            panel_ids,
+                        });
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -593,30 +611,34 @@ fn install_host_bindings<'js>(
         let regs = regs.clone();
         host.set(
             "registerCommand",
-            Function::new(ctx.clone(), move |json_str: String| -> rquickjs::Result<()> {
-                let val: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
-                let name = val
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let description = val
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if !name.is_empty() {
-                    regs.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .commands
-                        .push(PluginCommandSpec {
-                            plugin_id: pid.clone(),
-                            name,
-                            description,
-                        });
-                }
-                Ok(())
-            })?,
+            Function::new(
+                ctx.clone(),
+                move |json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let description = val
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if !name.is_empty() {
+                        regs.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .commands
+                            .push(PluginCommandSpec {
+                                plugin_id: pid.clone(),
+                                name,
+                                description,
+                            });
+                    }
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -626,46 +648,50 @@ fn install_host_bindings<'js>(
         let regs = regs.clone();
         host.set(
             "registerSchedule",
-            Function::new(ctx.clone(), move |json_str: String| -> rquickjs::Result<()> {
-                let val: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
-                let id = val
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("{}-{}", pid, uuid::Uuid::new_v4().simple()));
-                let name = val
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let rule = val
-                    .get("rule")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let instruction = val
-                    .get("instruction")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let delivery_mode = val
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("new_session_each_run")
-                    .to_string();
-                regs.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .schedules
-                    .push(PluginScheduleDecl {
-                        plugin_id: pid.clone(),
-                        id,
-                        name,
-                        rule,
-                        instruction,
-                        delivery_mode,
-                    });
-                Ok(())
-            })?,
+            Function::new(
+                ctx.clone(),
+                move |json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let id = val
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{}-{}", pid, uuid::Uuid::new_v4().simple()));
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let rule = val
+                        .get("rule")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let instruction = val
+                        .get("instruction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let delivery_mode = val
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("new_session_each_run")
+                        .to_string();
+                    regs.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .schedules
+                        .push(PluginScheduleDecl {
+                            plugin_id: pid.clone(),
+                            id,
+                            name,
+                            rule,
+                            instruction,
+                            delivery_mode,
+                        });
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -675,39 +701,40 @@ fn install_host_bindings<'js>(
         let regs = regs.clone();
         host.set(
             "registerPanel",
-            Function::new(ctx.clone(), move |json_str: String| -> rquickjs::Result<()> {
-                let val: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
-                let id = val
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("panel")
-                    .to_string();
-                let title = val
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Panel")
-                    .to_string();
-                let icon = val
-                    .get("icon")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let widgets: Vec<PluginWidget> = val
-                    .get("widgets")
-                    .cloned()
-                    .and_then(|w| serde_json::from_value(w).ok())
-                    .unwrap_or_default();
-                regs.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .panels
-                    .push(PluginUiPanel {
-                        plugin_id: pid.clone(),
-                        id,
-                        title,
-                        icon,
-                        widgets,
-                    });
-                Ok(())
-            })?,
+            Function::new(
+                ctx.clone(),
+                move |json_str: String| -> rquickjs::Result<()> {
+                    let val: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_default();
+                    let id = val
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("panel")
+                        .to_string();
+                    let title = val
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Panel")
+                        .to_string();
+                    let icon = val.get("icon").and_then(|v| v.as_str()).map(str::to_string);
+                    let widgets: Vec<PluginWidget> = val
+                        .get("widgets")
+                        .cloned()
+                        .and_then(|w| serde_json::from_value(w).ok())
+                        .unwrap_or_default();
+                    regs.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .panels
+                        .push(PluginUiPanel {
+                            plugin_id: pid.clone(),
+                            id,
+                            title,
+                            icon,
+                            widgets,
+                        });
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -794,61 +821,67 @@ fn install_host_bindings<'js>(
         let rt_handle = tokio_handle;
         host.set(
             "netFetch",
-            Function::new(ctx.clone(), move |url: String, opts_json: String| -> String {
-                let opts: serde_json::Value = serde_json::from_str(&opts_json).unwrap_or_default();
-                let method_str = opts
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("GET")
-                    .to_uppercase();
-                let body = opts
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let headers: BTreeMap<String, String> = opts
-                    .get("headers")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
+            Function::new(
+                ctx.clone(),
+                move |url: String, opts_json: String| -> String {
+                    let opts: serde_json::Value =
+                        serde_json::from_str(&opts_json).unwrap_or_default();
+                    let method_str = opts
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("GET")
+                        .to_uppercase();
+                    let body = opts
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let headers: BTreeMap<String, String> = opts
+                        .get("headers")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
 
-                let fut = async move {
-                    let client = reqwest::Client::new();
-                    let method = reqwest::Method::from_bytes(method_str.as_bytes())
-                        .unwrap_or(reqwest::Method::GET);
-                    let mut req = client.request(method, &url);
-                    for (k, v) in headers {
-                        req = req.header(k, v);
-                    }
-                    if let Some(b) = body {
-                        req = req.body(b);
-                    }
-                    match req.send().await {
-                        Ok(resp) => {
-                            let status = resp.status().as_u16();
-                            let text = resp.text().await.unwrap_or_default();
-                            serde_json::json!({
-                                "ok": (200..300).contains(&status),
-                                "status": status,
-                                "body": text,
-                            })
+                    let fut = async move {
+                        let client = reqwest::Client::new();
+                        let method = reqwest::Method::from_bytes(method_str.as_bytes())
+                            .unwrap_or(reqwest::Method::GET);
+                        let mut req = client.request(method, &url);
+                        for (k, v) in headers {
+                            req = req.header(k, v);
                         }
-                        Err(e) => serde_json::json!({
-                            "ok": false,
-                            "status": 0,
-                            "error": e.to_string(),
-                            "body": "",
-                        }),
-                    }
-                };
+                        if let Some(b) = body {
+                            req = req.body(b);
+                        }
+                        match req.send().await {
+                            Ok(resp) => {
+                                let status = resp.status().as_u16();
+                                let text = resp.text().await.unwrap_or_default();
+                                serde_json::json!({
+                                    "ok": (200..300).contains(&status),
+                                    "status": status,
+                                    "body": text,
+                                })
+                            }
+                            Err(e) => serde_json::json!({
+                                "ok": false,
+                                "status": 0,
+                                "error": e.to_string(),
+                                "body": "",
+                            }),
+                        }
+                    };
 
-                let val = if let Some(h) = &rt_handle {
-                    h.block_on(fut)
-                } else {
-                    tokio::runtime::Runtime::new()
-                        .map(|rt| rt.block_on(fut))
-                        .unwrap_or_else(|e| serde_json::json!({ "ok": false, "error": e.to_string() }))
-                };
-                val.to_string()
-            })?,
+                    let val = if let Some(h) = &rt_handle {
+                        h.block_on(fut)
+                    } else {
+                        tokio::runtime::Runtime::new()
+                            .map(|rt| rt.block_on(fut))
+                            .unwrap_or_else(
+                                |e| serde_json::json!({ "ok": false, "error": e.to_string() }),
+                            )
+                    };
+                    val.to_string()
+                },
+            )?,
         )?;
     }
 

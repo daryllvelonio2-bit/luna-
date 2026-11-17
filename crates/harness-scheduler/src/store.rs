@@ -70,7 +70,9 @@ impl ScheduleStore {
         let now = Utc::now();
         let next_run_at = compute_next_run(&rule, now)?;
         let task = ScheduleTask {
-            id: id.unwrap_or_else(|| format!("sch_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])),
+            id: id.unwrap_or_else(|| {
+                format!("sch_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+            }),
             name: name.trim().to_string(),
             instruction: instruction.trim().to_string(),
             rule,
@@ -90,7 +92,8 @@ impl ScheduleStore {
 
     pub fn upsert(&self, task: &ScheduleTask) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let target_json = serde_json::to_string(&task.delivery_target).map_err(|e| e.to_string())?;
+        let target_json =
+            serde_json::to_string(&task.delivery_target).map_err(|e| e.to_string())?;
         let history_json = serde_json::to_string(&task.history).map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO schedules (
@@ -138,9 +141,7 @@ impl ScheduleStore {
                  FROM schedules ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], row_to_task)
-            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], row_to_task).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| e.to_string())?);
@@ -219,7 +220,11 @@ impl ScheduleStore {
     }
 
     /// Record a delivery receipt and advance `next_run_at` (or mark one-shot completed).
-    pub fn record_delivery(&self, id: &str, receipt: DeliveryReceipt) -> Result<ScheduleTask, String> {
+    pub fn record_delivery(
+        &self,
+        id: &str,
+        receipt: DeliveryReceipt,
+    ) -> Result<ScheduleTask, String> {
         let mut task = self.get(id)?;
         let now = receipt.delivered_at;
         if let DeliveryTarget::SingleNewSession { session_id: None } = &task.delivery_target {
@@ -266,8 +271,16 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleTask> {
         plugin_id: row.get(5)?,
         paused: paused_int != 0,
         completed: completed_int != 0,
-        next_run_at: next_raw.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
-        last_run_at: last_raw.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+        next_run_at: next_raw.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        }),
+        last_run_at: last_raw.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        }),
         created_at: DateTime::parse_from_rfc3339(&created_raw)
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),

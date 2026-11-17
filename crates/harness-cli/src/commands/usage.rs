@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use colored::Colorize;
 pub use harness_app::UsageRecorder;
-use harness_core::usage::{GroupBy, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals};
+use harness_core::usage::{
+    GroupBy, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals,
+};
 use harness_core::HarnessError;
 use harness_providers::{CredentialManager, ModelDiscovery};
 

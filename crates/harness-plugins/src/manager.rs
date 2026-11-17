@@ -79,7 +79,10 @@ impl PluginManager {
                         discovered.insert(manifest.id.clone(), (manifest, path));
                     }
                     None => {
-                        tracing::warn!("ignoring malformed plugin manifest at {}", manifest_path.display());
+                        tracing::warn!(
+                            "ignoring malformed plugin manifest at {}",
+                            manifest_path.display()
+                        );
                     }
                 }
             }
@@ -119,7 +122,8 @@ impl PluginManager {
 
         let js_result = Self::ensure_compiled(&manifest, &dir);
         match js_result {
-            Ok(js_code) => match PluginRuntimeHandle::spawn(manifest.clone(), dir.clone(), js_code) {
+            Ok(js_code) => match PluginRuntimeHandle::spawn(manifest.clone(), dir.clone(), js_code)
+            {
                 Ok(rt) => LoadedPlugin {
                     manifest,
                     dir,
@@ -149,8 +153,8 @@ impl PluginManager {
         if entry_path.is_file() {
             let ts_source = std::fs::read_to_string(&entry_path)
                 .map_err(|e| format!("failed to read {}: {e}", entry_path.display()))?;
-            let js_code = compile_typescript(&manifest.entry, &ts_source)
-                .map_err(|e| e.to_string())?;
+            let js_code =
+                compile_typescript(&manifest.entry, &ts_source).map_err(|e| e.to_string())?;
             if let Some(parent) = compiled_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -181,8 +185,7 @@ impl PluginManager {
         manifest: PluginManifest,
         ts_source: &str,
     ) -> Result<PluginSummary, String> {
-        let js_code = compile_typescript(&manifest.entry, ts_source)
-            .map_err(|e| e.to_string())?;
+        let js_code = compile_typescript(&manifest.entry, ts_source).map_err(|e| e.to_string())?;
 
         let dir = self.plugins_dir.join(&manifest.id);
         let entry_path = dir.join(&manifest.entry);
@@ -197,8 +200,7 @@ impl PluginManager {
 
         std::fs::write(&entry_path, ts_source).map_err(|e| e.to_string())?;
         std::fs::write(&compiled_path, &js_code).map_err(|e| e.to_string())?;
-        let manifest_json =
-            serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         std::fs::write(dir.join("plugin.json"), manifest_json).map_err(|e| e.to_string())?;
 
         // Unload previous version if loaded
@@ -267,10 +269,11 @@ impl PluginManager {
             if let Some(rt) = entry.runtime.take() {
                 rt.shutdown();
             }
-            let fresh_manifest: PluginManifest = std::fs::read_to_string(entry.dir.join("plugin.json"))
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| entry.manifest.clone());
+            let fresh_manifest: PluginManifest =
+                std::fs::read_to_string(entry.dir.join("plugin.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| entry.manifest.clone());
             (fresh_manifest, entry.dir.clone())
         };
 
@@ -402,10 +405,7 @@ impl PluginManager {
     pub async fn dispatch_event(&self, event: &str, payload: serde_json::Value) {
         let runtimes: Vec<Arc<PluginRuntimeHandle>> = {
             let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
-            guard
-                .values()
-                .filter_map(|p| p.runtime.clone())
-                .collect()
+            guard.values().filter_map(|p| p.runtime.clone()).collect()
         };
         for rt in runtimes {
             let _ = rt.emit_event(event, &payload).await;

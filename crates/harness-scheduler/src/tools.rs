@@ -125,7 +125,10 @@ impl Tool for ScheduleCreateTool {
             args["session_id"].as_str(),
             self.current_session_id.as_deref(),
         );
-        match self.store.create(None, name, instruction, rule, target, None) {
+        match self
+            .store
+            .create(None, name, instruction, rule, target, None)
+        {
             Ok(task) => Ok(ToolResult::success(
                 call_id,
                 serde_json::to_string_pretty(&task).unwrap_or_default(),
@@ -284,8 +287,14 @@ impl Tool for ScheduleEditTool {
         let action = args["action"].as_str().unwrap_or("update");
         match action {
             "delete" => match self.store.delete(id) {
-                Ok(true) => Ok(ToolResult::success(call_id, format!("deleted schedule {id}"))),
-                Ok(false) => Ok(ToolResult::error(call_id, format!("schedule '{id}' not found"))),
+                Ok(true) => Ok(ToolResult::success(
+                    call_id,
+                    format!("deleted schedule {id}"),
+                )),
+                Ok(false) => Ok(ToolResult::error(
+                    call_id,
+                    format!("schedule '{id}' not found"),
+                )),
                 Err(e) => Ok(ToolResult::error(call_id, e)),
             },
             "pause" => match self.store.update(id, None, None, None, None, Some(true)) {

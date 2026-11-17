@@ -60,7 +60,6 @@ impl GuiState {
         let config = harness_core::config::resolve(&layers)?.into_config();
         let store = Arc::new(open_store(&config)?);
         let cred_manager = CredentialManager::new(Some(config.paths.credentials.clone()))?;
-        cred_manager.load_from_storage().await?;
 
         let discovery = Arc::new(ModelDiscovery::new(
             Some(config.paths.models_cache.clone()),

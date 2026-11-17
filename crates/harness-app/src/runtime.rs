@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use harness_core::tools::TodoScope;
 use harness_core::{
-    Agent, AgentObserver, ApprovalDecision, ApprovalRequest, BackgroundSaver,
-    CheckpointController, Config, DefaultToolRegistry, HarnessError, InterruptHandle,
-    ModelProvider, SessionBinding, SessionStore, SqliteSessionStore, ToolRegistry,
+    Agent, AgentObserver, ApprovalDecision, ApprovalRequest, BackgroundSaver, CheckpointController,
+    Config, DefaultToolRegistry, HarnessError, InterruptHandle, ModelProvider, SessionBinding,
+    SessionStore, SqliteSessionStore, ToolRegistry,
 };
 use harness_memory::{
     build_memory_engine, ForgetMemoryTool, MemoryEngineKind, MemorySearchTool, SaveMemoryTool,
@@ -299,18 +299,15 @@ impl AppRuntime {
             )))
             .await;
 
-        let (job_tx, job_rx) =
-            mpsc::unbounded_channel::<harness_core::tasks::JobCompletion>();
+        let (job_tx, job_rx) = mpsc::unbounded_channel::<harness_core::tasks::JobCompletion>();
         if options.interactive {
             bg_queue.set_completion_notifier(Arc::new(move |completion| {
                 let _ = job_tx.send(completion);
             }));
         }
 
-        let (approval_tx, approval_rx) = mpsc::unbounded_channel::<(
-            ApprovalRequest,
-            oneshot::Sender<ApprovalDecision>,
-        )>();
+        let (approval_tx, approval_rx) =
+            mpsc::unbounded_channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>();
         let allow_all_session = Arc::new(AtomicBool::new(
             config.tools.approval == harness_core::ApprovalMode::Allow,
         ));
@@ -377,7 +374,9 @@ impl AppRuntime {
             &config.paths.workspace_root,
             &config.hooks,
         )?);
-        agent = agent.with_hooks(hooks).with_checkpoints(checkpoints.clone());
+        agent = agent
+            .with_hooks(hooks)
+            .with_checkpoints(checkpoints.clone());
         if let Some(obs) = observer {
             agent = agent.with_observer(obs);
         }
