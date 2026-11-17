@@ -2210,7 +2210,15 @@ async fn handle_modal_key(
                 st.modal = ActiveModal::Help { scroll };
             }
             KeyCode::Down => {
-                scroll = scroll.saturating_add(1).min(12);
+                scroll = scroll.saturating_add(1).min(18);
+                st.modal = ActiveModal::Help { scroll };
+            }
+            KeyCode::PageUp => {
+                scroll = scroll.saturating_sub(6);
+                st.modal = ActiveModal::Help { scroll };
+            }
+            KeyCode::PageDown => {
+                scroll = scroll.saturating_add(6).min(18);
                 st.modal = ActiveModal::Help { scroll };
             }
             _ => {
