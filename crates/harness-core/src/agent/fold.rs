@@ -44,7 +44,21 @@ where
             self.announce_compaction_failure(&error);
             return Err(error);
         }
-        let (history, _) = self.load_history().await?;
+        if self.fold_in_flight.swap(true, Ordering::SeqCst) {
+            let error = HarnessError::SessionError("compaction is already in progress".to_string());
+            self.announce_compaction_failure(&error);
+            return Err(error);
+        }
+        let _guard = FoldInFlight(self.fold_in_flight.clone());
+        let history = if let Some(binding) = &self.session {
+            binding
+                .store
+                .replay(&binding.session_id, usize::MAX)
+                .await?
+                .history
+        } else {
+            Vec::new()
+        };
         let system_text = self.system_prompt("").await?;
         let mut messages = Vec::new();
         let notice = match self

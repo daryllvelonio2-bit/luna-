@@ -360,15 +360,7 @@ fn query_ordinary_rows(
     } else {
         "is_summary = 0 AND compacted_at IS NULL"
     };
-    let mut stored = query_rows(conn, session_id, filter, Some(start))?;
-    // If a limit boundary cuts in the middle of a turn, drop leading messages until
-    // the first User message so replayed history always starts on a clean user turn.
-    if let Some(first_user) = stored.iter().position(|m| m.message.role == Role::User) {
-        if first_user > 0 {
-            stored.drain(0..first_user);
-        }
-    }
-    Ok(stored)
+    query_rows(conn, session_id, filter, Some(start))
 }
 
 /// Where the bounded window starts: the seq of its oldest row, pulled back to the user message

@@ -2821,3 +2821,219 @@ async fn auto_compact_leaves_the_share_it_was_configured_to_leave() {
         share * 100.0
     );
 }
+
+/// Regression test for the hydrogen `/compact` doubling bug: live `assistant`/`tool` rows left
+/// after a mid-turn fold (with no `user` row before them) must never be hidden from replay or
+/// compaction when a later `user` message exists, and must never resurface to inflate tokens
+/// after `/compact` removes the remaining `user` rows.
+#[tokio::test]
+async fn compact_with_pre_user_live_rows_never_hides_or_doubles_context() {
+    let (_dir, _path, store) = temp_store();
+    let store = Arc::new(store);
+    store.ensure_session("s1").await.unwrap();
+
+    // Older turn that gets compacted into a summary.
+    let old_user_id = store
+        .append("s1", &Message::user("old prompt"), false)
+        .await
+        .unwrap();
+    let old_asst_id = store
+        .append("s1", &Message::assistant("old reply"), false)
+        .await
+        .unwrap();
+    store
+        .record_compaction("s1", &[old_user_id, old_asst_id], "prior summary")
+        .await
+        .unwrap();
+
+    // Live post-compaction assistant/tool rounds whose initiating user prompt was already folded.
+    // Give them substantial size (~120k chars = ~30k tokens) so hiding/resurfacing is dramatic.
+    for i in 0..3 {
+        let call_id = format!("pre_call_{i}");
+        store
+            .append(
+                "s1",
+                &Message::assistant_with_tools(vec![ToolCall {
+                    id: call_id.clone(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({ "path": format!("file_{i}.rs") }),
+                    signature: None,
+                }]),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &Message::tool(ToolResult::success(
+                    call_id,
+                    format!("content_{i}: {}", "a".repeat(38_000)),
+                )),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Later user turn (~80k chars = ~20k tokens) + kept tail (~40k chars = ~10k tokens).
+    store
+        .append("s1", &Message::user("later user turn"), false)
+        .await
+        .unwrap();
+    for i in 0..2 {
+        let call_id = format!("mid_call_{i}");
+        store
+            .append(
+                "s1",
+                &Message::assistant_with_tools(vec![ToolCall {
+                    id: call_id.clone(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({ "path": format!("mid_{i}.rs") }),
+                    signature: None,
+                }]),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &Message::tool(ToolResult::success(
+                    call_id,
+                    format!("mid_{i}: {}", "b".repeat(40_000)),
+                )),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .append(
+            "s1",
+            &Message::assistant(format!("tail reply {}", "c".repeat(40_000))),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Replay within limit must include every live row, including the pre-user ones.
+    let replayed = store.replay("s1", 200).await.unwrap();
+    assert_eq!(replayed.replayed, replayed.total);
+    assert!(
+        replayed
+            .history
+            .iter()
+            .any(|m| m.message.tool_calls.iter().any(|c| c.id == "pre_call_0")),
+        "pre-user live rows must remain visible in replay"
+    );
+
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("FOLDED_ALL_OLD"));
+    let make_agent = || {
+        Agent::new(
+            main.clone(),
+            Arc::new(MockMemory),
+            Arc::new(MockNotes),
+            Arc::new(DefaultToolRegistry::new()),
+            agent_config(),
+        )
+        .with_session(SessionBinding {
+            store: store.clone(),
+            session_id: "s1".to_string(),
+            resume_max_messages: 200,
+        })
+        .with_compaction(CompactionSetup {
+            provider: summariser.clone(),
+            model: "canned-model".to_string(),
+        })
+    };
+
+    let agent = make_agent();
+    let before = agent.estimate_session_tokens().await.unwrap();
+    agent.compact_current_session().await.unwrap();
+    let after_live = agent.estimate_session_tokens().await.unwrap();
+
+    // Restarting a fresh agent on the same DB must report the exact same shrunken token count.
+    let restarted = make_agent();
+    let after_restart = restarted.estimate_session_tokens().await.unwrap();
+
+    assert!(
+        after_live < before,
+        "compaction must shrink token estimate, not double it: before={before}, after={after_live}"
+    );
+    assert_eq!(
+        after_restart, after_live,
+        "restarted session must match post-compaction token estimate"
+    );
+
+    let post_replay = store.replay("s1", 200).await.unwrap();
+    assert!(
+        !post_replay.history.iter().any(|m| m
+            .message
+            .tool_calls
+            .iter()
+            .any(|c| c.id == "pre_call_0")),
+        "pre-user live rows must be folded by /compact rather than left stranded"
+    );
+}
+
+/// `/compact` must compact the full live session history, even when the live row count exceeds
+/// `resume_max_messages`.
+#[tokio::test]
+async fn compact_current_session_folds_beyond_resume_max_messages() {
+    let (_dir, _path, store) = temp_store();
+    let store = Arc::new(store);
+    store.ensure_session("s1").await.unwrap();
+
+    for turn in 0..8 {
+        store
+            .append(
+                "s1",
+                &Message::user(format!("turn {turn} {}", "x".repeat(40_000))),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "s1",
+                &Message::assistant(format!("reply {turn} {}", "y".repeat(40_000))),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    let main = Arc::new(RecordingProvider::new("done"));
+    let summariser = Arc::new(CannedProvider::new("COMPACTED_ALL"));
+    let agent = Agent::new(
+        main,
+        Arc::new(MockMemory),
+        Arc::new(MockNotes),
+        Arc::new(DefaultToolRegistry::new()),
+        agent_config(),
+    )
+    .with_session(SessionBinding {
+        store: store.clone(),
+        session_id: "s1".to_string(),
+        resume_max_messages: 4,
+    })
+    .with_compaction(CompactionSetup {
+        provider: summariser,
+        model: "canned-model".to_string(),
+    });
+
+    agent.compact_current_session().await.unwrap();
+
+    let all_live = store.replay("s1", usize::MAX).await.unwrap();
+    assert!(
+        !all_live.history.iter().any(|m| {
+            m.message
+                .content
+                .as_deref()
+                .is_some_and(|c| c.starts_with("turn 0 "))
+        }),
+        "oldest turn beyond resume_max_messages must be folded too"
+    );
+}
