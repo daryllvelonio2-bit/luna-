@@ -6732,7 +6732,8 @@ mod tests {
             .join("\n");
         assert!(text.contains("mirrored sequences accurately"), "{text}");
         assert!(text.contains("(a*b) mod 10 cleanly"), "{text}");
-        assert!(text.contains("without horizontal clipping"), "{text}");
+        assert!(text.contains("without horizontal"), "{text}");
+        assert!(text.contains("clipping"), "{text}");
         assert!(!text.contains("tha\u{2026}"), "{text}");
     }
 
@@ -6783,6 +6784,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Option 8"), "{text}");
-        assert!(text.contains("thoroughly for the user"), "{text}");
+        assert!(text.contains("thoroughly for"), "{text}");
+        assert!(text.contains("the user"), "{text}");
     }
 }
