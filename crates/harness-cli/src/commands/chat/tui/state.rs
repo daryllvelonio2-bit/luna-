@@ -931,6 +931,7 @@ pub struct BackgroundSession {
     pub live_thinking_view: LiveThinkingView,
     pub process_expanded: bool,
     pub scroll_from_bottom: usize,
+    pub scroll_anchor_top: Option<usize>,
     pub queue: VecDeque<String>,
     pub current_cancel: CancellationToken,
     pub active_turn: Option<tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>>,
@@ -1392,6 +1393,7 @@ pub struct TuiState {
     /// Short confirmation shown in the chrome after a selection is copied.
     pub selection_notice: Option<(String, std::time::Instant)>,
     pub scroll_from_bottom: usize,
+    pub scroll_anchor_top: Option<usize>,
     pub max_scroll: usize,
     pub modal: ActiveModal,
     pub slash_popup: SlashPopupState,
@@ -1438,6 +1440,42 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Return to following the latest (bottom) transcript lines.
+    pub fn jump_to_latest(&mut self) {
+        self.scroll_from_bottom = 0;
+        self.scroll_anchor_top = None;
+    }
+
+    /// Scroll upward by `lines`, pinning the top visible line so bottom updates stay stable.
+    pub fn scroll_transcript_up(&mut self, lines: usize) {
+        if let Some(top) = self.scroll_anchor_top {
+            let new_top = top.saturating_sub(lines);
+            self.scroll_anchor_top = Some(new_top);
+            self.scroll_from_bottom = self.max_scroll.saturating_sub(new_top).max(1);
+        } else if self.max_scroll > 0 {
+            let new_top = self.transcript_start.saturating_sub(lines);
+            self.scroll_anchor_top = Some(new_top);
+            self.scroll_from_bottom = (self.scroll_from_bottom + lines)
+                .min(self.max_scroll)
+                .max(1);
+        }
+    }
+
+    /// Scroll downward by `lines`, snapping back to bottom-follow once the latest lines are reached.
+    pub fn scroll_transcript_down(&mut self, lines: usize) {
+        let Some(top) = self.scroll_anchor_top else {
+            self.scroll_from_bottom = 0;
+            return;
+        };
+        let new_top = top.saturating_add(lines);
+        if new_top >= self.max_scroll {
+            self.jump_to_latest();
+        } else {
+            self.scroll_anchor_top = Some(new_top);
+            self.scroll_from_bottom = self.max_scroll.saturating_sub(new_top);
+        }
+    }
+
     pub fn prune_stale_notices(&mut self) {
         let now = std::time::Instant::now();
         let queue_empty = self.queue.is_empty();

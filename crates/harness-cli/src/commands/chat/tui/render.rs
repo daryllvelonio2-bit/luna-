@@ -788,28 +788,40 @@ fn render_conversation(
     let active_len = active_lines.len();
     let total_lines = settled_len + notice_len + active_len;
 
-    // While scrolled up, reserve the last transcript row for the "Jump to latest" badge instead
-    // of drawing it over the final line of output.
+    // While scrolled up, pin the top visible transcript line (`scroll_anchor_top`) so streaming
+    // output, tool updates, chrome height changes, or turn completion at the bottom never push
+    // what the user is reading out of view.
     let full_view_h = transcript_rect.height as usize;
     let badge_room = full_view_h > 1 && transcript_rect.width > 18;
-    let mut view_h = if st.scroll_from_bottom > 0 && badge_room {
+    let bottom_max_scroll = total_lines.saturating_sub(full_view_h);
+    let badge_view_h = if badge_room {
         full_view_h - 1
     } else {
         full_view_h
     };
-    st.max_scroll = total_lines.saturating_sub(view_h);
-    if st.scroll_from_bottom > st.max_scroll {
-        st.scroll_from_bottom = st.max_scroll;
+    let badge_max_scroll = total_lines.saturating_sub(badge_view_h);
+
+    if st.scroll_anchor_top.is_none() && st.scroll_from_bottom > 0 {
+        st.scroll_anchor_top = Some(badge_max_scroll.saturating_sub(st.scroll_from_bottom));
     }
-    let show_badge = st.scroll_from_bottom > 0 && badge_room;
-    if !show_badge && view_h != full_view_h {
-        // Clamping consumed the scroll offset, so give the badge row back to the transcript.
-        view_h = full_view_h;
-        st.max_scroll = total_lines.saturating_sub(view_h);
-    }
-    let start = total_lines
-        .saturating_sub(view_h)
-        .saturating_sub(st.scroll_from_bottom);
+
+    let (view_h, start, show_badge) = if let Some(anchor_top) = st.scroll_anchor_top {
+        if bottom_max_scroll == 0 || anchor_top >= bottom_max_scroll {
+            st.jump_to_latest();
+            st.max_scroll = bottom_max_scroll;
+            (full_view_h, bottom_max_scroll, false)
+        } else {
+            let start = anchor_top.min(badge_max_scroll);
+            st.scroll_anchor_top = Some(start);
+            st.max_scroll = badge_max_scroll;
+            st.scroll_from_bottom = badge_max_scroll.saturating_sub(start).max(1);
+            (badge_view_h, start, badge_room)
+        }
+    } else {
+        st.max_scroll = bottom_max_scroll;
+        st.scroll_from_bottom = 0;
+        (full_view_h, bottom_max_scroll, false)
+    };
     let end = (start + view_h).min(total_lines);
 
     st.transcript_area = (
@@ -5990,6 +6002,7 @@ mod tests {
             pending_transcript_click: None,
             selection_notice: None,
             scroll_from_bottom: 0,
+            scroll_anchor_top: None,
             max_scroll: 0,
             modal: ActiveModal::None,
             slash_popup: super::super::state::SlashPopupState::default(),
@@ -6688,6 +6701,7 @@ mod tests {
             pending_transcript_click: None,
             selection_notice: None,
             scroll_from_bottom: 0,
+            scroll_anchor_top: None,
             max_scroll: 0,
             modal: ActiveModal::None,
             slash_popup: super::super::state::SlashPopupState::default(),
@@ -7057,5 +7071,98 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text3.contains("max"), "{text3}");
+    }
+
+    #[test]
+    fn scrolled_up_viewport_stays_pinned_while_agent_streams_at_bottom() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        for i in 0..8 {
+            st.turns.push(TurnRecord {
+                user_query: format!("Question {i}"),
+                reasoning: None,
+                tools: Vec::new(),
+                tool_items: Vec::new(),
+                duration: std::time::Duration::from_secs(1),
+                reply: format!("Answer paragraph {i}\nwith detail line {i}"),
+            });
+            st.turn_meta.push(TurnMeta {
+                mode: "Build".to_string(),
+                model: "gpt-4o".to_string(),
+                output_tokens: None,
+            });
+        }
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let mut snap = TuiLiveSnapshot {
+            is_thinking: true,
+            status_text: "Generating".to_string(),
+            live_content: "Initial streamed line".to_string(),
+            ..Default::default()
+        };
+        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+
+        // First draw at bottom (`scroll_from_bottom == 0`): follows latest output.
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let bottom_start = st.transcript_start;
+        assert!(bottom_start > 0);
+        assert!(st
+            .transcript_visible_text
+            .iter()
+            .any(|l| l.contains("Initial streamed line")));
+
+        // Scroll all the way to the top (`start == 0`).
+        st.scroll_transcript_up(10_000);
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        assert_eq!(st.transcript_start, 0);
+        assert!(st.scroll_from_bottom > 0);
+        let pinned_lines = st.transcript_visible_text.clone();
+
+        // Agent streams many more lines AND shows a todo strip that shrinks transcript height.
+        snap.live_content = (0..40)
+            .map(|n| format!("New streamed output line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        snap.todo_panel = Some("1. Step one\n2. Step two".to_string());
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        assert_eq!(
+            st.transcript_start, 0,
+            "viewport must remain pinned at top while agent streams"
+        );
+        assert_eq!(
+            st.transcript_visible_text[..5],
+            pinned_lines[..5],
+            "top visible lines must not shift while agent streams"
+        );
+
+        // Pin in the middle too, then stream more lines -> `transcript_start` must stay identical.
+        st.scroll_transcript_down(10);
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let mid_start = st.transcript_start;
+        let mid_lines = st.transcript_visible_text.clone();
+        assert!(mid_start > 0);
+
+        snap.live_content
+            .push_str("\nEven more lines\nLine A\nLine B\nLine C");
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        assert_eq!(st.transcript_start, mid_start);
+        assert_eq!(st.transcript_visible_text[..5], mid_lines[..5]);
+
+        // Jumping to latest re-enables bottom-follow mode.
+        st.jump_to_latest();
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        assert_eq!(st.scroll_from_bottom, 0);
+        assert!(st
+            .transcript_visible_text
+            .iter()
+            .any(|l| l.contains("Line C")));
     }
 }
