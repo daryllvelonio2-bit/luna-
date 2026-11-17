@@ -1834,7 +1834,11 @@ async fn open_connect_priority_provider(env: &Env<'_>, st: &mut TuiState) {
     };
 }
 
-async fn open_connect_priority_credential(env: &Env<'_>, st: &mut TuiState, provider: String) {
+pub(crate) async fn open_connect_priority_credential(
+    env: &Env<'_>,
+    st: &mut TuiState,
+    provider: String,
+) {
     let creds = env.cred_manager.get_credentials(&provider).await;
     if creds.is_empty() {
         env.ui

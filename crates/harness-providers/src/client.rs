@@ -1499,6 +1499,7 @@ mod tests {
             )),
             http_client: build_http_client(600).expect("http client"),
             default_model: "test-model".to_string(),
+            session_id: None,
         }
     }
 
