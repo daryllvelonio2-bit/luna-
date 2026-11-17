@@ -116,6 +116,9 @@ pub struct Config {
     /// Persistent timed-disable schedules for optional features (`mcp`, `skills`, `memory`, `notes`).
     #[serde(default)]
     pub features: FeatureSettings,
+    /// Optional native desktop GUI installation and update preferences.
+    #[serde(default)]
+    pub gui: GuiSettings,
 }
 
 pub const AUTO_COMPACT_MIN_THRESHOLD: usize = 100_000;
@@ -171,6 +174,7 @@ impl Default for Config {
             display: DisplaySettings::default(),
             goal: GoalSettings::default(),
             features: FeatureSettings::default(),
+            gui: GuiSettings::default(),
         }
     }
 }
@@ -782,6 +786,12 @@ pub struct PathsSettings {
     pub workspace_root: PathBuf,
     pub jobs_dir: PathBuf,
     pub skills_dir: PathBuf,
+    /// Where DeepSeek-style TypeScript/guided-builder plugins live.
+    pub plugins_dir: PathBuf,
+    /// Persistent SQLite schedule database for automation tasks.
+    pub schedules_db: PathBuf,
+    /// Where the optional native desktop GUI binary/package is installed.
+    pub gui_dir: PathBuf,
     /// Where custom profiles live: one self-contained directory per profile.
     pub profiles_dir: PathBuf,
     /// Per-turn file snapshots that `/rewind` restores from.
@@ -812,6 +822,9 @@ impl Default for PathsSettings {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             jobs_dir: luna.join("jobs"),
             skills_dir: luna.join("skills"),
+            plugins_dir: luna.join("plugins"),
+            schedules_db: luna.join("schedules.db"),
+            gui_dir: luna.join("gui"),
             profiles_dir: luna.join("profiles"),
             checkpoints_dir: luna.join("checkpoints"),
             usage_db: luna.join("usage.db"),
@@ -1003,6 +1016,34 @@ impl Default for UpdateSettings {
             branch: "main".to_string(),
             workflow: "release-build.yml".to_string(),
             artifact: "luna-binary".to_string(),
+        }
+    }
+}
+
+/// Optional native desktop GUI settings (`luna gui`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GuiSettings {
+    /// Whether the optional native desktop GUI is enabled/installed by the user.
+    pub enabled: bool,
+    /// GitHub `owner/repo` publishing GUI release artifacts.
+    pub repo: String,
+    /// Git branch for workflow-run fallback downloads.
+    pub branch: String,
+    /// GitHub Actions workflow producing cross-platform GUI packages.
+    pub workflow: String,
+    /// Check for GUI updates automatically when launching `luna gui`.
+    pub auto_update: bool,
+}
+
+impl Default for GuiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repo: "daryllvelonio2-bit/luna-".to_string(),
+            branch: "main".to_string(),
+            workflow: "gui-release.yml".to_string(),
+            auto_update: true,
         }
     }
 }
@@ -1900,6 +1941,9 @@ fn expand_paths(paths: &mut PathsSettings) {
         &mut paths.workspace_root,
         &mut paths.jobs_dir,
         &mut paths.skills_dir,
+        &mut paths.plugins_dir,
+        &mut paths.schedules_db,
+        &mut paths.gui_dir,
     ];
     for field in fields {
         let expanded = expand_tilde(&field.to_string_lossy());

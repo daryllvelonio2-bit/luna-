@@ -7,3 +7,7 @@ eval-report.json
 
 __pycache__/
 *.pyc
+gui/node_modules
+gui/dist
+crates/harness-gui/target
+crates/harness-gui/gen

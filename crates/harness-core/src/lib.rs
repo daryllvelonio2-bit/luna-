@@ -37,7 +37,7 @@ pub use checkpoint::{
 };
 pub use config::{
     resolve, CheckpointSettings, Config, DisplaySettings, FeatureSettings, GoalSettings,
-    HooksSettings, Layers, MemoryMode, MemorySettings, ModelSettings, PathsSettings,
+    GuiSettings, HooksSettings, Layers, MemoryMode, MemorySettings, ModelSettings, PathsSettings,
     ProviderOverride, Resolved, SessionSettings, Source, ThemeMode, ToolsSettings, WorkerProfile,
     WORKER_NAME_MAX_CHARS,
 };

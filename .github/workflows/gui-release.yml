@@ -1,0 +1,92 @@
+name: Luna Desktop GUI Build & Release
+
+on:
+  push:
+    branches: [main, feat/native-gui-plugins]
+    paths:
+      - "gui/**"
+      - "crates/harness-gui/**"
+      - "crates/harness-app/**"
+      - "crates/harness-plugins/**"
+      - "crates/harness-scheduler/**"
+      - ".github/workflows/gui-release.yml"
+  workflow_dispatch:
+
+jobs:
+  build-gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: luna-gui-linux-x86_64
+            bin: luna-gui
+          - os: macos-latest
+            artifact: luna-gui-macos-aarch64
+            bin: luna-gui
+          - os: windows-latest
+            artifact: luna-gui-windows-x86_64
+            bin: luna-gui.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux WebKitGTK & GTK dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libasound2-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config
+
+      - name: Build React + TypeScript desktop UI
+        working-directory: gui
+        run: |
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run typecheck
+          npm run build
+
+      - name: Build Tauri native desktop binary (luna-gui)
+        working-directory: crates/harness-gui
+        run: cargo build --release --manifest-path Cargo.toml
+
+      - name: Package GUI archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist-gui
+          cp "crates/harness-gui/target/release/${{ matrix.bin }}" "dist-gui/${{ matrix.bin }}"
+          cd dist-gui && zip -9 "../${{ matrix.artifact }}.zip" "${{ matrix.bin }}"
+
+      - name: Package GUI archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-gui | Out-Null
+          Copy-Item "crates/harness-gui/target/release/${{ matrix.bin }}" "dist-gui/${{ matrix.bin }}"
+          Compress-Archive -Path "dist-gui/${{ matrix.bin }}" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip

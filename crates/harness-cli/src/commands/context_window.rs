@@ -1,58 +1,12 @@
 //! One answer to "how much room does this model have?".
-//!
-//! Several places need the number — the status line after every turn, the model picker, `/compact`,
-//! `luna heartbeat` — and each used to compute it with its own `unwrap_or(128_000)`. That literal
-//! is why a model the catalog had never heard of (any recent release) showed a 128k window whatever
-//! it really had. The resolution order lives here instead, and callers just ask.
-//!
-//! First answer wins:
-//!
-//! 1. what the provider published for this model (`/models`, cached by discovery) — measured, which
-//!    is why an asserted value below cannot beat it: over-stating a window fails a turn outright,
-//!    while under-stating only folds the conversation earlier than it had to;
-//! 2. `providers.<id>.context_window` — the operator's statement about a model this build predates;
-//! 3. the static catalog tables and the model-family rules;
-//! 4. `DEFAULT_CONTEXT_WINDOW`.
 
-use harness_core::config::Config;
-use harness_providers::{get_context_window, ModelDiscovery, DEFAULT_CONTEXT_WINDOW};
-
-/// The context window for `provider`/`model`.
-pub fn context_window(
-    config: &Config,
-    discovery: &ModelDiscovery,
-    provider: &str,
-    model: &str,
-) -> u32 {
-    discovery
-        .context_window(provider, model)
-        .or_else(|| {
-            config
-                .providers
-                .get(provider)
-                .and_then(|over| over.context_window)
-        })
-        .or_else(|| discovery.cross_provider_context_window(model))
-        .or_else(|| get_context_window(provider, model))
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
-}
-
-/// The same answer for a caller holding only the config. The cache path comes from
-/// `paths.models_cache`, so the lookup is identical; the TTL is irrelevant because this only reads
-/// the cache a real fetch already wrote.
-pub fn context_window_for(config: &Config, provider: &str, model: &str) -> u32 {
-    let discovery = ModelDiscovery::new(
-        Some(config.paths.models_cache.clone()),
-        0,
-        config.providers.clone(),
-    );
-    context_window(config, &discovery, provider, model)
-}
+pub use harness_app::{context_window, context_window_for};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_core::config::ProviderOverride;
+    use harness_core::config::{Config, ProviderOverride};
+    use harness_providers::ModelDiscovery;
 
     fn discovery_with(cache: &str) -> (tempfile::TempDir, ModelDiscovery) {
         let dir = tempfile::tempdir().expect("temp dir");

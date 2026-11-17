@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for Luna native desktop window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

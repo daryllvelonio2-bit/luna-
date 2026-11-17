@@ -9,73 +9,10 @@
 use std::sync::Arc;
 
 use colored::Colorize;
-use harness_core::usage::{
-    GroupBy, PriceTable, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals,
-    SOURCE_CHAT,
-};
+pub use harness_app::UsageRecorder;
+use harness_core::usage::{GroupBy, UsageBucket, UsageFilter, UsageLedger, UsageRecord, UsageTotals};
 use harness_core::HarnessError;
 use harness_providers::{CredentialManager, ModelDiscovery};
-
-/// What a finished turn contributes, resolved once from the config.
-pub struct UsageRecorder {
-    ledger: Option<Arc<UsageLedger>>,
-    prices: PriceTable,
-}
-
-impl UsageRecorder {
-    pub fn from_config(config: &harness_core::Config) -> Self {
-        let ledger = if config.usage.enabled {
-            match UsageLedger::open(Some(config.paths.usage_db.clone())) {
-                Ok(ledger) => Some(Arc::new(ledger)),
-                // A ledger that cannot be opened must not take the session down with it: the turn
-                // is still useful, and the accounting problem is reported once, on stderr.
-                Err(error) => {
-                    eprintln!("warning: usage recording is off ({error})");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        Self {
-            ledger,
-            prices: config.usage.price_table(),
-        }
-    }
-
-    /// Record one turn. Silent by design: accounting never interrupts a conversation, and a turn
-    /// whose usage the provider did not report writes nothing rather than a zero.
-    pub async fn record(
-        &self,
-        provider: &str,
-        model: &str,
-        session_id: Option<&str>,
-        outcome: &harness_core::TurnOutcome,
-        source: &str,
-    ) {
-        let Some(ledger) = self.ledger.as_ref() else {
-            return;
-        };
-        if let Err(error) = ledger
-            .record_turn(provider, model, session_id, outcome, source, &self.prices)
-            .await
-        {
-            eprintln!("warning: could not record usage ({error})");
-        }
-    }
-
-    /// The chat's default source tag, so call sites read as one call.
-    pub async fn record_chat(
-        &self,
-        provider: &str,
-        model: &str,
-        session_id: Option<&str>,
-        outcome: &harness_core::TurnOutcome,
-    ) {
-        self.record(provider, model, session_id, outcome, SOURCE_CHAT)
-            .await;
-    }
-}
 
 /// `luna usage` options.
 pub struct UsageOptions {

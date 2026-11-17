@@ -12,137 +12,17 @@
 //! provider and model the saver bills to, and turns the `memory.*` keys into a `SaverPolicy`. It
 //! lives in its own file because the mapping is worth testing on its own, without a terminal.
 
-use std::sync::Arc;
-
-use harness_core::config::Config;
-use harness_core::{HarnessError, MemoryEngine, NotesEngine};
-use harness_memory::{MemorySaver, SaverPolicy};
-use harness_providers::{CredentialManager, GenericProviderClient, ModelDiscovery};
-
-/// Build the independent memory writer, or `None` when the config keeps the session as the writer.
-///
-/// The saver gets its own provider client so it can be pointed at a cheaper model
-/// (`memory.background_model`) than the session's, the same way compaction is configured. It bills
-/// to that client, never to the turn's.
-///
-/// One caveat worth knowing: the client is resolved at startup, so `/model` changes the session
-/// mid-conversation without moving the saver. Point `memory.background_model` at something cheap
-/// and stable and the two never need to agree.
-/// The saver gets its own provider client so it can be pointed at a cheaper model
-/// (`memory.background_model`) than the session's, the same way compaction is configured. It bills
-/// to that client, never to the turn's.
-///
-/// One caveat worth knowing: the client is resolved at startup, so `/model` changes the session
-/// mid-conversation without moving the saver. Point `memory.background_model` at something cheap
-/// and stable and the two never need to agree.
-#[allow(clippy::too_many_arguments)]
-pub fn build_saver(
-    config: &Config,
-    memory: &Arc<dyn MemoryEngine>,
-    notes: Arc<dyn NotesEngine>,
-    session_provider: &str,
-    session_model: &str,
-    cred_manager: Arc<CredentialManager>,
-    discovery: Arc<ModelDiscovery>,
-) -> Option<Arc<MemorySaver>> {
-    if !config.memory.mode.is_background() {
-        return None;
-    }
-    let provider_id = config
-        .memory
-        .background_provider
-        .clone()
-        .unwrap_or_else(|| session_provider.to_string());
-    let model = config
-        .memory
-        .background_model
-        .clone()
-        .unwrap_or_else(|| session_model.to_string());
-    match build_saver_for(
-        config,
-        memory,
-        notes,
-        &provider_id,
-        &model,
-        cred_manager,
-        discovery,
-    ) {
-        Ok(saver) => Some(Arc::new(saver)),
-        // Unusable saver config is a warning, not a startup failure: the session runs either way,
-        // and the missing pass is visible in the log. The session keeps writing memory itself, so
-        // the fallback is the mode the user already had.
-        Err(error) => {
-            eprintln!(
-                "warning: the background memory saver is off (provider '{provider_id}', model '{model}'): {error}"
-            );
-            None
-        }
-    }
-}
-
-/// Build one saver for an explicit provider/model pair.
-///
-/// Unlike [`build_saver`], this returns the provider error so a slash command can reject a broken
-/// choice instead of silently persisting it and leaving the saver disabled.
-pub(crate) fn build_saver_for(
-    config: &Config,
-    memory: &Arc<dyn MemoryEngine>,
-    notes: Arc<dyn NotesEngine>,
-    provider_id: &str,
-    model: &str,
-    cred_manager: Arc<CredentialManager>,
-    discovery: Arc<ModelDiscovery>,
-) -> Result<MemorySaver, HarnessError> {
-    let client = GenericProviderClient::new(
-        provider_id.to_string(),
-        model.to_string(),
-        cred_manager,
-        discovery,
-        config.providers.get(provider_id),
-    )?;
-
-    let mut policy = SaverPolicy::new(model.to_string());
-    policy.every_turns = config.memory.background_every_turns;
-    policy.tail_messages = config.memory.background_tail_messages;
-    policy.notes = config.memory.background_notes;
-    policy.two_pass = config.memory.background_two_pass;
-    policy.min_confidence = config.memory.background_min_confidence;
-    policy.max_memory_writes = config.memory.background_max_memory_writes;
-    policy.max_note_writes = config.memory.background_max_note_writes;
-    policy.max_operations = config.memory.background_max_operations;
-    Ok(MemorySaver::new(
-        Arc::new(client),
-        memory.clone(),
-        notes,
-        policy,
-    ))
-}
-
-/// The startup line that tells the user which writer is active.
-///
-/// A mode that changes where records come from is worth one line of notice, and the number of turns
-/// is the part that surprises people ("why is nothing saved yet?").
-pub fn notice(config: &Config) -> Option<String> {
-    if !config.memory.mode.is_background() {
-        return None;
-    }
-    Some(format!(
-        "memory: background saver on ({}), after every {} turn(s) — memories land after each reply",
-        config
-            .memory
-            .background_model
-            .clone()
-            .unwrap_or_else(|| config.model.default.clone()),
-        config.memory.background_every_turns
-    ))
-}
+pub use harness_app::memory_writer::{build_saver, build_saver_for, notice};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_core::BackgroundSaver;
-    use harness_memory::SqliteMemoryEngine;
+    use harness_core::config::Config;
+    use harness_core::{BackgroundSaver, MemoryEngine, NotesEngine};
+    use harness_memory::{MemorySaver, SqliteMemoryEngine};
     use harness_notes::FileNotesEngine;
+    use harness_providers::{CredentialManager, ModelDiscovery};
+    use std::sync::Arc;
 
     fn temp_engines() -> (Arc<dyn MemoryEngine>, Arc<dyn NotesEngine>) {
         (

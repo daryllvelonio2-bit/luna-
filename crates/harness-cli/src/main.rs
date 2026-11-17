@@ -15,6 +15,7 @@ mod update_tests;
 use commands::auth::{handle_auth_command, handle_interactive_auth, AuthCommand};
 use commands::chat::{run_inline_chat, run_interactive_chat};
 use commands::config::{catalog_defaults, handle_config_command, ConfigCommand};
+use commands::gui::{run_gui_command, GuiCommand};
 use commands::mcp::{handle_mcp_command, McpCommand};
 use commands::memory::{handle_memory_command, MemoryCommand};
 use commands::models::{handle_models_command, ModelsCommand};
@@ -322,6 +323,11 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         subcommand: Option<McpCommand>,
+    },
+    /// Optional native desktop GUI (`luna gui install`, `luna gui`, `luna gui remove`)
+    Gui {
+        #[command(subcommand)]
+        subcommand: Option<GuiCommand>,
     },
 }
 
@@ -820,6 +826,9 @@ async fn dispatch_command(
         }
         Some(Commands::Mcp { subcommand }) => {
             run_mcp_selection(subcommand, &config).await?;
+        }
+        Some(Commands::Gui { subcommand }) => {
+            run_gui_command(subcommand, &config).await?;
         }
         None => {
             let selection = session_selection(cli.session, cli.fork, cli.continue_session);

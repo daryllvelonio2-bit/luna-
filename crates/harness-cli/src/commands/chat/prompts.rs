@@ -13,7 +13,7 @@ use super::modal::{paint_centred, ModalScreen};
 use super::render;
 use super::ui::{get_terminal_width, ChatUi};
 use crate::commands::approval::{render_approval_box, ApprovalChoice, APPROVAL_ACTIONS};
-use harness_core::{ApprovalRequest, HarnessError};
+use harness_core::ApprovalRequest;
 
 pub(super) async fn prompt_approval_choice(
     key_rx: &mut mpsc::UnboundedReceiver<AppKey>,
@@ -111,31 +111,7 @@ pub(super) async fn prompt_approval_choice(
     choice
 }
 
-pub struct ChatSudoPrompter {
-    request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
-}
-
-impl ChatSudoPrompter {
-    pub fn new(
-        request_tx: mpsc::UnboundedSender<(String, oneshot::Sender<Option<String>>)>,
-    ) -> Self {
-        Self { request_tx }
-    }
-}
-
-#[async_trait::async_trait]
-impl harness_core::tools::SudoPrompter for ChatSudoPrompter {
-    async fn prompt_sudo_password(&self, command: &str) -> Result<Option<String>, HarnessError> {
-        let (tx, rx) = oneshot::channel();
-        if self.request_tx.send((command.to_string(), tx)).is_err() {
-            return Ok(None);
-        }
-        match rx.await {
-            Ok(pwd) => Ok(pwd),
-            Err(_) => Ok(None),
-        }
-    }
-}
+pub use harness_app::ChannelSudoPrompter as ChatSudoPrompter;
 
 /// The sudo frame's widest fixed line. It sets the frame's width, so a command is wrapped to it
 /// rather than allowed to become the widest line itself.

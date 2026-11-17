@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 use clap::Subcommand;
 use colored::Colorize;
 
-use harness_core::{Config, HarnessError, SessionStore, SqliteSessionStore};
+use harness_core::{Config, HarnessError, SessionStore};
 
 #[derive(Subcommand, Debug)]
 pub enum SessionsCommand {
@@ -34,87 +34,7 @@ pub enum SessionsCommand {
     },
 }
 
-/// Which session `luna chat` runs against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionSelection {
-    /// A fresh session id.
-    New,
-    /// `--session <id>`; the session is created when it does not exist yet.
-    Resume(String),
-    /// Fork an existing session and start on the new copy.
-    Fork(String),
-    /// `--continue`: the most recently updated session.
-    Continue,
-}
-
-/// The store at `paths.sessions_db`.
-pub fn open_store(config: &Config) -> Result<SqliteSessionStore, HarnessError> {
-    SqliteSessionStore::new(Some(config.paths.sessions_db.clone()))
-}
-
-/// Resolve the selection to an existing session id.
-pub async fn resolve_session(
-    store: &SqliteSessionStore,
-    selection: SessionSelection,
-) -> Result<String, HarnessError> {
-    match selection {
-        SessionSelection::Resume(value) => {
-            // A session *name* is accepted as well as an id. Someone who named a session "luna"
-            // types `luna --session luna`; creating a fresh session called "luna" instead would
-            // silently strand the transcript they were trying to continue.
-            if store.get(&value).await.is_err() {
-                if let Some(id) = find_by_name(store, &value).await? {
-                    return Ok(id);
-                }
-            }
-            store.ensure_session(&value).await?;
-            Ok(value)
-        }
-        SessionSelection::Fork(source) => {
-            let id = if store.get(&source).await.is_ok() {
-                source
-            } else if let Some(resolved) = find_by_name(store, &source).await? {
-                resolved
-            } else {
-                return Err(HarnessError::SessionError(format!(
-                    "source session '{}' not found",
-                    source
-                )));
-            };
-            store.fork_session(&id, None).await
-        }
-        SessionSelection::Continue => match store.most_recent().await? {
-            Some(id) => Ok(id),
-            // `--continue` on a board with no sessions is not an error: it starts one.
-            None => create_session(store).await,
-        },
-        SessionSelection::New => create_session(store).await,
-    }
-}
-
-/// The id of the most recently updated session carrying this name. `list()` is ordered
-/// newest-first, so the first match is the one the user last used.
-pub(crate) async fn find_by_name(
-    store: &SqliteSessionStore,
-    name: &str,
-) -> Result<Option<String>, HarnessError> {
-    if name.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(store
-        .list()
-        .await?
-        .into_iter()
-        .find(|session| session.name == name)
-        .map(|session| session.id))
-}
-
-async fn create_session(store: &SqliteSessionStore) -> Result<String, HarnessError> {
-    let uuid = uuid::Uuid::new_v4().simple().to_string();
-    let id = format!("s{}", &uuid[..8]);
-    store.ensure_session(&id).await?;
-    Ok(id)
-}
+pub use harness_app::session::{find_by_name, open_store, resolve_session, SessionSelection};
 
 async fn list_sessions(config: &Config) -> Result<(), HarnessError> {
     let store = open_store(config)?;
@@ -285,6 +205,8 @@ pub async fn handle_sessions_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_app::create_session;
+    use harness_core::SqliteSessionStore;
 
     #[tokio::test]
     async fn test_sessions_command_delete() {

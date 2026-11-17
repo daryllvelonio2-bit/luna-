@@ -3,12 +3,6 @@
 //! They live here rather than beside the REPL so `mod.rs` stays a thin facade and the
 //! interactive loop keeps to its own concerns.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use harness_core::{Config, DefaultToolRegistry, HarnessError, ToolRegistry};
-use harness_mcp::{McpStdioClient, McpToolAdapter};
-
 use super::keys::AppKey;
 use super::render::{render_transcript, TurnRecord};
 use super::ui::{get_terminal_width, ChatUi};
@@ -125,117 +119,7 @@ pub(crate) fn finish_slash_command(
     }
 }
 
-/// Register MCP servers from configuration and add their tools to the registry.
-pub(crate) async fn register_mcp_servers(
-    registry: &Arc<DefaultToolRegistry>,
-    config: &Config,
-) -> Result<(), HarnessError> {
-    if !config.mcp.enabled || config.mcp.servers.is_empty() {
-        return Ok(());
-    }
-
-    for server_config in &config.mcp.servers {
-        if !server_config.enabled {
-            continue;
-        }
-
-        // Spawn the MCP stdio server
-        let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-        // `~` is expanded here rather than in the config type: the config keeps
-        // what the user wrote, and only the spawn needs a real path.
-        let cwd = server_config
-            .cwd
-            .as_ref()
-            .map(|dir| PathBuf::from(harness_core::config::expand_tilde(&dir.to_string_lossy())));
-        let client = match McpStdioClient::spawn(
-            &server_config.command,
-            &args,
-            &server_config.env,
-            cwd.as_deref(),
-            config.mcp.startup_timeout_secs,
-            config.mcp.call_timeout_secs,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "warning: failed to start MCP server '{}': {}",
-                    server_config.name, e
-                );
-                continue;
-            }
-        };
-
-        // List tools from the server
-        let tools = match client.list_tools().await {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!(
-                    "warning: failed to list tools from MCP server '{}': {}",
-                    server_config.name, e
-                );
-                continue;
-            }
-        };
-
-        // Filter tools if an allowlist is configured
-        let allowed: std::collections::HashSet<_> = server_config.tools.iter().cloned().collect();
-        let filtered_tools: Vec<_> = tools
-            .into_iter()
-            .filter(|t| allowed.is_empty() || allowed.contains(&t.name))
-            .collect();
-
-        // Register each tool under the namespace, dispatching to the server's own
-        // name: the namespace is local to this process and means nothing to the
-        // server, which would reject `mcp__<server>__<tool>` as an unknown tool.
-        for tool_info in &filtered_tools {
-            let namespaced_name = format!("mcp__{}__{}", server_config.name, tool_info.name);
-            let adapter = McpToolAdapter::namespaced(
-                namespaced_name.clone(),
-                tool_info.clone(),
-                client.clone(),
-            );
-            if let Err(e) = registry.register(Arc::new(adapter)).await {
-                eprintln!(
-                    "warning: failed to register MCP tool '{}': {}",
-                    namespaced_name, e
-                );
-            }
-        }
-
-        if !server_config.tools.is_empty() {
-            eprintln!(
-                "info: MCP server '{}' registered {} tool(s)",
-                server_config.name,
-                filtered_tools.len()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Spawn and register MCP servers on demand if none are currently registered yet.
-pub(crate) async fn ensure_mcp_servers_registered(
-    registry: &Arc<DefaultToolRegistry>,
-    config: &Config,
-) -> Result<(), HarnessError> {
-    if config.mcp.servers.is_empty() {
-        return Ok(());
-    }
-    let has_mcp_tools = registry
-        .list_tools()
-        .await?
-        .iter()
-        .any(|tool| tool.name.starts_with("mcp__"));
-    if has_mcp_tools {
-        return Ok(());
-    }
-    let mut forced = config.clone();
-    forced.mcp.enabled = true;
-    register_mcp_servers(registry, &forced).await
-}
+pub(crate) use harness_app::mcp::{ensure_mcp_servers_registered, register_mcp_servers};
 
 /// Whether a keypress can be handled without moving the mark.
 ///
