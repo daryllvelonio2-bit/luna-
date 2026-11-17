@@ -867,6 +867,36 @@ async fn denying_the_network_and_disabling_web_access_both_withhold_the_web_tool
     assert!(!names.contains(&"web_fetch".to_string()), "{names:?}");
 }
 
+#[tokio::test]
+async fn write_file_preview_generates_diff_for_new_and_existing_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cache = ReadCache::new();
+    let writer = WriteFileTool::new(root.clone(), cache);
+
+    // Brand-new file: diff shows every added line.
+    let preview_new = writer
+        .preview(&json!({ "path": "test.txt", "content": "hello\nworld\n" }))
+        .await
+        .unwrap();
+    assert_eq!(preview_new.target.as_deref(), Some("test.txt"));
+    let diff_new = preview_new.diff.expect("write_file preview must emit diff");
+    assert!(diff_new.contains("+hello"), "{diff_new}");
+    assert!(diff_new.contains("+world"), "{diff_new}");
+
+    // Existing file: diff shows removed and added lines.
+    tokio::fs::write(root.join("test.txt"), "hello\nworld\n")
+        .await
+        .unwrap();
+    let preview_edit = writer
+        .preview(&json!({ "path": "test.txt", "content": "hello\nrust\n" }))
+        .await
+        .unwrap();
+    let diff_edit = preview_edit.diff.expect("overwrite preview must emit diff");
+    assert!(diff_edit.contains("-world"), "{diff_edit}");
+    assert!(diff_edit.contains("+rust"), "{diff_edit}");
+}
+
 /// `list_files` is the filename-discovery surface that previously forced a `terminal` call.
 /// It must be non-mutating, so it never prompts under the HITL approval gate.
 #[tokio::test]

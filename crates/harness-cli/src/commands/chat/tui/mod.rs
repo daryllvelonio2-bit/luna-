@@ -497,6 +497,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             req,
                             resp_tx,
                             selected: 0,
+                            diff_scroll: 0,
                             editing_input: false,
                             input: String::new(),
                             asking: false,

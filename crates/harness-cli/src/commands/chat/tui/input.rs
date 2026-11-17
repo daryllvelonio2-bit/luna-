@@ -145,9 +145,14 @@ async fn handle_mouse(
                 ActiveModal::Approval {
                     reply,
                     reply_scroll,
+                    diff_scroll,
                     ..
-                } if reply.is_some() => {
-                    *reply_scroll = reply_scroll.saturating_sub(3);
+                } => {
+                    if reply.is_some() {
+                        *reply_scroll = reply_scroll.saturating_sub(3);
+                    } else {
+                        *diff_scroll = diff_scroll.saturating_sub(3);
+                    }
                 }
                 _ => {}
             },
@@ -208,9 +213,14 @@ async fn handle_mouse(
                 ActiveModal::Approval {
                     reply,
                     reply_scroll,
+                    diff_scroll,
                     ..
-                } if reply.is_some() => {
-                    *reply_scroll += 3;
+                } => {
+                    if reply.is_some() {
+                        *reply_scroll += 3;
+                    } else {
+                        *diff_scroll += 3;
+                    }
                 }
                 _ => {}
             },
@@ -1561,6 +1571,7 @@ async fn handle_modal_key(
             req,
             resp_tx,
             mut selected,
+            mut diff_scroll,
             mut editing_input,
             mut input,
             mut asking,
@@ -1578,6 +1589,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1598,6 +1610,7 @@ async fn handle_modal_key(
                                 req,
                                 resp_tx,
                                 selected,
+                                diff_scroll,
                                 editing_input,
                                 input,
                                 asking,
@@ -1628,6 +1641,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1643,6 +1657,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1659,6 +1674,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1673,6 +1689,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1706,6 +1723,39 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Char('[') => {
+                        diff_scroll = diff_scroll.saturating_sub(3);
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            diff_scroll,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Char(']') => {
+                        diff_scroll += 3;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1725,6 +1775,7 @@ async fn handle_modal_key(
                                 req,
                                 resp_tx,
                                 selected,
+                                diff_scroll,
                                 editing_input,
                                 input,
                                 asking,
@@ -1738,11 +1789,16 @@ async fn handle_modal_key(
                         }
                     }
                     KeyCode::PageUp => {
-                        reply_scroll = reply_scroll.saturating_sub(3);
+                        if reply.is_some() {
+                            reply_scroll = reply_scroll.saturating_sub(3);
+                        } else {
+                            diff_scroll = diff_scroll.saturating_sub(3);
+                        }
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1755,11 +1811,14 @@ async fn handle_modal_key(
                     KeyCode::PageDown => {
                         if reply.is_some() {
                             reply_scroll += 3;
+                        } else {
+                            diff_scroll += 3;
                         }
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1775,6 +1834,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1790,6 +1850,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
@@ -1817,6 +1878,7 @@ async fn handle_modal_key(
                                 req,
                                 resp_tx,
                                 selected,
+                                diff_scroll,
                                 editing_input,
                                 input,
                                 asking,
@@ -1832,6 +1894,7 @@ async fn handle_modal_key(
                             req,
                             resp_tx,
                             selected,
+                            diff_scroll,
                             editing_input,
                             input,
                             asking,
