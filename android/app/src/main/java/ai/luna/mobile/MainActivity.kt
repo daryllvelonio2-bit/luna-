@@ -1,38 +1,97 @@
 package ai.luna.mobile
 
+import ai.luna.mobile.theme.LunaMobileTheme
+import ai.luna.mobile.theme.LunaTheme
+import ai.luna.mobile.theme.LunaThemeMode
+import ai.luna.mobile.theme.applySystemBars
+import ai.luna.mobile.ui.ChatScreen
+import ai.luna.mobile.ui.ContextTelemetryPill
+import ai.luna.mobile.ui.LiveToolItem
+import ai.luna.mobile.ui.LunaCrescentMark
+import ai.luna.mobile.ui.MemoryScreen
+import ai.luna.mobile.ui.SessionsScreen
+import ai.luna.mobile.ui.SettingsScreen
+import ai.luna.mobile.ui.formatTokenCount
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.ChatBubbleOutline
+import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -46,14 +105,8 @@ private val jsonCodec = Json {
     isLenient = true
 }
 
-// Note: MemoryDto uses `object` in Rust JSON; map `object` safely via SerialName if needed
-data class LiveToolItem(
-    val name: String,
-    val arguments: String,
-    val output: String = "",
-    val done: Boolean = false,
-    val isError: Boolean = false,
-)
+private const val PREFS_NAME = "luna_ui_prefs"
+private const val PREF_THEME_MODE = "theme_mode"
 
 enum class AppTab(val label: String) {
     Chat("Chat"),
@@ -65,58 +118,73 @@ enum class AppTab(val label: String) {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedMode = runCatching {
+            LunaThemeMode.valueOf(prefs.getString(PREF_THEME_MODE, LunaThemeMode.System.name)!!)
+        }.getOrDefault(LunaThemeMode.System)
+
         setContent {
-            LunaMobileTheme {
-                LunaApp()
+            var themeMode by remember { mutableStateOf(savedMode) }
+            val systemDark = isSystemInDarkTheme()
+            val useDark = when (themeMode) {
+                LunaThemeMode.System -> systemDark
+                LunaThemeMode.Dark -> true
+                LunaThemeMode.Light -> false
+            }
+
+            LaunchedEffect(useDark) {
+                applySystemBars(useDark)
+            }
+
+            LunaMobileTheme(themeMode = themeMode) {
+                LunaApp(
+                    themeMode = themeMode,
+                    onThemeModeChange = { next ->
+                        themeMode = next
+                        prefs.edit().putString(PREF_THEME_MODE, next.name).apply()
+                    },
+                )
             }
         }
     }
 }
 
-@Composable
-fun LunaMobileTheme(content: @Composable () -> Unit) {
-    val colorScheme = darkColorScheme(
-        primary = Color(0xFF7C9EFF),
-        onPrimary = Color(0xFF0B1020),
-        secondary = Color(0xFF8BE9FD),
-        background = Color(0xFF0E1017),
-        surface = Color(0xFF161923),
-        surfaceVariant = Color(0xFF1F2433),
-        onBackground = Color(0xFFE6EAF5),
-        onSurface = Color(0xFFE6EAF5),
-        onSurfaceVariant = Color(0xFFA0A8C0),
-        error = Color(0xFFFF6B81),
-    )
-    MaterialTheme(
-        colorScheme = colorScheme,
-        content = content,
-    )
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LunaApp() {
+fun LunaApp(
+    themeMode: LunaThemeMode,
+    onThemeModeChange: (LunaThemeMode) -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val colors = LunaTheme.colors
+    val reduceMotion = LunaTheme.reduceMotion
+    val snackbarHostState = remember { SnackbarHostState() }
 
     var currentTab by remember { mutableStateOf(AppTab.Chat) }
     var initState by remember { mutableStateOf<InitResponse?>(null) }
     var initError by remember { mutableStateOf<String?>(null) }
     var messages by remember { mutableStateOf<List<ChatMessageDto>>(emptyList()) }
-    var statusBanner by remember { mutableStateOf<String?>(null) }
 
     var inputText by remember { mutableStateOf("") }
     var isRunning by remember { mutableStateOf(false) }
     var streamingContent by remember { mutableStateOf("") }
     var streamingReasoning by remember { mutableStateOf("") }
     var liveTools by remember { mutableStateOf<List<LiveToolItem>>(emptyList()) }
-    var tokensUsed by remember { mutableStateOf(0) }
+    var tokensUsed by remember { mutableIntStateOf(0) }
 
     var pendingApproval by remember { mutableStateOf<Pair<ApprovalPayload, CompletableDeferred<Int>>?>(null) }
+    var showContextSheet by remember { mutableStateOf(false) }
 
     var memories by remember { mutableStateOf<List<MemoryDto>>(emptyList()) }
     var notes by remember { mutableStateOf<List<NoteDto>>(emptyList()) }
+
+    fun showNotice(message: String) {
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+        }
+    }
 
     fun refreshMessages() {
         scope.launch {
@@ -125,9 +193,7 @@ fun LunaApp() {
                     jsonCodec.decodeFromString<MessagesResponse>(LunaBridge.nativeGetMessages())
                 }
             }
-            res.onSuccess {
-                if (it.ok) messages = it.messages
-            }
+            res.onSuccess { if (it.ok) messages = it.messages }
         }
     }
 
@@ -136,10 +202,10 @@ fun LunaApp() {
             withContext(Dispatchers.IO) {
                 runCatching {
                     val mem = jsonCodec.decodeFromString<MemoriesResponse>(
-                        LunaBridge.nativeListMemories(query)
+                        LunaBridge.nativeListMemories(query),
                     )
                     val note = jsonCodec.decodeFromString<NotesResponse>(
-                        LunaBridge.nativeListNotes(query)
+                        LunaBridge.nativeListNotes(query),
                     )
                     mem to note
                 }
@@ -150,23 +216,37 @@ fun LunaApp() {
         }
     }
 
+    fun startNewSession() {
+        scope.launch {
+            val res = withContext(Dispatchers.IO) {
+                runCatching {
+                    jsonCodec.decodeFromString<InitResponse>(LunaBridge.nativeNewSession())
+                }
+            }
+            res.onSuccess {
+                if (it.ok) {
+                    initState = it
+                    messages = emptyList()
+                    tokensUsed = 0
+                    currentTab = AppTab.Chat
+                }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         val result = withContext(Dispatchers.IO) {
             runCatching {
                 val filesDir = context.filesDir.absolutePath
                 val workspaceDir = File(context.filesDir, "workspace").apply { mkdirs() }.absolutePath
                 jsonCodec.decodeFromString<InitResponse>(
-                    LunaBridge.nativeInit(filesDir, workspaceDir)
+                    LunaBridge.nativeInit(filesDir, workspaceDir),
                 )
             }
         }
         result.onSuccess { init ->
             if (init.ok) {
                 initState = init
-                if (init.providers.none { it.hasKey }) {
-                    currentTab = AppTab.Settings
-                    statusBanner = "Add a provider API key in Settings to start chatting."
-                }
                 refreshMessages()
                 refreshKnowledge()
             } else {
@@ -218,10 +298,10 @@ fun LunaApp() {
                             tokensUsed = ev.tokensUsed ?: tokensUsed
                         }
                         "compaction_started" -> {
-                            statusBanner = "Compacting conversation..."
+                            showNotice("Compacting conversation...")
                         }
                         "compaction_finished" -> {
-                            statusBanner = ev.error?.let { "Compact: $it" } ?: "Compacted conversation."
+                            showNotice(ev.error?.let { "Compact: $it" } ?: "Conversation compacted")
                         }
                     }
                 }
@@ -240,22 +320,21 @@ fun LunaApp() {
         }
     }
 
-    fun sendCurrentPrompt() {
-        val prompt = inputText.trim()
+    fun sendPrompt(overridePrompt: String? = null) {
+        val prompt = (overridePrompt ?: inputText).trim()
         if (prompt.isEmpty() || isRunning) return
-        inputText = ""
+        if (overridePrompt == null) inputText = ""
         isRunning = true
         streamingContent = ""
         streamingReasoning = ""
         liveTools = emptyList()
-        statusBanner = null
         messages = messages + ChatMessageDto(role = "user", content = prompt)
 
         scope.launch {
             val res = withContext(Dispatchers.IO) {
                 runCatching {
                     jsonCodec.decodeFromString<SendResponse>(
-                        LunaBridge.nativeSendMessage(prompt, callback)
+                        LunaBridge.nativeSendMessage(prompt, callback),
                     )
                 }
             }
@@ -265,378 +344,307 @@ fun LunaApp() {
             liveTools = emptyList()
             res.onSuccess {
                 if (!it.ok) {
-                    statusBanner = it.error ?: "Turn failed"
+                    showNotice(it.error ?: "Turn failed")
                 }
             }.onFailure {
-                statusBanner = it.message ?: "Turn error"
+                showNotice(it.message ?: "Turn error")
             }
             refreshMessages()
             refreshKnowledge()
         }
     }
 
+    BackHandler(enabled = pendingApproval != null || showContextSheet || currentTab != AppTab.Chat) {
+        when {
+            pendingApproval != null -> {
+                val (_, deferred) = pendingApproval!!
+                pendingApproval = null
+                deferred.complete(0)
+            }
+            showContextSheet -> showContextSheet = false
+            currentTab != AppTab.Chat -> currentTab = AppTab.Chat
+        }
+    }
+
     pendingApproval?.let { (req, deferred) ->
-        AlertDialog(
-            onDismissRequest = {
+        ApprovalDialog(
+            request = req,
+            onDeny = {
                 pendingApproval = null
                 deferred.complete(0)
             },
-            title = { Text("Approve ${req.tool}?") },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    req.target?.let {
-                        Text(
-                            text = it,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.secondary,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    req.diff?.let {
-                        Text(
-                            text = it.take(1200),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                        )
-                    } ?: run {
-                        Text(
-                            text = req.arguments?.toString()?.take(600).orEmpty(),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                        )
-                    }
-                }
+            onAllowOnce = {
+                pendingApproval = null
+                deferred.complete(1)
             },
-            confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = {
-                        pendingApproval = null
-                        deferred.complete(2)
-                    }) { Text("Session") }
-                    Button(onClick = {
-                        pendingApproval = null
-                        deferred.complete(1)
-                    }) { Text("Allow") }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    pendingApproval = null
-                    deferred.complete(0)
-                }) { Text("Deny", color = MaterialTheme.colorScheme.error) }
+            onAllowSession = {
+                pendingApproval = null
+                deferred.complete(2)
             },
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Luna", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        initState?.let { st ->
-                            val ctxPct = if (st.contextWindow > 0 && tokensUsed > 0) {
-                                " · ${(tokensUsed * 100 / st.contextWindow)}%"
-                            } else ""
-                            Text(
-                                "${st.provider} / ${st.model}$ctxPct",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+    if (showContextSheet && initState != null) {
+        ContextSheet(
+            state = initState!!,
+            tokensUsed = tokensUsed,
+            onCompact = {
+                showContextSheet = false
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        LunaBridge.nativeCompactSession(callback)
                     }
-                },
-                actions = {
-                    if (currentTab == AppTab.Chat && initState != null) {
-                        IconButton(onClick = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    LunaBridge.nativeCompactSession(callback)
-                                }
-                                refreshMessages()
-                            }
-                        }) {
-                            Icon(Icons.Default.Compress, contentDescription = "Compact")
-                        }
-                        IconButton(onClick = {
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        jsonCodec.decodeFromString<InitResponse>(
-                                            LunaBridge.nativeNewSession()
+                    refreshMessages()
+                }
+            },
+            onNewSession = {
+                showContextSheet = false
+                startNewSession()
+            },
+            onDismiss = { showContextSheet = false },
+        )
+    }
+
+    val density = LocalDensity.current
+    val imeOpen = WindowInsets.ime.getBottom(density) > WindowInsets.navigationBars.getBottom(density)
+
+    Scaffold(
+        containerColor = colors.canvas,
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState) { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = colors.surfaceHigh,
+                    contentColor = colors.ink,
+                    actionColor = colors.coral,
+                    shape = RoundedCornerShape(12.dp),
+                )
+            }
+        },
+        topBar = {
+            Column(modifier = Modifier.background(colors.surfaceLow)) {
+                TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = colors.surfaceLow,
+                        titleContentColor = colors.ink,
+                        actionIconContentColor = colors.inkSecondary,
+                    ),
+                    title = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            LunaCrescentMark(size = 24.dp, tint = colors.coral)
+                            Column {
+                                Text(
+                                    text = when (currentTab) {
+                                        AppTab.Chat -> "Luna"
+                                        AppTab.Sessions -> "Sessions"
+                                        AppTab.Memory -> "Knowledge"
+                                        AppTab.Settings -> "Settings"
+                                    },
+                                    style = MaterialTheme.typography.titleLarge,
+                                )
+                                if (currentTab == AppTab.Chat) {
+                                    initState?.let { st ->
+                                        Text(
+                                            text = "${st.provider} · ${st.model}",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = colors.inkMuted,
+                                            ),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                     }
                                 }
-                                res.onSuccess { if (it.ok) { initState = it; messages = emptyList(); tokensUsed = 0 } }
                             }
-                        }) {
-                            Icon(Icons.Default.AddComment, contentDescription = "New Chat")
                         }
-                    }
-                },
-            )
+                    },
+                    actions = {
+                        if (currentTab == AppTab.Chat && initState != null) {
+                            ContextTelemetryPill(
+                                tokensUsed = tokensUsed,
+                                contextWindow = initState!!.contextWindow,
+                                onClick = { showContextSheet = true },
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            IconButton(
+                                onClick = { startNewSession() },
+                                modifier = Modifier.size(48.dp),
+                            ) {
+                                Icon(Icons.Default.AddComment, contentDescription = "New Chat")
+                            }
+                        }
+                    },
+                )
+                HorizontalDivider(color = colors.hairline)
+            }
         },
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = currentTab == AppTab.Chat,
-                    onClick = { currentTab = AppTab.Chat },
-                    icon = { Icon(Icons.Default.ChatBubbleOutline, contentDescription = "Chat") },
-                    label = { Text("Chat") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.Sessions,
-                    onClick = { currentTab = AppTab.Sessions },
-                    icon = { Icon(Icons.Default.History, contentDescription = "Sessions") },
-                    label = { Text("Sessions") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.Memory,
-                    onClick = {
-                        refreshKnowledge()
-                        currentTab = AppTab.Memory
-                    },
-                    icon = { Icon(Icons.Default.Psychology, contentDescription = "Memory") },
-                    label = { Text("Memory") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.Settings,
-                    onClick = { currentTab = AppTab.Settings },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                    label = { Text("Settings") },
-                )
+            if (!imeOpen) {
+                Column(modifier = Modifier.background(colors.surfaceLow)) {
+                    HorizontalDivider(color = colors.hairline)
+                    NavigationBar(
+                        containerColor = colors.surfaceLow,
+                        tonalElevation = 0.dp,
+                    ) {
+                        val itemColors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = colors.coral,
+                            selectedTextColor = colors.coral,
+                            indicatorColor = colors.coralContainer,
+                            unselectedIconColor = colors.inkMuted,
+                            unselectedTextColor = colors.inkMuted,
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.Chat,
+                            onClick = { currentTab = AppTab.Chat },
+                            icon = { Icon(Icons.Default.ChatBubbleOutline, contentDescription = null) },
+                            label = { Text("Chat") },
+                            colors = itemColors,
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.Sessions,
+                            onClick = { currentTab = AppTab.Sessions },
+                            icon = { Icon(Icons.Default.History, contentDescription = null) },
+                            label = { Text("Sessions") },
+                            colors = itemColors,
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.Memory,
+                            onClick = {
+                                refreshKnowledge()
+                                currentTab = AppTab.Memory
+                            },
+                            icon = { Icon(Icons.Default.Psychology, contentDescription = null) },
+                            label = { Text("Memory") },
+                            colors = itemColors,
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.Settings,
+                            onClick = { currentTab = AppTab.Settings },
+                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                            label = { Text("Settings") },
+                            colors = itemColors,
+                        )
+                    }
+                }
             }
         },
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .then(if (currentTab == AppTab.Chat) Modifier.imePadding() else Modifier),
+        ) {
             if (initError != null) {
                 Column(
-                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Failed to initialize Luna", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "Failed to initialize Luna",
+                        style = MaterialTheme.typography.titleMedium.copy(color = colors.bad),
+                    )
                     Spacer(Modifier.height(8.dp))
-                    Text(initError.orEmpty(), fontSize = 13.sp)
+                    Text(
+                        text = initError.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium.copy(color = colors.inkSecondary),
+                    )
                 }
             } else if (initState == null) {
-                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-            } else {
-                when (currentTab) {
-                    AppTab.Chat -> ChatScreen(
-                        messages = messages,
-                        isRunning = isRunning,
-                        streamingContent = streamingContent,
-                        streamingReasoning = streamingReasoning,
-                        liveTools = liveTools,
-                        statusBanner = statusBanner,
-                        inputText = inputText,
-                        onInputChange = { inputText = it },
-                        onSend = ::sendCurrentPrompt,
-                        onCancel = {
-                            scope.launch(Dispatchers.IO) { LunaBridge.nativeCancelTurn() }
-                        },
-                        onDismissBanner = { statusBanner = null },
-                    )
-
-                    AppTab.Sessions -> SessionsScreen(
-                        sessions = initState?.sessions.orEmpty(),
-                        activeSessionId = initState?.sessionId.orEmpty(),
-                        onSelect = { sid ->
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        jsonCodec.decodeFromString<InitResponse>(
-                                            LunaBridge.nativeSelectSession(sid)
-                                        )
-                                    }
-                                }
-                                res.onSuccess {
-                                    if (it.ok) {
-                                        initState = it
-                                        tokensUsed = 0
-                                        refreshMessages()
-                                        currentTab = AppTab.Chat
-                                    }
-                                }
-                            }
-                        },
-                        onDelete = { sid ->
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        jsonCodec.decodeFromString<InitResponse>(
-                                            LunaBridge.nativeDeleteSession(sid)
-                                        )
-                                    }
-                                }
-                                res.onSuccess {
-                                    if (it.ok) {
-                                        initState = it
-                                        refreshMessages()
-                                    }
-                                }
-                            }
-                        },
-                        onNew = {
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        jsonCodec.decodeFromString<InitResponse>(
-                                            LunaBridge.nativeNewSession()
-                                        )
-                                    }
-                                }
-                                res.onSuccess {
-                                    if (it.ok) {
-                                        initState = it
-                                        messages = emptyList()
-                                        tokensUsed = 0
-                                        currentTab = AppTab.Chat
-                                    }
-                                }
-                            }
-                        },
-                    )
-
-                    AppTab.Memory -> MemoryScreen(
-                        memories = memories,
-                        notes = notes,
-                        onSearch = { q -> refreshKnowledge(q) },
-                    )
-
-                    AppTab.Settings -> SettingsScreen(
-                        state = initState!!,
-                        onUpdated = { updated ->
-                            initState = updated
-                            statusBanner = "Updated ${updated.provider} / ${updated.model}"
-                        },
-                        onError = { msg -> statusBanner = msg },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ChatScreen(
-    messages: List<ChatMessageDto>,
-    isRunning: Boolean,
-    streamingContent: String,
-    streamingReasoning: String,
-    liveTools: List<LiveToolItem>,
-    statusBanner: String?,
-    inputText: String,
-    onInputChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onCancel: () -> Unit,
-    onDismissBanner: () -> Unit,
-) {
-    val listState = rememberLazyListState()
-
-    LaunchedEffect(messages.size, streamingContent.length, liveTools.size) {
-        val total = messages.size + if (isRunning) 1 else 0
-        if (total > 0) {
-            listState.animateScrollToItem(total - 1)
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        AnimatedVisibility(visible = statusBanner != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        statusBanner.orEmpty(),
-                        modifier = Modifier.weight(1f),
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.secondary,
-                    )
-                    IconButton(onClick = onDismissBanner, modifier = Modifier.size(20.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (messages.isEmpty() && !isRunning) {
-                item {
-                    Box(
-                        modifier = Modifier.fillParentMaxSize().padding(24.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            "Start a conversation with Luna.\nTools, memory, and notes run directly on your phone.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 14.sp,
-                        )
-                    }
-                }
-            }
-
-            items(messages) { msg ->
-                MessageCard(msg)
-            }
-
-            if (isRunning) {
-                item {
-                    LiveTurnCard(
-                        reasoning = streamingReasoning,
-                        content = streamingContent,
-                        tools = liveTools,
-                    )
-                }
-            }
-        }
-
-        Surface(
-            tonalElevation = 3.dp,
-            color = MaterialTheme.colorScheme.surface,
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Ask Luna...") },
-                    maxLines = 5,
-                    shape = RoundedCornerShape(20.dp),
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center),
+                    color = colors.coral,
                 )
-                Spacer(Modifier.width(8.dp))
-                if (isRunning) {
-                    FilledIconButton(
-                        onClick = onCancel,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                        ),
-                    ) {
-                        Icon(Icons.Default.Stop, contentDescription = "Stop")
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = onSend,
-                        enabled = inputText.isNotBlank(),
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+            } else {
+                val state = initState!!
+                Crossfade(
+                    targetState = currentTab,
+                    animationSpec = if (reduceMotion) snap() else tween(160),
+                    label = "tab_crossfade",
+                ) { tab ->
+                    when (tab) {
+                        AppTab.Chat -> ChatScreen(
+                            messages = messages,
+                            provider = state.provider,
+                            model = state.model,
+                            hasConfiguredKey = state.providers.any { it.hasKey },
+                            isRunning = isRunning,
+                            streamingContent = streamingContent,
+                            streamingReasoning = streamingReasoning,
+                            liveTools = liveTools,
+                            inputText = inputText,
+                            onInputChange = { inputText = it },
+                            onSend = { prompt -> sendPrompt(prompt) },
+                            onCancel = {
+                                scope.launch(Dispatchers.IO) { LunaBridge.nativeCancelTurn() }
+                            },
+                            onOpenSettings = { currentTab = AppTab.Settings },
+                        )
+
+                        AppTab.Sessions -> SessionsScreen(
+                            sessions = state.sessions,
+                            activeSessionId = state.sessionId,
+                            onSelect = { sid ->
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            jsonCodec.decodeFromString<InitResponse>(
+                                                LunaBridge.nativeSelectSession(sid),
+                                            )
+                                        }
+                                    }
+                                    res.onSuccess {
+                                        if (it.ok) {
+                                            initState = it
+                                            tokensUsed = 0
+                                            refreshMessages()
+                                            currentTab = AppTab.Chat
+                                        }
+                                    }
+                                }
+                            },
+                            onDelete = { sid ->
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            jsonCodec.decodeFromString<InitResponse>(
+                                                LunaBridge.nativeDeleteSession(sid),
+                                            )
+                                        }
+                                    }
+                                    res.onSuccess {
+                                        if (it.ok) {
+                                            initState = it
+                                            refreshMessages()
+                                            showNotice("Session deleted")
+                                        }
+                                    }
+                                }
+                            },
+                            onNew = { startNewSession() },
+                        )
+
+                        AppTab.Memory -> MemoryScreen(
+                            memories = memories,
+                            notes = notes,
+                            onSearch = { q -> refreshKnowledge(q) },
+                        )
+
+                        AppTab.Settings -> SettingsScreen(
+                            state = state,
+                            themeMode = themeMode,
+                            onThemeModeChange = onThemeModeChange,
+                            onUpdated = { updated, message ->
+                                initState = updated
+                                showNotice(message)
+                            },
+                            onError = { msg -> showNotice(msg) },
+                        )
                     }
                 }
             }
@@ -645,511 +653,199 @@ fun ChatScreen(
 }
 
 @Composable
-fun MessageCard(msg: ChatMessageDto) {
-    when (msg.role) {
-        "user" -> {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                Surface(
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                    shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
-                    modifier = Modifier.widthIn(max = 320.dp),
-                ) {
-                    SelectionContainer {
+private fun ApprovalDialog(
+    request: ApprovalPayload,
+    onDeny: () -> Unit,
+    onAllowOnce: () -> Unit,
+    onAllowSession: () -> Unit,
+) {
+    val colors = LunaTheme.colors
+    AlertDialog(
+        onDismissRequest = onDeny,
+        containerColor = colors.surfaceLow,
+        titleContentColor = colors.ink,
+        textContentColor = colors.inkSecondary,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Shield,
+                contentDescription = null,
+                tint = colors.amber,
+            )
+        },
+        title = {
+            Text(
+                text = "Approve ${request.tool}?",
+                style = MaterialTheme.typography.titleLarge,
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                request.target?.let {
+                    Surface(
+                        color = colors.codeBg,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, colors.hairline),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(
-                            msg.content,
-                            modifier = Modifier.padding(12.dp),
-                            fontSize = 14.sp,
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.celestial,
+                            ),
+                            modifier = Modifier.padding(10.dp),
+                        )
+                    }
+                }
+                val detail = request.diff ?: request.arguments?.toString().orEmpty()
+                if (detail.isNotBlank()) {
+                    Surface(
+                        color = colors.codeBg,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, colors.hairline),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = detail.take(1200),
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.inkSecondary,
+                            ),
+                            modifier = Modifier.padding(10.dp),
                         )
                     }
                 }
             }
-        }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onAllowSession,
+                    border = BorderStroke(1.dp, colors.outline),
+                ) {
+                    Text("Session", color = colors.ink)
+                }
+                Button(
+                    onClick = onAllowOnce,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.coral,
+                        contentColor = colors.onCoral,
+                    ),
+                ) {
+                    Text("Allow")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDeny) {
+                Text("Deny", color = colors.bad)
+            }
+        },
+    )
+}
 
-        "tool" -> {
-            val tr = msg.toolResult
-            var expanded by remember { mutableStateOf(false) }
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ContextSheet(
+    state: InitResponse,
+    tokensUsed: Int,
+    onCompact: () -> Unit,
+    onNewSession: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = LunaTheme.colors
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val ratio = if (state.contextWindow > 0) {
+        (tokensUsed.toFloat() / state.contextWindow.toFloat()).coerceIn(0f, 1f)
+    } else 0f
+    val pct = (ratio * 100).toInt()
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = colors.surfaceLow,
+        contentColor = colors.ink,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Session Context", style = MaterialTheme.typography.titleLarge)
+
             Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                color = colors.surface,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, colors.hairline),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(modifier = Modifier.padding(10.dp)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            if (tr?.isError == true) Icons.Default.ErrorOutline else Icons.Default.CheckCircleOutline,
-                            contentDescription = null,
-                            tint = if (tr?.isError == true) MaterialTheme.colorScheme.error else Color(0xFF50FA7B),
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(Modifier.width(6.dp))
                         Text(
-                            "Tool result (${tr?.callId.orEmpty()})",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
+                            text = "${formatTokenCount(tokensUsed)} / ${formatTokenCount(state.contextWindow)} tokens",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontFeatureSettings = "tnum",
+                                color = colors.ink,
+                            ),
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            if (expanded) "Hide" else "Show",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.primary,
+                            text = "$pct%",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontFeatureSettings = "tnum",
+                                color = if (pct >= 75) colors.coral else colors.celestial,
+                            ),
                         )
                     }
-                    if (expanded) {
-                        Spacer(Modifier.height(6.dp))
-                        SelectionContainer {
-                            Text(
-                                (tr?.content ?: msg.content).take(2000),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
+                    LinearProgressIndicator(
+                        progress = { ratio },
+                        color = if (pct >= 75) colors.coral else colors.celestial,
+                        trackColor = colors.outline,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                    )
+                    Text(
+                        text = "${state.provider} · ${state.model}",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.inkMuted,
+                        ),
+                    )
                 }
             }
-        }
 
-        else -> {
-            var showReasoning by remember { mutableStateOf(false) }
-            Column(modifier = Modifier.fillMaxWidth()) {
-                if (!msg.reasoning.isNullOrBlank()) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth().clickable { showReasoning = !showReasoning },
-                    ) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            Text(
-                                if (showReasoning) "Thinking (tap to hide)" else "Thinking (tap to view)",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            if (showReasoning) {
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    msg.reasoning,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                }
-
-                if (msg.toolCalls.isNotEmpty()) {
-                    msg.toolCalls.forEach { tc ->
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                        ) {
-                            Text(
-                                "Calling ${tc.name}(${tc.arguments.take(120)})",
-                                modifier = Modifier.padding(8.dp),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.secondary,
-                            )
-                        }
-                    }
-                }
-
-                if (msg.content.isNotBlank()) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        SelectionContainer {
-                            Text(
-                                msg.content,
-                                modifier = Modifier.padding(12.dp),
-                                fontSize = 14.sp,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun LiveTurnCard(
-    reasoning: String,
-    content: String,
-    tools: List<LiveToolItem>,
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
-                Text("Luna is working...", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-            }
-            if (reasoning.isNotBlank()) {
-                Text(
-                    reasoning.takeLast(600),
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            tools.forEach { tool ->
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        Text(
-                            "${tool.name} ${if (tool.done) (if (tool.isError) "failed" else "done") else "running..."}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (tool.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
-                        )
-                        if (tool.output.isNotBlank()) {
-                            Text(
-                                tool.output.takeLast(300),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp,
-                            )
-                        }
-                    }
-                }
-            }
-            if (content.isNotBlank()) {
-                Text(content, fontSize = 14.sp)
-            }
-        }
-    }
-}
-
-@Composable
-fun SessionsScreen(
-    sessions: List<SessionInfo>,
-    activeSessionId: String,
-    onSelect: (String) -> Unit,
-    onDelete: (String) -> Unit,
-    onNew: () -> Unit,
-) {
-    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-        Button(onClick = onNew, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Add, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("New Session")
-        }
-        Spacer(Modifier.height(12.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(sessions, key = { it.id }) { s ->
-                val isActive = s.id == activeSessionId
-                Surface(
-                    color = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surface,
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = onCompact,
+                    border = BorderStroke(1.dp, colors.outline),
                     shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().clickable { onSelect(s.id) },
+                    modifier = Modifier.weight(1f).height(48.dp),
                 ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                s.title.ifBlank { s.name.ifBlank { s.id } },
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "${s.messageCount} msgs · ${s.provider ?: "-"} / ${s.model ?: "-"}",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        IconButton(onClick = { onDelete(s.id) }) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete")
-                        }
-                    }
+                    Icon(Icons.Default.Compress, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Compact", color = colors.ink)
+                }
+                Button(
+                    onClick = onNewSession,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.coral,
+                        contentColor = colors.onCoral,
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f).height(48.dp),
+                ) {
+                    Icon(Icons.Default.AddComment, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("New Chat")
                 }
             }
         }
-    }
-}
-
-@Composable
-fun MemoryScreen(
-    memories: List<MemoryDto>,
-    notes: List<NoteDto>,
-    onSearch: (String) -> Unit,
-) {
-    var query by remember { mutableStateOf("") }
-    var showNotes by remember { mutableStateOf(false) }
-
-    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = {
-                query = it
-                onSearch(it)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search memories & notes...") },
-            singleLine = true,
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-        )
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = !showNotes,
-                onClick = { showNotes = false },
-                label = { Text("Memories (${memories.size})") },
-            )
-            FilterChip(
-                selected = showNotes,
-                onClick = { showNotes = true },
-                label = { Text("Notes (${notes.size})") },
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (!showNotes) {
-                items(memories) { m ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(
-                                "${m.subject}.${m.predicate}",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                            Text(m.object_, fontSize = 13.sp)
-                            Text(m.category, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            } else {
-                items(notes) { n ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(n.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                            if (n.pointer.isNotBlank()) {
-                                Text(n.pointer, fontSize = 12.sp, color = MaterialTheme.colorScheme.secondary)
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            Text(n.content.take(400), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun SettingsScreen(
-    state: InitResponse,
-    onUpdated: (InitResponse) -> Unit,
-    onError: (String) -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    var selectedProvider by remember(state.provider) { mutableStateOf(state.provider) }
-    var apiKey by remember { mutableStateOf("") }
-    var showKey by remember { mutableStateOf(false) }
-    var models by remember { mutableStateOf<List<String>>(emptyList()) }
-    var customModel by remember(state.model) { mutableStateOf(state.model) }
-    var autoApprove by remember(state.autoApprove) { mutableStateOf(state.autoApprove) }
-    var busy by remember { mutableStateOf(false) }
-
-    fun loadModels(providerId: String, refresh: Boolean) {
-        scope.launch {
-            busy = true
-            val res = withContext(Dispatchers.IO) {
-                runCatching {
-                    jsonCodec.decodeFromString<ModelsResponse>(
-                        LunaBridge.nativeListModels(providerId, refresh)
-                    )
-                }
-            }
-            busy = false
-            res.onSuccess { if (it.ok) models = it.models }
-        }
-    }
-
-    LaunchedEffect(selectedProvider) {
-        loadModels(selectedProvider, false)
-    }
-
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text("Provider", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            state.providers.forEach { p ->
-                FilterChip(
-                    selected = p.id == selectedProvider,
-                    onClick = { selectedProvider = p.id },
-                    label = {
-                        Text(if (p.hasKey) "${p.id} ✓" else p.id)
-                    },
-                )
-            }
-        }
-
-        OutlinedTextField(
-            value = apiKey,
-            onValueChange = { apiKey = it },
-            label = { Text("API Key for $selectedProvider") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-            trailingIcon = {
-                IconButton(onClick = { showKey = !showKey }) {
-                    Icon(
-                        if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = "Toggle key",
-                    )
-                }
-            },
-        )
-        Button(
-            onClick = {
-                scope.launch {
-                    busy = true
-                    val res = withContext(Dispatchers.IO) {
-                        runCatching {
-                            jsonCodec.decodeFromString<InitResponse>(
-                                LunaBridge.nativeSetApiKey(selectedProvider, apiKey)
-                            )
-                        }
-                    }
-                    busy = false
-                    res.onSuccess {
-                        if (it.ok) {
-                            apiKey = ""
-                            onUpdated(it)
-                            loadModels(selectedProvider, true)
-                        } else {
-                            onError(it.error ?: "Failed to save key")
-                        }
-                    }.onFailure { onError(it.message ?: "Error saving key") }
-                }
-            },
-            enabled = apiKey.isNotBlank() && !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Save API Key & Use $selectedProvider")
-        }
-
-        HorizontalDivider()
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Model", fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.weight(1f))
-            TextButton(onClick = { loadModels(selectedProvider, true) }, enabled = !busy) {
-                Text("Refresh")
-            }
-        }
-        OutlinedTextField(
-            value = customModel,
-            onValueChange = { customModel = it },
-            label = { Text("Model ID") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        Button(
-            onClick = {
-                scope.launch {
-                    busy = true
-                    val res = withContext(Dispatchers.IO) {
-                        runCatching {
-                            jsonCodec.decodeFromString<InitResponse>(
-                                LunaBridge.nativeSetModel(selectedProvider, customModel)
-                            )
-                        }
-                    }
-                    busy = false
-                    res.onSuccess {
-                        if (it.ok) onUpdated(it) else onError(it.error ?: "Failed to set model")
-                    }
-                }
-            },
-            enabled = customModel.isNotBlank() && !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Apply Model")
-        }
-
-        if (models.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                models.take(25).forEach { m ->
-                    val selected = m == state.model && selectedProvider == state.provider
-                    Surface(
-                        color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable {
-                            customModel = m
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        jsonCodec.decodeFromString<InitResponse>(
-                                            LunaBridge.nativeSetModel(selectedProvider, m)
-                                        )
-                                    }
-                                }
-                                res.onSuccess { if (it.ok) onUpdated(it) }
-                            }
-                        },
-                    ) {
-                        Text(m, modifier = Modifier.padding(10.dp), fontSize = 13.sp)
-                    }
-                }
-            }
-        }
-
-        HorizontalDivider()
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Auto-approve mutating tools", fontWeight = FontWeight.Medium)
-                Text(
-                    "Allow file writes and shell commands without prompting",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = autoApprove,
-                onCheckedChange = { checked ->
-                    autoApprove = checked
-                    scope.launch(Dispatchers.IO) {
-                        LunaBridge.nativeSetAutoApprove(checked)
-                    }
-                },
-            )
-        }
-
-        Text(
-            "Workspace: ${state.workspaceDir}",
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
