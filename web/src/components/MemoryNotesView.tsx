@@ -1,13 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import type { MemoryFact, NoteEntry } from '../types';
-import { Search, Database, FileText } from 'lucide-react';
+import { Search, Database, FileText, PanelLeft } from 'lucide-react';
 
 interface MemoryNotesViewProps {
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
   onSearchMemories: (q: string) => Promise<MemoryFact[]>;
   onSearchNotes: (q: string) => Promise<NoteEntry[]>;
 }
 
 export const MemoryNotesView: React.FC<MemoryNotesViewProps> = ({
+  sidebarOpen,
+  onToggleSidebar,
   onSearchMemories,
   onSearchNotes,
 }) => {
@@ -40,131 +44,100 @@ export const MemoryNotesView: React.FC<MemoryNotesViewProps> = ({
   };
 
   return (
-    <div style={{ flex: 1, padding: '24px', overflowY: 'auto' }}>
-      <div style={{ marginBottom: '20px' }}>
-        <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Memory & Persistent Notes</h2>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px' }}>
-          Real-time access to the SQLite memory facts and workspace notes graph.
-        </p>
-      </div>
-
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
-        <div style={{ position: 'relative', flex: 1 }}>
-          <input
-            type="text"
-            className="form-input"
-            style={{ width: '100%', paddingLeft: '32px' }}
-            placeholder="Search memories and notes by keyword..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-          <Search
-            size={16}
-            style={{
-              position: 'absolute',
-              left: '10px',
-              top: '50%',
-              transform: 'translateY(-50%)',
-              color: 'var(--text-muted)',
-            }}
-          />
+    <div className="page-view">
+      <header className="chat-header">
+        <div className="chat-header-left">
+          {!sidebarOpen && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onToggleSidebar}
+              title="Open sidebar"
+              aria-label="Open sidebar"
+            >
+              <PanelLeft size={16} />
+            </button>
+          )}
+          <span className="chat-header-title">Memory & Notes</span>
         </div>
-        <button className="primary-btn" onClick={() => performSearch(query)} disabled={loading}>
-          {loading ? 'Searching...' : 'Search'}
-        </button>
-      </div>
+      </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-            <Database size={16} color="var(--accent-color)" />
-            <h3 style={{ fontSize: '14px', fontWeight: 600 }}>Memory Facts ({memories.length})</h3>
+      <div className="page-scroll">
+        <div className="page-container">
+          <div className="page-intro">
+            <h1 className="page-title">Memory & persistent notes</h1>
+            <p className="page-subtitle">
+              Stored preferences, workflow rules, and workspace reference notes.
+            </p>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {memories.length === 0 ? (
-              <div
-                style={{
-                  padding: '20px',
-                  textAlign: 'center',
-                  backgroundColor: 'var(--bg-secondary)',
-                  borderRadius: '6px',
-                  color: 'var(--text-muted)',
-                  fontSize: '13px',
-                }}
-              >
-                No matching memory facts.
-              </div>
-            ) : (
-              memories.map((m, i) => (
-                <div
-                  key={i}
-                  style={{
-                    backgroundColor: 'var(--bg-secondary)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '6px',
-                    padding: '12px',
-                    fontSize: '13px',
-                  }}
-                >
-                  <div style={{ color: 'var(--accent-color)', fontSize: '11px', marginBottom: '4px' }}>
-                    {m.category || 'fact'} {m.predicate ? `• ${m.predicate}` : ''}
-                  </div>
-                  <div>{m.text}</div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
 
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-            <FileText size={16} color="var(--warning-color)" />
-            <h3 style={{ fontSize: '14px', fontWeight: 600 }}>Workspace Notes ({notes.length})</h3>
+          <div className="search-bar-row">
+            <div className="search-input-wrap">
+              <Search size={15} className="search-input-icon" />
+              <input
+                type="text"
+                className="form-input search-input"
+                placeholder="Search memories and notes…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleKeyDown}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => performSearch(query)}
+              disabled={loading}
+            >
+              {loading ? 'Searching…' : 'Search'}
+            </button>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {notes.length === 0 ? (
-              <div
-                style={{
-                  padding: '20px',
-                  textAlign: 'center',
-                  backgroundColor: 'var(--bg-secondary)',
-                  borderRadius: '6px',
-                  color: 'var(--text-muted)',
-                  fontSize: '13px',
-                }}
-              >
-                No matching notes found.
+
+          <div className="two-col-grid">
+            <section className="section-col">
+              <div className="section-heading">
+                <Database size={14} className="text-accent" />
+                <span>Memories</span>
+                <span className="section-count tabular-nums">{memories.length}</span>
               </div>
-            ) : (
-              notes.map((n, i) => (
-                <div
-                  key={i}
-                  style={{
-                    backgroundColor: 'var(--bg-secondary)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '6px',
-                    padding: '12px',
-                    fontSize: '13px',
-                  }}
-                >
-                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>{n.title}</div>
-                  {n.body && (
-                    <div
-                      style={{
-                        color: 'var(--text-secondary)',
-                        fontSize: '12px',
-                        whiteSpace: 'pre-wrap',
-                        maxHeight: '120px',
-                        overflowY: 'auto',
-                      }}
-                    >
-                      {n.body}
+
+              {memories.length === 0 ? (
+                <div className="empty-inline">No matching memory facts.</div>
+              ) : (
+                <div className="surface-list">
+                  {memories.map((m, i) => (
+                    <div key={i} className="surface-row surface-row-stack">
+                      <div className="surface-row-kicker">
+                        {m.category || 'fact'}
+                        {m.predicate ? ` · ${m.predicate}` : ''}
+                      </div>
+                      <div className="surface-row-body">{m.text}</div>
                     </div>
-                  )}
+                  ))}
                 </div>
-              ))
-            )}
+              )}
+            </section>
+
+            <section className="section-col">
+              <div className="section-heading">
+                <FileText size={14} className="text-warning" />
+                <span>Workspace notes</span>
+                <span className="section-count tabular-nums">{notes.length}</span>
+              </div>
+
+              {notes.length === 0 ? (
+                <div className="empty-inline">No matching notes found.</div>
+              ) : (
+                <div className="surface-list">
+                  {notes.map((n, i) => (
+                    <div key={i} className="surface-row surface-row-stack">
+                      <div className="surface-row-title">{n.title}</div>
+                      {n.body && <div className="note-preview">{n.body}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { PluginBuilderSpec } from '../types';
 import { Hammer, X } from 'lucide-react';
 
@@ -15,22 +15,30 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [author, setAuthor] = useState('User');
+  const [author] = useState('User');
   const [version, setVersion] = useState('0.1.0');
 
-  // Tool fields
   const [toolName, setToolName] = useState('my_custom_tool');
   const [toolDescription, setToolDescription] = useState('Executes custom TypeScript logic');
   const [handlerCode, setHandlerCode] = useState(
     `export default async function handle(args) {\n  return "Processed with " + JSON.stringify(args);\n}`
   );
 
-  // Agent fields
   const [includeAgent, setIncludeAgent] = useState(true);
   const [agentName, setAgentName] = useState('Specialist Agent');
   const [systemPrompt, setSystemPrompt] = useState('You are an expert specialist plugin agent.');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -70,33 +78,40 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
     };
 
     setIsSubmitting(true);
+    setErrorMsg(null);
     try {
       await onSubmit(spec);
       onClose();
     } catch (err) {
-      alert(`Failed to build plugin: ${String(err)}`);
+      setErrorMsg(`Failed to build plugin: ${String(err)}`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <div className="modal-backdrop">
-      <form className="modal-card" style={{ width: '700px' }} onSubmit={handleSubmit}>
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal-card modal-card-wide"
+        onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Hammer size={18} color="var(--accent-color)" />
-            <span style={{ fontWeight: 600 }}>Interactive Plugin Builder</span>
+          <div className="modal-title-group">
+            <Hammer size={16} className="text-accent" />
+            <span className="modal-title">Plugin builder</span>
           </div>
-          <button type="button" className="action-btn" onClick={onClose}>
-            <X size={18} />
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+            <X size={16} />
           </button>
         </div>
 
         <div className="modal-body">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          {errorMsg && <div className="inline-banner inline-banner-err">{errorMsg}</div>}
+
+          <div className="two-col-fields">
             <div className="form-group">
-              <label className="form-label">Plugin Name (identifier)</label>
+              <label className="form-label">Plugin name</label>
               <input
                 type="text"
                 className="form-input"
@@ -122,17 +137,21 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
             <input
               type="text"
               className="form-input"
-              placeholder="e.g. Analyzes CSV metrics and formats reporting tables"
+              placeholder="What this plugin does…"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
 
-          <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', marginTop: '4px' }}>
-            <h4 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>Custom Tool</h4>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '12px', marginBottom: '8px' }}>
+          <div className="settings-divider" />
+
+          <div className="settings-section">
+            <div className="settings-section-title">
+              <span>Custom tool</span>
+            </div>
+            <div className="two-col-fields">
               <div className="form-group">
-                <label className="form-label">Tool Name</label>
+                <label className="form-label">Tool name</label>
                 <input
                   type="text"
                   className="form-input"
@@ -141,7 +160,7 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Tool Description</label>
+                <label className="form-label">Tool description</label>
                 <input
                   type="text"
                   className="form-input"
@@ -152,10 +171,9 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
             </div>
 
             <div className="form-group">
-              <label className="form-label">TypeScript Execution Handler</label>
+              <label className="form-label">TypeScript handler</label>
               <textarea
-                className="form-input"
-                style={{ fontFamily: 'monospace', fontSize: '12px' }}
+                className="form-input mono-textarea"
                 rows={4}
                 value={handlerCode}
                 onChange={(e) => setHandlerCode(e.target.value)}
@@ -163,20 +181,22 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
             </div>
           </div>
 
-          <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', marginTop: '4px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '10px' }}>
+          <div className="settings-divider" />
+
+          <div className="settings-section">
+            <label className="radio-row">
               <input
                 type="checkbox"
                 checked={includeAgent}
                 onChange={(e) => setIncludeAgent(e.target.checked)}
               />
-              <span style={{ fontWeight: 600, fontSize: '13px' }}>Expose Dedicated Sidebar Agent</span>
+              <span>Expose dedicated sidebar agent</span>
             </label>
 
             {includeAgent && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div className="settings-section">
                 <div className="form-group">
-                  <label className="form-label">Agent Display Name</label>
+                  <label className="form-label">Agent name</label>
                   <input
                     type="text"
                     className="form-input"
@@ -185,7 +205,7 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label">System Prompt Persona</label>
+                  <label className="form-label">System prompt</label>
                   <textarea
                     className="form-input"
                     rows={2}
@@ -199,11 +219,15 @@ export const PluginBuilderModal: React.FC<PluginBuilderModalProps> = ({
         </div>
 
         <div className="modal-footer">
-          <button type="button" className="secondary-btn" onClick={onClose}>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="primary-btn" disabled={isSubmitting || !name.trim()}>
-            {isSubmitting ? 'Compiling & Bundling...' : 'Build & Register Plugin'}
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={isSubmitting || !name.trim()}
+          >
+            {isSubmitting ? 'Building…' : 'Build & register'}
           </button>
         </div>
       </form>

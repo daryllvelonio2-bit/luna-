@@ -22,6 +22,9 @@ import { SettingsModal } from './components/SettingsModal';
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<'chat' | 'automations' | 'plugins' | 'memories'>('chat');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth > 768 : true
+  );
 
   const [sessions, setSessions] = useState<GuiSessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -41,8 +44,15 @@ export const App: React.FC = () => {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isPluginBuilderOpen, setIsPluginBuilderOpen] = useState(false);
+  const [toastError, setToastError] = useState<string | null>(null);
 
-  // Apply theme to document
+  const showError = useCallback((msg: string) => {
+    setToastError(msg);
+    setTimeout(() => {
+      setToastError((curr) => (curr === msg ? null : curr));
+    }, 5000);
+  }, []);
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
@@ -56,7 +66,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Bootstrap initial state
   useEffect(() => {
     api
       .bootstrap()
@@ -76,19 +85,20 @@ export const App: React.FC = () => {
       })
       .catch((e) => console.error('Bootstrap failed', e));
 
-    // Load initial schedules and plugins
     api.listSchedules().then(setSchedules).catch(() => {});
     api.listPlugins().then(setPlugins).catch(() => {});
   }, [loadTranscript]);
 
-  // Subscribe to WebSocket events
   useEffect(() => {
     const unsub = api.subscribeEvents((event) => {
       switch (event.type) {
         case 'TurnStarted':
           if (event.session_id === activeSessionId) {
             setTurnRunning(true);
-            setMessages((prev) => [...prev, { role: 'user', content: event.query, tool_calls: [] }]);
+            setMessages((prev) => [
+              ...prev,
+              { role: 'user', content: event.query, tool_calls: [] },
+            ]);
           }
           break;
 
@@ -102,7 +112,10 @@ export const App: React.FC = () => {
                   { ...last, content: (last.content || '') + event.delta },
                 ];
               }
-              return [...prev, { role: 'assistant', content: event.delta, tool_calls: [] }];
+              return [
+                ...prev,
+                { role: 'assistant', content: event.delta, tool_calls: [] },
+              ];
             });
           }
           break;
@@ -119,7 +132,12 @@ export const App: React.FC = () => {
               }
               return [
                 ...prev,
-                { role: 'assistant', content: '', reasoning: event.delta, tool_calls: [] },
+                {
+                  role: 'assistant',
+                  content: '',
+                  reasoning: event.delta,
+                  tool_calls: [],
+                },
               ];
             });
           }
@@ -129,15 +147,36 @@ export const App: React.FC = () => {
           if (event.session_id === activeSessionId) {
             setMessages((prev) => {
               const last = prev[prev.length - 1];
-              const tc = { id: event.call_id, name: event.tool_name, arguments: event.arguments };
+              const tc = {
+                id: event.call_id,
+                name: event.tool_name,
+                arguments: event.arguments,
+              };
               if (last && last.role === 'assistant') {
                 return [
                   ...prev.slice(0, -1),
                   { ...last, tool_calls: [...last.tool_calls, tc] },
                 ];
               }
-              return [...prev, { role: 'assistant', content: '', tool_calls: [tc] }];
+              return [
+                ...prev,
+                { role: 'assistant', content: '', tool_calls: [tc] },
+              ];
             });
+          }
+          break;
+
+        case 'ToolCallFinished':
+          if (event.session_id === activeSessionId) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'tool',
+                content: event.result,
+                tool_call_id: event.call_id,
+                tool_calls: [],
+              },
+            ]);
           }
           break;
 
@@ -169,7 +208,6 @@ export const App: React.FC = () => {
           if (event.session_id === activeSessionId) {
             setTurnRunning(false);
           }
-          // Refresh sessions list message count
           api.listSessions().then(setSessions).catch(() => {});
           break;
 
@@ -178,7 +216,11 @@ export const App: React.FC = () => {
             setTurnRunning(false);
             setMessages((prev) => [
               ...prev,
-              { role: 'assistant', content: `⚠️ Error: ${event.error}`, tool_calls: [] },
+              {
+                role: 'assistant',
+                content: `**Error:** ${event.error}`,
+                tool_calls: [],
+              },
             ]);
           }
           break;
@@ -194,6 +236,9 @@ export const App: React.FC = () => {
     setPendingClarify(null);
     setTurnRunning(false);
     loadTranscript(sid);
+    if (window.innerWidth <= 768) {
+      setSidebarOpen(false);
+    }
   };
 
   const handleNewSession = async (agentId?: string | null) => {
@@ -204,7 +249,7 @@ export const App: React.FC = () => {
       handleSelectSession(sid);
       setCurrentTab('chat');
     } catch (e) {
-      alert(`Failed to create session: ${String(e)}`);
+      showError(`Failed to create session: ${String(e)}`);
     }
   };
 
@@ -215,7 +260,7 @@ export const App: React.FC = () => {
       setSessions(updated);
       handleSelectSession(newSid);
     } catch (e) {
-      alert(`Failed to fork session: ${String(e)}`);
+      showError(`Failed to fork session: ${String(e)}`);
     }
   };
 
@@ -233,7 +278,7 @@ export const App: React.FC = () => {
         }
       }
     } catch (e) {
-      alert(`Failed to delete session: ${String(e)}`);
+      showError(`Failed to delete session: ${String(e)}`);
     }
   };
 
@@ -243,7 +288,7 @@ export const App: React.FC = () => {
       const updated = await api.listSessions();
       setSessions(updated);
     } catch (e) {
-      alert(`Failed to rename: ${String(e)}`);
+      showError(`Failed to rename session: ${String(e)}`);
     }
   };
 
@@ -252,7 +297,7 @@ export const App: React.FC = () => {
     try {
       await api.sendMessage(activeSessionId, text);
     } catch (e) {
-      alert(`Failed to send: ${String(e)}`);
+      showError(`Failed to send message: ${String(e)}`);
     }
   };
 
@@ -275,7 +320,7 @@ export const App: React.FC = () => {
       await api.resolveApproval(activeSessionId, decision, args, feedback);
       setPendingApproval(null);
     } catch (e) {
-      alert(`Failed to resolve approval: ${String(e)}`);
+      showError(`Failed to resolve approval: ${String(e)}`);
     }
   };
 
@@ -285,11 +330,10 @@ export const App: React.FC = () => {
       await api.resolveClarify(activeSessionId, answers);
       setPendingClarify(null);
     } catch (e) {
-      alert(`Failed to resolve clarification: ${String(e)}`);
+      showError(`Failed to resolve clarification: ${String(e)}`);
     }
   };
 
-  // Automations handlers
   const handleCreateSchedule = async (
     title: string,
     prompt: string,
@@ -302,7 +346,7 @@ export const App: React.FC = () => {
       const updated = await api.listSchedules();
       setSchedules(updated);
     } catch (e) {
-      alert(`Failed to create schedule: ${String(e)}`);
+      showError(`Failed to create schedule: ${String(e)}`);
     }
   };
 
@@ -313,7 +357,7 @@ export const App: React.FC = () => {
         prev.map((s) => (s.id === taskId ? { ...s, enabled } : s))
       );
     } catch (e) {
-      alert(`Failed to toggle: ${String(e)}`);
+      showError(`Failed to toggle schedule: ${String(e)}`);
     }
   };
 
@@ -322,11 +366,10 @@ export const App: React.FC = () => {
       await api.deleteSchedule(taskId);
       setSchedules((prev) => prev.filter((s) => s.id !== taskId));
     } catch (e) {
-      alert(`Failed to delete schedule: ${String(e)}`);
+      showError(`Failed to delete schedule: ${String(e)}`);
     }
   };
 
-  // Plugin handlers
   const handleTogglePlugin = async (pluginId: string, enabled: boolean) => {
     try {
       await api.togglePlugin(pluginId, enabled);
@@ -334,7 +377,7 @@ export const App: React.FC = () => {
         prev.map((p) => (p.id === pluginId ? { ...p, enabled } : p))
       );
     } catch (e) {
-      alert(`Failed to toggle plugin: ${String(e)}`);
+      showError(`Failed to toggle plugin: ${String(e)}`);
     }
   };
 
@@ -348,12 +391,16 @@ export const App: React.FC = () => {
 
   const activeSessionItem = sessions.find((s) => s.record.id === activeSessionId);
   const activeTitle = activeSessionItem
-    ? activeSessionItem.record.name || activeSessionItem.record.title || `Session ${activeSessionItem.record.id.slice(0, 8)}`
+    ? activeSessionItem.record.name ||
+      activeSessionItem.record.title ||
+      `Session ${activeSessionItem.record.id.slice(0, 8)}`
     : '';
 
   return (
     <div className="app-container">
       <Sidebar
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         sessions={sessions}
@@ -369,7 +416,21 @@ export const App: React.FC = () => {
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />
 
-      <div className="main-content">
+      <main className="main-content">
+        {toastError && (
+          <div className="toast-error" role="alert">
+            <span>{toastError}</span>
+            <button
+              type="button"
+              className="toast-close"
+              onClick={() => setToastError(null)}
+              aria-label="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {currentTab === 'chat' && (
           <ChatView
             sessionId={activeSessionId}
@@ -378,6 +439,10 @@ export const App: React.FC = () => {
             model={defaultModel}
             messages={messages}
             turnRunning={turnRunning}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((v) => !v)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            onNewSession={() => handleNewSession(null)}
             onSendMessage={handleSendMessage}
             onInterrupt={handleInterrupt}
             pendingApproval={pendingApproval}
@@ -391,6 +456,8 @@ export const App: React.FC = () => {
         {currentTab === 'automations' && (
           <AutomationsView
             tasks={schedules}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onCreateTask={handleCreateSchedule}
             onToggleTask={handleToggleSchedule}
             onDeleteTask={handleDeleteSchedule}
@@ -400,6 +467,8 @@ export const App: React.FC = () => {
         {currentTab === 'plugins' && (
           <PluginsView
             plugins={plugins}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onTogglePlugin={handleTogglePlugin}
             onOpenBuilder={() => setIsPluginBuilderOpen(true)}
           />
@@ -407,11 +476,13 @@ export const App: React.FC = () => {
 
         {currentTab === 'memories' && (
           <MemoryNotesView
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((v) => !v)}
             onSearchMemories={api.searchMemories.bind(api)}
             onSearchNotes={api.searchNotes.bind(api)}
           />
         )}
-      </div>
+      </main>
 
       <PluginBuilderModal
         isOpen={isPluginBuilderOpen}

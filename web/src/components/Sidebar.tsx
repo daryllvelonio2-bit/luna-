@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { GuiSessionItem, PluginAgentEntry } from '../types';
 import {
   MessageSquare,
@@ -13,9 +13,14 @@ import {
   Bot,
   Sun,
   Moon,
+  PanelLeftClose,
+  Check,
+  X,
 } from 'lucide-react';
 
 interface SidebarProps {
+  isOpen: boolean;
+  onClose: () => void;
   currentTab: 'chat' | 'automations' | 'plugins' | 'memories';
   onSelectTab: (tab: 'chat' | 'automations' | 'plugins' | 'memories') => void;
   sessions: GuiSessionItem[];
@@ -32,6 +37,8 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
+  isOpen,
+  onClose,
   currentTab,
   onSelectTab,
   sessions,
@@ -46,150 +53,265 @@ export const Sidebar: React.FC<SidebarProps> = ({
   theme,
   onToggleTheme,
 }) => {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  if (!isOpen) return null;
+
+  const commitRename = (sid: string) => {
+    const trimmed = editingName.trim();
+    if (trimmed) {
+      onRenameSession(sid, trimmed);
+    }
+    setEditingId(null);
+  };
+
   return (
-    <div className="sidebar">
+    <aside className="sidebar">
       <div className="sidebar-header">
         <div className="brand-title">
-          <span>🌙 Luna</span>
+          <span className="brand-mark" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
+                fill="currentColor"
+              />
+            </svg>
+          </span>
+          <span>Luna</span>
         </div>
+
+        <div className="sidebar-header-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onToggleTheme}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            aria-label="Toggle theme"
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        </div>
+      </div>
+
+      <div className="sidebar-top-action">
         <button
-          className="action-btn"
-          onClick={onToggleTheme}
-          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+          type="button"
+          className="new-chat-btn"
+          onClick={() => {
+            onNewSession(null);
+            onSelectTab('chat');
+          }}
         >
-          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          <Plus size={15} />
+          <span>New chat</span>
         </button>
       </div>
 
-      <div className="sidebar-nav">
+      <nav className="sidebar-nav" aria-label="Primary">
         <button
+          type="button"
           className={`nav-item ${currentTab === 'chat' ? 'active' : ''}`}
           onClick={() => onSelectTab('chat')}
         >
-          <MessageSquare size={16} />
+          <MessageSquare size={15} />
           <span>Chat</span>
         </button>
         <button
+          type="button"
           className={`nav-item ${currentTab === 'automations' ? 'active' : ''}`}
           onClick={() => onSelectTab('automations')}
         >
-          <Clock size={16} />
+          <Clock size={15} />
           <span>Automations</span>
         </button>
         <button
+          type="button"
           className={`nav-item ${currentTab === 'plugins' ? 'active' : ''}`}
           onClick={() => onSelectTab('plugins')}
         >
-          <Layers size={16} />
+          <Layers size={15} />
           <span>Plugins</span>
         </button>
         <button
+          type="button"
           className={`nav-item ${currentTab === 'memories' ? 'active' : ''}`}
           onClick={() => onSelectTab('memories')}
         >
-          <BookOpen size={16} />
+          <BookOpen size={15} />
           <span>Memory & Notes</span>
         </button>
-      </div>
+      </nav>
 
       {sidebarAgents.length > 0 && (
-        <div className="session-section" style={{ flex: 'none', maxHeight: '160px' }}>
-          <div className="session-section-header">
-            <span>Specialized Agents</span>
-          </div>
-          <div className="session-list">
+        <div className="sidebar-group">
+          <div className="sidebar-group-label">Agents</div>
+          <div className="sidebar-group-list">
             {sidebarAgents.map((ag) => (
-              <div
+              <button
                 key={ag.id}
+                type="button"
                 className="session-item"
-                onClick={() => onNewSession(ag.id)}
+                onClick={() => {
+                  onNewSession(ag.id);
+                  onSelectTab('chat');
+                }}
                 title={ag.description}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Bot size={14} color="var(--accent-color)" />
+                <span className="session-item-agent">
+                  <Bot size={14} className="text-accent" />
                   <span className="session-name">{ag.name}</span>
-                </div>
-                <Plus size={14} />
-              </div>
+                </span>
+                <Plus size={13} className="session-agent-plus" />
+              </button>
             ))}
           </div>
         </div>
       )}
 
-      <div className="session-section">
-        <div className="session-section-header">
-          <span>Conversations</span>
-          <button className="new-btn" onClick={() => onNewSession(null)} title="New chat">
-            <Plus size={16} />
-          </button>
-        </div>
+      <div className="sidebar-conversations">
+        <div className="sidebar-group-label">Conversations</div>
         <div className="session-list">
-          {sessions.map((item) => {
-            const sid = item.record.id;
-            const displayName =
-              item.record.name || item.record.title || `Session ${sid.slice(0, 8)}`;
-            const isActive = activeSessionId === sid;
+          {sessions.length === 0 ? (
+            <div className="sidebar-empty">No conversations yet</div>
+          ) : (
+            sessions.map((item) => {
+              const sid = item.record.id;
+              const displayName =
+                item.record.name || item.record.title || `Session ${sid.slice(0, 8)}`;
+              const isActive = activeSessionId === sid && currentTab === 'chat';
+              const isEditing = editingId === sid;
+              const isConfirmingDelete = confirmDeleteId === sid;
 
-            return (
-              <div
-                key={sid}
-                className={`session-item ${isActive ? 'active' : ''}`}
-                onClick={() => {
-                  onSelectSession(sid);
-                  onSelectTab('chat');
-                }}
-              >
-                <span className="session-name" title={displayName}>
-                  {displayName}
-                </span>
-                <div className="session-actions" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    className="action-btn"
-                    title="Rename"
-                    onClick={() => {
-                      const newName = window.prompt('Rename session:', displayName);
-                      if (newName && newName.trim()) {
-                        onRenameSession(sid, newName.trim());
-                      }
-                    }}
+              if (isEditing) {
+                return (
+                  <div key={sid} className="session-item session-item-editing">
+                    <input
+                      type="text"
+                      className="session-rename-input"
+                      value={editingName}
+                      autoFocus
+                      onChange={(e) => setEditingName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename(sid);
+                        if (e.key === 'Escape') setEditingId(null);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="action-btn"
+                      title="Save"
+                      onClick={() => commitRename(sid)}
+                    >
+                      <Check size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="action-btn"
+                      title="Cancel"
+                      onClick={() => setEditingId(null)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={sid}
+                  className={`session-item ${isActive ? 'active' : ''}`}
+                  onClick={() => {
+                    setConfirmDeleteId(null);
+                    onSelectSession(sid);
+                    onSelectTab('chat');
+                  }}
+                >
+                  <span className="session-name" title={displayName}>
+                    {displayName}
+                  </span>
+                  <div
+                    className={`session-actions ${isConfirmingDelete ? 'visible' : ''}`}
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <Edit2 size={13} />
-                  </button>
-                  <button
-                    className="action-btn"
-                    title="Fork"
-                    onClick={() => onForkSession(sid)}
-                  >
-                    <GitFork size={13} />
-                  </button>
-                  <button
-                    className="action-btn"
-                    title="Delete"
-                    onClick={() => {
-                      if (window.confirm('Delete this session?')) {
-                        onDeleteSession(sid);
-                      }
-                    }}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                    {isConfirmingDelete ? (
+                      <>
+                        <button
+                          type="button"
+                          className="action-btn action-btn-danger"
+                          title="Confirm delete"
+                          onClick={() => {
+                            setConfirmDeleteId(null);
+                            onDeleteSession(sid);
+                          }}
+                        >
+                          <Check size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          title="Cancel"
+                          onClick={() => setConfirmDeleteId(null)}
+                        >
+                          <X size={13} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          title="Rename"
+                          onClick={() => {
+                            setEditingId(sid);
+                            setEditingName(displayName);
+                            setConfirmDeleteId(null);
+                          }}
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          title="Fork conversation"
+                          onClick={() => onForkSession(sid)}
+                        >
+                          <GitFork size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          title="Delete"
+                          onClick={() => setConfirmDeleteId(sid)}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
 
       <div className="sidebar-footer">
-        <button
-          className="nav-item"
-          style={{ width: '100%', padding: '6px 8px' }}
-          onClick={onOpenSettings}
-        >
-          <Settings size={16} />
+        <button type="button" className="nav-item w-full" onClick={onOpenSettings}>
+          <Settings size={15} />
           <span>Settings</span>
         </button>
       </div>
-    </div>
+    </aside>
   );
 };

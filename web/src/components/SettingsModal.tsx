@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { ProviderInfo } from '../types';
 import { X, Key, Cpu } from 'lucide-react';
 
@@ -25,6 +25,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [selectedModel, setSelectedModel] = useState(defaultModel);
   const [apiKey, setApiKey] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    setSelectedProvider(defaultProvider);
+    setSelectedModel(defaultModel);
+  }, [defaultProvider, defaultModel, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -32,11 +47,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleSaveModel = async () => {
     setIsSaving(true);
+    setStatusMsg(null);
     try {
       await onSaveDefaultModel(selectedProvider, selectedModel);
-      alert('Default model preferences saved.');
+      setStatusMsg({ kind: 'ok', text: `Default model updated to ${selectedProvider} / ${selectedModel}.` });
     } catch (e) {
-      alert(`Failed to save model: ${String(e)}`);
+      setStatusMsg({ kind: 'err', text: `Failed to save model: ${String(e)}` });
     } finally {
       setIsSaving(false);
     }
@@ -45,118 +61,132 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSaveKey = async () => {
     if (!apiKey.trim()) return;
     setIsSaving(true);
+    setStatusMsg(null);
     try {
       await onSaveCredential(selectedProvider, apiKey.trim());
       setApiKey('');
-      alert(`API credential for ${selectedProvider} stored successfully.`);
+      setStatusMsg({ kind: 'ok', text: `Credential saved for ${selectedProvider}.` });
     } catch (e) {
-      alert(`Failed to save credential: ${String(e)}`);
+      setStatusMsg({ kind: 'err', text: `Failed to save credential: ${String(e)}` });
     } finally {
       setIsSaving(false);
     }
   };
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-card">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
-          <span style={{ fontWeight: 600 }}>Luna Settings</span>
-          <button className="action-btn" onClick={onClose}>
-            <X size={18} />
+          <span className="modal-title">Settings</span>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+            <X size={16} />
           </button>
         </div>
 
         <div className="modal-body">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <Cpu size={16} color="var(--accent-color)" />
-                <span style={{ fontWeight: 600, fontSize: '14px' }}>Active Model & Provider</span>
-              </div>
+          {statusMsg && (
+            <div className={`inline-banner ${statusMsg.kind === 'err' ? 'inline-banner-err' : 'inline-banner-ok'}`}>
+              {statusMsg.text}
+            </div>
+          )}
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div className="form-group">
-                  <label className="form-label">Provider</label>
-                  <select
-                    className="form-input"
-                    value={selectedProvider}
-                    onChange={(e) => {
-                      const p = e.target.value;
-                      setSelectedProvider(p);
-                      const info = providers.find((pr) => pr.id === p);
-                      if (info && info.models.length > 0) {
-                        setSelectedModel(info.models[0]);
-                      }
-                    }}
-                  >
-                    {providers.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.display_name} {p.configured ? '✓' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Model</label>
-                  <select
-                    className="form-input"
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                  >
-                    {currentProviderInfo?.models.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <button
-                className="secondary-btn"
-                style={{ marginTop: '10px' }}
-                onClick={handleSaveModel}
-                disabled={isSaving}
-              >
-                Set as Default Model
-              </button>
+          <div className="settings-section">
+            <div className="settings-section-title">
+              <Cpu size={14} className="text-accent" />
+              <span>Model & provider</span>
             </div>
 
-            <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <Key size={16} color="var(--warning-color)" />
-                <span style={{ fontWeight: 600, fontSize: '14px' }}>
-                  Manage Credentials ({selectedProvider})
-                </span>
+            <div className="two-col-fields">
+              <div className="form-group">
+                <label className="form-label">Provider</label>
+                <select
+                  className="form-input"
+                  value={selectedProvider}
+                  onChange={(e) => {
+                    const p = e.target.value;
+                    setSelectedProvider(p);
+                    const info = providers.find((pr) => pr.id === p);
+                    if (info && info.models.length > 0) {
+                      setSelectedModel(info.models[0]);
+                    }
+                  }}
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.display_name} {p.configured ? '(Configured)' : ''}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="form-group">
-                <label className="form-label">API Key / Token</label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="password"
-                    className="form-input"
-                    style={{ flex: 1 }}
-                    placeholder={`Enter key for ${selectedProvider}...`}
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                  />
-                  <button
-                    className="primary-btn"
-                    onClick={handleSaveKey}
-                    disabled={isSaving || !apiKey.trim()}
-                  >
-                    Save Key
-                  </button>
-                </div>
+                <label className="form-label">Model</label>
+                <select
+                  className="form-input"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                >
+                  {currentProviderInfo?.models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleSaveModel}
+                disabled={isSaving}
+              >
+                Save default model
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-divider" />
+
+          <div className="settings-section">
+            <div className="settings-section-title">
+              <Key size={14} className="text-warning" />
+              <span>Credentials ({selectedProvider})</span>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">API key or token</label>
+              <div className="inline-row">
+                <input
+                  type="password"
+                  className="form-input flex-1"
+                  placeholder={`Enter key for ${selectedProvider}…`}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveKey()}
+                />
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleSaveKey}
+                  disabled={isSaving || !apiKey.trim()}
+                >
+                  Save key
+                </button>
               </div>
             </div>
           </div>
         </div>
 
         <div className="modal-footer">
-          <button className="primary-btn" onClick={onClose}>
+          <button type="button" className="btn btn-primary" onClick={onClose}>
             Done
           </button>
         </div>
