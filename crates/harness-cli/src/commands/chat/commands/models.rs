@@ -237,6 +237,7 @@ async fn set_default_compaction(
 
 /// The chained pickers redraw the box as they tear down — with the pre-switch model. Erase
 /// that stale box so the status bar is drawn once, showing the model now in use.
+#[allow(clippy::too_many_arguments)]
 async fn redraw_model_status(
     ui: &ChatUi,
     config: &Config,
