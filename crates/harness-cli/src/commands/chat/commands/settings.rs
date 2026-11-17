@@ -419,6 +419,24 @@ pub(crate) fn format_settings_summary(
         harness_core::MemoryMode::Session => "Session writer (saves mid-turn)",
         harness_core::MemoryMode::Background => "Background saver (distills after reply)",
     };
+    let approval_model_str = match (
+        config
+            .tools
+            .approval_provider
+            .as_deref()
+            .filter(|s| !s.is_empty()),
+        config
+            .tools
+            .approval_model
+            .as_deref()
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(p), Some(m)) => match config.tools.approval_reasoning_effort {
+            Some(e) => format!("{m} ({p}, thinking: {e})"),
+            None => format!("{m} ({p})"),
+        },
+        _ => "Default model".to_string(),
+    };
 
     let feat_line = |f: super::Feature| -> String {
         let live = toggles.map(|t| t.enabled(f));
@@ -459,7 +477,7 @@ pub(crate) fn format_settings_summary(
     };
 
     format!(
-        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
+        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
         "Theme:",
         theme_str,
         "Display Block Limit:",
@@ -472,6 +490,8 @@ pub(crate) fn format_settings_summary(
         compact_str,
         "Memory Saver Mode:",
         saver_str,
+        "Approval Model:",
+        approval_model_str,
         "MCP:",
         feat_line(super::Feature::Mcp),
         "Skills:",

@@ -37,8 +37,17 @@ pub enum ModelTarget {
     Compact { global: Option<bool> },
     /// The background memory saver's model (`/bgsaver-model`).
     BgSaver,
+    /// The model used to answer questions or suggestions inside the approval popup.
+    Approval,
     /// A named worker's model (`/worker <name>`).
     Worker(String),
+}
+
+/// Async result returned by the approval-model assistant query for an open approval modal.
+#[derive(Debug, Clone)]
+pub struct ApprovalReply {
+    pub call_id: String,
+    pub result: Result<String, String>,
 }
 
 /// A choice a generic TUI select modal hands back to the action layer.
@@ -1112,6 +1121,13 @@ pub enum ActiveModal {
         req: ApprovalRequest,
         resp_tx: oneshot::Sender<ApprovalDecision>,
         selected: usize,
+        editing_input: bool,
+        input: String,
+        asking: bool,
+        reply: Option<String>,
+        reply_scroll: usize,
+        error: Option<String>,
+        approval_model_label: String,
     },
     Clarify {
         req: ClarifyRequest,
@@ -1403,6 +1419,10 @@ pub struct TuiState {
     pub picker_tx: tokio::sync::mpsc::UnboundedSender<PickerLoad>,
     /// Receiver polled by the event loop to fill picker modals in place.
     pub picker_rx: tokio::sync::mpsc::UnboundedReceiver<PickerLoad>,
+    /// Sender handed to background approval-assistant model calls.
+    pub approval_reply_tx: tokio::sync::mpsc::UnboundedSender<ApprovalReply>,
+    /// Receiver polled by the event loop to display approval-assistant answers in place.
+    pub approval_reply_rx: tokio::sync::mpsc::UnboundedReceiver<ApprovalReply>,
     pub settled_cache: SettledTranscriptCache,
     pub live_content_cache: LiveContentCache,
     pub live_reasoning_cache: LiveReasoningCache,

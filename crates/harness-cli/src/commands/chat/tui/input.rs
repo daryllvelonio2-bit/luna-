@@ -12,10 +12,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::interactive::state::{Env, Flow};
 use super::actions::{
-    apply_agent_mode, apply_model_target, apply_thinking_selection, create_new_session,
-    interrupt_turn, open_models_for_target, open_provider_picker_for, open_session_picker,
-    open_thinking_picker, run_palette_action, run_slash_command, set_all_process_expanded,
-    submit_composer, switch_to_session, sync_slash_popup,
+    apply_agent_mode, apply_approval_model_choice, apply_model_target, apply_thinking_selection,
+    ask_approval_model, create_new_session, interrupt_turn, open_models_for_target,
+    open_provider_picker_for, open_session_picker, open_thinking_picker,
+    open_thinking_picker_with_current, run_palette_action, run_slash_command,
+    set_all_process_expanded, submit_composer, switch_to_session, sync_slash_popup,
 };
 use super::render::{
     filtered_models, filtered_palette_items, filtered_providers, filtered_sessions,
@@ -93,6 +94,14 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
             query.push_str(cleaned.trim());
             *selected = 0;
         }
+        ActiveModal::Approval {
+            input,
+            editing_input,
+            ..
+        } if *editing_input => {
+            input.push_str(cleaned.trim());
+            env.approval_activity.notify_one();
+        }
         ActiveModal::Clarify {
             custom,
             editing_custom,
@@ -132,6 +141,13 @@ async fn handle_mouse(
                 ActiveModal::TextModal { scroll, .. }
                 | ActiveModal::SubagentInspector { scroll, .. } => {
                     *scroll = scroll.saturating_sub(3);
+                }
+                ActiveModal::Approval {
+                    reply,
+                    reply_scroll,
+                    ..
+                } if reply.is_some() => {
+                    *reply_scroll = reply_scroll.saturating_sub(3);
                 }
                 _ => {}
             },
@@ -188,6 +204,13 @@ async fn handle_mouse(
                 }
                 ActiveModal::SubagentInspector { scroll, .. } => {
                     *scroll += 3;
+                }
+                ActiveModal::Approval {
+                    reply,
+                    reply_scroll,
+                    ..
+                } if reply.is_some() => {
+                    *reply_scroll += 3;
                 }
                 _ => {}
             },
@@ -1249,12 +1272,19 @@ async fn handle_modal_key(
                     if let Some((prov, model)) =
                         filtered_pairs.get(selected.min(filtered_pairs.len().saturating_sub(1)))
                     {
-                        if matches!(target, ModelTarget::Session) {
-                            // `/models` chains into the thinking-level picker: remember the
-                            // chosen pair and apply both once the effort is confirmed.
+                        if matches!(target, ModelTarget::Session | ModelTarget::Approval) {
+                            // Chain into the thinking-level picker: remember the chosen pair and
+                            // apply everything once the effort is confirmed.
                             st.pending_model_choice =
                                 Some((target.clone(), prov.clone(), model.clone()));
-                            open_thinking_picker(env, st).await;
+                            if matches!(target, ModelTarget::Approval) {
+                                open_thinking_picker_with_current(
+                                    st,
+                                    env.config.tools.approval_reasoning_effort,
+                                );
+                            } else {
+                                open_thinking_picker(env, st).await;
+                            }
                         } else if let Err(e) =
                             apply_model_target(env, st, target.clone(), prov, model).await
                         {
@@ -1493,12 +1523,32 @@ async fn handle_modal_key(
                     st.modal = ActiveModal::ThinkingPicker { current, selected };
                 }
                 KeyCode::Enter => {
-                    apply_thinking_selection(env, st, options[selected]).await;
-                    if let Some((target, provider, model)) = st.pending_model_choice.take() {
-                        if let Err(e) = apply_model_target(env, st, target, &provider, &model).await
-                        {
-                            env.ui
-                                .set_transient_error(Some(format!("Model switch failed: {e}")));
+                    let chosen_effort = options[selected];
+                    match st.pending_model_choice.take() {
+                        Some((ModelTarget::Approval, provider, model)) => {
+                            if let Err(e) = apply_approval_model_choice(
+                                env,
+                                st,
+                                &provider,
+                                &model,
+                                chosen_effort,
+                            ) {
+                                env.ui.set_transient_error(Some(format!(
+                                    "Approval model save failed: {e}"
+                                )));
+                            }
+                        }
+                        Some((target, provider, model)) => {
+                            apply_thinking_selection(env, st, chosen_effort).await;
+                            if let Err(e) =
+                                apply_model_target(env, st, target, &provider, &model).await
+                            {
+                                env.ui
+                                    .set_transient_error(Some(format!("Model switch failed: {e}")));
+                            }
+                        }
+                        None => {
+                            apply_thinking_selection(env, st, chosen_effort).await;
                         }
                     }
                 }
@@ -1511,56 +1561,289 @@ async fn handle_modal_key(
             req,
             resp_tx,
             mut selected,
-        } => match key.code {
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                let _ = resp_tx.send(ApprovalDecision::Deny);
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
-                let _ = resp_tx.send(ApprovalDecision::Run);
-            }
-            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('2') => {
-                apply_agent_mode(env, st, AgentMode::Auto);
-                let _ = resp_tx.send(ApprovalDecision::Run);
-            }
-            KeyCode::Char('3') => {
-                let _ = resp_tx.send(ApprovalDecision::Deny);
-            }
-            KeyCode::Up => {
-                selected = if selected == 0 { 2 } else { selected - 1 };
-                st.modal = ActiveModal::Approval {
-                    req,
-                    resp_tx,
-                    selected,
-                };
-            }
-            KeyCode::Down => {
-                selected = (selected + 1) % 3;
-                st.modal = ActiveModal::Approval {
-                    req,
-                    resp_tx,
-                    selected,
-                };
-            }
-            KeyCode::Enter => match selected {
-                0 => {
-                    let _ = resp_tx.send(ApprovalDecision::Run);
+            mut editing_input,
+            mut input,
+            mut asking,
+            mut reply,
+            mut reply_scroll,
+            mut error,
+            approval_model_label,
+        } => {
+            env.approval_activity.notify_one();
+            if editing_input {
+                match key.code {
+                    KeyCode::Esc => {
+                        editing_input = false;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        let trimmed = input.trim().to_string();
+                        if trimmed.is_empty() {
+                            error =
+                                Some("Type a suggestion before sending to the agent.".to_string());
+                            st.modal = ActiveModal::Approval {
+                                req,
+                                resp_tx,
+                                selected,
+                                editing_input,
+                                input,
+                                asking,
+                                reply,
+                                reply_scroll,
+                                error,
+                                approval_model_label,
+                            };
+                        } else {
+                            let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let trimmed = input.trim().to_string();
+                        if !trimmed.is_empty() && !asking {
+                            asking = true;
+                            editing_input = false;
+                            error = None;
+                            reply = None;
+                            reply_scroll = 0;
+                            ask_approval_model(env, st, req.clone(), trimmed);
+                        } else if trimmed.is_empty() {
+                            error = Some(
+                                "Type a question or suggestion first, or press Esc.".to_string(),
+                            );
+                        }
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        input.push(c);
+                        error = None;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    _ => {
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
                 }
-                1 => {
-                    apply_agent_mode(env, st, AgentMode::Auto);
-                    let _ = resp_tx.send(ApprovalDecision::Run);
+            } else {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        let _ = resp_tx.send(ApprovalDecision::Deny);
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+                        let _ = resp_tx.send(ApprovalDecision::Run);
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('2') => {
+                        apply_agent_mode(env, st, AgentMode::Auto);
+                        let _ = resp_tx.send(ApprovalDecision::Run);
+                    }
+                    KeyCode::Char('3') => {
+                        let _ = resp_tx.send(ApprovalDecision::Deny);
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Char('4') => {
+                        editing_input = true;
+                        selected = 3;
+                        error = None;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        let trimmed = input.trim().to_string();
+                        if trimmed.is_empty() {
+                            error = Some("Press q to type a suggestion first.".to_string());
+                            st.modal = ActiveModal::Approval {
+                                req,
+                                resp_tx,
+                                selected,
+                                editing_input,
+                                input,
+                                asking,
+                                reply,
+                                reply_scroll,
+                                error,
+                                approval_model_label,
+                            };
+                        } else {
+                            let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        reply_scroll = reply_scroll.saturating_sub(3);
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::PageDown => {
+                        if reply.is_some() {
+                            reply_scroll += 3;
+                        }
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Up => {
+                        selected = if selected == 0 { 3 } else { selected - 1 };
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Down => {
+                        selected = (selected + 1) % 4;
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
+                    KeyCode::Enter => match selected {
+                        0 => {
+                            let _ = resp_tx.send(ApprovalDecision::Run);
+                        }
+                        1 => {
+                            apply_agent_mode(env, st, AgentMode::Auto);
+                            let _ = resp_tx.send(ApprovalDecision::Run);
+                        }
+                        2 => {
+                            let _ = resp_tx.send(ApprovalDecision::Deny);
+                        }
+                        _ => {
+                            editing_input = true;
+                            error = None;
+                            st.modal = ActiveModal::Approval {
+                                req,
+                                resp_tx,
+                                selected,
+                                editing_input,
+                                input,
+                                asking,
+                                reply,
+                                reply_scroll,
+                                error,
+                                approval_model_label,
+                            };
+                        }
+                    },
+                    _ => {
+                        st.modal = ActiveModal::Approval {
+                            req,
+                            resp_tx,
+                            selected,
+                            editing_input,
+                            input,
+                            asking,
+                            reply,
+                            reply_scroll,
+                            error,
+                            approval_model_label,
+                        };
+                    }
                 }
-                _ => {
-                    let _ = resp_tx.send(ApprovalDecision::Deny);
-                }
-            },
-            _ => {
-                st.modal = ActiveModal::Approval {
-                    req,
-                    resp_tx,
-                    selected,
-                };
             }
-        },
+        }
         ActiveModal::Clarify {
             req,
             resp_tx,

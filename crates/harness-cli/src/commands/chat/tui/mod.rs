@@ -271,6 +271,36 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 }
             }
 
+            maybe_approval_reply = st.approval_reply_rx.recv() => {
+                if let Some(msg) = maybe_approval_reply {
+                    if let ActiveModal::Approval {
+                        req,
+                        asking,
+                        reply,
+                        reply_scroll,
+                        error,
+                        ..
+                    } = &mut st.modal
+                    {
+                        if req.call_id == msg.call_id {
+                            *asking = false;
+                            match msg.result {
+                                Ok(text) => {
+                                    *reply = Some(text);
+                                    *reply_scroll = 0;
+                                    *error = None;
+                                }
+                                Err(err) => {
+                                    *error = Some(err);
+                                }
+                            }
+                            env.approval_activity.notify_one();
+                            needs_redraw = true;
+                        }
+                    }
+                }
+            }
+
             _ = animation.tick(), if st.active_turn.is_some()
                 || has_bg_active
                 || env.compacting.load(Ordering::SeqCst)
@@ -282,11 +312,25 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || actions::has_pending_worker_turns(&st)
                 || matches!(
                     st.modal,
-                    ActiveModal::SubagentInspector { .. } | ActiveModal::SubagentsModal { .. }
+                    ActiveModal::SubagentInspector { .. }
+                        | ActiveModal::SubagentsModal { .. }
+                        | ActiveModal::Approval {
+                            asking: true,
+                            ..
+                        }
                 )
                 || !st.queue.is_empty() => {
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
+                if matches!(
+                    st.modal,
+                    ActiveModal::Approval {
+                        editing_input: true,
+                        ..
+                    } | ActiveModal::Approval { asking: true, .. }
+                ) {
+                    env.approval_activity.notify_one();
+                }
                 st.prune_stale_notices();
                 actions::sync_worker_turns(&env, &mut st).await;
                 actions::refresh_subagents_if_open(&env, &mut st).await;
@@ -317,6 +361,19 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
 
             _ = idle_tick.tick() => {
                 needs_redraw = true;
+                if matches!(
+                    st.modal,
+                    ActiveModal::Approval {
+                        editing_input: true,
+                        ..
+                    } | ActiveModal::Approval { asking: true, .. }
+                        | ActiveModal::Approval {
+                            reply: Some(_),
+                            ..
+                        }
+                ) {
+                    env.approval_activity.notify_one();
+                }
                 st.prune_stale_notices();
                 actions::sync_worker_turns(&env, &mut st).await;
                 actions::refresh_subagents_if_open(&env, &mut st).await;
@@ -429,10 +486,24 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             maybe_approval = env.approval_rx.recv() => {
                 if let Some((req, resp_tx)) = maybe_approval {
                     if !resp_tx.is_closed() {
+                        let (_, m, _, is_def) = actions::resolve_approval_model(&env, &st);
+                        let m_disp = theme::friendly_model_name(&m);
+                        let approval_model_label = if is_def {
+                            format!("default ({m_disp})")
+                        } else {
+                            m_disp
+                        };
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,
                             selected: 0,
+                            editing_input: false,
+                            input: String::new(),
+                            asking: false,
+                            reply: None,
+                            reply_scroll: 0,
+                            error: None,
+                            approval_model_label,
                         };
                         needs_redraw = true;
                     }
@@ -624,6 +695,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
 
     let initial_turns_len = turns.len();
     let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut st = TuiState {
         turns,
         turn_meta,
@@ -691,6 +763,8 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         picker_loading: None,
         picker_tx: picker_tx.clone(),
         picker_rx,
+        approval_reply_tx,
+        approval_reply_rx,
         settled_cache: state::SettledTranscriptCache::default(),
         live_content_cache: state::LiveContentCache::default(),
         live_reasoning_cache: state::LiveReasoningCache::default(),

@@ -705,3 +705,32 @@ fn feature_timed_disables_honor_expiry_and_persist_in_config() {
     assert!(!cfg.skills_effective_enabled_at(1500));
     assert!(!cfg.skills_effective_enabled_at(2500));
 }
+
+#[test]
+fn approval_model_settings_round_trip_through_config_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layers = layers(Some(config_path(&tmp)));
+
+    set_in_file(&layers, "tools.approval_provider", "anthropic").unwrap();
+    set_in_file(&layers, "tools.approval_model", "claude-3-5-sonnet").unwrap();
+    set_in_file(&layers, "tools.approval_reasoning_effort", "medium").unwrap();
+
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert_eq!(cfg.tools.approval_provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        cfg.tools.approval_model.as_deref(),
+        Some("claude-3-5-sonnet")
+    );
+    assert_eq!(
+        cfg.tools.approval_reasoning_effort,
+        Some(harness_core::ReasoningEffort::Medium)
+    );
+
+    unset_in_file(&layers, "tools.approval_provider").unwrap();
+    unset_in_file(&layers, "tools.approval_model").unwrap();
+    unset_in_file(&layers, "tools.approval_reasoning_effort").unwrap();
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert_eq!(cfg.tools.approval_provider, None);
+    assert_eq!(cfg.tools.approval_model, None);
+    assert_eq!(cfg.tools.approval_reasoning_effort, None);
+}

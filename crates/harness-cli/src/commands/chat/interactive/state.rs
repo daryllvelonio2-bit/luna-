@@ -59,6 +59,7 @@ pub(in crate::commands::chat) struct Env<'a> {
         harness_core::ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
+    pub(in crate::commands::chat) approval_activity: Arc<tokio::sync::Notify>,
     pub(in crate::commands::chat) sudo_rx:
         &'a mut mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
     pub(in crate::commands::chat) clarify_rx: &'a mut mpsc::UnboundedReceiver<(
@@ -100,6 +101,7 @@ impl<'a> Env<'a> {
             skills_arc: rt.skills_arc.clone(),
             skills_readout: rt.skills_readout.clone(),
             approval_rx: &mut rt.approval_rx,
+            approval_activity: rt.approval_activity.clone(),
             sudo_rx: &mut rt.sudo_rx,
             clarify_rx: &mut rt.clarify_rx,
             job_rx: &mut rt.job_rx,

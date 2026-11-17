@@ -3144,6 +3144,7 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
 
 fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &FooterInfo<'_>) {
     st.modal_rect = None;
+    let spinner_tick = st.spinner_tick;
     match &st.modal {
         ActiveModal::None => {}
         ActiveModal::CommandPalette { query, selected } => {
@@ -3566,12 +3567,35 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .collect();
             frame.render_widget(Paragraph::new(lines), inner);
         }
-        ActiveModal::Approval { req, selected, .. } => {
-            let w = screen.width.saturating_sub(6).clamp(50, 82);
-            let h = screen.height.saturating_sub(4).clamp(12, 22);
+        ActiveModal::Approval {
+            req,
+            selected,
+            editing_input,
+            input,
+            asking,
+            reply,
+            reply_scroll,
+            error,
+            approval_model_label,
+            ..
+        } => {
+            let w = screen.width.saturating_sub(6).clamp(54, 86);
+            let h = screen.height.saturating_sub(4).clamp(16, 28);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
-            let inner = draw_modal_frame(frame, rect, "Approve Tool Call", "↑/↓ · enter");
+            let hint = if *editing_input {
+                "enter ask model · ctrl+s send to agent · esc back"
+            } else if reply.is_some() {
+                "↑/↓ · enter · q ask · pgup/pgdn · ctrl+s send"
+            } else if !input.trim().is_empty() {
+                "↑/↓ · enter · q ask · ctrl+s send to agent"
+            } else {
+                "↑/↓ · enter · y/a/n/q"
+            };
+            let inner = draw_modal_frame(frame, rect, "Approve Tool Call", hint);
+
+            let inner_w = inner.width as usize;
+            let inner_h = inner.height as usize;
 
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
@@ -3591,14 +3615,44 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 lines.push(Line::from(Span::styled(
                     format!(
                         " Target: {}",
-                        truncate_str(target, (inner.width as usize).saturating_sub(10))
+                        truncate_str(target, inner_w.saturating_sub(10))
                     ),
                     Style::default().fg(text_primary()).bg(bg_elevated()),
                 )));
             }
             lines.push(Line::default());
+
+            let reply_wrapped: Vec<String> = reply
+                .as_deref()
+                .map(|text| {
+                    text.lines()
+                        .flat_map(|l| {
+                            if l.trim().is_empty() {
+                                vec![String::new()]
+                            } else {
+                                wrap_plain_text(l, inner_w.saturating_sub(3))
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reply_rows = if *asking || error.is_some() {
+                2
+            } else if !reply_wrapped.is_empty() {
+                reply_wrapped.len().min(7) + 2
+            } else {
+                0
+            };
+            let input_rows = if *editing_input || !input.trim().is_empty() {
+                2
+            } else {
+                0
+            };
+            let choices_rows = 4;
+            let reserved = lines.len() + reply_rows + input_rows + choices_rows + 1;
+
             if let Some(ref diff) = req.diff {
-                let preview_budget = (inner.height as usize).saturating_sub(7);
+                let preview_budget = inner_h.saturating_sub(reserved).max(2);
                 for dline in diff.lines().take(preview_budget) {
                     let color = if dline.starts_with('+') {
                         green_ok()
@@ -3608,23 +3662,66 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         text_muted()
                     };
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            " {}",
-                            truncate_str(dline, (inner.width as usize).saturating_sub(2))
-                        ),
+                        format!(" {}", truncate_str(dline, inner_w.saturating_sub(2))),
                         Style::default().fg(color).bg(bg_elevated()),
                     )));
                 }
                 lines.push(Line::default());
             }
 
-            let choices = ["Allow once", "Allow for this session (Auto mode)", "Deny"];
+            if *asking {
+                let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+                lines.push(Line::from(Span::styled(
+                    format!(" {spinner} Asking {approval_model_label}…"),
+                    Style::default().fg(accent_coral()).bg(bg_elevated()),
+                )));
+                lines.push(Line::default());
+            } else if let Some(ref err) = error {
+                lines.push(Line::from(Span::styled(
+                    format!(" ⚠ {}", truncate_str(err, inner_w.saturating_sub(4))),
+                    Style::default().fg(red_err()).bg(bg_elevated()),
+                )));
+                lines.push(Line::default());
+            } else if !reply_wrapped.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " {}:",
+                        truncate_str(
+                            &format!("Approval model ({approval_model_label})"),
+                            inner_w.saturating_sub(3)
+                        )
+                    ),
+                    Style::default()
+                        .fg(accent_coral())
+                        .bg(bg_elevated())
+                        .add_modifier(Modifier::BOLD),
+                )));
+                let visible_reply = inner_h
+                    .saturating_sub(lines.len() + input_rows + choices_rows + 1)
+                    .clamp(2, 7);
+                let max_scroll = reply_wrapped.len().saturating_sub(visible_reply);
+                let scroll = (*reply_scroll).min(max_scroll);
+                for rline in reply_wrapped.iter().skip(scroll).take(visible_reply) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {rline}"),
+                        Style::default().fg(text_primary()).bg(bg_elevated()),
+                    )));
+                }
+                lines.push(Line::default());
+            }
+
+            let choices = [
+                "[y] Allow once",
+                "[a] Allow for this session (Auto mode)",
+                "[n] Deny",
+                "[q] Ask a question / add a suggestion",
+            ];
             for (idx, ch) in choices.iter().enumerate() {
-                let is_sel = idx == *selected;
+                let is_sel = !*editing_input && idx == *selected;
                 let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let prefix = if is_sel { " ▸ " } else { "   " };
                 let line = format!("{prefix}{ch}");
-                let pad = (inner.width as usize).saturating_sub(line.width());
+                let pad = inner_w.saturating_sub(line.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         line,
@@ -3641,6 +3738,48 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                 ]));
             }
+
+            if *editing_input {
+                lines.push(Line::default());
+                let prompt_prefix = " ▸ Ask / suggest: ";
+                let avail = inner_w.saturating_sub(prompt_prefix.width() + 1);
+                let mut shown = input.clone();
+                if shown.width() > avail {
+                    let mut chars: Vec<char> = shown.chars().collect();
+                    while chars.iter().collect::<String>().width() > avail && !chars.is_empty() {
+                        chars.remove(0);
+                    }
+                    shown = chars.into_iter().collect();
+                }
+                let row_text = format!("{prompt_prefix}{shown}");
+                let pad = inner_w.saturating_sub(row_text.width());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        prompt_prefix,
+                        Style::default().fg(accent_coral()).bg(bg_selected()),
+                    ),
+                    Span::styled(
+                        shown.clone(),
+                        Style::default().fg(text_primary()).bg(bg_selected()),
+                    ),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg_selected())),
+                ]));
+                let cur_x = (inner.x + prompt_prefix.width() as u16 + shown.width() as u16)
+                    .min(inner.x + inner.width.saturating_sub(1));
+                let cur_y = inner.y + (lines.len().saturating_sub(1)) as u16;
+                frame.set_cursor_position((cur_x, cur_y));
+            } else if !input.trim().is_empty() {
+                lines.push(Line::default());
+                let note_line = format!(
+                    " Note: \"{}\" (Ctrl+S to send to agent)",
+                    truncate_str(input.trim(), inner_w.saturating_sub(36))
+                );
+                lines.push(Line::from(Span::styled(
+                    truncate_str(&note_line, inner_w),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                )));
+            }
+
             frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::Clarify {
@@ -5354,6 +5493,7 @@ mod tests {
     #[test]
     fn ensure_settled_transcript_caches_and_appends_incrementally() {
         let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut st = TuiState {
             turns: vec![TurnRecord {
                 user_query: "turn one".to_string(),
@@ -5424,6 +5564,8 @@ mod tests {
             picker_loading: None,
             picker_tx,
             picker_rx,
+            approval_reply_tx,
+            approval_reply_rx,
             settled_cache: super::super::state::SettledTranscriptCache::default(),
             live_content_cache: super::super::state::LiveContentCache::default(),
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
@@ -6028,6 +6170,7 @@ mod tests {
 
     fn test_dummy_tui_state() -> TuiState {
         let (picker_tx, picker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (approval_reply_tx, approval_reply_rx) = tokio::sync::mpsc::unbounded_channel();
         let tmp = tempfile::tempdir().unwrap();
         let memory = std::sync::Arc::new(harness_memory::MemoryEngineKind::Sqlite(
             harness_memory::SqliteMemoryEngine::in_memory().unwrap(),
@@ -6119,6 +6262,8 @@ mod tests {
             picker_loading: None,
             picker_tx,
             picker_rx,
+            approval_reply_tx,
+            approval_reply_rx,
             settled_cache: super::super::state::SettledTranscriptCache::default(),
             live_content_cache: super::super::state::LiveContentCache::default(),
             live_reasoning_cache: super::super::state::LiveReasoningCache::default(),
@@ -6126,5 +6271,53 @@ mod tests {
             background_sessions: std::collections::HashMap::new(),
             memory_project_filter: None,
         }
+    }
+
+    #[test]
+    fn approval_modal_renders_four_choices_input_and_reply() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.modal = ActiveModal::Approval {
+            req: harness_core::ApprovalRequest {
+                tool: "patch".to_string(),
+                call_id: "c99".to_string(),
+                target: Some("src/lib.rs".to_string()),
+                diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n-a\n+b\n".to_string()),
+                arguments: serde_json::json!({}),
+            },
+            resp_tx: tx,
+            selected: 3,
+            editing_input: true,
+            input: "Why replace a with b?".to_string(),
+            asking: false,
+            reply: Some("Because b fixes the off-by-one.".to_string()),
+            reply_scroll: 0,
+            error: None,
+            approval_model_label: "default (gpt-4o)".to_string(),
+        };
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..32)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Allow once"), "{text}");
+        assert!(text.contains("Ask a question / add a suggestion"), "{text}");
+        assert!(text.contains("Because b fixes the off-by-one."), "{text}");
+        assert!(text.contains("Why replace a with b?"), "{text}");
     }
 }

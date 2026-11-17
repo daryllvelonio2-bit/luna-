@@ -852,6 +852,14 @@ pub struct ToolsSettings {
     pub approval: ApprovalMode,
     /// No answer within this window counts as a denial.
     pub approval_timeout_secs: u64,
+    /// Provider used to answer questions or suggestions inside the approval popup.
+    /// `None` uses the default model.
+    pub approval_provider: Option<String>,
+    /// Model used to answer questions or suggestions inside the approval popup.
+    /// `None` uses the default model.
+    pub approval_model: Option<String>,
+    /// Thinking/reasoning effort used by the approval model. `None` uses default/off.
+    pub approval_reasoning_effort: Option<ReasoningEffort>,
     /// Tool names the gate must treat as mutating even when the tool says otherwise.
     pub mutating_overrides: Vec<String>,
     /// Whether a `terminal` child may open sockets other than `AF_UNIX`.
@@ -882,6 +890,9 @@ impl Default for ToolsSettings {
         Self {
             approval: ApprovalMode::Ask,
             approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+            approval_provider: None,
+            approval_model: None,
+            approval_reasoning_effort: None,
             mutating_overrides: Vec::new(),
             network: crate::tools::netguard::NetworkPolicy::Allow,
             read_max_chars: 100_000,
@@ -1690,6 +1701,12 @@ fn coerce(key: &str, raw: &str, default: Option<&Value>) -> Result<Value, Harnes
             "timeout_secs" => parse_u64(key, raw).map(|value| Value::Number(value.into())),
             _ => Ok(Value::String(raw.to_string())),
         };
+    }
+    if matches!(
+        key,
+        "tools.approval_provider" | "tools.approval_model" | "tools.approval_reasoning_effort"
+    ) {
+        return Ok(Value::String(raw.to_string()));
     }
     match default {
         Some(Value::Bool(_)) => parse_bool(key, raw).map(Value::Bool),

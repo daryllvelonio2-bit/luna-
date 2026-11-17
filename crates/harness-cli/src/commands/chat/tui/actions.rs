@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use harness_core::{
-    CompactionSetup, HarnessError, MemoryEngine, ReasoningEffort, SessionBinding, SessionStore,
-    TurnOutcome,
+    ApprovalRequest, CompactionSetup, CompletionOptions, HarnessError, MemoryEngine, Message,
+    ModelProvider, ReasoningEffort, SessionBinding, SessionStore, TurnOutcome,
 };
 use harness_providers::{GenericProviderClient, RotationStrategy};
 use ratatui::backend::CrosstermBackend;
@@ -35,9 +35,9 @@ use super::super::turn::{
 use super::super::ui::ChatUi;
 use super::markdown::strip_ansi;
 use super::state::{
-    ActiveModal, AgentMode, BackgroundSession, InputAction, LiveThinkingView, ModelPickerItem,
-    ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab, SubagentUiEntry,
-    SystemNotice, TuiState, TurnMeta,
+    ActiveModal, AgentMode, ApprovalReply, BackgroundSession, InputAction, LiveThinkingView,
+    ModelPickerItem, ModelTarget, PaletteAction, ProviderPickerItem, SelectAction, SessionTab,
+    SubagentUiEntry, SystemNotice, TuiState, TurnMeta,
 };
 use super::theme::{friendly_model_name, friendly_provider_name};
 use crate::commands::context_window::context_window;
@@ -734,7 +734,21 @@ pub async fn open_provider_picker_with_target(
     target: ModelTarget,
     query: String,
 ) {
-    let items = st.provider_items.clone();
+    let highlight_provider = if matches!(target, ModelTarget::Approval) {
+        resolve_approval_model(env, st).0
+    } else {
+        env.current_provider.clone()
+    };
+    let items = if highlight_provider.eq_ignore_ascii_case(env.current_provider) {
+        st.provider_items.clone()
+    } else {
+        build_provider_items(
+            env.cred_manager.clone(),
+            Some(&env.config.providers),
+            &highlight_provider,
+        )
+        .await
+    };
     let selected = items.iter().position(|i| i.is_current).unwrap_or(0);
     st.picker_loading = None;
     st.modal = ActiveModal::ProviderPicker {
@@ -747,11 +761,10 @@ pub async fn open_provider_picker_with_target(
 
     let tx = st.picker_tx.clone();
     let cred_manager = env.cred_manager.clone();
-    let current_provider = env.current_provider.clone();
     let config_providers = env.config.providers.clone();
     tokio::spawn(async move {
         let items =
-            build_provider_items(cred_manager, Some(&config_providers), &current_provider).await;
+            build_provider_items(cred_manager, Some(&config_providers), &highlight_provider).await;
         let _ = tx.send(super::state::PickerLoad::Providers(items));
     });
 }
@@ -822,8 +835,12 @@ pub async fn open_models_for_target(
     let tx = st.picker_tx.clone();
     let discovery = env.discovery.clone();
     let cred_manager = env.cred_manager.clone();
-    let current_provider = env.current_provider.clone();
-    let current_model = env.current_model.clone();
+    let (current_provider, current_model) = if matches!(target, ModelTarget::Approval) {
+        let (p, m, _, _) = resolve_approval_model(env, st);
+        (p, m)
+    } else {
+        (env.current_provider.clone(), env.current_model.clone())
+    };
     tokio::spawn(async move {
         let items = load_model_items(
             discovery.as_ref(),
@@ -884,7 +901,10 @@ pub fn apply_picker_load(st: &mut TuiState, load: super::state::PickerLoad) {
 }
 
 pub async fn open_thinking_picker(_env: &Env<'_>, st: &mut TuiState) {
-    let cur = st.reasoning_effort;
+    open_thinking_picker_with_current(st, st.reasoning_effort);
+}
+
+pub fn open_thinking_picker_with_current(st: &mut TuiState, cur: Option<ReasoningEffort>) {
     let selected = match cur {
         None => 0,
         Some(ReasoningEffort::Minimal) => 1,
@@ -990,7 +1010,8 @@ pub async fn apply_model_target(
     provider: &str,
     model: &str,
 ) -> Result<(), HarnessError> {
-    if st.active_turn.is_some() && !matches!(target, ModelTarget::Worker(_)) {
+    if st.active_turn.is_some() && !matches!(target, ModelTarget::Worker(_) | ModelTarget::Approval)
+    {
         env.ui.set_transient_error(Some(
             "Wait for or interrupt the active turn in this session before changing models.".into(),
         ));
@@ -1040,9 +1061,216 @@ pub async fn apply_model_target(
             )
             .await
         }
+        ModelTarget::Approval => apply_approval_model_choice(
+            env,
+            st,
+            provider,
+            model,
+            env.config.tools.approval_reasoning_effort,
+        ),
         ModelTarget::Worker(name) => apply_worker_target(env, st, &name, provider, model),
     }
     .map(|_| ())
+}
+
+/// Resolve `(provider, model, reasoning_effort, is_default)` for approval popup questions.
+pub fn resolve_approval_model(
+    env: &Env<'_>,
+    st: &TuiState,
+) -> (String, String, Option<ReasoningEffort>, bool) {
+    if let (Some(p), Some(m)) = (
+        env.config
+            .tools
+            .approval_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        env.config
+            .tools
+            .approval_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        return (
+            p.to_string(),
+            m.to_string(),
+            env.config.tools.approval_reasoning_effort,
+            false,
+        );
+    }
+    let default_provider = env.config.model.provider.trim();
+    let default_model = env.config.model.default.trim();
+    if !default_provider.is_empty() && !default_model.is_empty() {
+        let effort = if default_provider.eq_ignore_ascii_case(env.current_provider)
+            && default_model == env.current_model.as_str()
+        {
+            st.reasoning_effort
+        } else {
+            None
+        };
+        return (
+            default_provider.to_string(),
+            default_model.to_string(),
+            effort,
+            true,
+        );
+    }
+    (
+        env.current_provider.clone(),
+        env.current_model.clone(),
+        st.reasoning_effort,
+        true,
+    )
+}
+
+fn format_approval_model_badge(env: &Env<'_>, st: &TuiState) -> String {
+    let (provider, model, effort, is_default) = resolve_approval_model(env, st);
+    let model_disp = friendly_model_name(&model);
+    if is_default {
+        format!("default ({model_disp})")
+    } else if let Some(e) = effort {
+        format!("{model_disp} ({provider} · {e})")
+    } else {
+        format!("{model_disp} ({provider})")
+    }
+}
+
+pub fn apply_approval_model_choice(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+    provider: &str,
+    model: &str,
+    effort: Option<ReasoningEffort>,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    harness_core::config::set_in_file(&layers, "tools.approval_provider", provider)?;
+    harness_core::config::set_in_file(&layers, "tools.approval_model", model)?;
+    if let Some(e) = effort {
+        harness_core::config::set_in_file(&layers, "tools.approval_reasoning_effort", e.as_str())?;
+    } else {
+        let _ = harness_core::config::unset_in_file(&layers, "tools.approval_reasoning_effort")?;
+    }
+    env.config.tools.approval_provider = Some(provider.to_string());
+    env.config.tools.approval_model = Some(model.to_string());
+    env.config.tools.approval_reasoning_effort = effort;
+    let effort_label = effort
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "off".to_string());
+    notify_setting_change(
+        st,
+        format!(
+            "✔ Approval model set to {} ({}, thinking: {})",
+            friendly_model_name(model),
+            provider,
+            effort_label
+        ),
+    );
+    open_settings_menu(env, st, 9);
+    Ok(())
+}
+
+pub fn reset_approval_model_choice(
+    env: &mut Env<'_>,
+    st: &mut TuiState,
+) -> Result<(), HarnessError> {
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let _ = harness_core::config::unset_in_file(&layers, "tools.approval_provider")?;
+    let _ = harness_core::config::unset_in_file(&layers, "tools.approval_model")?;
+    let _ = harness_core::config::unset_in_file(&layers, "tools.approval_reasoning_effort")?;
+    env.config.tools.approval_provider = None;
+    env.config.tools.approval_model = None;
+    env.config.tools.approval_reasoning_effort = None;
+    notify_setting_change(st, "✔ Approval model reset to default".to_string());
+    open_settings_menu(env, st, 9);
+    Ok(())
+}
+
+fn truncate_chars_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    format!("{}\n...(truncated)", &text[..end])
+}
+
+pub fn build_approval_question_prompt(req: &ApprovalRequest, question: &str) -> String {
+    let mut out = format!("Pending tool call: {}\n", req.tool);
+    if let Some(ref target) = req.target {
+        out.push_str(&format!("Target: {target}\n"));
+    }
+    if let Some(ref diff) = req.diff {
+        out.push_str("\nDiff:\n");
+        out.push_str(&truncate_chars_with_ellipsis(diff, 8000));
+        out.push('\n');
+    } else if !req.arguments.is_null() {
+        let pretty = serde_json::to_string_pretty(&req.arguments)
+            .unwrap_or_else(|_| req.arguments.to_string());
+        out.push_str("\nArguments:\n");
+        out.push_str(&truncate_chars_with_ellipsis(&pretty, 4000));
+        out.push('\n');
+    }
+    out.push_str("\nUser question / suggestion:\n");
+    out.push_str(question.trim());
+    out
+}
+
+pub fn ask_approval_model(env: &Env<'_>, st: &TuiState, req: ApprovalRequest, question: String) {
+    let (provider, model, reasoning_effort, _) = resolve_approval_model(env, st);
+    let cred_manager = env.cred_manager.clone();
+    let discovery = env.discovery.clone();
+    let provider_override = env.config.providers.get(&provider).cloned();
+    let tx = st.approval_reply_tx.clone();
+    let activity = env.approval_activity.clone();
+    activity.notify_one();
+
+    tokio::spawn(async move {
+        let call_id = req.call_id.clone();
+        let result = async {
+            let client = GenericProviderClient::new(
+                provider.clone(),
+                model.clone(),
+                cred_manager,
+                discovery,
+                provider_override.as_ref(),
+            )
+            .map_err(|e| {
+                format!("failed to initialize approval model ({provider}/{model}): {e}")
+            })?;
+
+            let prompt = build_approval_question_prompt(&req, &question);
+            let messages = vec![
+                Message::system(
+                    "You are assisting a user who is reviewing a pending tool approval request in Luna. \
+                     Answer their question or evaluate their suggestion clearly and concisely based strictly \
+                     on the tool call details shown. Do not invent file contents that were not provided.",
+                ),
+                Message::user(prompt),
+            ];
+            let options = CompletionOptions {
+                model: Some(model.clone()),
+                reasoning_effort,
+                ..Default::default()
+            };
+            let reply = client
+                .complete(&messages, &[], &options)
+                .await
+                .map_err(|e| format!("approval model error ({provider}/{model}): {e}"))?;
+            let text = reply.content.trim().to_string();
+            if text.is_empty() {
+                Ok("(model returned an empty response)".to_string())
+            } else {
+                Ok(text)
+            }
+        }
+        .await;
+        activity.notify_one();
+        let _ = tx.send(ApprovalReply { call_id, result });
+    });
 }
 
 async fn apply_default_target(
@@ -1228,6 +1456,7 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
         harness_core::MemoryMode::Session => "Session writer",
         harness_core::MemoryMode::Background => "Background saver",
     };
+    let approval_model = format_approval_model_badge(env, st);
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
         items: vec![
@@ -1240,9 +1469,10 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
             format!("Memory · {}", feature_status_badge(env, Feature::Memory)),
             format!("Notes · {}", feature_status_badge(env, Feature::Notes)),
             format!("Memory saver · {saver}"),
+            format!("Approval model · {approval_model}"),
             "View current settings summary".to_string(),
         ],
-        selected: selected.min(9),
+        selected: selected.min(10),
         action: SelectAction::SettingsMain,
     };
 }
@@ -1412,6 +1642,13 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
                 notify_setting_change(st, format!("Memory saver set to {label} (saved)"));
             }
             open_settings_menu(env, st, 8);
+        }
+        9 => {
+            if let Err(err) = reset_approval_model_choice(env, st) {
+                env.ui
+                    .set_transient_error(Some(format!("Approval model reset failed: {err}")));
+                open_settings_menu(env, st, 9);
+            }
         }
         _ => {
             open_settings_menu(env, st, choice);
@@ -2101,6 +2338,7 @@ pub async fn run_select_action(
                 };
             }
             2..=8 => toggle_settings_main_item(env, st, choice).await,
+            9 => open_provider_picker_for(env, st, ModelTarget::Approval).await,
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
@@ -4487,5 +4725,23 @@ mod tests {
         assert_eq!(sliced.len(), 1);
         assert_eq!(sliced[0].user_query, "GOAL: fix bug");
         assert_eq!(sliced[0].reply, "fixed");
+    }
+
+    #[test]
+    fn build_approval_question_prompt_includes_diff_and_question() {
+        let req = harness_core::ApprovalRequest {
+            tool: "patch".to_string(),
+            call_id: "c1".to_string(),
+            target: Some("src/main.rs".to_string()),
+            diff: Some(
+                "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            ),
+            arguments: serde_json::json!({ "path": "src/main.rs" }),
+        };
+        let prompt = super::build_approval_question_prompt(&req, "Is +new safe?");
+        assert!(prompt.contains("Pending tool call: patch"));
+        assert!(prompt.contains("Target: src/main.rs"));
+        assert!(prompt.contains("+new"));
+        assert!(prompt.contains("Is +new safe?"));
     }
 }

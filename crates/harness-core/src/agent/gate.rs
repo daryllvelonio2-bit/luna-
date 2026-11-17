@@ -122,7 +122,25 @@ where
         );
 
         let timeout = self.approval.timeout;
-        match tokio::time::timeout(timeout, self.approver.approve(&request)).await {
+        let notifier = self.approver.activity_notifier();
+        let mut approve_fut = std::pin::pin!(self.approver.approve(&request));
+        let outcome = loop {
+            let sleep = tokio::time::sleep(timeout);
+            tokio::pin!(sleep);
+            tokio::select! {
+                res = &mut approve_fut => break Ok(res),
+                _ = async {
+                    match &notifier {
+                        Some(n) => n.notified().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    continue;
+                }
+                _ = &mut sleep => break Err(()),
+            }
+        };
+        match outcome {
             Ok(Ok(ApprovalDecision::Run)) => GateOutcome::Run(None),
             Ok(Ok(ApprovalDecision::RunWithArguments(arguments))) => {
                 GateOutcome::Run(Some(arguments))
@@ -130,11 +148,17 @@ where
             Ok(Ok(ApprovalDecision::Deny)) => {
                 GateOutcome::Denied("denied at the prompt".to_string())
             }
+            Ok(Ok(ApprovalDecision::DenyWithFeedback(feedback))) => {
+                let trimmed = feedback.trim();
+                if trimmed.is_empty() {
+                    GateOutcome::Denied("denied at the prompt".to_string())
+                } else {
+                    GateOutcome::Denied(format!("human feedback: {trimmed}"))
+                }
+            }
             Ok(Err(HarnessError::ApprovalRejected(reason))) => GateOutcome::Denied(reason),
             Ok(Err(error)) => GateOutcome::Denied(error.to_string()),
-            Err(_elapsed) => {
-                GateOutcome::Denied(format!("no answer within {}s", timeout.as_secs()))
-            }
+            Err(()) => GateOutcome::Denied(format!("no answer within {}s", timeout.as_secs())),
         }
     }
 }

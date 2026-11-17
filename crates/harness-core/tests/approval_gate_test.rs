@@ -431,3 +431,77 @@ async fn mutating_overrides_gate_a_tool_that_claims_to_be_read_only() {
     assert_eq!(prompts.load(Ordering::SeqCst), 1);
     assert_eq!(observed.tool_runs, 0);
 }
+
+#[tokio::test]
+async fn deny_with_feedback_returns_feedback_in_tool_result() {
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let observed = run_case(
+        AgentConfig::default(),
+        ApprovalSettings::default(),
+        Arc::new(ScriptedApprover {
+            prompts: prompts.clone(),
+            decision: ApprovalDecision::DenyWithFeedback(
+                "Please edit /tmp/other.txt instead".to_string(),
+            ),
+        }),
+        true,
+    )
+    .await;
+
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(observed.tool_runs, 0);
+    assert!(
+        observed
+            .tool_results
+            .contains("Please edit /tmp/other.txt instead"),
+        "{}",
+        observed.tool_results
+    );
+}
+
+#[tokio::test]
+async fn activity_notifier_keeps_approval_alive_past_idle_timeout() {
+    use tokio::sync::Notify;
+
+    struct ActiveApprover {
+        notify: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Approver for ActiveApprover {
+        async fn approve(
+            &self,
+            _request: &ApprovalRequest,
+        ) -> Result<ApprovalDecision, HarnessError> {
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            self.notify.notify_one();
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            self.notify.notify_one();
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            Ok(ApprovalDecision::Run)
+        }
+
+        fn activity_notifier(&self) -> Option<Arc<Notify>> {
+            Some(self.notify.clone())
+        }
+    }
+
+    let approver = Arc::new(ActiveApprover {
+        notify: Arc::new(Notify::new()),
+    });
+    let observed = run_case(
+        AgentConfig::default(),
+        ApprovalSettings {
+            timeout: Duration::from_millis(80),
+            mutating_overrides: vec![],
+        },
+        approver,
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        observed.tool_runs, 1,
+        "activity notifications must reset the idle timeout so approved work continues"
+    );
+}
