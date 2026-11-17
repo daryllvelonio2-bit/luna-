@@ -1596,7 +1596,6 @@ async fn handle_modal_key(
             mut reply,
             mut reply_scroll,
             mut error,
-            approval_model_label,
         } => {
             env.approval_activity.notify_one();
             if editing_input {
@@ -1614,7 +1613,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Char('s') | KeyCode::Char('S')
@@ -1635,7 +1633,6 @@ async fn handle_modal_key(
                                 reply,
                                 reply_scroll,
                                 error,
-                                approval_model_label,
                             };
                         } else {
                             let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
@@ -1666,7 +1663,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Backspace => {
@@ -1682,7 +1678,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1699,7 +1694,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     _ => {
@@ -1714,7 +1708,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                 }
@@ -1748,7 +1741,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Char('[') => {
@@ -1764,7 +1756,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Char(']') => {
@@ -1780,7 +1771,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Char('s') | KeyCode::Char('S')
@@ -1800,7 +1790,6 @@ async fn handle_modal_key(
                                 reply,
                                 reply_scroll,
                                 error,
-                                approval_model_label,
                             };
                         } else {
                             let _ = resp_tx.send(ApprovalDecision::DenyWithFeedback(trimmed));
@@ -1823,7 +1812,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::PageDown => {
@@ -1843,7 +1831,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Up => {
@@ -1859,7 +1846,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Down => {
@@ -1875,7 +1861,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                     KeyCode::Enter => match selected {
@@ -1903,7 +1888,6 @@ async fn handle_modal_key(
                                 reply,
                                 reply_scroll,
                                 error,
-                                approval_model_label,
                             };
                         }
                     },
@@ -1919,7 +1903,6 @@ async fn handle_modal_key(
                             reply,
                             reply_scroll,
                             error,
-                            approval_model_label,
                         };
                     }
                 }

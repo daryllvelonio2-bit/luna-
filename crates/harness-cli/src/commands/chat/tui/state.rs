@@ -1128,7 +1128,6 @@ pub enum ActiveModal {
         reply: Option<String>,
         reply_scroll: usize,
         error: Option<String>,
-        approval_model_label: String,
     },
     Clarify {
         req: ClarifyRequest,

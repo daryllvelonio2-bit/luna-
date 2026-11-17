@@ -486,13 +486,6 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             maybe_approval = env.approval_rx.recv() => {
                 if let Some((req, resp_tx)) = maybe_approval {
                     if !resp_tx.is_closed() {
-                        let (_, m, _, is_def) = actions::resolve_approval_model(&env, &st);
-                        let m_disp = theme::friendly_model_name(&m);
-                        let approval_model_label = if is_def {
-                            format!("default ({m_disp})")
-                        } else {
-                            m_disp
-                        };
                         st.modal = ActiveModal::Approval {
                             req,
                             resp_tx,
@@ -504,7 +497,6 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             reply: None,
                             reply_scroll: 0,
                             error: None,
-                            approval_model_label,
                         };
                         needs_redraw = true;
                     }

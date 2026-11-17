@@ -3628,242 +3628,269 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             reply,
             reply_scroll,
             error,
-            approval_model_label,
             ..
         } => {
-            let (w, h) = responsive_modal_size(screen, 4, 2, 58, 104, 18, 36);
-            let rect = centered_rect(screen, w, h);
-            st.modal_rect = Some(rect);
+            let (max_w, max_h) = responsive_modal_size(screen, 4, 2, 58, 100, 10, 34);
             let hint = if *editing_input {
-                "enter ask model · ctrl+s send to agent · esc back"
+                "enter ask · ctrl+s send · esc back"
             } else if reply.is_some() {
                 "↑/↓ · enter · q ask · pgup/pgdn · [/] diff · ctrl+s send"
             } else if !input.trim().is_empty() {
-                "↑/↓ · enter · q ask · pgup/pgdn diff · ctrl+s send"
+                "↑/↓ · enter · q ask · [/] diff · ctrl+s send"
             } else {
-                "↑/↓ · enter · y/a/n/q · pgup/pgdn diff"
+                "↑/↓ · enter · y/a/n/q · [/] diff"
             };
-            let inner = draw_modal_frame(frame, rect, "Approve Tool Call", hint);
+            let box_w_est = max_w.saturating_sub(4) as usize;
+            let box_inner_w_est = box_w_est.saturating_sub(3).max(16);
 
-            let inner_w = inner.width as usize;
-            let inner_h = inner.height as usize;
-
-            let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                Span::styled(
-                    " Tool: ",
-                    Style::default().fg(text_muted()).bg(bg_elevated()),
-                ),
-                Span::styled(
-                    truncate_str(&req.tool, inner_w.saturating_sub(8)),
-                    Style::default()
-                        .fg(accent_coral())
-                        .bg(bg_elevated())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            if inner_h >= 8 {
-                if let Some(ref target) = req.target {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            " Target: {}",
-                            truncate_str(target, inner_w.saturating_sub(10))
-                        ),
-                        Style::default().fg(text_primary()).bg(bg_elevated()),
-                    )));
+            // Build data preview lines first so the popup prioritizes the actual payload.
+            let preview_lines: Vec<String> = if let Some(ref diff) = req.diff {
+                let mut raw: Vec<&str> = diff.lines().collect();
+                if raw.first().is_some_and(|l| l.starts_with("--- "))
+                    && raw.get(1).is_some_and(|l| l.starts_with("+++ "))
+                {
+                    raw.drain(..2);
                 }
-            }
-            if inner_h >= 10 {
-                lines.push(Line::default());
-            }
+                if raw.len() > 1 && raw.first().is_some_and(|l| l.starts_with("@@ -0,0 ")) {
+                    raw.remove(0);
+                }
+                raw.into_iter().map(str::to_string).collect()
+            } else if req.tool == "terminal" {
+                let mut rows = Vec::new();
+                if let Some(cmd) = req.arguments.get("command").and_then(|c| c.as_str()) {
+                    for (i, line) in cmd.lines().enumerate() {
+                        let prefixed = if i == 0 {
+                            format!("$ {line}")
+                        } else {
+                            format!("  {line}")
+                        };
+                        rows.extend(wrap_plain_text(&prefixed, box_inner_w_est));
+                    }
+                }
+                if let Some(wd) = req
+                    .arguments
+                    .get("workdir")
+                    .and_then(|w| w.as_str())
+                    .filter(|w| !w.trim().is_empty())
+                {
+                    rows.push(format!("in {}", shorten_path(wd)));
+                }
+                rows
+            } else if let Some(content) = req.arguments.get("content").and_then(|c| c.as_str()) {
+                content.lines().map(|l| format!("+{l}")).collect()
+            } else if !req.arguments.is_null()
+                && !req.arguments.as_object().is_some_and(|obj| obj.is_empty())
+            {
+                let pretty = serde_json::to_string_pretty(&req.arguments)
+                    .unwrap_or_else(|_| req.arguments.to_string());
+                pretty
+                    .lines()
+                    .flat_map(|l| wrap_plain_text(l, box_inner_w_est))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let is_diff_preview = req.diff.is_some()
+                || (req.tool != "terminal"
+                    && req
+                        .arguments
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .is_some());
 
             let reply_rendered: Vec<Line<'static>> = reply
                 .as_deref()
                 .map(|text| {
-                    let mut md = render_markdown(text, inner_w.saturating_sub(6).max(8));
+                    let mut md = render_markdown(text, box_inner_w_est.max(8));
                     while md.last().is_some_and(|l| l.spans.is_empty()) {
                         md.pop();
                     }
                     md
                 })
                 .unwrap_or_default();
-            let input_rows = if *editing_input || !input.trim().is_empty() {
-                2
-            } else {
-                0
-            };
-            let choices_rows = 4;
-            let extras_budget = inner_h.saturating_sub(lines.len() + choices_rows + input_rows);
-            let max_reply_cap = if extras_budget >= 12 { 7 } else { 3 };
-            let reply_rows = if *asking || error.is_some() {
-                2.min(extras_budget)
-            } else if !reply_rendered.is_empty() && extras_budget >= 3 {
-                (reply_rendered.len().min(max_reply_cap) + 3).min(extras_budget)
-            } else {
-                0
-            };
-            let preview_space = extras_budget.saturating_sub(reply_rows);
 
-            let preview_lines: Option<(&str, Vec<String>)> = if let Some(ref diff) = req.diff {
-                let raw: Vec<String> = diff.lines().map(str::to_string).collect();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(("Diff", raw))
-                }
-            } else if let Some(content) = req.arguments.get("content").and_then(|c| c.as_str()) {
-                let raw: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(("Preview", raw))
-                }
-            } else if !req.arguments.is_null()
-                && !req.arguments.as_object().is_some_and(|obj| obj.is_empty())
-            {
-                let pretty = serde_json::to_string_pretty(&req.arguments)
-                    .unwrap_or_else(|_| req.arguments.to_string());
-                let raw: Vec<String> = pretty.lines().map(str::to_string).collect();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(("Arguments", raw))
-                }
+            let has_input_row = *editing_input || !input.trim().is_empty();
+            let choices_rows = 4usize;
+            let header_rows = 2usize; // 1 header line + 1 spacer
+            let input_rows = if has_input_row { 2usize } else { 0usize };
+            let status_rows = if *asking || error.is_some() {
+                2usize
             } else {
-                None
+                0usize
             };
+            let desired_preview = if preview_lines.is_empty() {
+                0
+            } else {
+                preview_lines.len() + 1
+            };
+            let desired_reply = if reply_rendered.is_empty() {
+                0
+            } else {
+                reply_rendered.len().min(6) + 1
+            };
+            let desired_inner_h = header_rows
+                + desired_preview
+                + desired_reply
+                + status_rows
+                + choices_rows
+                + input_rows;
+            let desired_h = (desired_inner_h as u16).saturating_add(2);
+            let h = desired_h.clamp(10.min(max_h), max_h);
+            let rect = centered_rect(screen, max_w, h);
+            st.modal_rect = Some(rect);
+            let inner = draw_modal_frame(frame, rect, "Approve Tool Call", hint);
 
-            if preview_space >= 4 {
-                if let Some((section_label, raw_lines)) = preview_lines {
-                    let box_bg = bg_code();
-                    let box_w = inner_w.saturating_sub(2);
-                    let box_inner_w = box_w.saturating_sub(3);
-                    let total_preview = raw_lines.len();
-                    let overhead = if total_preview > preview_space.saturating_sub(3) {
-                        4
+            let inner_w = inner.width as usize;
+            let inner_h = inner.height as usize;
+
+            let fixed_rows = 1 + choices_rows + input_rows + status_rows;
+            let body_budget = inner_h.saturating_sub(fixed_rows);
+            let (preview_budget, reply_budget) =
+                if !preview_lines.is_empty() && !reply_rendered.is_empty() {
+                    let want_p = preview_lines.len();
+                    let want_r = reply_rendered.len().min(6);
+                    let avail = body_budget.saturating_sub(3); // spacers
+                    if want_p + want_r <= avail {
+                        (want_p, want_r)
                     } else {
-                        3
-                    };
-                    let preview_budget = preview_space.saturating_sub(overhead).max(1);
-                    let max_scroll = total_preview.saturating_sub(preview_budget);
-                    let dscroll = (*diff_scroll).min(max_scroll);
-                    let shown_end = (dscroll + preview_budget).min(total_preview);
-                    let header_title = match req.target.as_deref() {
-                        Some(t) if section_label != "Arguments" => {
-                            format!("{section_label}: {}", shorten_path(t))
-                        }
-                        _ => format!("{section_label}:"),
-                    };
-                    let push_dark_box_row =
-                        |out: &mut Vec<Line<'static>>, content_spans: Vec<Span<'static>>| {
-                            let used: usize = content_spans.iter().map(|s| s.content.width()).sum();
-                            let pad = box_w.saturating_sub(2 + used);
-                            let mut spans = vec![
-                                Span::styled(" ", Style::default().bg(bg_elevated())),
-                                Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
-                            ];
-                            spans.extend(content_spans);
-                            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
-                            spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
-                            out.push(Line::from(spans));
-                        };
+                        let min_p = (avail / 2).max(2).min(want_p);
+                        let r = want_r.min(avail.saturating_sub(min_p)).max(2.min(want_r));
+                        let p = avail.saturating_sub(r).min(want_p).max(1);
+                        (p, r)
+                    }
+                } else if !preview_lines.is_empty() {
+                    (
+                        preview_lines
+                            .len()
+                            .min(body_budget.saturating_sub(2).max(1)),
+                        0,
+                    )
+                } else if !reply_rendered.is_empty() {
+                    (
+                        0,
+                        reply_rendered
+                            .len()
+                            .min(body_budget.saturating_sub(2).max(1)),
+                    )
+                } else {
+                    (0, 0)
+                };
 
-                    push_dark_box_row(
-                        &mut lines,
-                        vec![Span::styled(
-                            truncate_str(&header_title, box_inner_w),
-                            Style::default()
-                                .fg(text_primary())
-                                .bg(box_bg)
-                                .add_modifier(Modifier::BOLD),
-                        )],
-                    );
-                    push_dark_box_row(&mut lines, Vec::new());
-                    for dline in raw_lines.iter().skip(dscroll).take(preview_budget) {
-                        let trimmed_start = dline.trim_start();
-                        let color = if dline.starts_with("+++")
-                            || dline.starts_with("---")
-                            || dline.starts_with("@@")
-                        {
-                            cyan_link()
-                        } else if trimmed_start.starts_with('+') {
-                            green_ok()
-                        } else if trimmed_start.starts_with('-') {
-                            red_err()
-                        } else if section_label == "Diff" {
-                            text_muted()
-                        } else {
-                            text_primary()
-                        };
-                        push_dark_box_row(
-                            &mut lines,
-                            vec![Span::styled(
-                                truncate_str(dline, box_inner_w),
-                                Style::default().fg(color).bg(box_bg),
-                            )],
-                        );
-                    }
-                    if total_preview > preview_budget {
-                        let footer = format!(
-                            "({}–{shown_end} of {total_preview} lines · [/] or PgUp/PgDn scroll)",
-                            dscroll + 1
-                        );
-                        push_dark_box_row(
-                            &mut lines,
-                            vec![Span::styled(
-                                truncate_str(&footer, box_inner_w),
-                                Style::default().fg(text_dim()).bg(box_bg),
-                            )],
-                        );
-                    }
-                    lines.push(Line::default());
-                }
+            let mut lines = Vec::new();
+            let total_preview = preview_lines.len();
+            let max_dscroll = total_preview.saturating_sub(preview_budget);
+            let dscroll = (*diff_scroll).min(max_dscroll);
+            let range_badge = if preview_budget > 0 && total_preview > preview_budget {
+                format!(
+                    " {}-{} / {} ",
+                    dscroll + 1,
+                    dscroll + preview_budget,
+                    total_preview
+                )
+            } else {
+                String::new()
+            };
+            let target_part = req
+                .target
+                .as_deref()
+                .filter(|t| !(req.tool == "terminal" && !preview_lines.is_empty() && t.len() > 40))
+                .map(shorten_path)
+                .unwrap_or_default();
+            let left_prefix_w = 1 + req.tool.width() + if target_part.is_empty() { 0 } else { 3 };
+            let target_avail = inner_w.saturating_sub(left_prefix_w + range_badge.width() + 1);
+            let mut hdr_spans = vec![
+                Span::styled(" ", Style::default().bg(bg_elevated())),
+                Span::styled(
+                    truncate_str(&req.tool, inner_w.saturating_sub(2)),
+                    Style::default()
+                        .fg(accent_coral())
+                        .bg(bg_elevated())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            let mut hdr_used = 1 + req.tool.width().min(inner_w.saturating_sub(2));
+            if !target_part.is_empty() && target_avail > 4 {
+                let target_disp = truncate_str(&target_part, target_avail);
+                hdr_used += 3 + target_disp.width();
+                hdr_spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(text_dim()).bg(bg_elevated()),
+                ));
+                hdr_spans.push(Span::styled(
+                    target_disp,
+                    Style::default().fg(text_primary()).bg(bg_elevated()),
+                ));
+            }
+            if !range_badge.is_empty() && hdr_used + range_badge.width() <= inner_w {
+                let pad = inner_w.saturating_sub(hdr_used + range_badge.width());
+                hdr_spans.push(Span::styled(
+                    " ".repeat(pad),
+                    Style::default().bg(bg_elevated()),
+                ));
+                hdr_spans.push(Span::styled(
+                    range_badge,
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                ));
+            }
+            lines.push(Line::from(hdr_spans));
+            if inner_h >= 9 {
+                lines.push(Line::default());
             }
 
-            if *asking && reply_rows > 0 {
+            if preview_budget > 0 && !preview_lines.is_empty() {
+                let box_bg = bg_code();
+                let box_w = inner_w.saturating_sub(2);
+                let box_inner_w = box_w.saturating_sub(3);
+                for dline in preview_lines.iter().skip(dscroll).take(preview_budget) {
+                    let trimmed_start = dline.trim_start();
+                    let color = if dline.starts_with("@@") {
+                        cyan_link()
+                    } else if is_diff_preview && trimmed_start.starts_with('+') {
+                        green_ok()
+                    } else if is_diff_preview && trimmed_start.starts_with('-') {
+                        red_err()
+                    } else if req.tool == "terminal" && dline.starts_with("$ ") {
+                        cyan_link()
+                    } else if is_diff_preview {
+                        text_muted()
+                    } else {
+                        text_primary()
+                    };
+                    let shown = truncate_str(dline, box_inner_w);
+                    let pad = box_w.saturating_sub(2 + shown.width());
+                    lines.push(Line::from(vec![
+                        Span::styled(" ", Style::default().bg(bg_elevated())),
+                        Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
+                        Span::styled(shown, Style::default().fg(color).bg(box_bg)),
+                        Span::styled(" ".repeat(pad), Style::default().bg(box_bg)),
+                        Span::styled(" ", Style::default().bg(bg_elevated())),
+                    ]));
+                }
+                lines.push(Line::default());
+            }
+
+            if *asking && status_rows > 0 {
                 let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
                 lines.push(Line::from(Span::styled(
-                    truncate_str(
-                        &format!(" {spinner} Asking {approval_model_label}…"),
-                        inner_w,
-                    ),
+                    format!(" {spinner} Asking…"),
                     Style::default().fg(accent_coral()).bg(bg_elevated()),
                 )));
                 lines.push(Line::default());
             } else if let Some(ref err) = error {
-                if reply_rows > 0 {
+                if status_rows > 0 {
                     lines.push(Line::from(Span::styled(
                         format!(" ⚠ {}", truncate_str(err, inner_w.saturating_sub(4))),
                         Style::default().fg(red_err()).bg(bg_elevated()),
                     )));
                     lines.push(Line::default());
                 }
-            } else if !reply_rendered.is_empty() && reply_rows >= 3 {
+            } else if reply_budget > 0 && !reply_rendered.is_empty() {
                 let box_bg = bg_surface();
                 let box_w = inner_w.saturating_sub(2);
                 let box_inner_w = box_w.saturating_sub(3);
-                let hdr = truncate_str(
-                    &format!("Approval model ({approval_model_label}):"),
-                    box_inner_w,
-                );
-                let hdr_pad = box_w.saturating_sub(2 + hdr.width());
-                lines.push(Line::from(vec![
-                    Span::styled(" ", Style::default().bg(bg_elevated())),
-                    Span::styled("│ ", Style::default().fg(accent_coral()).bg(box_bg)),
-                    Span::styled(
-                        hdr,
-                        Style::default()
-                            .fg(accent_coral())
-                            .bg(box_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" ".repeat(hdr_pad), Style::default().bg(box_bg)),
-                    Span::styled(" ", Style::default().bg(bg_elevated())),
-                ]));
-                let visible_reply = reply_rows.saturating_sub(2).max(1);
-                let max_scroll = reply_rendered.len().saturating_sub(visible_reply);
+                let max_scroll = reply_rendered.len().saturating_sub(reply_budget);
                 let scroll = (*reply_scroll).min(max_scroll);
-                for rline in reply_rendered.iter().skip(scroll).take(visible_reply) {
+                for rline in reply_rendered.iter().skip(scroll).take(reply_budget) {
                     let mut spans = vec![
                         Span::styled(" ", Style::default().bg(bg_elevated())),
                         Span::styled("│ ", Style::default().fg(accent_coral()).bg(box_bg)),
@@ -3964,8 +3991,8 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     lines.push(Line::default());
                 }
                 let note_line = format!(
-                    " Note: \"{}\" (Ctrl+S to send to agent)",
-                    truncate_str(input.trim(), inner_w.saturating_sub(36))
+                    " Draft: \"{}\" · Ctrl+S send",
+                    truncate_str(input.trim(), inner_w.saturating_sub(26))
                 );
                 lines.push(Line::from(Span::styled(
                     truncate_str(&note_line, inner_w),
@@ -6707,7 +6734,9 @@ mod tests {
                 tool: "patch".to_string(),
                 call_id: "c99".to_string(),
                 target: Some("src/lib.rs".to_string()),
-                diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n-a\n+b\n".to_string()),
+                diff: Some(
+                    "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n".to_string(),
+                ),
                 arguments: serde_json::json!({}),
             },
             resp_tx: tx,
@@ -6719,7 +6748,6 @@ mod tests {
             reply: Some("Because b fixes the off-by-one.".to_string()),
             reply_scroll: 0,
             error: None,
-            approval_model_label: "default (gpt-4o)".to_string(),
         };
         let in_flight = Vec::new();
         let info = FooterInfo {
@@ -6739,7 +6767,10 @@ mod tests {
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Diff:"), "{text}");
+        assert!(text.contains("patch"), "{text}");
+        assert!(text.contains("src/lib.rs"), "{text}");
+        assert!(!text.contains("--- a/src/lib.rs"), "{text}");
+        assert!(!text.contains("Approval model"), "{text}");
         assert!(text.contains("-a"), "{text}");
         assert!(text.contains("+b"), "{text}");
         assert!(text.contains("Allow once"), "{text}");
@@ -6774,7 +6805,6 @@ mod tests {
             reply: None,
             reply_scroll: 0,
             error: None,
-            approval_model_label: "default (gpt-4o)".to_string(),
         };
         let in_flight = Vec::new();
         let info = FooterInfo {
@@ -6794,7 +6824,8 @@ mod tests {
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Preview:"), "{text}");
+        assert!(text.contains("write_file"), "{text}");
+        assert!(text.contains("test.txt"), "{text}");
         assert!(text.contains("+line one"), "{text}");
         assert!(text.contains("+line two"), "{text}");
         // Verify darker diff box background (`bg_code`) and semantic button colors.
@@ -6968,7 +6999,6 @@ mod tests {
             reply: None,
             reply_scroll: 0,
             error: None,
-            approval_model_label: "default (gpt-4o)".to_string(),
         };
         let mut term = Terminal::new(TestBackend::new(44, 12)).unwrap();
         term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
