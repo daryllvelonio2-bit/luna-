@@ -48,17 +48,17 @@ jobs:
         with:
           tool: cargo-ndk
 
-      - name: Install Android NDK and platform 35
+      - name: Install Android platform 35 and build-tools
         run: |
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_ROOT:-$SDK_ROOT/ndk/27.3.13750724}" >> "$GITHUB_ENV"
           yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
-          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Build Rust JNI library (arm64-v8a)
-        run: cargo ndk -t arm64-v8a -p 29 -o android/app/src/main/jniLibs build --release --package harness-android
+        run: cargo ndk -t arm64-v8a --platform 29 -o android/app/src/main/jniLibs build --release -p harness-android
 
       - uses: gradle/actions/setup-gradle@v4
         with:
