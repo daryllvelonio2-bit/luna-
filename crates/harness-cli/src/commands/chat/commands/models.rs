@@ -376,6 +376,7 @@ pub(crate) async fn handle_default_model_switch(
         compact_model,
         chosen_provider.clone(),
         chosen_model.clone(),
+        Some(session_id),
     )
     .await;
 
