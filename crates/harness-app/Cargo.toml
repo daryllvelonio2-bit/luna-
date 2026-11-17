@@ -1,0 +1,29 @@
+[package]
+name = "harness-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Headless application runtime shared across Luna CLI/TUI and native desktop GUI"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-providers = { workspace = true }
+harness-memory = { workspace = true }
+harness-notes = { workspace = true }
+harness-note-graph = { workspace = true }
+harness-plugins = { workspace = true }
+harness-mcp = { workspace = true }
+harness-telemetry = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

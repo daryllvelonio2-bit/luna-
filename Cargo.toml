@@ -12,6 +12,9 @@ members = [
     "crates/harness-onboarding",
     "crates/harness-desktop",
     "crates/harness-desktop-linux",
+    "crates/harness-scheduler",
+    "crates/harness-app",
+    "crates/harness-web",
     "crates/harness-cli",
 ]
 resolver = "2"
@@ -64,6 +67,13 @@ base64 = "0.22"
 sha2 = "0.10"
 regex = "1.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rquickjs = { version = "0.14.0", features = ["std", "loader", "macro", "futures"] }
+oxc_allocator = "0.159.0"
+oxc_codegen = "0.159.0"
+oxc_parser = "0.159.0"
+oxc_semantic = "0.159.0"
+oxc_span = "0.159.0"
+oxc_transformer = "0.159.0"
 
 # Internal crate dependencies
 harness-core = { path = "crates/harness-core" }
@@ -78,6 +88,9 @@ harness-telemetry = { path = "crates/harness-telemetry" }
 harness-onboarding = { path = "crates/harness-onboarding" }
 harness-desktop = { path = "crates/harness-desktop" }
 harness-desktop-linux = { path = "crates/harness-desktop-linux" }
+harness-scheduler = { path = "crates/harness-scheduler" }
+harness-app = { path = "crates/harness-app" }
+harness-web = { path = "crates/harness-web" }
 
 [profile.dev]
 debug = 0
@@ -92,5 +105,3 @@ debug = 0
 [profile.test.package."*"]
 opt-level = 0
 debug = 0
-
-

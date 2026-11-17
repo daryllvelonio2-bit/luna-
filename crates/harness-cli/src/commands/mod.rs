@@ -25,6 +25,7 @@ pub mod supervisor;
 pub mod update;
 pub mod usage;
 pub mod voice;
+pub mod web;
 
 /// Clear the visible terminal and its scrollback, leaving the cursor at home.
 /// A no-op when stdout is not an attended terminal (piped or redirected output must

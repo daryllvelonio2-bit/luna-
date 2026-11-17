@@ -323,6 +323,8 @@ enum Commands {
         #[command(subcommand)]
         subcommand: Option<McpCommand>,
     },
+    /// Launch the browser-based web GUI and REST/WebSocket API server
+    Web(commands::web::WebCommand),
 }
 
 /// Everything the profile selector and clap resolve before config-dependent work begins.
@@ -820,6 +822,9 @@ async fn dispatch_command(
         }
         Some(Commands::Mcp { subcommand }) => {
             run_mcp_selection(subcommand, &config).await?;
+        }
+        Some(Commands::Web(cmd)) => {
+            commands::web::handle_web_command(cmd, config).await?;
         }
         None => {
             let selection = session_selection(cli.session, cli.fork, cli.continue_session);

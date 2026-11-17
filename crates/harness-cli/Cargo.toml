@@ -29,6 +29,9 @@ harness-voice = { workspace = true }
 harness-telemetry = { workspace = true }
 harness-onboarding = { workspace = true }
 harness-desktop = { workspace = true }
+harness-scheduler = { workspace = true }
+harness-app = { workspace = true }
+harness-web = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

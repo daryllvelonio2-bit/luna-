@@ -1,0 +1,37 @@
+[package]
+name = "harness-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Web server, REST/WebSocket API, and embedded browser UI for Luna Harness"
+
+[dependencies]
+harness-core = { workspace = true }
+harness-app = { workspace = true }
+harness-providers = { workspace = true }
+harness-memory = { workspace = true }
+harness-notes = { workspace = true }
+harness-plugins = { workspace = true }
+harness-scheduler = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+rust-embed = { version = "8.14", features = ["axum-ex"] }
+mime_guess = "2.0"
+colored = { workspace = true }
+serde_yaml = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+open = "5.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
