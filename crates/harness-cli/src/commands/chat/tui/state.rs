@@ -21,7 +21,7 @@ use super::super::ui::ChatUi;
 use super::super::ChatAgent;
 use crate::commands::clarify::{ClarifyRequest, ClarifyResponse};
 
-use super::theme::BG_SURFACE;
+use super::theme::bg_surface;
 
 /// Agent execution mode toggled by `Shift+Tab` (shown in coral/accent on composer footer).
 /// Which model slot a provider → model picker is choosing for.
@@ -46,6 +46,7 @@ pub enum ModelTarget {
 pub enum SelectAction {
     SettingsMain,
     SettingsBlockLimit,
+    SettingsTheme,
     DirScope {
         path: String,
     },
@@ -316,7 +317,7 @@ fn decode_image_preview(data_url: &str) -> Option<ImagePreview> {
 
 /// Composite one RGBA pixel over the composer surface, which is what the cell background will be.
 fn blend_over_surface(pixel: [u8; 4]) -> Color {
-    let (bg_r, bg_g, bg_b) = match BG_SURFACE {
+    let (bg_r, bg_g, bg_b) = match bg_surface() {
         Color::Rgb(r, g, b) => (r as u32, g as u32, b as u32),
         _ => (30, 30, 32),
     };
@@ -862,6 +863,7 @@ pub struct SettledTranscriptCache {
     pub turns_len: usize,
     pub process_expanded: bool,
     pub block_limit: Option<usize>,
+    pub theme: harness_core::ThemeMode,
     pub expanded_thinking: HashSet<(usize, usize)>,
     pub expanded_tools: HashSet<(usize, usize)>,
     pub lines: Vec<Line<'static>>,

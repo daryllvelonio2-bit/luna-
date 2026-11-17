@@ -23,10 +23,10 @@ use super::state::{
     TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
-    friendly_model_name, friendly_provider_name, humanize_tokens, mode_accent, ACCENT_CORAL,
-    BG_CANVAS, BG_ELEVATED, BG_SELECTED, BG_SELECTION, BG_SURFACE, BORDER_SUBTLE, CYAN_LINK,
-    GREEN_OK, LOGO_GRAY, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT, RED_ERR, TEXT_DIM, TEXT_MUTED,
-    TEXT_PRIMARY, YELLOW_WARN,
+    accent_coral, bg_canvas, bg_elevated, bg_selected, bg_selection, bg_surface, border_subtle,
+    cyan_link, friendly_model_name, friendly_provider_name, green_ok, humanize_tokens, logo_gray,
+    mode_accent, note_accent, red_err, scanner_color, text_dim, text_muted, text_primary,
+    yellow_warn, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT,
 };
 use ratatui::style::Color;
 
@@ -111,7 +111,10 @@ pub fn draw(frame: &mut Frame, st: &mut TuiState, snap: &TuiLiveSnapshot, info: 
     // overlaid (the classic "stable system" ghosting).
     frame.render_widget(Clear, area);
     // Paint the entire frame canvas `#0e0e0f`.
-    frame.render_widget(Block::default().style(Style::default().bg(BG_CANVAS)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(bg_canvas())),
+        area,
+    );
 
     if area.width < 20 || area.height < 8 {
         return;
@@ -266,19 +269,19 @@ fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER_SUBTLE).bg(BG_SURFACE))
-        .style(Style::default().bg(BG_SURFACE))
+        .border_style(Style::default().fg(border_subtle()).bg(bg_surface()))
+        .style(Style::default().bg(bg_surface()))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(ACCENT_CORAL)
-                .bg(BG_SURFACE)
+                .fg(accent_coral())
+                .bg(bg_surface())
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
             Line::from(Span::styled(
                 status,
-                Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+                Style::default().fg(text_dim()).bg(bg_surface()),
             ))
             .right_aligned(),
         );
@@ -323,7 +326,7 @@ fn render_pty_pane(frame: &mut Frame, rect: Rect, pane: &TuiPtyPane) {
     }
 
     frame.render_widget(
-        Paragraph::new(rows).style(Style::default().bg(BG_SURFACE)),
+        Paragraph::new(rows).style(Style::default().bg(bg_surface())),
         inner,
     );
 }
@@ -344,12 +347,12 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
     });
     spans.push(Span::styled(
         count_label,
-        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+        Style::default().fg(text_muted()).bg(bg_canvas()),
     ));
     cursor_x += count_w;
 
     // Leave 2 spaces before tabs.
-    spans.push(Span::styled("  ", Style::default().bg(BG_CANVAS)));
+    spans.push(Span::styled("  ", Style::default().bg(bg_canvas())));
     cursor_x += 2;
 
     // Determine how many trailing tabs fit within `area.width - 6`.
@@ -409,15 +412,15 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
 
         let style = if is_active {
             Style::default()
-                .fg(TEXT_PRIMARY)
-                .bg(BG_SURFACE)
+                .fg(text_primary())
+                .bg(bg_surface())
                 .add_modifier(Modifier::BOLD)
         } else if rel_idx == 0 && slice_len > 3 {
-            Style::default().fg(TEXT_DIM).bg(BG_CANVAS)
+            Style::default().fg(text_dim()).bg(bg_canvas())
         } else {
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)
+            Style::default().fg(text_muted()).bg(bg_canvas())
         };
-        let bg = if is_active { BG_SURFACE } else { BG_CANVAS };
+        let bg = if is_active { bg_surface() } else { bg_canvas() };
 
         st.hit_boxes.push(TabHitBox {
             x_start: cursor_x,
@@ -429,7 +432,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
         if busy {
             spans.push(Span::styled(
                 format!("{spinner} "),
-                Style::default().fg(ACCENT_CORAL).bg(bg),
+                Style::default().fg(accent_coral()).bg(bg),
             ));
         }
         spans.push(Span::styled(format!("{truncated}  "), style));
@@ -447,7 +450,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, st: &mut TuiState, active_sessi
         });
         spans.push(Span::styled(
             plus_label,
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ));
     }
 
@@ -499,12 +502,12 @@ fn render_landing(
             break;
         }
         let line = Line::from(vec![
-            Span::styled(*left, Style::default().fg(LOGO_GRAY).bg(BG_CANVAS)),
+            Span::styled(*left, Style::default().fg(logo_gray()).bg(bg_canvas())),
             Span::styled(
                 *right,
                 Style::default()
-                    .fg(TEXT_PRIMARY)
-                    .bg(BG_CANVAS)
+                    .fg(text_primary())
+                    .bg(bg_canvas())
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -524,10 +527,13 @@ fn render_landing(
     // 2. Optional update notice (`/update to install vX.Y.Z`)
     if let Some(ref version_label) = st.update_notice {
         let msg = Line::from(vec![
-            Span::styled("/update", Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS)),
+            Span::styled(
+                "/update",
+                Style::default().fg(accent_coral()).bg(bg_canvas()),
+            ),
             Span::styled(
                 format!(" to install {version_label}"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             ),
         ]);
         let msg_w = (7 + 12 + version_label.width()) as u16;
@@ -618,7 +624,7 @@ fn render_landing(
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("{} ", st.version),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             ))),
             Rect {
                 x: ver_x,
@@ -637,12 +643,12 @@ fn feature_status_spans(name: &str, item: FeatureLandingItem) -> (Vec<Span<'stat
         let text_len = 2 + name.width() + 3;
         (
             vec![
-                Span::styled("● ", Style::default().fg(GREEN_OK).bg(BG_CANVAS)),
+                Span::styled("● ", Style::default().fg(green_ok()).bg(bg_canvas())),
                 Span::styled(
                     name.to_string(),
-                    Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+                    Style::default().fg(text_primary()).bg(bg_canvas()),
                 ),
-                Span::styled(" on", Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
+                Span::styled(" on", Style::default().fg(text_muted()).bg(bg_canvas())),
             ],
             text_len,
         )
@@ -654,12 +660,12 @@ fn feature_status_spans(name: &str, item: FeatureLandingItem) -> (Vec<Span<'stat
         let text_len = 2 + name.width() + suffix.width();
         (
             vec![
-                Span::styled("○ ", Style::default().fg(TEXT_DIM).bg(BG_CANVAS)),
+                Span::styled("○ ", Style::default().fg(text_dim()).bg(bg_canvas())),
                 Span::styled(
                     name.to_string(),
-                    Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+                    Style::default().fg(text_dim()).bg(bg_canvas()),
                 ),
-                Span::styled(suffix, Style::default().fg(TEXT_DIM).bg(BG_CANVAS)),
+                Span::styled(suffix, Style::default().fg(text_dim()).bg(bg_canvas())),
             ],
             text_len,
         )
@@ -673,7 +679,7 @@ fn join_feature_spans(items: &[(&str, FeatureLandingItem)]) -> (Line<'static>, u
         if idx > 0 {
             spans.push(Span::styled(
                 " · ",
-                Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+                Style::default().fg(text_dim()).bg(bg_canvas()),
             ));
             width += 3;
         }
@@ -703,14 +709,17 @@ fn build_landing_status_lines(
     }
 
     let (saver_label, saver_color) = match features.memory_mode {
-        harness_core::MemoryMode::Session => ("session", TEXT_PRIMARY),
-        harness_core::MemoryMode::Background => ("background saver", CYAN_LINK),
+        harness_core::MemoryMode::Session => ("session", text_primary()),
+        harness_core::MemoryMode::Background => ("background saver", cyan_link()),
     };
     let saver_w = "saver: ".width() + saver_label.width();
     lines.push((
         Line::from(vec![
-            Span::styled("saver: ", Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
-            Span::styled(saver_label, Style::default().fg(saver_color).bg(BG_CANVAS)),
+            Span::styled("saver: ", Style::default().fg(text_muted()).bg(bg_canvas())),
+            Span::styled(
+                saver_label,
+                Style::default().fg(saver_color).bg(bg_canvas()),
+            ),
         ]),
         saver_w,
     ));
@@ -888,7 +897,7 @@ fn render_conversation(
                 else {
                     continue;
                 };
-                cell.set_style(Style::default().bg(BG_SELECTION));
+                cell.set_style(Style::default().bg(bg_selection()));
             }
         }
     }
@@ -905,7 +914,7 @@ fn render_conversation(
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     badge,
-                    Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+                    Style::default().fg(text_primary()).bg(bg_canvas()),
                 ))),
                 Rect {
                     x: badge_x,
@@ -1110,7 +1119,7 @@ fn render_preview_cell(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "✕",
-                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                Style::default().fg(text_muted()).bg(bg_surface()),
             )),
             Rect {
                 x: close_x,
@@ -1153,11 +1162,11 @@ fn quota_circle_glyph(remaining_fraction: f64) -> &'static str {
 fn quota_circle_color(remaining_fraction: f64) -> Color {
     let f = remaining_fraction.clamp(0.0, 1.0);
     if f > 0.50 {
-        GREEN_OK
+        green_ok()
     } else if f > 0.20 {
-        YELLOW_WARN
+        yellow_warn()
     } else {
-        RED_ERR
+        red_err()
     }
 }
 
@@ -1175,7 +1184,7 @@ fn build_antigravity_footer_line(
             let sep = " · ";
             quota_spans.push(Span::styled(
                 sep,
-                Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+                Style::default().fg(text_dim()).bg(bg_surface()),
             ));
             quota_w += sep.width();
         }
@@ -1188,9 +1197,9 @@ fn build_antigravity_footer_line(
         let pct_val = (line.remaining_fraction.clamp(0.0, 1.0) * 100.0).round();
         let pct_str = format!(" {pct_val:.0}%");
         let pct_color = if line.remaining_fraction <= 0.20 {
-            RED_ERR
+            red_err()
         } else {
-            TEXT_PRIMARY
+            text_primary()
         };
         let reset = line
             .reset_time
@@ -1200,17 +1209,17 @@ fn build_antigravity_footer_line(
 
         quota_spans.push(Span::styled(
             glyph,
-            Style::default().fg(color).bg(BG_SURFACE),
+            Style::default().fg(color).bg(bg_surface()),
         ));
         quota_spans.push(Span::styled(
             format!(" {window_label}"),
-            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+            Style::default().fg(text_muted()).bg(bg_surface()),
         ));
         quota_spans.push(Span::styled(
             pct_str.clone(),
             Style::default()
                 .fg(pct_color)
-                .bg(BG_SURFACE)
+                .bg(bg_surface())
                 .add_modifier(Modifier::BOLD),
         ));
         quota_w += glyph.width() + 1 + window_label.width() + pct_str.width();
@@ -1220,7 +1229,7 @@ fn build_antigravity_footer_line(
             quota_w += rem_str.width();
             quota_spans.push(Span::styled(
                 rem_str,
-                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                Style::default().fg(text_muted()).bg(bg_surface()),
             ));
         }
     }
@@ -1233,8 +1242,8 @@ fn build_antigravity_footer_line(
         .filter(|s| !s.is_empty());
 
     let mut spans = vec![
-        Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
-        Span::styled("  ", Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
+        Span::styled("  ", Style::default().bg(bg_surface())),
     ];
 
     match (account_raw, quota_w > 0) {
@@ -1246,7 +1255,7 @@ fn build_antigravity_footer_line(
                     .collect::<String>();
                 spans.push(Span::styled(
                     truncate_str(&text, avail),
-                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
                 ));
             } else {
                 let max_acct = avail.saturating_sub(quota_w + 2);
@@ -1255,11 +1264,11 @@ fn build_antigravity_footer_line(
                     let gap = avail.saturating_sub(acct_disp.width() + quota_w);
                     spans.push(Span::styled(
                         acct_disp,
-                        Style::default().fg(CYAN_LINK).bg(BG_SURFACE),
+                        Style::default().fg(cyan_link()).bg(bg_surface()),
                     ));
                     spans.push(Span::styled(
                         " ".repeat(gap),
-                        Style::default().bg(BG_SURFACE),
+                        Style::default().bg(bg_surface()),
                     ));
                 }
                 spans.extend(quota_spans);
@@ -1268,7 +1277,7 @@ fn build_antigravity_footer_line(
         (Some(acct), false) => {
             spans.push(Span::styled(
                 truncate_str(acct, avail),
-                Style::default().fg(CYAN_LINK).bg(BG_SURFACE),
+                Style::default().fg(cyan_link()).bg(bg_surface()),
             ));
         }
         (None, true) => {
@@ -1281,7 +1290,7 @@ fn build_antigravity_footer_line(
                     .collect::<String>();
                 spans.push(Span::styled(
                     truncate_str(&text, avail),
-                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
                 ));
             }
         }
@@ -1306,13 +1315,13 @@ fn render_composer_card(
     let accent = mode_accent(st.mode.label());
     let inner_w = rect.width.saturating_sub(1) as usize;
 
-    // Fill all card rows with `▎` accent bar + `BG_SURFACE` background.
+    // Fill all card rows with `▎` accent bar + `bg_surface()` background.
     for row in 0..rect.height {
         let y = rect.y + row;
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
-                Span::styled(" ".repeat(inner_w), Style::default().bg(BG_SURFACE)),
+                Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
+                Span::styled(" ".repeat(inner_w), Style::default().bg(bg_surface())),
             ])),
             Rect {
                 x: rect.x,
@@ -1382,10 +1391,10 @@ fn render_composer_card(
         let clipped = truncate_str(placeholder, text_area_w);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
+                Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
                 Span::styled(
                     format!("  {clipped}"),
-                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
                 ),
             ])),
             Rect {
@@ -1405,8 +1414,8 @@ fn render_composer_card(
         {
             let y = input_top + vis_idx as u16;
             let mut spans = vec![
-                Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
-                Span::styled("  ", Style::default().bg(BG_SURFACE)),
+                Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
+                Span::styled("  ", Style::default().bg(bg_surface())),
             ];
             spans.extend(styled_composer_line_spans(line_str));
             frame.render_widget(
@@ -1439,36 +1448,36 @@ fn render_composer_card(
             .map(|e| e.to_string())
             .unwrap_or_else(|| "off".to_string());
         let thinking_color = if info.reasoning_effort.is_some() {
-            ACCENT_CORAL
+            accent_coral()
         } else {
-            TEXT_MUTED
+            text_muted()
         };
 
         let footer = Line::from(vec![
-            Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
-            Span::styled("  ", Style::default().bg(BG_SURFACE)),
+            Span::styled("▎", Style::default().fg(accent).bg(bg_surface())),
+            Span::styled("  ", Style::default().bg(bg_surface())),
             Span::styled(
                 st.mode.label(),
                 Style::default()
                     .fg(accent)
-                    .bg(BG_SURFACE)
+                    .bg(bg_surface())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" · ", Style::default().fg(TEXT_MUTED).bg(BG_SURFACE)),
+            Span::styled(" · ", Style::default().fg(text_muted()).bg(bg_surface())),
             Span::styled(
                 model_display,
                 Style::default()
-                    .fg(TEXT_PRIMARY)
-                    .bg(BG_SURFACE)
+                    .fg(text_primary())
+                    .bg(bg_surface())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {provider_display} · "),
-                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                Style::default().fg(text_muted()).bg(bg_surface()),
             ),
             Span::styled(
                 thinking_label,
-                Style::default().fg(thinking_color).bg(BG_SURFACE),
+                Style::default().fg(thinking_color).bg(bg_surface()),
             ),
         ]);
         frame.render_widget(
@@ -1519,28 +1528,26 @@ fn render_composer_hint_row(
         };
         for i in 0..SCANNER_LEN {
             let dist = head.abs_diff(i);
-            let color = match dist {
-                0 => ACCENT_CORAL,
-                1 => Color::Rgb(168, 84, 60),
-                2 => Color::Rgb(96, 52, 42),
-                _ => Color::Rgb(54, 34, 30),
-            };
-            left_spans.push(Span::styled("▪", Style::default().fg(color).bg(BG_CANVAS)));
+            let color = scanner_color(dist);
+            left_spans.push(Span::styled(
+                "▪",
+                Style::default().fg(color).bg(bg_canvas()),
+            ));
         }
         left_spans.push(Span::styled(
             "  esc ",
-            Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+            Style::default().fg(text_primary()).bg(bg_canvas()),
         ));
         left_spans.push(Span::styled(
             "interrupt",
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ));
     }
 
     if let Some(ref project) = st.memory_project_filter {
         right_spans.push(Span::styled(
             format!("memory: {project} · "),
-            Style::default().fg(CYAN_LINK).bg(BG_CANVAS),
+            Style::default().fg(cyan_link()).bg(bg_canvas()),
         ));
     }
 
@@ -1548,7 +1555,7 @@ fn render_composer_hint_row(
         if s.memory_distilling.is_some() {
             right_spans.push(Span::styled(
                 "🧠 memory · ",
-                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                Style::default().fg(accent_coral()).bg(bg_canvas()),
             ));
         }
         if s.delegate_count > 0 {
@@ -1559,7 +1566,7 @@ fn render_composer_hint_row(
             };
             right_spans.push(Span::styled(
                 label,
-                Style::default().fg(CYAN_LINK).bg(BG_CANVAS),
+                Style::default().fg(cyan_link()).bg(bg_canvas()),
             ));
         }
         if st.active_turn.is_some() {
@@ -1571,7 +1578,7 @@ fn render_composer_hint_row(
                 };
                 right_spans.push(Span::styled(
                     format!("↓ 1 {kind_label} · "),
-                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                    Style::default().fg(text_muted()).bg(bg_canvas()),
                 ));
             }
         }
@@ -1580,26 +1587,26 @@ fn render_composer_hint_row(
     if let Some(ctx) = context_label {
         right_spans.push(Span::styled(
             format!("{ctx}   "),
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ));
     }
     if is_landing && st.active_turn.is_none() {
         right_spans.push(Span::styled(
             "shift+tab",
-            Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+            Style::default().fg(text_primary()).bg(bg_canvas()),
         ));
         right_spans.push(Span::styled(
             " agents   ",
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ));
     }
     right_spans.push(Span::styled(
         "ctrl+p",
-        Style::default().fg(TEXT_PRIMARY).bg(BG_CANVAS),
+        Style::default().fg(text_primary()).bg(bg_canvas()),
     ));
     right_spans.push(Span::styled(
         " commands",
-        Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+        Style::default().fg(text_muted()).bg(bg_canvas()),
     ));
 
     let right_w: usize = right_spans.iter().map(|s| s.content.width()).sum();
@@ -1608,7 +1615,7 @@ fn render_composer_hint_row(
         let left_text = truncate_str(&st.cwd_label, max_left);
         left_spans.push(Span::styled(
             left_text,
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ));
     }
 
@@ -1618,7 +1625,7 @@ fn render_composer_hint_row(
     let mut spans = left_spans;
     spans.push(Span::styled(
         " ".repeat(spacer),
-        Style::default().bg(BG_CANVAS),
+        Style::default().bg(bg_canvas()),
     ));
     spans.extend(right_spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
@@ -1628,10 +1635,10 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
     let mut lines = Vec::new();
     if let Some(ref err) = snap.transient_error {
         lines.push(Line::from(vec![
-            Span::styled("✖ ", Style::default().fg(RED_ERR).bg(BG_CANVAS)),
+            Span::styled("✖ ", Style::default().fg(red_err()).bg(bg_canvas())),
             Span::styled(
                 truncate_str(&strip_ansi(err), width.saturating_sub(3)),
-                Style::default().fg(RED_ERR).bg(BG_CANVAS),
+                Style::default().fg(red_err()).bg(bg_canvas()),
             ),
         ]));
     }
@@ -1644,7 +1651,7 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
         let spinner = SPINNER_FRAMES[st.spinner_tick % SPINNER_FRAMES.len()];
         lines.push(Line::from(vec![Span::styled(
             format!("{spinner} {kind} context… ({secs:.1}s)"),
-            Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
+            Style::default().fg(yellow_warn()).bg(bg_canvas()),
         )]));
     }
     if let Some((ref model, secs)) = snap.memory_distilling {
@@ -1657,52 +1664,52 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{spinner} "),
-                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                Style::default().fg(accent_coral()).bg(bg_canvas()),
             ),
             Span::styled(
                 "Distilling memory",
                 Style::default()
-                    .fg(TEXT_PRIMARY)
+                    .fg(text_primary())
                     .add_modifier(Modifier::BOLD)
-                    .bg(BG_CANVAS),
+                    .bg(bg_canvas()),
             ),
             Span::styled(
                 format!("{model_label}… ({secs:.1}s)"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             ),
         ]));
     }
     for (storage, name, detail, status) in &snap.memory_notices {
         let status_color = match status.as_str() {
-            "saved" => GREEN_OK,
-            "updated" => YELLOW_WARN,
-            "deleted" => RED_ERR,
-            "merged" => CYAN_LINK,
-            _ => TEXT_MUTED,
+            "saved" => green_ok(),
+            "updated" => yellow_warn(),
+            "deleted" => red_err(),
+            "merged" => cyan_link(),
+            _ => text_muted(),
         };
         let (icon, storage_color) = if storage == "note" {
-            ("📝 ", Color::Rgb(210, 140, 230))
+            ("📝 ", note_accent())
         } else {
-            ("🧠 ", CYAN_LINK)
+            ("🧠 ", cyan_link())
         };
         let max_name_len = 32.min(width.saturating_sub(20));
         let short_name = truncate_str(name, max_name_len);
         let mut spans = vec![
-            Span::styled(icon, Style::default().bg(BG_CANVAS)),
+            Span::styled(icon, Style::default().bg(bg_canvas())),
             Span::styled(
                 format!("{storage} "),
-                Style::default().fg(storage_color).bg(BG_CANVAS),
+                Style::default().fg(storage_color).bg(bg_canvas()),
             ),
             Span::styled(
                 short_name.to_string(),
                 Style::default()
-                    .fg(TEXT_PRIMARY)
+                    .fg(text_primary())
                     .add_modifier(Modifier::BOLD)
-                    .bg(BG_CANVAS),
+                    .bg(bg_canvas()),
             ),
             Span::styled(
                 format!(" {status}"),
-                Style::default().fg(status_color).bg(BG_CANVAS),
+                Style::default().fg(status_color).bg(bg_canvas()),
             ),
         ];
         if let Some(ref d) = detail {
@@ -1711,7 +1718,7 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
             if avail >= 8 {
                 spans.push(Span::styled(
                     format!(": {}", truncate_str(d, avail)),
-                    Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                    Style::default().fg(text_muted()).bg(bg_canvas()),
                 ));
             }
         }
@@ -1741,7 +1748,7 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
             };
             lines.push(Line::from(Span::styled(
                 summary,
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             )));
         }
     }
@@ -1761,19 +1768,19 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
                     Span::styled(
                         truncate_str(&body, avail_body),
                         Style::default()
-                            .fg(CYAN_LINK)
+                            .fg(cyan_link())
                             .add_modifier(Modifier::BOLD)
-                            .bg(BG_CANVAS),
+                            .bg(bg_canvas()),
                     ),
-                    Span::styled(hint, Style::default().fg(TEXT_MUTED).bg(BG_CANVAS)),
+                    Span::styled(hint, Style::default().fg(text_muted()).bg(bg_canvas())),
                 ]
             } else {
                 vec![Span::styled(
                     truncate_str(&body, width),
                     Style::default()
-                        .fg(CYAN_LINK)
+                        .fg(cyan_link())
                         .add_modifier(Modifier::BOLD)
-                        .bg(BG_CANVAS),
+                        .bg(bg_canvas()),
                 )]
             };
             lines.push(Line::from(spans));
@@ -1782,24 +1789,24 @@ fn build_chrome_lines(st: &TuiState, snap: &TuiLiveSnapshot, width: usize) -> Ve
     if !st.queue.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("⏸ {} queued — will run next", st.queue.len()),
-            Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
+            Style::default().fg(yellow_warn()).bg(bg_canvas()),
         )));
     }
     if let Some(armed_at) = st.ctrl_c_armed {
         if armed_at.elapsed().as_secs() < 2 {
             lines.push(Line::from(Span::styled(
                 "Press Ctrl+C again to exit Luna",
-                Style::default().fg(YELLOW_WARN).bg(BG_CANVAS),
+                Style::default().fg(yellow_warn()).bg(bg_canvas()),
             )));
         }
     }
     if let Some((message, at)) = &st.selection_notice {
         if at.elapsed().as_secs() < 3 {
             lines.push(Line::from(vec![
-                Span::styled("✓ ", Style::default().fg(GREEN_OK).bg(BG_CANVAS)),
+                Span::styled("✓ ", Style::default().fg(green_ok()).bg(bg_canvas())),
                 Span::styled(
                     truncate_str(message, width.saturating_sub(3)),
-                    Style::default().fg(GREEN_OK).bg(BG_CANVAS),
+                    Style::default().fg(green_ok()).bg(bg_canvas()),
                 ),
             ]));
         }
@@ -1855,7 +1862,7 @@ fn render_single_settled_turn(
             out.push(Line::default());
         }
         for mline in render_markdown(display_reply, card_inner_w) {
-            let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+            let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
             spans.extend(mline.spans);
             out.push(Line::from(spans));
         }
@@ -1868,7 +1875,7 @@ fn render_single_settled_turn(
         meta.map(|m| m.mode.as_str()).unwrap_or(fallback_mode)
     };
     let mode_color = if is_compaction {
-        YELLOW_WARN
+        yellow_warn()
     } else {
         mode_accent(mode_str)
     };
@@ -1882,14 +1889,14 @@ fn render_single_settled_turn(
     };
 
     let mut footer_spans = vec![
-        Span::styled("  ", Style::default().bg(BG_CANVAS)),
+        Span::styled("  ", Style::default().bg(bg_canvas())),
         Span::styled(
             mode_str.to_string(),
-            Style::default().fg(mode_color).bg(BG_CANVAS),
+            Style::default().fg(mode_color).bg(bg_canvas()),
         ),
         Span::styled(
             format!(" · {model_disp} · {dur_label}"),
-            Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+            Style::default().fg(text_muted()).bg(bg_canvas()),
         ),
     ];
     if let Some(toks) = meta.and_then(|m| m.output_tokens) {
@@ -1897,7 +1904,7 @@ fn render_single_settled_turn(
             let tps = toks as f64 / dur_secs;
             footer_spans.push(Span::styled(
                 format!(" · {tps:.1} tok/s"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             ));
         }
     }
@@ -1917,6 +1924,7 @@ fn ensure_settled_transcript(
         && st.settled_cache.card_inner_w == card_inner_w
         && st.settled_cache.process_expanded == st.process_expanded
         && st.settled_cache.block_limit == st.block_limit
+        && st.settled_cache.theme == super::theme::active_theme()
         && st.settled_cache.expanded_thinking == st.expanded_thinking
         && st.settled_cache.expanded_tools == st.expanded_tools;
 
@@ -1932,6 +1940,7 @@ fn ensure_settled_transcript(
         st.settled_cache.card_inner_w = card_inner_w;
         st.settled_cache.process_expanded = st.process_expanded;
         st.settled_cache.block_limit = st.block_limit;
+        st.settled_cache.theme = super::theme::active_theme();
         st.settled_cache.expanded_thinking = st.expanded_thinking.clone();
         st.settled_cache.expanded_tools = st.expanded_tools.clone();
         st.settled_cache.lines.clear();
@@ -1988,7 +1997,7 @@ fn build_active_and_notice_lines(
         for line in wrap_plain_text(&strip_ansi(&notice.text), card_inner_w) {
             notice_lines.push(Line::from(Span::styled(
                 format!("  {line}"),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             )));
         }
     }
@@ -2096,7 +2105,7 @@ fn render_completed_turn_process(
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 for mline in render_markdown(trimmed, card_inner_w) {
-                    let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+                    let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                     spans.extend(mline.spans);
                     out.push(Line::from(spans));
                 }
@@ -2185,7 +2194,7 @@ fn render_active_turn_process(
             let trimmed = item.output.trim();
             if !trimmed.is_empty() {
                 for mline in render_markdown(trimmed, card_inner_w) {
-                    let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+                    let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                     spans.extend(mline.spans);
                     out.push(Line::from(spans));
                 }
@@ -2277,10 +2286,10 @@ fn render_active_turn_process(
             let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
             let header_idx = out.len();
             out.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+                Span::styled("  │ ", Style::default().fg(border_subtle()).bg(bg_canvas())),
                 Span::styled(
                     format!("{spinner} Thought: {secs:.1}s"),
-                    Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                    Style::default().fg(accent_coral()).bg(bg_canvas()),
                 ),
             ]));
             hit_targets.push((header_idx, TranscriptClickTarget::ToggleLiveThinking));
@@ -2288,7 +2297,7 @@ fn render_active_turn_process(
             if view_mode != LiveThinkingView::Collapsed {
                 out.push(Line::from(Span::styled(
                     "  │",
-                    Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
+                    Style::default().fg(border_subtle()).bg(bg_canvas()),
                 )));
                 let reasoning_inner_w = card_inner_w.saturating_sub(2);
                 if live_reasoning_cache.reasoning != trimmed
@@ -2308,12 +2317,12 @@ fn render_active_turn_process(
                 for rline in live_reasoning_cache.lines.iter().skip(skip) {
                     let mut spans = vec![Span::styled(
                         "  │ ",
-                        Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
+                        Style::default().fg(border_subtle()).bg(bg_canvas()),
                     )];
                     for s in &rline.spans {
                         spans.push(Span::styled(
                             s.content.clone(),
-                            s.style.fg(TEXT_MUTED).bg(BG_CANVAS),
+                            s.style.fg(text_muted()).bg(bg_canvas()),
                         ));
                     }
                     let row_idx = out.len();
@@ -2351,7 +2360,7 @@ fn render_active_turn_process(
             live_content_cache.card_inner_w = card_inner_w;
             live_content_cache.lines.clear();
             for mline in render_markdown(&snap.content, card_inner_w) {
-                let mut spans = vec![Span::styled("  ", Style::default().bg(BG_CANVAS))];
+                let mut spans = vec![Span::styled("  ", Style::default().bg(bg_canvas()))];
                 spans.extend(mline.spans);
                 live_content_cache.lines.push(Line::from(spans));
             }
@@ -2363,10 +2372,10 @@ fn render_active_turn_process(
         if snap.reasoning.trim().is_empty() && snap.activity_call.is_none() {
             let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
             out.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+                Span::styled("  │ ", Style::default().fg(border_subtle()).bg(bg_canvas())),
                 Span::styled(
                     format!("{spinner} Thinking… {turn_secs:.1}s"),
-                    Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                    Style::default().fg(accent_coral()).bg(bg_canvas()),
                 ),
             ]));
         }
@@ -2391,14 +2400,14 @@ fn push_settled_thinking_block(
     if open {
         let header_idx = out.len();
         out.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
-            Span::styled(label, Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS)),
+            Span::styled("  │ ", Style::default().fg(border_subtle()).bg(bg_canvas())),
+            Span::styled(label, Style::default().fg(accent_coral()).bg(bg_canvas())),
         ]));
         hit_targets.push((header_idx, click_target.clone()));
         let spacer_idx = out.len();
         out.push(Line::from(Span::styled(
             "  │",
-            Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
+            Style::default().fg(border_subtle()).bg(bg_canvas()),
         )));
         hit_targets.push((spacer_idx, click_target.clone()));
         let rendered = render_markdown(trimmed, card_inner_w.saturating_sub(2));
@@ -2410,12 +2419,12 @@ fn push_settled_thinking_block(
         for rline in rendered.into_iter().take(show) {
             let mut spans = vec![Span::styled(
                 "  │ ",
-                Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS),
+                Style::default().fg(border_subtle()).bg(bg_canvas()),
             )];
             for s in rline.spans {
                 spans.push(Span::styled(
                     s.content,
-                    s.style.fg(TEXT_MUTED).bg(BG_CANVAS),
+                    s.style.fg(text_muted()).bg(bg_canvas()),
                 ));
             }
             let row_idx = out.len();
@@ -2426,10 +2435,10 @@ fn push_settled_thinking_block(
         if hidden > 0 {
             let row_idx = out.len();
             out.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+                Span::styled("  │ ", Style::default().fg(border_subtle()).bg(bg_canvas())),
                 Span::styled(
                     format!("… ({hidden} more lines)"),
-                    Style::default().fg(TEXT_DIM).bg(BG_CANVAS),
+                    Style::default().fg(text_dim()).bg(bg_canvas()),
                 ),
             ]));
             hit_targets.push((row_idx, click_target.clone()));
@@ -2440,10 +2449,10 @@ fn push_settled_thinking_block(
         let unit = if line_count == 1 { "line" } else { "lines" };
         let row_idx = out.len();
         out.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_CANVAS)),
+            Span::styled("  │ ", Style::default().fg(border_subtle()).bg(bg_canvas())),
             Span::styled(
                 format!("▸ {label} ({line_count} {unit})"),
-                Style::default().fg(ACCENT_CORAL).bg(BG_CANVAS),
+                Style::default().fg(accent_coral()).bg(bg_canvas()),
             ),
         ]));
         hit_targets.push((row_idx, click_target));
@@ -2620,14 +2629,14 @@ fn push_card_row(
 
     let pad = width.saturating_sub(3 + content_w);
     let mut spans = vec![
-        Span::styled("│", Style::default().fg(border_color).bg(BG_SURFACE)),
-        Span::styled("  ", Style::default().bg(BG_SURFACE)),
+        Span::styled("│", Style::default().fg(border_color).bg(bg_surface())),
+        Span::styled("  ", Style::default().bg(bg_surface())),
     ];
     spans.extend(clamped_spans);
     if pad > 0 {
         spans.push(Span::styled(
             " ".repeat(pad),
-            Style::default().bg(BG_SURFACE),
+            Style::default().bg(bg_surface()),
         ));
     }
     let row_idx = out.len();
@@ -2647,8 +2656,8 @@ fn push_card_blank_row(
     let blank_fill = " ".repeat(width.saturating_sub(1));
     let row_idx = out.len();
     out.push(Line::from(vec![
-        Span::styled("│", Style::default().fg(border_color).bg(BG_SURFACE)),
-        Span::styled(blank_fill, Style::default().bg(BG_SURFACE)),
+        Span::styled("│", Style::default().fg(border_color).bg(bg_surface())),
+        Span::styled(blank_fill, Style::default().bg(bg_surface())),
     ]));
     if let (Some(targets), Some(target)) = (hit_targets, click_target) {
         targets.push((row_idx, target.clone()));
@@ -2678,7 +2687,7 @@ fn push_completed_tool_card(
         if !clean.trim().is_empty() {
             out.push(Line::from(Span::styled(
                 format!("  {}", truncate_str(clean.trim(), card_inner_w)),
-                Style::default().fg(TEXT_MUTED).bg(BG_CANVAS),
+                Style::default().fg(text_muted()).bg(bg_canvas()),
             )));
             out.push(Line::default());
         }
@@ -2686,9 +2695,9 @@ fn push_completed_tool_card(
     }
 
     let border_color = if item.is_error {
-        RED_ERR
+        red_err()
     } else {
-        BORDER_SUBTLE
+        border_subtle()
     };
     let (prefix, header_body) = format_opencode_tool_header(
         &item.tool_name,
@@ -2724,15 +2733,19 @@ fn push_completed_tool_card(
                 Span::styled(
                     lead,
                     Style::default()
-                        .fg(if item.is_error { RED_ERR } else { TEXT_PRIMARY })
-                        .bg(BG_SURFACE)
+                        .fg(if item.is_error {
+                            red_err()
+                        } else {
+                            text_primary()
+                        })
+                        .bg(bg_surface())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     hline,
                     Style::default()
-                        .fg(TEXT_PRIMARY)
-                        .bg(BG_SURFACE)
+                        .fg(text_primary())
+                        .bg(bg_surface())
                         .add_modifier(Modifier::BOLD),
                 ),
             ],
@@ -2753,11 +2766,11 @@ fn push_completed_tool_card(
         for diff in item.diff_lines.iter().take(max_diff) {
             let clean = clean_terminal_text(diff);
             let color = if clean.trim_start().starts_with('+') {
-                GREEN_OK
+                green_ok()
             } else if clean.trim_start().starts_with('-') {
-                RED_ERR
+                red_err()
             } else {
-                TEXT_MUTED
+                text_muted()
             };
             push_card_row(
                 out,
@@ -2767,7 +2780,7 @@ fn push_completed_tool_card(
                 width,
                 vec![Span::styled(
                     truncate_str(&clean, card_inner_w),
-                    Style::default().fg(color).bg(BG_SURFACE),
+                    Style::default().fg(color).bg(bg_surface()),
                 )],
             );
         }
@@ -2781,7 +2794,7 @@ fn push_completed_tool_card(
                 width,
                 vec![Span::styled(
                     format!("({diff_more} more diff lines)"),
-                    Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+                    Style::default().fg(text_dim()).bg(bg_surface()),
                 )],
             );
         }
@@ -2807,9 +2820,9 @@ fn push_completed_tool_card(
             );
             let max_lines = if open { raw_lines.len() } else { 10 };
             let body_color = if item.is_error && raw_lines.len() <= 6 {
-                RED_ERR
+                red_err()
             } else {
-                TEXT_MUTED
+                text_muted()
             };
             for line in raw_lines.iter().take(max_lines) {
                 let clean = clean_terminal_text(line);
@@ -2822,7 +2835,7 @@ fn push_completed_tool_card(
                         width,
                         vec![Span::styled(
                             wrapped,
-                            Style::default().fg(body_color).bg(BG_SURFACE),
+                            Style::default().fg(body_color).bg(bg_surface()),
                         )],
                     );
                 }
@@ -2837,7 +2850,7 @@ fn push_completed_tool_card(
                     width,
                     vec![Span::styled(
                         format!("({more} more lines)"),
-                        Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+                        Style::default().fg(text_dim()).bg(bg_surface()),
                     )],
                 );
             }
@@ -2859,7 +2872,7 @@ fn push_completed_tool_card(
             width,
             vec![Span::styled(
                 truncate_str(res_clean.trim(), card_inner_w),
-                Style::default().fg(RED_ERR).bg(BG_SURFACE),
+                Style::default().fg(red_err()).bg(bg_surface()),
             )],
         );
     }
@@ -2899,32 +2912,32 @@ fn push_running_tool_card(
     let wrap_w = card_inner_w.saturating_sub(prefix_w).max(8);
     let header_lines = wrap_plain_text(&full_header, wrap_w);
 
-    push_card_blank_row(out, None, None, ACCENT_CORAL, width);
+    push_card_blank_row(out, None, None, accent_coral(), width);
     for (i, hline) in header_lines.into_iter().enumerate() {
         if i == 0 {
             push_card_row(
                 out,
                 None,
                 None,
-                ACCENT_CORAL,
+                accent_coral(),
                 width,
                 vec![
                     Span::styled(
                         format!("{spinner} "),
-                        Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE),
+                        Style::default().fg(accent_coral()).bg(bg_surface()),
                     ),
                     Span::styled(
                         prefix.to_string(),
                         Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .bg(BG_SURFACE)
+                            .fg(text_primary())
+                            .bg(bg_surface())
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         hline,
                         Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .bg(BG_SURFACE)
+                            .fg(text_primary())
+                            .bg(bg_surface())
                             .add_modifier(Modifier::BOLD),
                     ),
                 ],
@@ -2934,15 +2947,15 @@ fn push_running_tool_card(
                 out,
                 None,
                 None,
-                ACCENT_CORAL,
+                accent_coral(),
                 width,
                 vec![
-                    Span::styled(" ".repeat(prefix_w), Style::default().bg(BG_SURFACE)),
+                    Span::styled(" ".repeat(prefix_w), Style::default().bg(bg_surface())),
                     Span::styled(
                         hline,
                         Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .bg(BG_SURFACE)
+                            .fg(text_primary())
+                            .bg(bg_surface())
                             .add_modifier(Modifier::BOLD),
                     ),
                 ],
@@ -2951,17 +2964,17 @@ fn push_running_tool_card(
     }
 
     if !raw_tail.is_empty() || hidden_lines > 0 {
-        push_card_blank_row(out, None, None, ACCENT_CORAL, width);
+        push_card_blank_row(out, None, None, accent_coral(), width);
         if hidden_lines > 0 {
             push_card_row(
                 out,
                 None,
                 None,
-                ACCENT_CORAL,
+                accent_coral(),
                 width,
                 vec![Span::styled(
                     format!("({hidden_lines} earlier lines)"),
-                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                    Style::default().fg(text_muted()).bg(bg_surface()),
                 )],
             );
         }
@@ -2972,72 +2985,72 @@ fn push_running_tool_card(
                     out,
                     None,
                     None,
-                    ACCENT_CORAL,
+                    accent_coral(),
                     width,
                     vec![Span::styled(
                         wrapped,
-                        Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                        Style::default().fg(text_muted()).bg(bg_surface()),
                     )],
                 );
             }
         }
     }
 
-    push_card_blank_row(out, None, None, ACCENT_CORAL, width);
+    push_card_blank_row(out, None, None, accent_coral(), width);
     out.push(Line::default());
 }
 
 fn push_compaction_card(out: &mut Vec<Line<'static>>, width: usize) {
     let blank_fill = " ".repeat(width.saturating_sub(1));
     out.push(Line::from(vec![
-        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
-        Span::styled(blank_fill.clone(), Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(yellow_warn()).bg(bg_surface())),
+        Span::styled(blank_fill.clone(), Style::default().bg(bg_surface())),
     ]));
     let label = "⚡ Context Compacted";
     let pad = width.saturating_sub(4 + label.len());
     out.push(Line::from(vec![
-        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
-        Span::styled("  ", Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(yellow_warn()).bg(bg_surface())),
+        Span::styled("  ", Style::default().bg(bg_surface())),
         Span::styled(
             label,
             Style::default()
-                .fg(YELLOW_WARN)
-                .bg(BG_SURFACE)
+                .fg(yellow_warn())
+                .bg(bg_surface())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)),
+        Span::styled(" ".repeat(pad), Style::default().bg(bg_surface())),
     ]));
     out.push(Line::from(vec![
-        Span::styled("▎", Style::default().fg(YELLOW_WARN).bg(BG_SURFACE)),
-        Span::styled(blank_fill, Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(yellow_warn()).bg(bg_surface())),
+        Span::styled(blank_fill, Style::default().bg(bg_surface())),
     ]));
 }
 
 fn push_user_card(out: &mut Vec<Line<'static>>, query: &str, width: usize, inner_w: usize) {
     let blank_fill = " ".repeat(width.saturating_sub(1));
     out.push(Line::from(vec![
-        Span::styled("▎", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
-        Span::styled(blank_fill.clone(), Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(accent_coral()).bg(bg_surface())),
+        Span::styled(blank_fill.clone(), Style::default().bg(bg_surface())),
     ]));
 
     let max_inner = width.saturating_sub(3);
     for line in wrap_plain_text(query.trim(), inner_w.min(max_inner)) {
         let pad = width.saturating_sub(3 + line.width());
         let mut spans = vec![
-            Span::styled("▎", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
-            Span::styled("  ", Style::default().bg(BG_SURFACE)),
+            Span::styled("▎", Style::default().fg(accent_coral()).bg(bg_surface())),
+            Span::styled("  ", Style::default().bg(bg_surface())),
         ];
         spans.extend(styled_composer_line_spans(&line));
         spans.push(Span::styled(
             " ".repeat(pad),
-            Style::default().bg(BG_SURFACE),
+            Style::default().bg(bg_surface()),
         ));
         out.push(Line::from(spans));
     }
 
     out.push(Line::from(vec![
-        Span::styled("▎", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
-        Span::styled(blank_fill, Style::default().bg(BG_SURFACE)),
+        Span::styled("▎", Style::default().fg(accent_coral()).bg(bg_surface())),
+        Span::styled(blank_fill, Style::default().bg(bg_surface())),
     ]));
 }
 
@@ -3061,11 +3074,11 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
     frame.render_widget(Clear, popup_rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED))
-        .style(Style::default().bg(BG_ELEVATED))
+        .border_style(Style::default().fg(border_subtle()).bg(bg_elevated()))
+        .style(Style::default().bg(bg_elevated()))
         .title(Span::styled(
             " Commands ",
-            Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+            Style::default().fg(text_muted()).bg(bg_elevated()),
         ));
     let inner = block.inner(popup_rect);
     frame.render_widget(block, popup_rect);
@@ -3083,8 +3096,8 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
         .take(max_items)
         .map(|(idx, entry)| {
             let sel = idx == st.slash_popup.selected;
-            let bg = if sel { BG_SELECTED } else { BG_ELEVATED };
-            let name_fg = if sel { ACCENT_CORAL } else { TEXT_PRIMARY };
+            let bg = if sel { bg_selected() } else { bg_elevated() };
+            let name_fg = if sel { accent_coral() } else { text_primary() };
             let desc_w = (inner.width as usize).saturating_sub(entry.name.width() + 4);
             let desc = truncate_str(&entry.details, desc_w);
             let pad = (inner.width as usize).saturating_sub(entry.name.width() + desc.width() + 3);
@@ -3097,7 +3110,7 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(desc, Style::default().fg(TEXT_MUTED).bg(bg)),
+                Span::styled(desc, Style::default().fg(text_muted()).bg(bg)),
                 Span::styled(" ".repeat(pad), Style::default().bg(bg)),
             ])
         })
@@ -3124,7 +3137,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
-                Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+                Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
             let list_h = (inner.height as usize).saturating_sub(2).max(1);
@@ -3133,7 +3146,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
             for (idx, item) in items.iter().enumerate().skip(scroll).take(list_h) {
                 let is_sel = idx == sel;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let left = format!(" {} ", item.title);
                 let right = if item.shortcut.is_empty() {
                     format!(" {} ", item.category)
@@ -3145,7 +3158,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(
                         left,
                         Style::default()
-                            .fg(TEXT_PRIMARY)
+                            .fg(text_primary())
                             .bg(bg)
                             .add_modifier(if is_sel {
                                 Modifier::BOLD
@@ -3157,7 +3170,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(
                         right,
                         Style::default()
-                            .fg(if is_sel { ACCENT_CORAL } else { TEXT_MUTED })
+                            .fg(if is_sel { accent_coral() } else { text_muted() })
                             .bg(bg),
                     ),
                 ]));
@@ -3165,7 +3178,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             if items.is_empty() {
                 lines.push(Line::from(Span::styled(
                     " No matching commands",
-                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3189,7 +3202,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
-                Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+                Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
             let list_h = (inner.height as usize).saturating_sub(2).max(1);
@@ -3198,7 +3211,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
             for (idx, sess) in filtered.iter().enumerate().skip(scroll).take(list_h) {
                 let is_sel = idx == sel;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let is_cur = sess.id == info.session_id;
                 let marker = if is_cur { "●" } else { " " };
                 let label = if !sess.name.is_empty() {
@@ -3220,17 +3233,21 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(
                         left,
                         Style::default()
-                            .fg(if is_cur { ACCENT_CORAL } else { TEXT_PRIMARY })
+                            .fg(if is_cur {
+                                accent_coral()
+                            } else {
+                                text_primary()
+                            })
                             .bg(bg),
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                    Span::styled(right, Style::default().fg(TEXT_MUTED).bg(bg)),
+                    Span::styled(right, Style::default().fg(text_muted()).bg(bg)),
                 ]));
             }
             if filtered.is_empty() {
                 lines.push(Line::from(Span::styled(
                     " No sessions match",
-                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3255,7 +3272,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
-                Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+                Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
             let list_h = (inner.height as usize).saturating_sub(2).max(1);
@@ -3264,7 +3281,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
             for (idx, item) in filtered.iter().enumerate().skip(scroll).take(list_h) {
                 let is_sel = idx == sel;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let marker = if item.is_current { "●" } else { " " };
                 let right = if item.tag.is_empty() {
                     format!(" {} ", item.id)
@@ -3281,20 +3298,20 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         left,
                         Style::default()
                             .fg(if item.is_current {
-                                ACCENT_CORAL
+                                accent_coral()
                             } else {
-                                TEXT_PRIMARY
+                                text_primary()
                             })
                             .bg(bg),
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                    Span::styled(right_disp, Style::default().fg(TEXT_MUTED).bg(bg)),
+                    Span::styled(right_disp, Style::default().fg(text_muted()).bg(bg)),
                 ]));
             }
             if filtered.is_empty() {
                 lines.push(Line::from(Span::styled(
                     " No providers match",
-                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3322,7 +3339,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             frame.set_cursor_position((cur_x, inner.y));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
-                Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+                Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
             let list_h = (inner.height as usize).saturating_sub(2).max(1);
@@ -3331,7 +3348,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
             for (idx, item) in filtered.iter().enumerate().skip(scroll).take(list_h) {
                 let is_sel = idx == sel;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let marker = if item.is_current { "●" } else { " " };
                 let right = if item.model != item.display_name {
                     format!(" {} ", item.model)
@@ -3352,14 +3369,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         left,
                         Style::default()
                             .fg(if item.is_current {
-                                ACCENT_CORAL
+                                accent_coral()
                             } else {
-                                TEXT_PRIMARY
+                                text_primary()
                             })
                             .bg(bg),
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                    Span::styled(right_disp, Style::default().fg(TEXT_MUTED).bg(bg)),
+                    Span::styled(right_disp, Style::default().fg(text_muted()).bg(bg)),
                 ]));
             }
             if filtered.is_empty() {
@@ -3368,13 +3385,13 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     .as_deref()
                     .is_some_and(|p| p.eq_ignore_ascii_case(provider))
                 {
-                    (" Loading models…", ACCENT_CORAL)
+                    (" Loading models…", accent_coral())
                 } else {
-                    (" No models match", TEXT_MUTED)
+                    (" No models match", text_muted())
                 };
                 lines.push(Line::from(Span::styled(
                     msg,
-                    Style::default().fg(fg).bg(BG_ELEVATED),
+                    Style::default().fg(fg).bg(bg_elevated()),
                 )));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3404,7 +3421,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .take(list_h)
                 .map(|(idx, item)| {
                     let is_sel = idx == sel;
-                    let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                    let bg = if is_sel { bg_selected() } else { bg_elevated() };
                     let prefix = if is_sel { " ▸ " } else { "   " };
                     let text = format!(
                         "{prefix}{}",
@@ -3415,7 +3432,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         Span::styled(
                             text,
                             Style::default()
-                                .fg(if is_sel { ACCENT_CORAL } else { TEXT_PRIMARY })
+                                .fg(if is_sel {
+                                    accent_coral()
+                                } else {
+                                    text_primary()
+                                })
                                 .bg(bg),
                         ),
                         Span::styled(" ".repeat(pad), Style::default().bg(bg)),
@@ -3449,7 +3470,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         " {}",
                         truncate_str(prompt, (inner.width as usize).saturating_sub(2))
                     ),
-                    Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
                 )),
                 Line::default(),
                 Line::from(Span::styled(
@@ -3457,7 +3478,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         " {}_",
                         truncate_str(&shown, (inner.width as usize).saturating_sub(3))
                     ),
-                    Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED),
+                    Style::default().fg(accent_coral()).bg(bg_elevated()),
                 )),
             ];
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3480,7 +3501,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .map(|line| {
                     Line::from(Span::styled(
                         truncate_str(line, (inner.width as usize).saturating_sub(1)),
-                        Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
+                        Style::default().fg(text_primary()).bg(bg_elevated()),
                     ))
                 })
                 .collect();
@@ -3500,7 +3521,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .map(|(idx, opt)| {
                     let is_sel = idx == *selected;
                     let is_cur = *opt == cur_str;
-                    let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                    let bg = if is_sel { bg_selected() } else { bg_elevated() };
                     let marker = if is_cur { "●" } else { " " };
                     let text = format!(" {marker} {opt}");
                     let pad = (inner.width as usize).saturating_sub(text.width());
@@ -3508,7 +3529,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         Span::styled(
                             text,
                             Style::default()
-                                .fg(if is_cur { ACCENT_CORAL } else { TEXT_PRIMARY })
+                                .fg(if is_cur {
+                                    accent_coral()
+                                } else {
+                                    text_primary()
+                                })
                                 .bg(bg),
                         ),
                         Span::styled(" ".repeat(pad), Style::default().bg(bg)),
@@ -3526,12 +3551,15 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
-                Span::styled(" Tool: ", Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED)),
+                Span::styled(
+                    " Tool: ",
+                    Style::default().fg(text_muted()).bg(bg_elevated()),
+                ),
                 Span::styled(
                     req.tool.clone(),
                     Style::default()
-                        .fg(ACCENT_CORAL)
-                        .bg(BG_ELEVATED)
+                        .fg(accent_coral())
+                        .bg(bg_elevated())
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
@@ -3541,7 +3569,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         " Target: {}",
                         truncate_str(target, (inner.width as usize).saturating_sub(10))
                     ),
-                    Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
+                    Style::default().fg(text_primary()).bg(bg_elevated()),
                 )));
             }
             lines.push(Line::default());
@@ -3549,18 +3577,18 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 let preview_budget = (inner.height as usize).saturating_sub(7);
                 for dline in diff.lines().take(preview_budget) {
                     let color = if dline.starts_with('+') {
-                        GREEN_OK
+                        green_ok()
                     } else if dline.starts_with('-') {
-                        RED_ERR
+                        red_err()
                     } else {
-                        TEXT_MUTED
+                        text_muted()
                     };
                     lines.push(Line::from(Span::styled(
                         format!(
                             " {}",
                             truncate_str(dline, (inner.width as usize).saturating_sub(2))
                         ),
-                        Style::default().fg(color).bg(BG_ELEVATED),
+                        Style::default().fg(color).bg(bg_elevated()),
                     )));
                 }
                 lines.push(Line::default());
@@ -3569,7 +3597,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             let choices = ["Allow once", "Allow for this session (Auto mode)", "Deny"];
             for (idx, ch) in choices.iter().enumerate() {
                 let is_sel = idx == *selected;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let prefix = if is_sel { " ▸ " } else { "   " };
                 let line = format!("{prefix}{ch}");
                 let pad = (inner.width as usize).saturating_sub(line.width());
@@ -3578,11 +3606,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         line,
                         Style::default()
                             .fg(if idx == 2 && is_sel {
-                                RED_ERR
+                                red_err()
                             } else if is_sel {
-                                ACCENT_CORAL
+                                accent_coral()
                             } else {
-                                TEXT_PRIMARY
+                                text_primary()
                             })
                             .bg(bg),
                     ),
@@ -3617,15 +3645,15 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     lines.push(Line::from(Span::styled(
                         format!(" {wline}"),
                         Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .bg(BG_ELEVATED)
+                            .fg(text_primary())
+                            .bg(bg_elevated())
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
                 lines.push(Line::default());
                 for (idx, choice) in q.choices.iter().enumerate() {
                     let is_sel = !*editing_custom && idx == *selected;
-                    let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                    let bg = if is_sel { bg_selected() } else { bg_elevated() };
                     let text = format!(
                         " {} {}",
                         if is_sel { "▸" } else { " " },
@@ -3636,7 +3664,11 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         Span::styled(
                             text,
                             Style::default()
-                                .fg(if is_sel { ACCENT_CORAL } else { TEXT_PRIMARY })
+                                .fg(if is_sel {
+                                    accent_coral()
+                                } else {
+                                    text_primary()
+                                })
                                 .bg(bg),
                         ),
                         Span::styled(" ".repeat(pad), Style::default().bg(bg)),
@@ -3644,7 +3676,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 }
                 let custom_idx = q.choices.len();
                 let is_sel = *editing_custom || *selected == custom_idx;
-                let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let label = if *editing_custom {
                     format!(" ▸ Answer: {custom}_")
                 } else {
@@ -3655,7 +3687,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(
                         label,
                         Style::default()
-                            .fg(if is_sel { ACCENT_CORAL } else { TEXT_MUTED })
+                            .fg(if is_sel { accent_coral() } else { text_muted() })
                             .bg(bg),
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
@@ -3684,12 +3716,12 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                         " {}",
                         truncate_str(prompt, (inner.width as usize).saturating_sub(2))
                     ),
-                    Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED),
+                    Style::default().fg(text_primary()).bg(bg_elevated()),
                 )),
                 Line::default(),
                 Line::from(Span::styled(
                     format!(" Password: {masked}_"),
-                    Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED),
+                    Style::default().fg(accent_coral()).bg(bg_elevated()),
                 )),
             ];
             frame.render_widget(Paragraph::new(lines), inner);
@@ -3733,9 +3765,9 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Line::from(vec![
                         Span::styled(
                             format!(" {:<28}", k),
-                            Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED),
+                            Style::default().fg(accent_coral()).bg(bg_elevated()),
                         ),
-                        Span::styled(*v, Style::default().fg(TEXT_PRIMARY).bg(BG_ELEVATED)),
+                        Span::styled(*v, Style::default().fg(text_primary()).bg(bg_elevated())),
                     ])
                 })
                 .collect();
@@ -3770,19 +3802,19 @@ fn draw_modal_frame(frame: &mut Frame, rect: Rect, title: &str, hint: &str) -> R
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED))
-        .style(Style::default().bg(BG_ELEVATED))
+        .border_style(Style::default().fg(border_subtle()).bg(bg_elevated()))
+        .style(Style::default().bg(bg_elevated()))
         .title(Span::styled(
             format!(" {title} "),
             Style::default()
-                .fg(TEXT_PRIMARY)
-                .bg(BG_ELEVATED)
+                .fg(text_primary())
+                .bg(bg_elevated())
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
             Line::from(Span::styled(
                 format!(" {hint} "),
-                Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+                Style::default().fg(text_muted()).bg(bg_elevated()),
             ))
             .right_aligned(),
         );
@@ -3819,17 +3851,24 @@ fn render_subagents_modal(
     let count_label = format!("{running_count} running · {completed_count} completed");
     let pad = (inner.width as usize).saturating_sub(filter_label.len() + count_label.len() + 2);
     rows.push(Line::from(vec![
-        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ", Style::default().bg(bg_elevated())),
         Span::styled(
             filter_label,
             Style::default()
-                .fg(if active_only { CYAN_LINK } else { TEXT_PRIMARY })
-                .bg(BG_SURFACE)
+                .fg(if active_only {
+                    cyan_link()
+                } else {
+                    text_primary()
+                })
+                .bg(bg_surface())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ".repeat(pad), Style::default().bg(BG_ELEVATED)),
-        Span::styled(count_label, Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED)),
-        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ".repeat(pad), Style::default().bg(bg_elevated())),
+        Span::styled(
+            count_label,
+            Style::default().fg(text_muted()).bg(bg_elevated()),
+        ),
+        Span::styled(" ", Style::default().bg(bg_elevated())),
     ]));
     rows.push(Line::default());
 
@@ -3847,25 +3886,25 @@ fn render_subagents_modal(
         };
         rows.push(Line::from(Span::styled(
             msg,
-            Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+            Style::default().fg(text_muted()).bg(bg_elevated()),
         )));
     } else {
         let sel = selected.min(filtered.len().saturating_sub(1));
         let scroll = sel.saturating_sub(list_h.saturating_sub(1));
         for (idx, item) in filtered.iter().enumerate().skip(scroll).take(list_h) {
             let is_sel = idx == sel;
-            let bg = if is_sel { BG_SELECTED } else { BG_ELEVATED };
+            let bg = if is_sel { bg_selected() } else { bg_elevated() };
             let prefix = if is_sel { " ▸ " } else { "   " };
 
             let (status_icon, status_color) = if item.status == "running" {
                 let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-                (spinner, CYAN_LINK)
+                (spinner, cyan_link())
             } else if item.status == "completed" {
-                ("●", GREEN_OK)
+                ("●", green_ok())
             } else if item.status.starts_with("failed") {
-                ("◍", RED_ERR)
+                ("◍", red_err())
             } else {
-                ("○", TEXT_MUTED)
+                ("○", text_muted())
             };
 
             let elapsed_str = format!("{}s", item.elapsed_secs);
@@ -3882,7 +3921,7 @@ fn render_subagents_modal(
                 Span::styled(
                     prefix,
                     Style::default()
-                        .fg(if is_sel { ACCENT_CORAL } else { TEXT_MUTED })
+                        .fg(if is_sel { accent_coral() } else { text_muted() })
                         .bg(bg),
                 ),
                 Span::styled(
@@ -3892,13 +3931,13 @@ fn render_subagents_modal(
                 Span::styled(
                     agent_badge,
                     Style::default()
-                        .fg(if is_sel { ACCENT_CORAL } else { CYAN_LINK })
+                        .fg(if is_sel { accent_coral() } else { cyan_link() })
                         .add_modifier(Modifier::BOLD)
                         .bg(bg),
                 ),
-                Span::styled(title_trunc, Style::default().fg(TEXT_PRIMARY).bg(bg)),
+                Span::styled(title_trunc, Style::default().fg(text_primary()).bg(bg)),
                 Span::styled(" ".repeat(row_pad), Style::default().bg(bg)),
-                Span::styled(elapsed_str, Style::default().fg(TEXT_MUTED).bg(bg)),
+                Span::styled(elapsed_str, Style::default().fg(text_muted()).bg(bg)),
                 Span::styled(" ", Style::default().bg(bg)),
             ]));
         }
@@ -3932,13 +3971,13 @@ fn render_subagent_inspector(
 
     let (status_icon, _) = if item.status == "running" {
         let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-        (spinner, CYAN_LINK)
+        (spinner, cyan_link())
     } else if item.status == "completed" {
-        ("●", GREEN_OK)
+        ("●", green_ok())
     } else if item.status.starts_with("failed") {
-        ("◍", RED_ERR)
+        ("◍", red_err())
     } else {
-        ("○", TEXT_MUTED)
+        ("○", text_muted())
     };
 
     let cycle_badge = if items.len() > 1 {
@@ -3954,23 +3993,23 @@ fn render_subagent_inspector(
     let hpad = (inner.width as usize).saturating_sub(title_trunc.width() + cycle_badge.len() + 2);
 
     header_rows.push(Line::from(vec![
-        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ", Style::default().bg(bg_elevated())),
         Span::styled(
             title_trunc,
             Style::default()
-                .fg(TEXT_PRIMARY)
+                .fg(text_primary())
                 .add_modifier(Modifier::BOLD)
-                .bg(BG_ELEVATED),
+                .bg(bg_elevated()),
         ),
-        Span::styled(" ".repeat(hpad), Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ".repeat(hpad), Style::default().bg(bg_elevated())),
         Span::styled(
             cycle_badge,
             Style::default()
-                .fg(ACCENT_CORAL)
+                .fg(accent_coral())
                 .add_modifier(Modifier::BOLD)
-                .bg(BG_ELEVATED),
+                .bg(bg_elevated()),
         ),
-        Span::styled(" ", Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ", Style::default().bg(bg_elevated())),
     ]));
 
     let meta_line = format!(
@@ -3979,11 +4018,11 @@ fn render_subagent_inspector(
     );
     header_rows.push(Line::from(Span::styled(
         truncate_str(&meta_line, inner.width as usize),
-        Style::default().fg(TEXT_MUTED).bg(BG_ELEVATED),
+        Style::default().fg(text_muted()).bg(bg_elevated()),
     )));
     header_rows.push(Line::from(Span::styled(
         "─".repeat(inner.width as usize),
-        Style::default().fg(BORDER_SUBTLE).bg(BG_ELEVATED),
+        Style::default().fg(border_subtle()).bg(bg_elevated()),
     )));
 
     let header_h = header_rows.len() as u16;
@@ -4030,17 +4069,19 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 format!("  ⠋ Subagent is starting... (Activity: {})", item.activity),
-                Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(cyan_link())
+                    .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(Span::styled(
                 "  Tools and responses will appear here live.",
-                Style::default().fg(TEXT_MUTED),
+                Style::default().fg(text_muted()),
             )));
         } else {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 format!("  No transcript recorded. (Status: {})", item.status),
-                Style::default().fg(TEXT_MUTED),
+                Style::default().fg(text_muted()),
             )));
         }
         return lines;
@@ -4054,35 +4095,37 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                 "Follow-up"
             };
             lines.push(Line::from(vec![
-                Span::styled("▎ ", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
+                Span::styled("▎ ", Style::default().fg(accent_coral()).bg(bg_surface())),
                 Span::styled(
                     format!("{label}: "),
                     Style::default()
-                        .fg(ACCENT_CORAL)
+                        .fg(accent_coral())
                         .add_modifier(Modifier::BOLD)
-                        .bg(BG_SURFACE),
+                        .bg(bg_surface()),
                 ),
             ]));
             for qline in wrap_plain_text(&turn.user_query, card_inner_w) {
                 let pad = card_inner_w.saturating_sub(qline.width());
                 lines.push(Line::from(vec![
-                    Span::styled("▎ ", Style::default().fg(ACCENT_CORAL).bg(BG_SURFACE)),
-                    Span::styled(qline, Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE)),
-                    Span::styled(" ".repeat(pad), Style::default().bg(BG_SURFACE)),
+                    Span::styled("▎ ", Style::default().fg(accent_coral()).bg(bg_surface())),
+                    Span::styled(qline, Style::default().fg(text_primary()).bg(bg_surface())),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg_surface())),
                 ]));
             }
             lines.push(Line::default());
         }
 
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(CYAN_LINK)),
+            Span::styled("● ", Style::default().fg(cyan_link())),
             Span::styled(
                 format!("Subagent [{}]", item.agent),
-                Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(cyan_link())
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" · {:.1}s", turn.duration.as_secs_f64()),
-                Style::default().fg(TEXT_MUTED),
+                Style::default().fg(text_muted()),
             ),
         ]));
 
@@ -4090,13 +4133,13 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
             lines.push(Line::from(Span::styled(
                 "  ◈ Thinking",
                 Style::default()
-                    .fg(TEXT_MUTED)
+                    .fg(text_muted())
                     .add_modifier(Modifier::ITALIC),
             )));
             for rline in wrap_plain_text(reasoning, card_inner_w) {
                 lines.push(Line::from(Span::styled(
                     format!("    {rline}"),
-                    Style::default().fg(TEXT_MUTED),
+                    Style::default().fg(text_muted()),
                 )));
             }
             lines.push(Line::default());
@@ -4105,7 +4148,11 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
         if !turn.tool_items.is_empty() {
             for t_item in &turn.tool_items {
                 let glyph = if t_item.is_error { "✖ " } else { "✓ " };
-                let glyph_color = if t_item.is_error { RED_ERR } else { GREEN_OK };
+                let glyph_color = if t_item.is_error {
+                    red_err()
+                } else {
+                    green_ok()
+                };
                 let desc = if !t_item.call_formatted.is_empty() {
                     &t_item.call_formatted
                 } else {
@@ -4121,17 +4168,17 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                     ),
                     Span::styled(
                         truncate_str(desc, card_inner_w.saturating_sub(4)),
-                        Style::default().fg(TEXT_PRIMARY),
+                        Style::default().fg(text_primary()),
                     ),
                 ]));
                 for diff in t_item.diff_lines.iter().take(6) {
                     let clean = clean_terminal_text(diff);
                     let c = if clean.trim_start().starts_with('+') {
-                        GREEN_OK
+                        green_ok()
                     } else if clean.trim_start().starts_with('-') {
-                        RED_ERR
+                        red_err()
                     } else {
-                        TEXT_MUTED
+                        text_muted()
                     };
                     lines.push(Line::from(Span::styled(
                         format!("      {}", truncate_str(&clean, card_inner_w)),
@@ -4143,7 +4190,7 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
         } else if !turn.tools.is_empty() {
             for tool in &turn.tools {
                 let glyph = if tool.is_error { "✖ " } else { "✓ " };
-                let glyph_color = if tool.is_error { RED_ERR } else { GREEN_OK };
+                let glyph_color = if tool.is_error { red_err() } else { green_ok() };
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(
@@ -4155,7 +4202,7 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                     Span::styled(
                         truncate_str(&tool.name, 24),
                         Style::default()
-                            .fg(TEXT_PRIMARY)
+                            .fg(text_primary())
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -4163,7 +4210,7 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
                             " {}",
                             truncate_str(&tool.output, card_inner_w.saturating_sub(28))
                         ),
-                        Style::default().fg(TEXT_MUTED),
+                        Style::default().fg(text_muted()),
                     ),
                 ]));
             }
@@ -4182,7 +4229,9 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
     if item.status == "running" {
         lines.push(Line::from(Span::styled(
             format!("  ⠋ Subagent is running ({})", item.activity),
-            Style::default().fg(CYAN_LINK).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(cyan_link())
+                .add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -4193,18 +4242,21 @@ fn search_input_line(query: &str, width: usize) -> Line<'static> {
     let prefix = " > ";
     let shown = if query.is_empty() { "Search..." } else { query };
     let color = if query.is_empty() {
-        TEXT_MUTED
+        text_muted()
     } else {
-        TEXT_PRIMARY
+        text_primary()
     };
     let pad = width.saturating_sub(prefix.width() + shown.width());
     Line::from(vec![
-        Span::styled(prefix, Style::default().fg(ACCENT_CORAL).bg(BG_ELEVATED)),
+        Span::styled(
+            prefix,
+            Style::default().fg(accent_coral()).bg(bg_elevated()),
+        ),
         Span::styled(
             shown.to_string(),
-            Style::default().fg(color).bg(BG_ELEVATED),
+            Style::default().fg(color).bg(bg_elevated()),
         ),
-        Span::styled(" ".repeat(pad), Style::default().bg(BG_ELEVATED)),
+        Span::styled(" ".repeat(pad), Style::default().bg(bg_elevated())),
     ])
 }
 
@@ -4393,32 +4445,36 @@ fn styled_composer_line_spans(line: &str) -> Vec<Span<'static>> {
         let Some((pos, is_image)) = next else {
             spans.push(Span::styled(
                 rest.to_string(),
-                Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
+                Style::default().fg(text_primary()).bg(bg_surface()),
             ));
             break;
         };
         if pos > 0 {
             spans.push(Span::styled(
                 rest[..pos].to_string(),
-                Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
+                Style::default().fg(text_primary()).bg(bg_surface()),
             ));
         }
         let after = &rest[pos..];
         if let Some(end) = after.find(']') {
             let token = &after[..=end];
-            let fg = if is_image { ACCENT_CORAL } else { YELLOW_WARN };
+            let fg = if is_image {
+                accent_coral()
+            } else {
+                yellow_warn()
+            };
             spans.push(Span::styled(
                 token.to_string(),
                 Style::default()
                     .fg(fg)
-                    .bg(BG_ELEVATED)
+                    .bg(bg_elevated())
                     .add_modifier(Modifier::BOLD),
             ));
             rest = &after[end + 1..];
         } else {
             spans.push(Span::styled(
                 after.to_string(),
-                Style::default().fg(TEXT_PRIMARY).bg(BG_SURFACE),
+                Style::default().fg(text_primary()).bg(bg_surface()),
             ));
             break;
         }
@@ -4521,7 +4577,7 @@ fn highlight_line_selection(line: Line<'static>, from_col: usize, to_col: usize)
             if run_selected != Some(selected) {
                 if let Some(previous) = run_selected {
                     let style = if previous {
-                        span_style.bg(BG_SELECTION)
+                        span_style.bg(bg_selection())
                     } else {
                         span_style
                     };
@@ -4535,7 +4591,7 @@ fn highlight_line_selection(line: Line<'static>, from_col: usize, to_col: usize)
 
         if let Some(previous) = run_selected {
             let style = if previous {
-                span_style.bg(BG_SELECTION)
+                span_style.bg(bg_selection())
             } else {
                 span_style
             };
@@ -4590,8 +4646,8 @@ mod tests {
     #[test]
     fn highlight_line_selection_keeps_text_and_splits_spans() {
         let line = Line::from(vec![
-            Span::styled("hello ", Style::default().fg(TEXT_PRIMARY)),
-            Span::styled("world", Style::default().fg(ACCENT_CORAL)),
+            Span::styled("hello ", Style::default().fg(text_primary())),
+            Span::styled("world", Style::default().fg(accent_coral())),
         ]);
         let highlighted = highlight_line_selection(line, 4, 8);
         assert_eq!(line_text(&highlighted), "hello world");
@@ -4600,14 +4656,14 @@ mod tests {
         let selected: String = highlighted
             .spans
             .iter()
-            .filter(|s| s.style.bg == Some(BG_SELECTION))
+            .filter(|s| s.style.bg == Some(bg_selection()))
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(selected, "o wo");
         assert!(highlighted
             .spans
             .iter()
-            .any(|s| s.style.fg == Some(ACCENT_CORAL) && s.style.bg.is_none()));
+            .any(|s| s.style.fg == Some(accent_coral()) && s.style.bg.is_none()));
     }
 
     #[test]
@@ -4617,7 +4673,7 @@ mod tests {
         let selected: String = highlighted
             .spans
             .iter()
-            .filter(|s| s.style.bg == Some(BG_SELECTION))
+            .filter(|s| s.style.bg == Some(bg_selection()))
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(selected, "中");
@@ -4707,7 +4763,7 @@ mod tests {
                 && pos_t3_hdr < pos_t3_body,
             "chronological order violated:\n{joined}"
         );
-        // Verify shell card uses BG_SURFACE
+        // Verify shell card uses bg_surface()
         let card_line = out
             .iter()
             .find(|l| line_text(l).contains("$ ls -la /home/janelle"))
@@ -4715,7 +4771,7 @@ mod tests {
         assert!(card_line
             .spans
             .iter()
-            .all(|s| s.style.bg == Some(BG_SURFACE)));
+            .all(|s| s.style.bg == Some(bg_surface())));
         assert!(hits
             .iter()
             .any(|(_, t)| matches!(t, TranscriptClickTarget::ToggleLiveThinkingStep(0))));
@@ -4791,7 +4847,7 @@ mod tests {
         let preview = ImagePreview {
             width: 72,
             height: 20,
-            cells: vec![(BG_SURFACE, BG_SURFACE); 72 * 20],
+            cells: vec![(bg_surface(), bg_surface()); 72 * 20],
         };
 
         let (width, height) = preview_display_size(&preview, 72);
@@ -4825,7 +4881,7 @@ mod tests {
         let preview = ImagePreview {
             width: 8,
             height: 4,
-            cells: vec![(BG_SURFACE, BG_SURFACE); 8 * 4],
+            cells: vec![(bg_surface(), bg_surface()); 8 * 4],
         };
         let placement = PreviewPlacement {
             index: 0,
@@ -4877,8 +4933,12 @@ mod tests {
         let close_x = 3 + placement.width - 1;
         let cell = &hovered[(close_x, 1)];
         assert_eq!(cell.symbol(), "✕");
-        assert_eq!(cell.fg, TEXT_MUTED, "the glyph is muted, not a red warning");
-        assert_eq!(cell.bg, BG_SURFACE, "the glyph sits on the card surface");
+        assert_eq!(
+            cell.fg,
+            text_muted(),
+            "the glyph is muted, not a red warning"
+        );
+        assert_eq!(cell.bg, bg_surface(), "the glyph sits on the card surface");
         assert_eq!(hits[0].x_start, close_x);
         assert_eq!(hits[0].y, 1);
     }
@@ -4907,7 +4967,7 @@ mod tests {
             .iter()
             .find(|span| span.content.contains("Thought"))
             .expect("label span");
-        assert_eq!(label.style.fg, Some(ACCENT_CORAL));
+        assert_eq!(label.style.fg, Some(accent_coral()));
     }
 
     #[test]
@@ -5193,10 +5253,10 @@ mod tests {
         assert_eq!(spans.len(), 5);
         assert_eq!(spans[0].content, "fix ");
         assert_eq!(spans[1].content, "[Image 1]");
-        assert_eq!(spans[1].style.fg, Some(ACCENT_CORAL));
+        assert_eq!(spans[1].style.fg, Some(accent_coral()));
         assert_eq!(spans[2].content, " and ");
         assert_eq!(spans[3].content, "[Pasted ~12 lines]");
-        assert_eq!(spans[3].style.fg, Some(YELLOW_WARN));
+        assert_eq!(spans[3].style.fg, Some(yellow_warn()));
         assert_eq!(spans[4].content, " now");
     }
 
@@ -5483,7 +5543,7 @@ mod tests {
         let selected: String = highlighted
             .spans
             .iter()
-            .filter(|span| span.style.bg == Some(BG_SELECTION))
+            .filter(|span| span.style.bg == Some(bg_selection()))
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(selected, "bcde");
@@ -5501,7 +5561,7 @@ mod tests {
         let selected: String = highlighted
             .spans
             .iter()
-            .filter(|span| span.style.bg == Some(BG_SELECTION))
+            .filter(|span| span.style.bg == Some(bg_selection()))
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(selected, "中");
@@ -5722,7 +5782,7 @@ mod tests {
         let mut right_spans = Vec::new();
         if snap.delegate_count > 0 {
             let label = format!("● {} subagents · ", snap.delegate_count);
-            right_spans.push(Span::styled(label, Style::default().fg(CYAN_LINK)));
+            right_spans.push(Span::styled(label, Style::default().fg(cyan_link())));
         }
         let rendered_label: String = right_spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(rendered_label, "● 2 subagents · ");
@@ -5800,9 +5860,9 @@ mod tests {
         assert_eq!(quota_circle_glyph(0.25), "◔");
         assert_eq!(quota_circle_glyph(0.05), "○");
 
-        assert_eq!(quota_circle_color(0.8), GREEN_OK);
-        assert_eq!(quota_circle_color(0.4), YELLOW_WARN);
-        assert_eq!(quota_circle_color(0.1), RED_ERR);
+        assert_eq!(quota_circle_color(0.8), green_ok());
+        assert_eq!(quota_circle_color(0.4), yellow_warn());
+        assert_eq!(quota_circle_color(0.1), red_err());
 
         let now = chrono::Utc::now();
         let reset_5h = (now + chrono::Duration::seconds(4 * 3600 + 30 * 60 + 30))
@@ -5833,7 +5893,7 @@ mod tests {
         assert_eq!(snap.account_name.as_deref(), Some("daryll@example.com"));
         assert!(has_antigravity_footer(&snap));
 
-        let line = build_antigravity_footer_line(&snap, ACCENT_CORAL, 80);
+        let line = build_antigravity_footer_line(&snap, accent_coral(), 80);
         let text = line_text(&line);
         assert!(text.contains("daryll@example.com"), "{text}");
         assert!(text.contains("◕ 5h 78% (4h 30m)"), "{text}");

@@ -6,9 +6,9 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme::{
-    ACCENT_AUTO, ACCENT_CORAL, BG_CODE, BORDER_SUBTLE, CODE_COMMENT, CODE_FUNCTION, CODE_INLINE,
-    CODE_KEY, CODE_KEYWORD, CODE_NUMBER, CODE_STRING, CYAN_LINK, TEXT_DIM, TEXT_MUTED,
-    TEXT_PRIMARY,
+    accent_auto, accent_coral, bg_code, bg_surface, border_subtle, code_comment, code_function,
+    code_inline, code_key, code_keyword, code_number, code_string, cyan_link, text_dim, text_muted,
+    text_primary,
 };
 
 /// Render Markdown into wrapped `ratatui` lines constrained to `max_width` terminal cells.
@@ -22,7 +22,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
 
     let mut cur_spans: Vec<Span<'static>> = Vec::new();
-    let mut style_stack: Vec<Style> = vec![Style::default().fg(TEXT_PRIMARY)];
+    let mut style_stack: Vec<Style> = vec![Style::default().fg(text_primary())];
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_buf = String::new();
@@ -43,7 +43,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
         }
         let mut prefix = Vec::new();
         for _ in 0..blockquote_depth {
-            prefix.push(Span::styled("│ ", Style::default().fg(TEXT_DIM)));
+            prefix.push(Span::styled("│ ", Style::default().fg(text_dim())));
         }
         if let Some(p) = pending_prefix.take() {
             prefix.extend(p);
@@ -102,9 +102,9 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                         out.push(Line::default());
                     }
                     let color = match level {
-                        HeadingLevel::H1 => ACCENT_CORAL,
-                        HeadingLevel::H2 => ACCENT_AUTO,
-                        _ => TEXT_PRIMARY,
+                        HeadingLevel::H1 => accent_coral(),
+                        HeadingLevel::H2 => accent_auto(),
+                        _ => text_primary(),
                     };
                     style_stack.push(Style::default().fg(color).add_modifier(Modifier::BOLD));
                 }
@@ -124,7 +124,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     blockquote_depth += 1;
                     style_stack.push(
                         Style::default()
-                            .fg(TEXT_MUTED)
+                            .fg(text_muted())
                             .add_modifier(Modifier::ITALIC),
                     );
                 }
@@ -168,7 +168,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     };
                     pending_prefix = Some(vec![Span::styled(
                         marker,
-                        Style::default().fg(ACCENT_CORAL),
+                        Style::default().fg(accent_coral()),
                     )]);
                 }
                 Tag::Emphasis => {
@@ -185,7 +185,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                 }
                 Tag::Link { .. } => {
                     let top = *style_stack.last().unwrap_or(&Style::default());
-                    style_stack.push(top.fg(CYAN_LINK).add_modifier(Modifier::UNDERLINED));
+                    style_stack.push(top.fg(cyan_link()).add_modifier(Modifier::UNDERLINED));
                 }
                 _ => {}
             },
@@ -225,10 +225,10 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     let code_width = width.saturating_sub(2);
                     if !code_lang.is_empty() {
                         out.push(Line::from(vec![
-                            Span::styled("│ ", Style::default().fg(TEXT_DIM).bg(BG_CODE)),
+                            Span::styled("│ ", Style::default().fg(text_dim()).bg(bg_code())),
                             Span::styled(
                                 format!("{:<width$}", code_lang, width = code_width),
-                                Style::default().fg(TEXT_MUTED).bg(BG_CODE),
+                                Style::default().fg(text_muted()).bg(bg_code()),
                             ),
                         ]));
                     }
@@ -239,15 +239,15 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                             let pad = code_width.saturating_sub(chunk.width());
                             let mut spans = vec![Span::styled(
                                 "│ ",
-                                Style::default().fg(TEXT_DIM).bg(BG_CODE),
+                                Style::default().fg(text_dim()).bg(bg_code()),
                             )];
                             for span in chunk.spans {
-                                spans.push(Span::styled(span.content, span.style.bg(BG_CODE)));
+                                spans.push(Span::styled(span.content, span.style.bg(bg_code())));
                             }
                             if pad > 0 {
                                 spans.push(Span::styled(
                                     " ".repeat(pad),
-                                    Style::default().bg(BG_CODE),
+                                    Style::default().bg(bg_code()),
                                 ));
                             }
                             out.push(Line::from(spans));
@@ -256,7 +256,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                     if code_buf.is_empty() {
                         out.push(Line::from(Span::styled(
                             "│ ",
-                            Style::default().fg(TEXT_DIM).bg(BG_CODE),
+                            Style::default().fg(text_dim()).bg(bg_code()),
                         )));
                     }
                     out.push(Line::default());
@@ -297,7 +297,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
             Event::Code(code) => {
                 cur_spans.push(Span::styled(
                     format!("`{}`", strip_ansi(&code)),
-                    Style::default().fg(CODE_INLINE).bg(BG_CODE),
+                    Style::default().fg(code_inline()).bg(bg_code()),
                 ));
             }
             Event::SoftBreak => {
@@ -325,7 +325,7 @@ pub fn render_markdown(input: &str, max_width: usize) -> Vec<Line<'static>> {
                 );
                 out.push(Line::from(Span::styled(
                     "─".repeat(width.min(48)),
-                    Style::default().fg(TEXT_DIM),
+                    Style::default().fg(text_dim()),
                 )));
             }
             _ => {}
@@ -402,7 +402,7 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
         widths[widest] -= 1;
     }
 
-    let border = Style::default().fg(BORDER_SUBTLE);
+    let border = Style::default().fg(border_subtle());
     let rule = |left: &str, mid: &str, right: &str| {
         let mut s = String::from(left);
         for (i, w) in widths.iter().enumerate() {
@@ -439,10 +439,10 @@ fn render_table(out: &mut Vec<Line<'static>>, table: &TableBuffer, width: usize)
             };
             let style = if is_header {
                 Style::default()
-                    .fg(ACCENT_CORAL)
+                    .fg(accent_coral())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(TEXT_PRIMARY)
+                Style::default().fg(text_primary())
             };
             spans.push(Span::styled(" ", border));
             spans.push(Span::styled(" ".repeat(before), style));
@@ -734,7 +734,7 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
         if !plain.is_empty() {
             spans.push(Span::styled(
                 std::mem::take(plain),
-                Style::default().fg(TEXT_PRIMARY),
+                Style::default().fg(text_primary()),
             ));
         }
     };
@@ -747,7 +747,7 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
                 spans.push(Span::styled(
                     chars[i..].iter().collect::<String>(),
                     Style::default()
-                        .fg(CODE_COMMENT)
+                        .fg(code_comment())
                         .add_modifier(Modifier::ITALIC),
                 ));
                 break;
@@ -775,7 +775,7 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
             flush_plain(&mut plain, &mut spans);
             let is_key = lang.keys_are_colored()
                 && matches!(next_significant(&chars, i), Some(':') | Some('='));
-            let color = if is_key { CODE_KEY } else { CODE_STRING };
+            let color = if is_key { code_key() } else { code_string() };
             spans.push(Span::styled(literal, Style::default().fg(color)));
             continue;
         }
@@ -793,7 +793,7 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
             flush_plain(&mut plain, &mut spans);
             spans.push(Span::styled(
                 chars[start..i].iter().collect::<String>(),
-                Style::default().fg(CODE_NUMBER),
+                Style::default().fg(code_number()),
             ));
             continue;
         }
@@ -814,16 +814,16 @@ fn highlight_code_line(lang_tag: &str, line: &str) -> Vec<Span<'static>> {
                 .any(|keyword| keyword.eq_ignore_ascii_case(&word))
             {
                 Style::default()
-                    .fg(CODE_KEYWORD)
+                    .fg(code_keyword())
                     .add_modifier(Modifier::BOLD)
             } else if next_significant(&chars, probe) == Some('(') {
-                Style::default().fg(CODE_FUNCTION)
+                Style::default().fg(code_function())
             } else if lang.keys_are_colored()
                 && matches!(next_significant(&chars, i), Some(':') | Some('='))
             {
-                Style::default().fg(CODE_KEY)
+                Style::default().fg(code_key())
             } else {
-                Style::default().fg(TEXT_PRIMARY)
+                Style::default().fg(text_primary())
             };
             flush_plain(&mut plain, &mut spans);
             spans.push(Span::styled(word, style));
@@ -1023,14 +1023,9 @@ pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
         return Line::from(vec![
             Span::styled(
                 truncated,
-                Style::default()
-                    .fg(TEXT_PRIMARY)
-                    .bg(crate::commands::chat::tui::theme::BG_SURFACE),
+                Style::default().fg(text_primary()).bg(bg_surface()),
             ),
-            Span::styled(
-                pad,
-                Style::default().bg(crate::commands::chat::tui::theme::BG_SURFACE),
-            ),
+            Span::styled(pad, Style::default().bg(bg_surface())),
         ]);
     }
     let mut clean_line = String::with_capacity(line.len());
@@ -1045,9 +1040,7 @@ pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
     let mut lexer = AnsiLexer::default();
     lexer.feed(
         &clean_line,
-        Style::default()
-            .fg(TEXT_PRIMARY)
-            .bg(crate::commands::chat::tui::theme::BG_SURFACE),
+        Style::default().fg(text_primary()).bg(bg_surface()),
         &mut spans,
     );
     let mut total_width = 0;
@@ -1069,10 +1062,7 @@ pub fn parse_terminal_line(line: &str, max_width: usize) -> Line<'static> {
     }
     if total_width < max_width {
         let pad = " ".repeat(max_width - total_width);
-        truncated_spans.push(Span::styled(
-            pad,
-            Style::default().bg(crate::commands::chat::tui::theme::BG_SURFACE),
-        ));
+        truncated_spans.push(Span::styled(pad, Style::default().bg(bg_surface())));
     }
     Line::from(truncated_spans)
 }
@@ -1328,7 +1318,7 @@ mod tests {
             header
                 .spans
                 .iter()
-                .any(|s| s.style.fg == Some(ACCENT_CORAL)),
+                .any(|s| s.style.fg == Some(accent_coral())),
             "header cells should use the accent color"
         );
     }
@@ -1398,30 +1388,32 @@ mod tests {
         assert!(
             spans
                 .iter()
-                .any(|s| s.content.as_ref() == "fn" && s.style.fg == Some(CODE_KEYWORD)),
+                .any(|s| s.content.as_ref() == "fn" && s.style.fg == Some(code_keyword())),
             "keyword `fn` should use the keyword color"
         );
         assert!(
             spans
                 .iter()
-                .any(|s| s.content.as_ref() == "42" && s.style.fg == Some(CODE_NUMBER)),
+                .any(|s| s.content.as_ref() == "42" && s.style.fg == Some(code_number())),
             "number literal should use the number color"
         );
         assert!(
-            spans.iter().any(|s| s.content.as_ref().contains("// note")
-                && s.style.fg == Some(CODE_COMMENT)),
+            spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("// note")
+                    && s.style.fg == Some(code_comment())),
             "comment should use the comment color"
         );
         assert!(
             spans
                 .iter()
-                .any(|s| s.content.as_ref().contains("hello") && s.style.fg == Some(CODE_STRING)),
+                .any(|s| s.content.as_ref().contains("hello") && s.style.fg == Some(code_string())),
             "string should use the string color"
         );
         assert!(
             spans
                 .iter()
-                .any(|s| s.content.as_ref() == "println" && s.style.fg == Some(CODE_FUNCTION)),
+                .any(|s| s.content.as_ref() == "println" && s.style.fg == Some(code_function())),
             "call name should use the function color"
         );
     }
@@ -1437,7 +1429,7 @@ mod tests {
         assert!(heading
             .spans
             .iter()
-            .any(|s| s.style.fg == Some(ACCENT_AUTO)
+            .any(|s| s.style.fg == Some(accent_auto())
                 && s.style.add_modifier.contains(Modifier::BOLD)));
 
         let inline = lines
@@ -1445,8 +1437,8 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .find(|s| s.content.as_ref().contains("cargo test"))
             .expect("inline code span");
-        assert_eq!(inline.style.fg, Some(CODE_INLINE));
-        assert_eq!(inline.style.bg, Some(BG_CODE));
+        assert_eq!(inline.style.fg, Some(code_inline()));
+        assert_eq!(inline.style.bg, Some(bg_code()));
     }
 
     #[test]

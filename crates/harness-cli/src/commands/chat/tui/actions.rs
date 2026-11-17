@@ -1217,6 +1217,10 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     } else {
         "off"
     };
+    let theme_label = match config.display.theme {
+        harness_core::ThemeMode::Dark => "dark mode (default)",
+        harness_core::ThemeMode::Light => "light mode",
+    };
     let saver = match config.memory.mode {
         harness_core::MemoryMode::Session => "Session writer",
         harness_core::MemoryMode::Background => "Background saver",
@@ -1224,6 +1228,7 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
     st.modal = ActiveModal::SelectModal {
         title: "CLI Settings".to_string(),
         items: vec![
+            format!("Theme · {theme_label}"),
             format!("Display block limit · {limit}"),
             format!("Auto-collapse on turn finish · {collapse}"),
             format!("Auto-collapse thinking while a tool runs · {thinking}"),
@@ -1234,7 +1239,7 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
             format!("Memory saver · {saver}"),
             "View current settings summary".to_string(),
         ],
-        selected: selected.min(8),
+        selected: selected.min(9),
         action: SelectAction::SettingsMain,
     };
 }
@@ -1243,6 +1248,31 @@ fn open_settings_menu(env: &Env<'_>, st: &mut TuiState, selected: usize) {
 pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, choice: usize) {
     match choice {
         0 => {
+            let next = match env.config.display.theme {
+                harness_core::ThemeMode::Dark => "theme light",
+                harness_core::ThemeMode::Light => "theme dark",
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(next),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            } else {
+                super::theme::set_active_theme(env.config.display.theme);
+                st.settled_cache.clear();
+                st.live_content_cache = Default::default();
+                st.live_reasoning_cache = Default::default();
+            }
+            open_settings_menu(env, st, 0);
+        }
+        1 => {
             let next = match env.config.display.block_limit {
                 None => Some(1),
                 Some(n) if n < 10 => Some(n + 1),
@@ -1266,9 +1296,9 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
                     .set_transient_error(Some(format!("Settings failed: {error}")));
             }
             st.block_limit = env.config.display.block_limit;
-            open_settings_menu(env, st, 0);
+            open_settings_menu(env, st, 1);
         }
-        1 => {
+        2 => {
             let arg = if env.config.display.auto_collapse {
                 "collapse off"
             } else {
@@ -1289,9 +1319,9 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
             } else {
                 set_all_process_expanded(st, !env.config.display.auto_collapse);
             }
-            open_settings_menu(env, st, 1);
+            open_settings_menu(env, st, 2);
         }
-        2 => {
+        3 => {
             let arg = if env.config.display.auto_hide_thinking {
                 "thinking off"
             } else {
@@ -1311,13 +1341,13 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
                     .set_transient_error(Some(format!("Settings failed: {error}")));
             }
             st.auto_hide_thinking = env.config.display.auto_hide_thinking;
-            open_settings_menu(env, st, 2);
+            open_settings_menu(env, st, 3);
         }
-        3..=6 => {
+        4..=7 => {
             let feature = match choice {
-                3 => Feature::Mcp,
-                4 => Feature::Skills,
-                5 => Feature::Memory,
+                4 => Feature::Mcp,
+                5 => Feature::Skills,
+                6 => Feature::Memory,
                 _ => Feature::Notes,
             };
             let live_on = env.feature_toggles.enabled(feature);
@@ -1362,7 +1392,7 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
             }
             open_settings_menu(env, st, choice);
         }
-        7 => {
+        8 => {
             let next_mode = if env.config.memory.mode.is_background() {
                 harness_core::MemoryMode::Session
             } else {
@@ -1378,7 +1408,7 @@ pub async fn toggle_settings_main_item(env: &mut Env<'_>, st: &mut TuiState, cho
             } else {
                 notify_setting_change(st, format!("Memory saver set to {label} (saved)"));
             }
-            open_settings_menu(env, st, 7);
+            open_settings_menu(env, st, 8);
         }
         _ => {
             open_settings_menu(env, st, choice);
@@ -1882,6 +1912,19 @@ pub async fn run_select_action(
     match action {
         SelectAction::SettingsMain => match choice {
             0 => {
+                let items = vec!["Dark Mode (default)".to_string(), "Light Mode".to_string()];
+                let selected = match env.config.display.theme {
+                    harness_core::ThemeMode::Dark => 0,
+                    harness_core::ThemeMode::Light => 1,
+                };
+                st.modal = ActiveModal::SelectModal {
+                    title: "Select Theme".to_string(),
+                    items,
+                    selected,
+                    action: SelectAction::SettingsTheme,
+                };
+            }
+            1 => {
                 let items: Vec<String> =
                     std::iter::once("Uncapped / Display everything (default)".to_string())
                         .chain((1..=10).map(|n| {
@@ -1900,12 +1943,38 @@ pub async fn run_select_action(
                     action: SelectAction::SettingsBlockLimit,
                 };
             }
-            1..=7 => toggle_settings_main_item(env, st, choice).await,
+            2..=8 => toggle_settings_main_item(env, st, choice).await,
             _ => {
                 let summary = format_settings_summary(env.config, Some(env.feature_toggles));
                 show_text_modal(st, "Current CLI Settings", &summary);
             }
         },
+        SelectAction::SettingsTheme => {
+            let arg = if choice == 1 {
+                "theme light"
+            } else {
+                "theme dark"
+            };
+            if let Err(error) = handle_settings_command(
+                None,
+                &env.ui,
+                env.config,
+                &env.display_settings,
+                &mut st.process_expanded,
+                Some(arg),
+            )
+            .await
+            {
+                env.ui
+                    .set_transient_error(Some(format!("Settings failed: {error}")));
+            } else {
+                super::theme::set_active_theme(env.config.display.theme);
+                st.settled_cache.clear();
+                st.live_content_cache = Default::default();
+                st.live_reasoning_cache = Default::default();
+                open_settings_menu(env, st, 0);
+            }
+        }
         SelectAction::SettingsBlockLimit => {
             let arg = if choice == 0 {
                 "limit all".to_string()

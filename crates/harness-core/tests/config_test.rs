@@ -667,15 +667,23 @@ fn display_settings_round_trip_through_file() {
     set_in_file(&layers, "display.block_limit", "4").unwrap();
     set_in_file(&layers, "display.auto_collapse", "false").unwrap();
     set_in_file(&layers, "display.auto_hide_thinking", "false").unwrap();
+    set_in_file(&layers, "display.theme", "light").unwrap();
 
     let cfg = resolve(&layers).unwrap().into_config();
     assert_eq!(cfg.display.block_limit, Some(4));
     assert!(!cfg.display.auto_collapse);
     assert!(!cfg.display.auto_hide_thinking);
+    assert_eq!(cfg.display.theme, harness_core::ThemeMode::Light);
+
+    set_in_file(&layers, "display.theme", "dark").unwrap();
+    let cfg = resolve(&layers).unwrap().into_config();
+    assert_eq!(cfg.display.theme, harness_core::ThemeMode::Dark);
 
     unset_in_file(&layers, "display.block_limit").unwrap();
+    unset_in_file(&layers, "display.theme").unwrap();
     let cfg = resolve(&layers).unwrap().into_config();
     assert_eq!(cfg.display.block_limit, None);
+    assert_eq!(cfg.display.theme, harness_core::ThemeMode::Dark);
 }
 
 #[test]

@@ -13,7 +13,7 @@ mod input;
 mod markdown;
 mod render;
 mod state;
-mod theme;
+pub(in crate::commands::chat) mod theme;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -119,6 +119,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
     terminal.clear()?;
 
     let mut env = Env::new(runtime);
+    theme::set_active_theme(env.config.display.theme);
     let mut st = init_tui_state(&mut env).await?;
 
     // Warm model catalog in the background so `/model` and context window sizing stay crisp.
@@ -150,9 +151,10 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
         if needs_redraw {
             let t_draw = std::time::Instant::now();
             // Render current frame (never await env.agent.lock() here — the running turn holds it!).
-            // Keep the thinking display settings in step with `/settings` changes.
+            // Keep the thinking display and theme settings in step with `/settings` changes.
             st.auto_hide_thinking = env.config.display.auto_hide_thinking;
             st.block_limit = env.config.display.block_limit;
+            theme::set_active_theme(env.config.display.theme);
             let w = terminal.size().map(|s| s.width as usize).unwrap_or(100);
             snap = env.ui.tui_snapshot(w);
             let reasoning_effort = st.reasoning_effort;

@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use colored::Colorize;
-use harness_core::{Config, HarnessError};
+use harness_core::{Config, HarnessError, ThemeMode};
 
+use super::super::tui::theme::set_active_theme;
 use super::super::ui::ChatUi;
 use super::picker::select_from_rx;
 use crate::commands::chat::AppKey;
@@ -37,13 +38,18 @@ pub(crate) async fn handle_settings_command(
                 apply_auto_hide_thinking(enabled, ui, config, display_settings)?;
                 return Ok(());
             }
+            ["theme", val] => {
+                let theme = parse_theme(val)?;
+                apply_theme(theme, ui, config, display_settings)?;
+                return Ok(());
+            }
             ["show"] => {
                 show_settings(ui, config);
                 return Ok(());
             }
             _ => {
                 ui.emit_above(&format!(
-                    "{} Unknown settings option: {}\nUsage: /settings [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [show]",
+                    "{} Unknown settings option: {}\nUsage: /settings [theme <dark|light>] [limit <1-10|all>] [collapse <on|off>] [thinking <on|off>] [show]",
                     "•".cyan(),
                     arg_str
                 ));
@@ -83,6 +89,16 @@ fn parse_bool(val: &str) -> Result<bool, HarnessError> {
     }
 }
 
+fn parse_theme(val: &str) -> Result<ThemeMode, HarnessError> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "dark" | "darkmode" | "dark-mode" => Ok(ThemeMode::Dark),
+        "light" | "lightmode" | "light-mode" => Ok(ThemeMode::Light),
+        _ => Err(HarnessError::ConfigurationError(
+            "theme must be 'dark' or 'light'".to_string(),
+        )),
+    }
+}
+
 async fn run_settings_wizard(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppKey>,
     ui: &ChatUi,
@@ -105,12 +121,17 @@ async fn run_settings_wizard(
     } else {
         "Disabled (keep thinking visible)"
     };
+    let current_theme_desc = match config.display.theme {
+        ThemeMode::Dark => "Dark mode (Default)",
+        ThemeMode::Light => "Light mode",
+    };
 
     let main_items = vec![
         format!("1. Display Block Limit · [{current_limit_desc}]"),
         format!("2. Auto-collapse on Turn Finish · [{current_collapse_desc}]"),
         format!("3. Auto-collapse Thinking During Tool Calls · [{current_thinking_desc}]"),
-        "4. View Current Settings Summary".to_string(),
+        format!("4. Theme · [{current_theme_desc}]"),
+        "5. View Current Settings Summary".to_string(),
     ];
 
     let choice = select_from_rx(rx, ui, "CLI Settings", &main_items, 0, false, false).await;
@@ -192,6 +213,31 @@ async fn run_settings_wizard(
             }
         }
         Some(3) => {
+            let theme_items = vec!["Dark Mode (Default)".to_string(), "Light Mode".to_string()];
+            let default_idx = match config.display.theme {
+                ThemeMode::Dark => 0,
+                ThemeMode::Light => 1,
+            };
+            let theme_choice = select_from_rx(
+                rx,
+                ui,
+                "Select TUI Theme",
+                &theme_items,
+                default_idx,
+                true,
+                false,
+            )
+            .await;
+            if let Some(idx) = theme_choice {
+                let theme = if idx == 1 {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                };
+                apply_theme(theme, ui, config, display_settings)?;
+            }
+        }
+        Some(4) => {
             show_settings(ui, config);
         }
         _ => {}
@@ -302,6 +348,35 @@ fn apply_auto_hide_thinking(
     Ok(())
 }
 
+fn apply_theme(
+    theme: ThemeMode,
+    ui: &ChatUi,
+    config: &mut Config,
+    display_settings: &Arc<std::sync::RwLock<harness_core::DisplaySettings>>,
+) -> Result<(), HarnessError> {
+    config.display.theme = theme;
+    set_active_theme(theme);
+    if let Ok(mut lock) = display_settings.write() {
+        lock.theme = theme;
+    }
+
+    let layers = harness_core::config::process_layers(crate::commands::config::catalog_defaults())?;
+    let _ = harness_core::config::set_in_file(&layers, "display.theme", theme.label());
+
+    let desc = match theme {
+        ThemeMode::Dark => "Dark mode (default)",
+        ThemeMode::Light => "Light mode",
+    };
+
+    ui.emit_above(&format!(
+        "{} Theme set to: {} (saved to config)",
+        "✔".green().bold(),
+        desc.bold()
+    ));
+
+    Ok(())
+}
+
 fn show_settings(ui: &ChatUi, config: &Config) {
     let summary = format_settings_summary(config, None);
     ui.emit_above(&format!(
@@ -330,6 +405,10 @@ pub(crate) fn format_settings_summary(
         "Enabled (hide while a tool runs)"
     } else {
         "Disabled (keep thinking visible)"
+    };
+    let theme_str = match config.display.theme {
+        ThemeMode::Dark => "Dark mode (default)",
+        ThemeMode::Light => "Light mode",
     };
     let compact_str = if config.auto_compact_enabled {
         "Enabled"
@@ -380,7 +459,9 @@ pub(crate) fn format_settings_summary(
     };
 
     format!(
-        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
+        "  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}\n  {:<26} {}",
+        "Theme:",
+        theme_str,
         "Display Block Limit:",
         limit_str,
         "Auto-collapse on Finish:",
@@ -400,4 +481,26 @@ pub(crate) fn format_settings_summary(
         "Notes:",
         feat_line(super::Feature::Notes),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_theme_accepts_dark_and_light_variants() {
+        assert_eq!(parse_theme("dark").unwrap(), ThemeMode::Dark);
+        assert_eq!(parse_theme("DARK").unwrap(), ThemeMode::Dark);
+        assert_eq!(parse_theme("light").unwrap(), ThemeMode::Light);
+        assert_eq!(parse_theme("light-mode").unwrap(), ThemeMode::Light);
+        assert!(parse_theme("sepia").is_err());
+    }
+
+    #[test]
+    fn format_settings_summary_reports_theme() {
+        let mut cfg = Config::default();
+        assert!(format_settings_summary(&cfg, None).contains("Dark mode (default)"));
+        cfg.display.theme = ThemeMode::Light;
+        assert!(format_settings_summary(&cfg, None).contains("Light mode"));
+    }
 }

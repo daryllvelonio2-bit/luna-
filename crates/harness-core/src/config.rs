@@ -1013,6 +1013,55 @@ impl Default for SessionSettings {
     }
 }
 
+/// Color theme for the full-screen TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn is_light(self) -> bool {
+        matches!(self, Self::Light)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+}
+
+impl std::fmt::Display for ThemeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl std::str::FromStr for ThemeMode {
+    type Err = HarnessError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "dark" => Ok(Self::Dark),
+            "light" => Ok(Self::Light),
+            other => Err(HarnessError::ConfigurationError(format!(
+                "theme must be 'dark' or 'light', got '{other}'"
+            ))),
+        }
+    }
+}
+
 /// Display preferences for the interactive CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1025,6 +1074,8 @@ pub struct DisplaySettings {
     /// Whether a thinking block collapses as soon as the next tool call starts running.
     /// Defaults to true so the working view stays focused on the tool while it executes.
     pub auto_hide_thinking: bool,
+    /// Visual theme for the TUI (`dark` default, or `light`).
+    pub theme: ThemeMode,
 }
 
 impl Default for DisplaySettings {
@@ -1033,6 +1084,7 @@ impl Default for DisplaySettings {
             block_limit: None,
             auto_collapse: true,
             auto_hide_thinking: true,
+            theme: ThemeMode::Dark,
         }
     }
 }
