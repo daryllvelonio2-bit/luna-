@@ -105,9 +105,11 @@ fn handle_paste(env: &Env<'_>, st: &mut TuiState, text: &str) {
         ActiveModal::Clarify {
             custom,
             editing_custom,
+            follow_selection,
             ..
         } if *editing_custom => {
             custom.push_str(cleaned.trim());
+            *follow_selection = true;
         }
         ActiveModal::Sudo { input, .. } => {
             input.push_str(cleaned.trim());
@@ -141,6 +143,14 @@ async fn handle_mouse(
                 ActiveModal::TextModal { scroll, .. }
                 | ActiveModal::SubagentInspector { scroll, .. } => {
                     *scroll = scroll.saturating_sub(3);
+                }
+                ActiveModal::Clarify {
+                    scroll,
+                    follow_selection,
+                    ..
+                } => {
+                    *scroll = scroll.saturating_sub(3);
+                    *follow_selection = false;
                 }
                 ActiveModal::Approval {
                     reply,
@@ -209,6 +219,14 @@ async fn handle_mouse(
                 }
                 ActiveModal::SubagentInspector { scroll, .. } => {
                     *scroll += 3;
+                }
+                ActiveModal::Clarify {
+                    scroll,
+                    follow_selection,
+                    ..
+                } => {
+                    *scroll = scroll.saturating_add(3);
+                    *follow_selection = false;
                 }
                 ActiveModal::Approval {
                     reply,
@@ -1915,6 +1933,8 @@ async fn handle_modal_key(
             mut selected,
             mut custom,
             editing_custom,
+            mut scroll,
+            mut follow_selection,
         } => {
             if key.code == KeyCode::Esc {
                 if editing_custom {
@@ -1926,6 +1946,8 @@ async fn handle_modal_key(
                         selected,
                         custom,
                         editing_custom: false,
+                        scroll,
+                        follow_selection: true,
                     };
                 } else {
                     let _ = resp_tx.send(ClarifyResponse {
@@ -1956,6 +1978,8 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom: true,
+                            scroll,
+                            follow_selection: true,
                         };
                     }
                     KeyCode::Enter => {
@@ -1984,6 +2008,8 @@ async fn handle_modal_key(
                                 selected: 0,
                                 custom: String::new(),
                                 editing_custom: false,
+                                scroll: 0,
+                                follow_selection: true,
                             };
                         }
                     }
@@ -1997,6 +2023,8 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom: true,
+                            scroll,
+                            follow_selection: true,
                         };
                     }
                     _ => {
@@ -2008,6 +2036,8 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom: true,
+                            scroll,
+                            follow_selection,
                         };
                     }
                 }
@@ -2019,6 +2049,7 @@ async fn handle_modal_key(
                         } else {
                             selected - 1
                         };
+                        follow_selection = true;
                         st.modal = ActiveModal::Clarify {
                             req,
                             resp_tx,
@@ -2027,10 +2058,13 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom,
+                            scroll,
+                            follow_selection,
                         };
                     }
                     KeyCode::Down => {
                         selected = (selected + 1) % total_opts.max(1);
+                        follow_selection = true;
                         st.modal = ActiveModal::Clarify {
                             req,
                             resp_tx,
@@ -2039,6 +2073,38 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom,
+                            scroll,
+                            follow_selection,
+                        };
+                    }
+                    KeyCode::PageUp => {
+                        scroll = scroll.saturating_sub(5);
+                        follow_selection = false;
+                        st.modal = ActiveModal::Clarify {
+                            req,
+                            resp_tx,
+                            question_idx,
+                            answers,
+                            selected,
+                            custom,
+                            editing_custom,
+                            scroll,
+                            follow_selection,
+                        };
+                    }
+                    KeyCode::PageDown => {
+                        scroll = scroll.saturating_add(5);
+                        follow_selection = false;
+                        st.modal = ActiveModal::Clarify {
+                            req,
+                            resp_tx,
+                            question_idx,
+                            answers,
+                            selected,
+                            custom,
+                            editing_custom,
+                            scroll,
+                            follow_selection,
                         };
                     }
                     KeyCode::Enter => {
@@ -2051,6 +2117,8 @@ async fn handle_modal_key(
                                 selected,
                                 custom,
                                 editing_custom: true,
+                                scroll,
+                                follow_selection: true,
                             };
                         } else {
                             let q = &req.questions[question_idx];
@@ -2078,6 +2146,8 @@ async fn handle_modal_key(
                                     selected: 0,
                                     custom: String::new(),
                                     editing_custom: false,
+                                    scroll: 0,
+                                    follow_selection: true,
                                 };
                             }
                         }
@@ -2091,6 +2161,8 @@ async fn handle_modal_key(
                             selected,
                             custom,
                             editing_custom,
+                            scroll,
+                            follow_selection,
                         };
                     }
                 }

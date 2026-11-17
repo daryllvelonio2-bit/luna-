@@ -1138,6 +1138,8 @@ pub enum ActiveModal {
         selected: usize,
         custom: String,
         editing_custom: bool,
+        scroll: usize,
+        follow_selection: bool,
     },
     Sudo {
         prompt: String,

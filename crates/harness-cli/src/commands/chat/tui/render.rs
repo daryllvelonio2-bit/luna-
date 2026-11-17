@@ -16,6 +16,7 @@ use super::super::render::{
 use super::super::ui::{TuiLiveSnapshot, TuiPtyPane};
 use super::markdown::{
     clean_terminal_text, parse_terminal_line, render_markdown, strip_ansi, wrap_plain_text,
+    wrap_spans,
 };
 use super::state::{
     ActiveModal, ComposerHitBox, ImagePreview, LiveThinkingView, ModelPickerItem, PaletteAction,
@@ -3145,7 +3146,7 @@ fn render_slash_popup(frame: &mut Frame, screen: Rect, composer_rect: Rect, st: 
 fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &FooterInfo<'_>) {
     st.modal_rect = None;
     let spinner_tick = st.spinner_tick;
-    match &st.modal {
+    match &mut st.modal {
         ActiveModal::None => {}
         ActiveModal::CommandPalette { query, selected } => {
             let items = filtered_palette_items(query);
@@ -3904,81 +3905,243 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             selected,
             custom,
             editing_custom,
+            scroll,
+            follow_selection,
             ..
         } => {
-            let w = screen.width.saturating_sub(6).clamp(48, 76);
-            let h = screen.height.saturating_sub(4).clamp(12, 20);
-            let rect = centered_rect(screen, w, h);
-            st.modal_rect = Some(rect);
+            let max_w = screen.width.saturating_sub(6).clamp(48, 96);
+            let min_w = 54.min(max_w);
             let title = format!(
                 "Question {}/{}",
-                question_idx + 1,
+                *question_idx + 1,
                 req.questions.len().max(1)
             );
-            let inner = draw_modal_frame(frame, rect, &title, "enter · esc");
+            let q_opt = req.questions.get(*question_idx);
+            let longest_content = q_opt
+                .map(|q| {
+                    let q_max = q
+                        .question
+                        .lines()
+                        .map(UnicodeWidthStr::width)
+                        .max()
+                        .unwrap_or(0)
+                        + 2;
+                    let c_max = q.choices.iter().map(|c| c.width() + 5).max().unwrap_or(0);
+                    let custom_max = custom.width() + 14;
+                    q_max.max(c_max).max(custom_max).max(32)
+                })
+                .unwrap_or(48) as u16;
+            let w = longest_content.saturating_add(4).clamp(min_w, max_w);
+            let inner_w = w.saturating_sub(2) as usize;
+            let wrap_w = inner_w.saturating_sub(5).max(16);
 
-            let mut lines = Vec::new();
-            if let Some(q) = req.questions.get(*question_idx) {
-                for wline in wrap_plain_text(&q.question, (inner.width as usize).saturating_sub(2))
-                {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {wline}"),
-                        Style::default()
-                            .fg(text_primary())
-                            .bg(bg_elevated())
-                            .add_modifier(Modifier::BOLD),
-                    )));
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            let mut option_ranges: Vec<(usize, usize)> = Vec::new();
+            let mut cursor_pos: Option<(usize, u16)> = None;
+
+            if let Some(q) = q_opt {
+                for para in q.question.lines() {
+                    if para.trim().is_empty() {
+                        lines.push(Line::default());
+                    } else {
+                        for wline in wrap_plain_text(para, inner_w.saturating_sub(2).max(12)) {
+                            lines.push(Line::from(Span::styled(
+                                format!(" {wline}"),
+                                Style::default()
+                                    .fg(text_primary())
+                                    .bg(bg_elevated())
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        }
+                    }
                 }
-                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", "─".repeat(inner_w.saturating_sub(2))),
+                    Style::default().fg(border_subtle()).bg(bg_elevated()),
+                )));
+
+                // Wrap every choice upfront so nothing is truncated with `...`.
+                let mut wrapped_choices: Vec<Vec<Line<'static>>> =
+                    Vec::with_capacity(q.choices.len());
                 for (idx, choice) in q.choices.iter().enumerate() {
                     let is_sel = !*editing_custom && idx == *selected;
                     let bg = if is_sel { bg_selected() } else { bg_elevated() };
-                    let text = format!(
-                        " {} {}",
-                        if is_sel { "▸" } else { " " },
-                        truncate_str(choice, (inner.width as usize).saturating_sub(4))
-                    );
-                    let pad = (inner.width as usize).saturating_sub(text.width());
+                    let title_fg = if is_sel {
+                        accent_coral()
+                    } else {
+                        text_primary()
+                    };
+                    let body_fg = if is_sel { text_primary() } else { text_muted() };
+
+                    let split_opt = choice
+                        .split_once(" \u{2013} ")
+                        .map(|(h, b)| (h, " \u{2013} ", b))
+                        .or_else(|| {
+                            choice
+                                .split_once(" \u{2014} ")
+                                .map(|(h, b)| (h, " \u{2014} ", b))
+                        })
+                        .or_else(|| choice.split_once(" - ").map(|(h, b)| (h, " - ", b)));
+
+                    let spans = if let Some((head, sep, body)) = split_opt {
+                        vec![
+                            Span::styled(
+                                head.to_string(),
+                                Style::default()
+                                    .fg(title_fg)
+                                    .bg(bg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("{sep}{body}"),
+                                Style::default().fg(body_fg).bg(bg),
+                            ),
+                        ]
+                    } else {
+                        vec![Span::styled(
+                            choice.clone(),
+                            Style::default().fg(title_fg).bg(bg),
+                        )]
+                    };
+                    wrapped_choices.push(wrap_spans(&spans, wrap_w));
+                }
+
+                let any_choice_wrapped = wrapped_choices.iter().any(|wc| wc.len() > 1);
+                for (idx, wlines) in wrapped_choices.into_iter().enumerate() {
+                    let is_sel = !*editing_custom && idx == *selected;
+                    let bg = if is_sel { bg_selected() } else { bg_elevated() };
+                    let start_row = lines.len();
+                    for (w_idx, mut wline) in wlines.into_iter().enumerate() {
+                        let prefix = if w_idx == 0 && is_sel { " ▸ " } else { "   " };
+                        let row_w = 3 + wline.width();
+                        let pad = inner_w.saturating_sub(row_w);
+                        let mut spans = Vec::with_capacity(wline.spans.len() + 2);
+                        spans.push(Span::styled(
+                            prefix,
+                            Style::default()
+                                .fg(if is_sel { accent_coral() } else { text_muted() })
+                                .bg(bg),
+                        ));
+                        spans.append(&mut wline.spans);
+                        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+                        lines.push(Line::from(spans));
+                    }
+                    let end_row = lines.len().saturating_sub(1);
+                    option_ranges.push((start_row, end_row));
+                    if any_choice_wrapped && idx + 1 < q.choices.len() {
+                        lines.push(Line::default());
+                    }
+                }
+
+                if any_choice_wrapped && !q.choices.is_empty() {
+                    lines.push(Line::default());
+                }
+
+                let custom_idx = q.choices.len();
+                let is_sel = *editing_custom || *selected == custom_idx;
+                let bg = if is_sel { bg_selected() } else { bg_elevated() };
+                let start_row = lines.len();
+                if *editing_custom || !custom.trim().is_empty() {
+                    let custom_wrap_w = inner_w.saturating_sub(12).max(12);
+                    let chunks = wrap_plain_text(custom, custom_wrap_w);
+                    let chunk_count = chunks.len();
+                    for (w_idx, chunk) in chunks.into_iter().enumerate() {
+                        let prefix = if w_idx == 0 {
+                            " ▸ Answer: "
+                        } else {
+                            "           "
+                        };
+                        let prefix_w = prefix.width();
+                        let row_w = prefix_w + chunk.width();
+                        let pad = inner_w.saturating_sub(row_w);
+                        if *editing_custom && w_idx + 1 == chunk_count {
+                            cursor_pos = Some((lines.len(), (prefix_w + chunk.width()) as u16));
+                        }
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                prefix,
+                                Style::default()
+                                    .fg(if is_sel { accent_coral() } else { text_muted() })
+                                    .bg(bg),
+                            ),
+                            Span::styled(chunk, Style::default().fg(text_primary()).bg(bg)),
+                            Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                        ]));
+                    }
+                } else {
+                    let label = if is_sel {
+                        " ▸ Type your answer..."
+                    } else {
+                        "   Type your answer..."
+                    };
+                    let pad = inner_w.saturating_sub(label.width());
                     lines.push(Line::from(vec![
                         Span::styled(
-                            text,
+                            label,
                             Style::default()
-                                .fg(if is_sel {
-                                    accent_coral()
-                                } else {
-                                    text_primary()
-                                })
+                                .fg(if is_sel { accent_coral() } else { text_muted() })
                                 .bg(bg),
                         ),
                         Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                     ]));
                 }
-                let custom_idx = q.choices.len();
-                let is_sel = *editing_custom || *selected == custom_idx;
-                let bg = if is_sel { bg_selected() } else { bg_elevated() };
-                let label = if *editing_custom {
-                    format!(" ▸ Answer: {custom}_")
-                } else {
-                    " ▸ Type your answer...".to_string()
-                };
-                let pad = (inner.width as usize).saturating_sub(label.width());
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        label,
-                        Style::default()
-                            .fg(if is_sel { accent_coral() } else { text_muted() })
-                            .bg(bg),
-                    ),
-                    Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                ]));
-                if *editing_custom {
-                    let cur_x = (inner.x + 11 + custom.width() as u16)
-                        .min(inner.x + inner.width.saturating_sub(1));
-                    let cur_y = inner.y + (lines.len().saturating_sub(1)) as u16;
+                let end_row = lines.len().saturating_sub(1);
+                option_ranges.push((start_row, end_row));
+            }
+
+            let max_h = screen.height.saturating_sub(4).max(10);
+            let desired_h = (lines.len() as u16).saturating_add(2);
+            let h = desired_h.clamp(10.min(max_h), max_h);
+            let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
+
+            let inner_h = rect.height.saturating_sub(2) as usize;
+            let max_scroll = lines.len().saturating_sub(inner_h);
+            if *follow_selection {
+                if let Some(q) = q_opt {
+                    let active_opt = if *editing_custom {
+                        q.choices.len()
+                    } else {
+                        (*selected).min(option_ranges.len().saturating_sub(1))
+                    };
+                    if let Some(&(sel_start, sel_end)) = option_ranges.get(active_opt) {
+                        if sel_end >= *scroll + inner_h {
+                            *scroll = sel_end + 1 - inner_h;
+                        }
+                        if sel_start < *scroll {
+                            *scroll = sel_start;
+                        }
+                        if *selected == 0 && !*editing_custom && sel_end < inner_h {
+                            *scroll = 0;
+                        }
+                    }
+                }
+            }
+            *scroll = (*scroll).min(max_scroll);
+
+            let hint = if *editing_custom {
+                "enter submit · esc back"
+            } else if max_scroll > 0 {
+                "↑/↓ · pgup/pgdn · enter · esc"
+            } else {
+                "↑/↓ · enter · esc"
+            };
+            let inner = draw_modal_frame(frame, rect, &title, hint);
+
+            let visible_lines: Vec<Line<'static>> = lines
+                .into_iter()
+                .skip(*scroll)
+                .take(inner.height as usize)
+                .collect();
+            frame.render_widget(Paragraph::new(visible_lines), inner);
+
+            if let Some((cline, ccol)) = cursor_pos {
+                if cline >= *scroll && cline < *scroll + inner.height as usize {
+                    let cur_x = (inner.x + ccol).min(inner.x + inner.width.saturating_sub(1));
+                    let cur_y = inner.y + (cline - *scroll) as u16;
                     frame.set_cursor_position((cur_x, cur_y));
                 }
             }
-            frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::Sudo { prompt, input, .. } => {
             let w = screen.width.saturating_sub(6).clamp(44, 68);
@@ -4061,7 +4224,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             let h = screen.height.saturating_sub(4).clamp(12, 24);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
-            render_subagents_modal(frame, rect, items, *selected, *active_only, st.spinner_tick);
+            render_subagents_modal(frame, rect, items, *selected, *active_only, spinner_tick);
         }
         ActiveModal::SubagentInspector {
             items,
@@ -4072,7 +4235,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             let h = screen.height.saturating_sub(2).clamp(14, 38);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
-            render_subagent_inspector(frame, rect, items, *current_idx, *scroll, st.spinner_tick);
+            render_subagent_inspector(frame, rect, items, *current_idx, *scroll, spinner_tick);
         }
     }
 }
@@ -6521,5 +6684,105 @@ mod tests {
         assert!(saw_auto_yellow, "Auto mode must be yellow");
         assert!(saw_deny_red, "Deny must be red");
         assert!(saw_ask_white, "Ask question must be white");
+    }
+
+    #[test]
+    fn clarify_modal_wraps_long_choices_without_truncation() {
+        use harness_core::{ClarifyQuestion, ClarifyRequest};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.modal = ActiveModal::Clarify {
+            req: ClarifyRequest {
+                questions: vec![ClarifyQuestion {
+                    question: "What should it do?: Pick the capability the model must demonstrate in full detail.".to_string(),
+                    choices: vec![
+                        "Repeat / copy & pattern completion (Recommended) \u{2013} Char-level GPT that learns cyclic or mirrored sequences accurately".to_string(),
+                        "Digit arithmetic mod 10 \u{2013} Transformer that outputs (a+b) mod 10 or (a*b) mod 10 cleanly".to_string(),
+                    ],
+                }],
+            },
+            resp_tx: tx,
+            question_idx: 0,
+            answers: Vec::new(),
+            selected: 0,
+            custom: "my very long custom answer that wraps cleanly across lines without horizontal clipping".to_string(),
+            editing_custom: true,
+            scroll: 0,
+            follow_selection: true,
+        };
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+        let backend = TestBackend::new(100, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..34)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("mirrored sequences accurately"), "{text}");
+        assert!(text.contains("(a*b) mod 10 cleanly"), "{text}");
+        assert!(text.contains("without horizontal clipping"), "{text}");
+        assert!(!text.contains("tha\u{2026}"), "{text}");
+    }
+
+    #[test]
+    fn clarify_modal_scrolls_to_follow_selection_on_short_screen() {
+        use harness_core::{ClarifyQuestion, ClarifyRequest};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let choices = (1..=8)
+            .map(|i| {
+                format!("Option {i} \u{2013} Detailed description number {i} explaining everything thoroughly for the user")
+            })
+            .collect();
+        st.modal = ActiveModal::Clarify {
+            req: ClarifyRequest {
+                questions: vec![ClarifyQuestion {
+                    question: "Choose one option:".to_string(),
+                    choices,
+                }],
+            },
+            resp_tx: tx,
+            question_idx: 0,
+            answers: Vec::new(),
+            selected: 7,
+            custom: String::new(),
+            editing_custom: false,
+            scroll: 0,
+            follow_selection: true,
+        };
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+        let backend = TestBackend::new(90, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..18)
+            .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Option 8"), "{text}");
+        assert!(text.contains("thoroughly for the user"), "{text}");
     }
 }
