@@ -6688,14 +6688,14 @@ mod tests {
 
     #[test]
     fn clarify_modal_wraps_long_choices_without_truncation() {
-        use harness_core::{ClarifyQuestion, ClarifyRequest};
+        use harness_core::{ClarifyItem, ClarifyRequest};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let mut st = test_dummy_tui_state();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         st.modal = ActiveModal::Clarify {
             req: ClarifyRequest {
-                questions: vec![ClarifyQuestion {
+                questions: vec![ClarifyItem {
                     question: "What should it do?: Pick the capability the model must demonstrate in full detail.".to_string(),
                     choices: vec![
                         "Repeat / copy & pattern completion (Recommended) \u{2013} Char-level GPT that learns cyclic or mirrored sequences accurately".to_string(),
@@ -6738,7 +6738,7 @@ mod tests {
 
     #[test]
     fn clarify_modal_scrolls_to_follow_selection_on_short_screen() {
-        use harness_core::{ClarifyQuestion, ClarifyRequest};
+        use harness_core::{ClarifyItem, ClarifyRequest};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let mut st = test_dummy_tui_state();
@@ -6750,7 +6750,7 @@ mod tests {
             .collect();
         st.modal = ActiveModal::Clarify {
             req: ClarifyRequest {
-                questions: vec![ClarifyQuestion {
+                questions: vec![ClarifyItem {
                     question: "Choose one option:".to_string(),
                     choices,
                 }],
