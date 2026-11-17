@@ -27,8 +27,8 @@
 
 - **Reproduce before patching:** Identify the exact file and line, verify against current behavior, and write or run targeted tests.
 - **Behavior contracts over snapshots:** Tests must assert invariants and contracts, not brittle text snapshots.
-- **Verification gate:** Run `scripts/test-changed.sh` (only the tests affected by the diff) plus `cargo check`/`cargo clippy` on touched crates before completing changes. Use `scripts/test-changed.sh --full` before pushing a change that spans crates.
-- **Build and install:** Always build and install (`cargo install --path crates/harness-cli`) upon completing tasks so that the environment runs the updated `luna` binary.
+- **Verification gate (GitHub Actions):** Tests, lint, and builds run on GitHub Actions, not locally. `.github/workflows/ci.yml` runs on every push and PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --release --bin luna`. After pushing, confirm the resulting CI run succeeds. For an on-demand run use `python3 scripts/ci_run.py` (tests + build) with `GITHUB_TOKEN` set. Keep local cargo to fast develop-mode checks only (`cargo check -p <crate>`); do not run local multi-minute builds or full suites.
+- **Build and install (GitHub Actions):** Builds happen in CI. `python3 scripts/auto_build_install.py` triggers `release-build.yml`, downloads the `luna-binary` artifact, and installs it to `~/.local/bin/luna` so the environment runs the updated binary. Never `cargo install --path` locally.
 - **Keep only main & clean worktrees:** Delete all other worktrees and keep only `main`. Never leave implemented features stranded or unused in abandoned worktrees; any temporary worktrees must be merged and pruned immediately.
 - **Commit authorship:** Commits must be authored and committed as `Daryll <daryllvelonio2@gmail.com>`.
 - **Push verified work:** After the verification gate passes, commit the completed change and push it to the remote tracking branch (`git push origin <branch>`) unless the user explicitly asks not to. Never push unverified or half-finished work.
