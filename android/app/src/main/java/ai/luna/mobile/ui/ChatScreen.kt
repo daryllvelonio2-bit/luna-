@@ -98,10 +98,12 @@ private data class PairedToolCall(
 )
 
 private sealed interface ChatEntry {
-    data class User(val id: String, val text: String) : ChatEntry
-    data class Summary(val id: String, val text: String) : ChatEntry
+    val id: String
+
+    data class User(override val id: String, val text: String) : ChatEntry
+    data class Summary(override val id: String, val text: String) : ChatEntry
     data class AssistantTurn(
-        val id: String,
+        override val id: String,
         val reasoningParts: List<String>,
         val tools: List<PairedToolCall>,
         val reply: String,
