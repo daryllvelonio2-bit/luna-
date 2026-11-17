@@ -53,6 +53,8 @@ pub(crate) enum SlashOutcome {
         prompt: String,
         display: String,
     },
+    /// A `/<worker> <task>` invocation: spawned as a background subagent in `delegate_tool`.
+    WorkerSpawned(worker::WorkerSpawnInfo),
 }
 
 #[allow(clippy::too_many_arguments)]

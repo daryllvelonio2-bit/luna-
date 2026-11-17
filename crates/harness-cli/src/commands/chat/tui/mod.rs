@@ -238,6 +238,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             _ = tui_notifier.notified() => {
                 needs_redraw = true;
                 drain_tui_notices(&env, &mut st);
+                actions::sync_worker_turns(&env, &mut st).await;
                 if env.ui.take_compaction_completed() {
                     actions::apply_compaction_completed(&env, &mut st).await;
                 }
@@ -278,6 +279,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 || snap.compacting.is_some()
                 || snap.memory_distilling.is_some()
                 || snap.delegate_count > 0
+                || actions::has_pending_worker_turns(&st)
                 || matches!(
                     st.modal,
                     ActiveModal::SubagentInspector { .. } | ActiveModal::SubagentsModal { .. }
@@ -286,6 +288,7 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                 needs_redraw = true;
                 st.spinner_tick = st.spinner_tick.wrapping_add(1);
                 st.prune_stale_notices();
+                actions::sync_worker_turns(&env, &mut st).await;
                 actions::refresh_subagents_if_open(&env, &mut st).await;
                 if env.ui.take_compaction_completed() {
                     actions::apply_compaction_completed(&env, &mut st).await;
@@ -315,6 +318,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
             _ = idle_tick.tick() => {
                 needs_redraw = true;
                 st.prune_stale_notices();
+                actions::sync_worker_turns(&env, &mut st).await;
+                actions::refresh_subagents_if_open(&env, &mut st).await;
                 if env.ui.take_compaction_completed() {
                     actions::apply_compaction_completed(&env, &mut st).await;
                 }

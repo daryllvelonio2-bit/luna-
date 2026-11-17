@@ -183,6 +183,6 @@ pub(super) async fn run_tail(
             );
             Ok(Flow::Continue)
         }
-        SlashOutcome::Continue => Ok(Flow::Continue),
+        SlashOutcome::Continue | SlashOutcome::WorkerSpawned(_) => Ok(Flow::Continue),
     }
 }

@@ -198,21 +198,23 @@ impl<'a> SlashContext<'a> {
             let worker_name = worker_name.to_ascii_lowercase();
             if self.config.workers.contains_key(&worker_name) {
                 match arg {
-                    Some(task) => {
-                        if let Err(e) = worker::handle_worker_invocation(
-                            &worker_name,
-                            task,
-                            self.ui,
-                            self.config,
-                            self.cred_manager,
-                            self.discovery,
-                            self.agent,
-                            self.session_id,
-                            self.delegate_tool,
-                            self.pending_images,
-                        )
-                        .await
-                        {
+                    Some(task) => match worker::handle_worker_invocation(
+                        &worker_name,
+                        task,
+                        self.ui,
+                        self.config,
+                        self.cred_manager,
+                        self.discovery,
+                        self.agent,
+                        self.session_id,
+                        self.delegate_tool,
+                        self.pending_images,
+                    )
+                    .await
+                    {
+                        Ok(Some(info)) => return Ok(SlashOutcome::WorkerSpawned(info)),
+                        Ok(None) => {}
+                        Err(e) => {
                             self.ui.emit_above(&format!(
                                 "{} Worker {} failed to start: {}",
                                 "✖".red().bold(),
@@ -220,7 +222,7 @@ impl<'a> SlashContext<'a> {
                                 e
                             ));
                         }
-                    }
+                    },
                     None => self.ui.emit_above(&format!(
                         "{} Usage: {}",
                         "•".cyan(),
