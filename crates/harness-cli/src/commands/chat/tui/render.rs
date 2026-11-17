@@ -23,10 +23,10 @@ use super::state::{
     TranscriptClickTarget, TranscriptHitBox, TuiState, TurnMeta,
 };
 use super::theme::{
-    accent_coral, bg_canvas, bg_elevated, bg_selected, bg_selection, bg_surface, border_subtle,
-    cyan_link, friendly_model_name, friendly_provider_name, green_ok, humanize_tokens, logo_gray,
-    mode_accent, note_accent, red_err, scanner_color, text_dim, text_muted, text_primary,
-    yellow_warn, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT,
+    accent_coral, bg_canvas, bg_code, bg_elevated, bg_selected, bg_selection, bg_surface,
+    border_subtle, cyan_link, friendly_model_name, friendly_provider_name, green_ok,
+    humanize_tokens, logo_gray, mode_accent, note_accent, red_err, scanner_color, text_dim,
+    text_muted, text_primary, yellow_warn, LUNA_LOGO_LEFT, LUNA_LOGO_RIGHT,
 };
 use ratatui::style::Color;
 
@@ -3623,24 +3623,20 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
             lines.push(Line::default());
 
-            let reply_wrapped: Vec<String> = reply
+            let reply_rendered: Vec<Line<'static>> = reply
                 .as_deref()
                 .map(|text| {
-                    text.lines()
-                        .flat_map(|l| {
-                            if l.trim().is_empty() {
-                                vec![String::new()]
-                            } else {
-                                wrap_plain_text(l, inner_w.saturating_sub(3))
-                            }
-                        })
-                        .collect()
+                    let mut md = render_markdown(text, inner_w.saturating_sub(6));
+                    while md.last().is_some_and(|l| l.spans.is_empty()) {
+                        md.pop();
+                    }
+                    md
                 })
                 .unwrap_or_default();
             let reply_rows = if *asking || error.is_some() {
                 2
-            } else if !reply_wrapped.is_empty() {
-                reply_wrapped.len().min(7) + 2
+            } else if !reply_rendered.is_empty() {
+                reply_rendered.len().min(7) + 3
             } else {
                 0
             };
@@ -3682,45 +3678,81 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             };
 
             if let Some((section_label, raw_lines)) = preview_lines {
+                let box_bg = bg_code();
+                let box_w = inner_w.saturating_sub(2);
+                let box_inner_w = box_w.saturating_sub(3);
                 let total_preview = raw_lines.len();
-                let preview_budget = inner_h.saturating_sub(reserved + 2).max(2);
+                let preview_budget = inner_h.saturating_sub(reserved + 4).max(3);
                 let max_scroll = total_preview.saturating_sub(preview_budget);
                 let dscroll = (*diff_scroll).min(max_scroll);
                 let shown_end = (dscroll + preview_budget).min(total_preview);
-                let header = if total_preview > preview_budget {
-                    format!(
-                        " {section_label} ({}–{shown_end} of {total_preview} · [/] scroll):",
-                        dscroll + 1
-                    )
-                } else {
-                    format!(" {section_label}:")
+                let header_title = match req.target.as_deref() {
+                    Some(t) if section_label != "Arguments" => {
+                        format!("{section_label}: {}", shorten_path(t))
+                    }
+                    _ => format!("{section_label}:"),
                 };
-                lines.push(Line::from(Span::styled(
-                    truncate_str(&header, inner_w.saturating_sub(1)),
-                    Style::default()
-                        .fg(text_muted())
-                        .bg(bg_elevated())
-                        .add_modifier(Modifier::BOLD),
-                )));
+                let push_dark_box_row =
+                    |out: &mut Vec<Line<'static>>, content_spans: Vec<Span<'static>>| {
+                        let used: usize = content_spans.iter().map(|s| s.content.width()).sum();
+                        let pad = box_w.saturating_sub(2 + used);
+                        let mut spans = vec![
+                            Span::styled(" ", Style::default().bg(bg_elevated())),
+                            Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
+                        ];
+                        spans.extend(content_spans);
+                        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
+                        spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
+                        out.push(Line::from(spans));
+                    };
+
+                push_dark_box_row(
+                    &mut lines,
+                    vec![Span::styled(
+                        truncate_str(&header_title, box_inner_w),
+                        Style::default()
+                            .fg(text_primary())
+                            .bg(box_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )],
+                );
+                push_dark_box_row(&mut lines, Vec::new());
                 for dline in raw_lines.iter().skip(dscroll).take(preview_budget) {
+                    let trimmed_start = dline.trim_start();
                     let color = if dline.starts_with("+++")
                         || dline.starts_with("---")
                         || dline.starts_with("@@")
                     {
                         cyan_link()
-                    } else if dline.starts_with('+') {
+                    } else if trimmed_start.starts_with('+') {
                         green_ok()
-                    } else if dline.starts_with('-') {
+                    } else if trimmed_start.starts_with('-') {
                         red_err()
                     } else if section_label == "Diff" {
                         text_muted()
                     } else {
                         text_primary()
                     };
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", truncate_str(dline, inner_w.saturating_sub(3))),
-                        Style::default().fg(color).bg(bg_elevated()),
-                    )));
+                    push_dark_box_row(
+                        &mut lines,
+                        vec![Span::styled(
+                            truncate_str(dline, box_inner_w),
+                            Style::default().fg(color).bg(box_bg),
+                        )],
+                    );
+                }
+                if total_preview > preview_budget {
+                    let footer = format!(
+                        "({}–{shown_end} of {total_preview} lines · [/] or PgUp/PgDn scroll)",
+                        dscroll + 1
+                    );
+                    push_dark_box_row(
+                        &mut lines,
+                        vec![Span::styled(
+                            truncate_str(&footer, box_inner_w),
+                            Style::default().fg(text_dim()).bg(box_bg),
+                        )],
+                    );
                 }
                 lines.push(Line::default());
             }
@@ -3738,59 +3770,87 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Style::default().fg(red_err()).bg(bg_elevated()),
                 )));
                 lines.push(Line::default());
-            } else if !reply_wrapped.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        " {}:",
-                        truncate_str(
-                            &format!("Approval model ({approval_model_label})"),
-                            inner_w.saturating_sub(3)
-                        )
+            } else if !reply_rendered.is_empty() {
+                let box_bg = bg_surface();
+                let box_w = inner_w.saturating_sub(2);
+                let box_inner_w = box_w.saturating_sub(3);
+                let hdr = truncate_str(
+                    &format!("Approval model ({approval_model_label}):"),
+                    box_inner_w,
+                );
+                let hdr_pad = box_w.saturating_sub(2 + hdr.width());
+                lines.push(Line::from(vec![
+                    Span::styled(" ", Style::default().bg(bg_elevated())),
+                    Span::styled("│ ", Style::default().fg(accent_coral()).bg(box_bg)),
+                    Span::styled(
+                        hdr,
+                        Style::default()
+                            .fg(accent_coral())
+                            .bg(box_bg)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Style::default()
-                        .fg(accent_coral())
-                        .bg(bg_elevated())
-                        .add_modifier(Modifier::BOLD),
-                )));
+                    Span::styled(" ".repeat(hdr_pad), Style::default().bg(box_bg)),
+                    Span::styled(" ", Style::default().bg(bg_elevated())),
+                ]));
                 let visible_reply = inner_h
                     .saturating_sub(lines.len() + input_rows + choices_rows + 1)
                     .clamp(2, 7);
-                let max_scroll = reply_wrapped.len().saturating_sub(visible_reply);
+                let max_scroll = reply_rendered.len().saturating_sub(visible_reply);
                 let scroll = (*reply_scroll).min(max_scroll);
-                for rline in reply_wrapped.iter().skip(scroll).take(visible_reply) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {rline}"),
-                        Style::default().fg(text_primary()).bg(bg_elevated()),
-                    )));
+                for rline in reply_rendered.iter().skip(scroll).take(visible_reply) {
+                    let mut spans = vec![
+                        Span::styled(" ", Style::default().bg(bg_elevated())),
+                        Span::styled("│ ", Style::default().fg(accent_coral()).bg(box_bg)),
+                    ];
+                    let mut used = 0usize;
+                    for sp in &rline.spans {
+                        let w = sp.content.width();
+                        if used + w > box_inner_w {
+                            let avail = box_inner_w.saturating_sub(used);
+                            let cut = truncate_str(&sp.content, avail);
+                            used += cut.width();
+                            spans.push(Span::styled(
+                                cut,
+                                sp.style
+                                    .bg(box_bg)
+                                    .fg(sp.style.fg.unwrap_or_else(text_primary)),
+                            ));
+                            break;
+                        }
+                        used += w;
+                        spans.push(Span::styled(
+                            sp.content.clone(),
+                            sp.style
+                                .bg(box_bg)
+                                .fg(sp.style.fg.unwrap_or_else(text_primary)),
+                        ));
+                    }
+                    let pad = box_w.saturating_sub(2 + used);
+                    spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
+                    spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
+                    lines.push(Line::from(spans));
                 }
                 lines.push(Line::default());
             }
 
             let choices = [
-                "[y] Allow once",
-                "[a] Allow for this session (Auto mode)",
-                "[n] Deny",
-                "[q] Ask a question / add a suggestion",
+                ("[y] Allow once", green_ok()),
+                ("[a] Allow for this session (Auto mode)", yellow_warn()),
+                ("[n] Deny", red_err()),
+                ("[q] Ask a question / add a suggestion", text_primary()),
             ];
-            for (idx, ch) in choices.iter().enumerate() {
+            for (idx, (ch, base_fg)) in choices.iter().enumerate() {
                 let is_sel = !*editing_input && idx == *selected;
                 let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let prefix = if is_sel { " ▸ " } else { "   " };
                 let line = format!("{prefix}{ch}");
                 let pad = inner_w.saturating_sub(line.width());
+                let mut style = Style::default().fg(*base_fg).bg(bg);
+                if is_sel {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        line,
-                        Style::default()
-                            .fg(if idx == 2 && is_sel {
-                                red_err()
-                            } else if is_sel {
-                                accent_coral()
-                            } else {
-                                text_primary()
-                            })
-                            .bg(bg),
-                    ),
+                    Span::styled(line, style),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                 ]));
             }
@@ -6430,5 +6490,36 @@ mod tests {
         assert!(text.contains("Preview:"), "{text}");
         assert!(text.contains("+line one"), "{text}");
         assert!(text.contains("+line two"), "{text}");
+        // Verify darker diff box background (`bg_code`) and semantic button colors.
+        let mut saw_dark_box = false;
+        let mut saw_allow_green = false;
+        let mut saw_auto_yellow = false;
+        let mut saw_deny_red = false;
+        let mut saw_ask_white = false;
+        for y in 0..32 {
+            let row: String = (0..100).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains("+line one") {
+                if let Some(col) = row.find("+line one") {
+                    saw_dark_box = buf[(col as u16, y)].bg == bg_code();
+                }
+            }
+            if let Some(col) = row.find("Allow once") {
+                saw_allow_green = buf[(col as u16, y)].fg == green_ok();
+            }
+            if let Some(col) = row.find("Auto mode") {
+                saw_auto_yellow = buf[(col as u16, y)].fg == yellow_warn();
+            }
+            if let Some(col) = row.find("[n] Deny") {
+                saw_deny_red = buf[(col as u16, y)].fg == red_err();
+            }
+            if let Some(col) = row.find("[q] Ask") {
+                saw_ask_white = buf[(col as u16, y)].fg == text_primary();
+            }
+        }
+        assert!(saw_dark_box, "diff/preview box must use darker bg_code()");
+        assert!(saw_allow_green, "Allow once must be green");
+        assert!(saw_auto_yellow, "Auto mode must be yellow");
+        assert!(saw_deny_red, "Deny must be red");
+        assert!(saw_ask_white, "Ask question must be white");
     }
 }
