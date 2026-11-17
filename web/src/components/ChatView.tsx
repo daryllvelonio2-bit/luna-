@@ -60,15 +60,22 @@ interface PairedToolStep {
   hasOutput: boolean;
 }
 
-interface AssistantSegment {
-  reasoning?: string;
-  tools: PairedToolStep[];
-  content?: string;
-}
+type ActivityEntry =
+  | { kind: 'reasoning'; key: string; text: string }
+  | { kind: 'tool'; step: PairedToolStep }
+  | { kind: 'orphan'; key: string; output: string }
+  | { kind: 'note'; key: string; text: string };
 
 type RenderTurn =
   | { kind: 'user'; content: string; key: string }
-  | { kind: 'assistant'; segments: AssistantSegment[]; orphanOutputs: string[]; key: string };
+  | {
+      kind: 'assistant';
+      activities: ActivityEntry[];
+      finalContents: string[];
+      reasoningCount: number;
+      toolCount: number;
+      key: string;
+    };
 
 function summarizeToolArgs(name: string, args: unknown): string {
   if (!args || typeof args !== 'object') return '';
@@ -114,10 +121,9 @@ function buildRenderTurns(messages: TranscriptMessageDto[]): RenderTurn[] {
   const toolStepById = new Map<string, PairedToolStep>();
 
   const flushAssistant = () => {
-    if (currentAssistant) {
-      turns.push(currentAssistant);
-      currentAssistant = null;
-    }
+    if (!currentAssistant) return;
+    turns.push(currentAssistant);
+    currentAssistant = null;
   };
 
   messages.forEach((m, idx) => {
@@ -141,29 +147,48 @@ function buildRenderTurns(messages: TranscriptMessageDto[]): RenderTurn[] {
         if (!currentAssistant) {
           currentAssistant = {
             kind: 'assistant',
-            segments: [],
-            orphanOutputs: [],
+            activities: [],
+            finalContents: [],
+            reasoningCount: 0,
+            toolCount: 0,
             key: `a-${idx}`,
           };
         }
-        currentAssistant.orphanOutputs.push(output);
+        currentAssistant.activities.push({
+          kind: 'orphan',
+          key: `orphan-${idx}`,
+          output,
+        });
+        currentAssistant.toolCount += 1;
       }
       return;
     }
 
-    // Assistant or system summary message
     if (!currentAssistant) {
       currentAssistant = {
         kind: 'assistant',
-        segments: [],
-        orphanOutputs: [],
+        activities: [],
+        finalContents: [],
+        reasoningCount: 0,
+        toolCount: 0,
         key: `a-${idx}`,
       };
     }
 
-    const pairedTools: PairedToolStep[] = (m.tool_calls || []).map((tc: ToolCallItem) => {
+    const hasReasoning = Boolean(m.reasoning && m.reasoning.trim().length > 0);
+    if (hasReasoning && m.reasoning) {
+      currentAssistant.activities.push({
+        kind: 'reasoning',
+        key: `r-${idx}`,
+        text: m.reasoning,
+      });
+      currentAssistant.reasoningCount += 1;
+    }
+
+    const rawTools = m.tool_calls || [];
+    rawTools.forEach((tc: ToolCallItem, tIdx: number) => {
       const step: PairedToolStep = {
-        id: tc.id || `tc-${idx}-${Math.random()}`,
+        id: tc.id || `tc-${idx}-${tIdx}`,
         name: tc.name,
         arguments: tc.arguments,
         hasOutput: false,
@@ -171,18 +196,21 @@ function buildRenderTurns(messages: TranscriptMessageDto[]): RenderTurn[] {
       if (tc.id) {
         toolStepById.set(tc.id, step);
       }
-      return step;
+      currentAssistant!.activities.push({ kind: 'tool', step });
+      currentAssistant!.toolCount += 1;
     });
 
     const hasContent = Boolean(m.content && m.content.trim().length > 0);
-    const hasReasoning = Boolean(m.reasoning && m.reasoning.trim().length > 0);
-
-    if (hasReasoning || pairedTools.length > 0 || hasContent) {
-      currentAssistant.segments.push({
-        reasoning: m.reasoning || undefined,
-        tools: pairedTools,
-        content: m.content || undefined,
-      });
+    if (hasContent && m.content) {
+      if (rawTools.length > 0) {
+        currentAssistant.activities.push({
+          kind: 'note',
+          key: `note-${idx}`,
+          text: m.content,
+        });
+      } else {
+        currentAssistant.finalContents.push(m.content);
+      }
     }
   });
 
@@ -216,6 +244,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onAskApprovalQuestion,
 }) => {
   const [input, setInput] = useState('');
+  const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
+  const [collapsedLive, setCollapsedLive] = useState<Record<string, boolean>>({});
   const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({});
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [copiedTurnKey, setCopiedTurnKey] = useState<string | null>(null);
@@ -231,8 +261,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const prevTurnRunningRef = useRef(turnRunning);
 
   const turns = useMemo(() => buildRenderTurns(messages), [messages]);
+
+  // Collapse all activity groups, reasoning blocks, and tool drawers when a turn finishes
+  useEffect(() => {
+    if (prevTurnRunningRef.current && !turnRunning) {
+      setExpandedActivity({});
+      setCollapsedLive({});
+      setExpandedReasoning({});
+      setExpandedTools({});
+    }
+    prevTurnRunningRef.current = turnRunning;
+  }, [turnRunning]);
+
+  // Reset expansion state when switching conversations
+  useEffect(() => {
+    setExpandedActivity({});
+    setCollapsedLive({});
+    setExpandedReasoning({});
+    setExpandedTools({});
+  }, [sessionId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -259,6 +309,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  const toggleActivity = (turnKey: string, isLive: boolean) => {
+    if (isLive) {
+      setCollapsedLive((prev) => ({ ...prev, [turnKey]: !prev[turnKey] }));
+    } else {
+      setExpandedActivity((prev) => ({ ...prev, [turnKey]: !prev[turnKey] }));
+    }
+  };
+
   const toggleReasoning = (key: string) => {
     setExpandedReasoning((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -268,10 +326,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const handleCopyAssistantTurn = (turn: Extract<RenderTurn, { kind: 'assistant' }>) => {
-    const text = turn.segments
-      .map((s) => s.content || '')
-      .filter(Boolean)
-      .join('\n\n');
+    const text = turn.finalContents.join('\n\n').trim();
     if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
       setCopiedTurnKey(turn.key);
@@ -317,6 +372,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const modelLabel = model || provider || 'default';
+
+  const formatActivityLabel = (
+    turn: Extract<RenderTurn, { kind: 'assistant' }>,
+    isLive: boolean
+  ): string => {
+    const { reasoningCount, toolCount } = turn;
+    if (isLive) {
+      if (toolCount > 0) {
+        return `Working · ${toolCount} ${toolCount === 1 ? 'tool call' : 'tool calls'}`;
+      }
+      if (reasoningCount > 0) {
+        return 'Thinking…';
+      }
+      return 'Working…';
+    }
+    if (reasoningCount > 0 && toolCount > 0) {
+      return `Thought and used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
+    }
+    if (toolCount > 0) {
+      return `Used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
+    }
+    return 'Thought process';
+  };
 
   return (
     <div className="chat-view">
@@ -417,145 +495,168 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }
 
               const isLastTurn = turnIdx === turns.length - 1;
-              const hasProse = turn.segments.some((s) => Boolean(s.content && s.content.trim()));
+              const isLive = isLastTurn && turnRunning;
+              const hasActivity = turn.activities.length > 0;
+              const isActivityOpen = isLive
+                ? !collapsedLive[turn.key]
+                : Boolean(expandedActivity[turn.key]);
+              const hasProse = turn.finalContents.length > 0;
 
               return (
                 <div key={turn.key} className="turn-assistant">
-                  {turn.segments.map((seg, segIdx) => {
-                    const rKey = `${turn.key}-r-${segIdx}`;
-                    const isReasoningOpen = Boolean(expandedReasoning[rKey]);
-
-                    return (
-                      <div key={segIdx} className="assistant-segment">
-                        {seg.reasoning && (
-                          <div className="thinking-block">
-                            <button
-                              type="button"
-                              className="thinking-toggle"
-                              onClick={() => toggleReasoning(rKey)}
-                            >
-                              <Sparkles size={13} className="thinking-icon" />
-                              <span>Thought process</span>
-                              {isReasoningOpen ? (
-                                <ChevronDown size={13} />
-                              ) : (
-                                <ChevronRight size={13} />
-                              )}
-                            </button>
-                            {isReasoningOpen && (
-                              <div className="thinking-body">{seg.reasoning}</div>
-                            )}
-                          </div>
+                  {hasActivity && (
+                    <div className="activity-group">
+                      <button
+                        type="button"
+                        className="activity-summary-btn"
+                        onClick={() => toggleActivity(turn.key, isLive)}
+                      >
+                        {isLive ? (
+                          <span className="pulse-dot" />
+                        ) : (
+                          <Sparkles size={13} className="thinking-icon" />
                         )}
+                        <span>{formatActivityLabel(turn, isLive)}</span>
+                        {isActivityOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      </button>
 
-                        {seg.tools.length > 0 && (
-                          <div className="tool-steps">
-                            {seg.tools.map((tc) => {
-                              const open = Boolean(expandedTools[tc.id]);
-                              const summary = summarizeToolArgs(tc.name, tc.arguments);
-                              const isActiveRunning = !tc.hasOutput && isLastTurn && turnRunning;
+                      {isActivityOpen && (
+                        <div className="activity-trace">
+                          {turn.activities.map((entry, entryIdx) => {
+                            if (entry.kind === 'reasoning') {
+                              const rKey = `${turn.key}-${entry.key}`;
+                              const isLastEntry = entryIdx === turn.activities.length - 1;
+                              // While live, auto-show the active reasoning stream unless collapsed
+                              const rOpen =
+                                expandedReasoning[rKey] !== undefined
+                                  ? expandedReasoning[rKey]
+                                  : isLive && isLastEntry;
 
                               return (
-                                <div key={tc.id} className="tool-step">
+                                <div key={rKey} className="thinking-block">
+                                  <button
+                                    type="button"
+                                    className="thinking-toggle"
+                                    onClick={() => toggleReasoning(rKey)}
+                                  >
+                                    <Sparkles size={12} className="thinking-icon" />
+                                    <span>Thought process</span>
+                                    {rOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                  </button>
+                                  {rOpen && <div className="thinking-body">{entry.text}</div>}
+                                </div>
+                              );
+                            }
+
+                            if (entry.kind === 'note') {
+                              return (
+                                <div key={`${turn.key}-${entry.key}`} className="activity-note">
+                                  {entry.text}
+                                </div>
+                              );
+                            }
+
+                            if (entry.kind === 'orphan') {
+                              const oKey = `${turn.key}-${entry.key}`;
+                              const open = Boolean(expandedTools[oKey]);
+                              const preview = entry.output.split('\n')[0]?.slice(0, 72) || 'Tool output';
+                              return (
+                                <div key={oKey} className="tool-step">
                                   <button
                                     type="button"
                                     className="tool-step-row"
-                                    onClick={() => toggleTool(tc.id)}
+                                    onClick={() => toggleTool(oKey)}
                                   >
                                     <span className="tool-step-left">
-                                      <span className="tool-step-icon">{getToolIcon(tc.name)}</span>
-                                      <span className="tool-step-name">{tc.name}</span>
-                                      {summary && (
-                                        <span className="tool-step-summary" title={summary}>
-                                          {summary}
-                                        </span>
-                                      )}
+                                      <span className="tool-step-icon">
+                                        <Terminal size={13} />
+                                      </span>
+                                      <span className="tool-step-name">output</span>
+                                      <span className="tool-step-summary">{preview}</span>
                                     </span>
                                     <span className="tool-step-right">
-                                      {isActiveRunning ? (
-                                        <span className="tool-status tool-status-running">Running</span>
-                                      ) : tc.hasOutput ? (
-                                        <span className="tool-status">Done</span>
-                                      ) : null}
-                                      {open ? (
-                                        <ChevronDown size={13} />
-                                      ) : (
-                                        <ChevronRight size={13} />
-                                      )}
+                                      {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                                     </span>
                                   </button>
-
                                   {open && (
                                     <div className="tool-step-drawer">
-                                      {tc.arguments !== undefined && (
-                                        <div className="tool-drawer-section">
-                                          <div className="tool-drawer-label">Input</div>
-                                          <pre className="tool-drawer-pre">
-                                            {formatToolArgs(tc.arguments)}
-                                          </pre>
-                                        </div>
-                                      )}
-                                      {tc.hasOutput && (
-                                        <div className="tool-drawer-section">
-                                          <div className="tool-drawer-label">Output</div>
-                                          <pre className="tool-drawer-pre">
-                                            {tc.output || '(empty output)'}
-                                          </pre>
-                                        </div>
-                                      )}
+                                      <pre className="tool-drawer-pre">{entry.output}</pre>
                                     </div>
                                   )}
                                 </div>
                               );
-                            })}
-                          </div>
-                        )}
+                            }
 
-                        {seg.content && seg.content.trim().length > 0 && (
-                          <div className="assistant-prose">
-                            <MarkdownContent content={seg.content} />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                            const tc = entry.step;
+                            const open = Boolean(expandedTools[tc.id]);
+                            const summary = summarizeToolArgs(tc.name, tc.arguments);
+                            const isActiveRunning = !tc.hasOutput && isLive;
 
-                  {turn.orphanOutputs.length > 0 && (
-                    <div className="tool-steps">
-                      {turn.orphanOutputs.map((out, oi) => {
-                        const oKey = `${turn.key}-orphan-${oi}`;
-                        const open = Boolean(expandedTools[oKey]);
-                        const preview = out.split('\n')[0]?.slice(0, 72) || 'Tool output';
-                        return (
-                          <div key={oKey} className="tool-step">
-                            <button
-                              type="button"
-                              className="tool-step-row"
-                              onClick={() => toggleTool(oKey)}
-                            >
-                              <span className="tool-step-left">
-                                <span className="tool-step-icon">
-                                  <Terminal size={13} />
-                                </span>
-                                <span className="tool-step-name">output</span>
-                                <span className="tool-step-summary">{preview}</span>
-                              </span>
-                              <span className="tool-step-right">
-                                {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                              </span>
-                            </button>
-                            {open && (
-                              <div className="tool-step-drawer">
-                                <pre className="tool-drawer-pre">{out}</pre>
+                            return (
+                              <div key={tc.id} className="tool-step">
+                                <button
+                                  type="button"
+                                  className="tool-step-row"
+                                  onClick={() => toggleTool(tc.id)}
+                                >
+                                  <span className="tool-step-left">
+                                    <span className="tool-step-icon">{getToolIcon(tc.name)}</span>
+                                    <span className="tool-step-name">{tc.name}</span>
+                                    {summary && (
+                                      <span className="tool-step-summary" title={summary}>
+                                        {summary}
+                                      </span>
+                                    )}
+                                  </span>
+                                  <span className="tool-step-right">
+                                    {isActiveRunning ? (
+                                      <span className="tool-status tool-status-running">Running</span>
+                                    ) : tc.hasOutput ? (
+                                      <span className="tool-status">Done</span>
+                                    ) : null}
+                                    {open ? (
+                                      <ChevronDown size={13} />
+                                    ) : (
+                                      <ChevronRight size={13} />
+                                    )}
+                                  </span>
+                                </button>
+
+                                {open && (
+                                  <div className="tool-step-drawer">
+                                    {tc.arguments !== undefined && (
+                                      <div className="tool-drawer-section">
+                                        <div className="tool-drawer-label">Input</div>
+                                        <pre className="tool-drawer-pre">
+                                          {formatToolArgs(tc.arguments)}
+                                        </pre>
+                                      </div>
+                                    )}
+                                    {tc.hasOutput && (
+                                      <div className="tool-drawer-section">
+                                        <div className="tool-drawer-label">Output</div>
+                                        <pre className="tool-drawer-pre">
+                                          {tc.output || '(empty output)'}
+                                        </pre>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
 
-                  {hasProse && !(isLastTurn && turnRunning) && (
+                  {turn.finalContents.map((prose, pIdx) => (
+                    <div key={`${turn.key}-p-${pIdx}`} className="assistant-prose">
+                      <MarkdownContent content={prose} />
+                    </div>
+                  ))}
+
+                  {hasProse && !isLive && (
                     <div className="turn-actions">
                       <button
                         type="button"
@@ -582,61 +683,46 @@ export const ChatView: React.FC<ChatViewProps> = ({
             })
           )}
 
-          {turnRunning &&
-            (turns.length === 0 || turns[turns.length - 1].kind === 'user') && (
-              <div className="turn-assistant">
-                <div className="thinking-indicator">
-                  <span className="pulse-dot" />
-                  <span>Luna is thinking…</span>
-                </div>
-              </div>
-            )}
-
           <div ref={messagesEndRef} />
         </div>
       </div>
 
       {pendingApproval && (
         <div className="modal-backdrop">
-          <div className="modal-card" role="dialog" aria-modal="true" aria-label="Tool approval">
+          <div className="modal-card">
             <div className="modal-header">
-              <div className="modal-title-group">
+              <div className="modal-title-row">
                 <ShieldAlert size={17} className="text-warning" />
-                <span className="modal-title">Approve tool execution</span>
+                <span>Approve tool execution</span>
               </div>
-              <span className="pill">{pendingApproval.tool_name}</span>
+              <span className="badge badge-mono">{pendingApproval.tool_name}</span>
             </div>
 
             <div className="modal-body">
               {pendingApproval.target && (
                 <div className="form-group">
                   <span className="form-label">Target</span>
-                  <div className="mono-inline-box">{pendingApproval.target}</div>
+                  <div className="code-inline-block">{pendingApproval.target}</div>
                 </div>
               )}
 
-              {pendingApproval.diff ? (
-                <div className="form-group">
-                  <span className="form-label">Proposed diff</span>
-                  <div className="diff-view">{pendingApproval.diff}</div>
-                </div>
-              ) : (
-                <div className="form-group">
-                  <span className="form-label">Arguments</span>
-                  <div className="diff-view">
-                    {JSON.stringify(pendingApproval.arguments, null, 2)}
-                  </div>
-                </div>
-              )}
+              <div className="form-group">
+                <span className="form-label">
+                  {pendingApproval.diff ? 'Proposed diff' : 'Arguments'}
+                </span>
+                <pre className="diff-view">
+                  {pendingApproval.diff || JSON.stringify(pendingApproval.arguments, null, 2)}
+                </pre>
+              </div>
 
               {approvalReplies.length > 0 && (
                 <div className="form-group">
-                  <span className="form-label">Model Q&A</span>
+                  <span className="form-label">Model explanation</span>
                   <div className="qa-list">
-                    {approvalReplies.map((r, i) => (
+                    {approvalReplies.map((item, i) => (
                       <div key={i} className="qa-item">
-                        <div className="qa-question">Q: {r.q}</div>
-                        <div className="qa-answer">{r.a}</div>
+                        <div className="qa-question">Q: {item.q}</div>
+                        <div className="qa-answer">{item.a}</div>
                       </div>
                     ))}
                   </div>
@@ -644,12 +730,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
               )}
 
               <div className="form-group">
-                <span className="form-label">Ask about this change before approving</span>
-                <div className="inline-row">
+                <span className="form-label">Ask about this command before deciding</span>
+                <div className="inline-input-row">
                   <input
                     type="text"
-                    className="form-input flex-1"
-                    placeholder="Ask a question or request a narrower edit…"
+                    className="form-input"
+                    placeholder="What does this command modify?"
                     value={approvalQuestion}
                     onChange={(e) => setApprovalQuestion(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleAskApproval()}
@@ -670,31 +756,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <button
                 type="button"
                 className="btn btn-danger"
-                onClick={() => onResolveApproval('deny')}
+                onClick={() => {
+                  const reason = window.prompt('Optional denial reason or feedback:');
+                  if (reason && reason.trim()) {
+                    onResolveApproval('deny_with_feedback', undefined, reason.trim());
+                  } else {
+                    onResolveApproval('deny');
+                  }
+                  setApprovalReplies([]);
+                }}
               >
                 Deny
               </button>
-              {approvalReplies.length > 0 && (
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() =>
-                    onResolveApproval(
-                      'deny_with_feedback',
-                      undefined,
-                      approvalReplies[approvalReplies.length - 1].q
-                    )
-                  }
-                >
-                  Deny with feedback
-                </button>
-              )}
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={() => onResolveApproval('run')}
+                onClick={() => {
+                  onResolveApproval('run');
+                  setApprovalReplies([]);
+                }}
               >
-                Approve once
+                Allow
               </button>
             </div>
           </div>
@@ -703,45 +785,59 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {pendingClarify && (
         <div className="modal-backdrop">
-          <div className="modal-card" role="dialog" aria-modal="true" aria-label="Clarification">
+          <div className="modal-card">
             <div className="modal-header">
-              <div className="modal-title-group">
+              <div className="modal-title-row">
                 <HelpCircle size={17} className="text-accent" />
-                <span className="modal-title">Clarification needed</span>
+                <span>Clarification requested</span>
               </div>
             </div>
 
             <div className="modal-body">
-              {(pendingClarify.questions && pendingClarify.questions.length > 0
-                ? pendingClarify.questions
-                : [{ question: pendingClarify.question, choices: pendingClarify.choices }]
-              ).map((q, idx) => (
-                <div key={idx} className="form-group">
-                  <span className="clarify-question">{q.question}</span>
-                  <div className="radio-stack">
-                    {q.choices?.map((choice) => (
+              {pendingClarify.questions && pendingClarify.questions.length > 0 ? (
+                pendingClarify.questions.map((q, idx) => (
+                  <div key={idx} className="form-group">
+                    <span className="form-label form-label-strong">{q.question}</span>
+                    <div className="radio-list">
+                      {(q.choices || []).map((choice) => (
+                        <label key={choice} className="radio-row">
+                          <input
+                            type="radio"
+                            name={`q-${idx}`}
+                            checked={clarifyAnswers[idx] === choice}
+                            onChange={() => setClarifyAnswers((prev) => ({ ...prev, [idx]: choice }))}
+                          />
+                          <span>{choice}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="form-group">
+                  <span className="form-label form-label-strong">{pendingClarify.question}</span>
+                  <div className="radio-list">
+                    {pendingClarify.choices.map((choice) => (
                       <label key={choice} className="radio-row">
                         <input
                           type="radio"
-                          name={`choice-${idx}`}
-                          checked={clarifyAnswers[idx] === choice}
-                          onChange={() =>
-                            setClarifyAnswers((prev) => ({ ...prev, [idx]: choice }))
-                          }
+                          name="choice-0"
+                          checked={clarifyAnswers[0] === choice}
+                          onChange={() => setClarifyAnswers((prev) => ({ ...prev, [0]: choice }))}
                         />
                         <span>{choice}</span>
                       </label>
                     ))}
                   </div>
                 </div>
-              ))}
+              )}
 
               <div className="form-group">
                 <span className="form-label">Or enter a custom answer</span>
                 <input
                   type="text"
                   className="form-input"
-                  placeholder="Custom response…"
+                  placeholder="Type response…"
                   value={customClarifyInput}
                   onChange={(e) => setCustomClarifyInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleClarifySubmit()}
@@ -758,45 +854,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      <div className="composer-region">
-        <div className="composer-shell">
+      <div className="chat-composer-wrap">
+        <div className="chat-composer">
           <textarea
             ref={textareaRef}
-            className="composer-textarea"
-            placeholder={sessionId ? 'Message Luna…' : 'Create or select a conversation to start'}
+            className="chat-textarea"
+            placeholder={
+              sessionId
+                ? 'Message Luna… (Enter to send, Shift+Enter for newline)'
+                : 'Select or start a conversation first'
+            }
             disabled={!sessionId}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             rows={1}
           />
-          <div className="composer-footer">
-            <div className="composer-meta">
-              <button
-                type="button"
-                className="composer-model-btn"
-                onClick={onOpenSettings}
-                title="Change model or provider"
-              >
-                {modelLabel}
-              </button>
-              <span className="composer-hint">Enter to send · Shift+Enter for newline</span>
-            </div>
-
+          <div className="chat-composer-footer">
+            <span className="composer-hint">
+              {provider && model ? `${provider} · ${model}` : 'Ready'}
+            </span>
             {turnRunning ? (
               <button
                 type="button"
-                className="send-circle send-circle-stop"
+                className="composer-stop-btn"
                 onClick={onInterrupt}
                 title="Stop generating"
                 aria-label="Stop generating"
               >
-                <Square size={13} fill="currentColor" />
+                <Square size={14} fill="currentColor" />
               </button>
             ) : (
               <button
                 type="button"
-                className="send-circle"
+                className="composer-send-btn"
                 onClick={() => handleSend()}
                 disabled={!sessionId || !input.trim()}
                 title="Send message"
