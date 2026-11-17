@@ -82,6 +82,11 @@ pub enum SelectAction {
         provider: String,
         ids: Vec<String>,
     },
+    ConnectPriorityScope {
+        provider: String,
+        id: String,
+        has_override: bool,
+    },
     ConnectStrategyProvider {
         ids: Vec<String>,
     },
@@ -804,6 +809,7 @@ pub enum TranscriptClickTarget {
     OpenSubagents,
     #[allow(dead_code)]
     OpenSubagent(String),
+    OpenCredentialPriority(String),
 }
 
 #[derive(Debug, Clone)]

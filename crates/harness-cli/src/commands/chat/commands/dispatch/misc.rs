@@ -16,7 +16,14 @@ impl<'a> SlashContext<'a> {
         };
         // handle_connect_command restores the composer on every exit path; drawing it again
         // here would print a second box below the first.
-        if let Err(e) = connect::handle_connect_command(key_rx, self.ui, self.cred_manager).await {
+        if let Err(e) = connect::handle_connect_command(
+            key_rx,
+            self.ui,
+            self.cred_manager,
+            Some(self.session_id),
+        )
+        .await
+        {
             self.ui.emit_above(&format!(
                 "{} Failed to open provider setup: {}",
                 "✖".red().bold(),
@@ -28,6 +35,7 @@ impl<'a> SlashContext<'a> {
             self.current_provider,
             self.current_model,
             self.cred_manager,
+            Some(self.session_id),
         )
         .await;
         Ok(SlashOutcome::Continue)

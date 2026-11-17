@@ -567,6 +567,9 @@ async fn apply_transcript_click(env: &Env<'_>, st: &mut TuiState, target: Transc
             st.jump_to_latest();
             clear_selection(st);
         }
+        TranscriptClickTarget::OpenCredentialPriority(provider) => {
+            super::actions::open_connect_priority_credential(env, st, provider).await;
+        }
     }
 }
 

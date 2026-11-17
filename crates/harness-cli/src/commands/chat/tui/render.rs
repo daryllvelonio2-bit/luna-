@@ -1523,6 +1523,12 @@ fn render_composer_card(
                     height: 1,
                 },
             );
+            st.transcript_hit_boxes.push(TranscriptHitBox {
+                y: ag_y,
+                x_start: rect.x,
+                x_end: rect.x.saturating_add(rect.width),
+                target: TranscriptClickTarget::OpenCredentialPriority("antigravity".to_string()),
+            });
         }
     }
 }

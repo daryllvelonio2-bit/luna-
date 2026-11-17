@@ -159,6 +159,7 @@ async fn seed_status(env: &Env<'_>) {
         env.current_provider.as_str(),
         env.current_model.as_str(),
         &env.cred_manager,
+        Some(env.session_id.as_str()),
     )
     .await;
     // A resumed named session shows its name centered in the status bar from the first frame.

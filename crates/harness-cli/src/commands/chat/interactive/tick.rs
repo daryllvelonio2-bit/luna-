@@ -108,6 +108,7 @@ pub(super) fn animation(env: &mut Env<'_>, st: &mut ReplState) {
             current_provider.clone(),
             current_model.clone(),
             cred_manager.clone(),
+            Some(session_id.clone()),
         ));
     }
     // The queue's second drain path: a fold the user asked for ends without a turn-end

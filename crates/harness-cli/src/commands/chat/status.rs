@@ -78,6 +78,7 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
     current_provider: &str,
     current_model: &str,
     cred_manager: &Arc<CredentialManager>,
+    session_id: Option<&str>,
 ) {
     if !is_antigravity(current_provider) {
         ui.set_account_name(None);
@@ -85,7 +86,7 @@ pub(crate) async fn refresh_antigravity_status_if_needed(
         return;
     }
 
-    match primary_credential(cred_manager).await {
+    match primary_credential(cred_manager, session_id).await {
         Some((client, api_key, label)) => {
             // The account name follows the credential actually in use, so a label written down
             // once cannot outlive the key it described.
@@ -118,11 +119,14 @@ pub(crate) async fn refresh_antigravity_quota_owned(
     provider: String,
     model: String,
     cred_manager: Arc<CredentialManager>,
+    session_id: Option<String>,
 ) {
     if !is_antigravity(&provider) {
         return;
     }
-    if let Some((client, api_key, _label)) = primary_credential(&cred_manager).await {
+    if let Some((client, api_key, _label)) =
+        primary_credential(&cred_manager, session_id.as_deref()).await
+    {
         fetch_quota_lines(&ui, &client, &api_key, &model, &cred_manager).await;
     }
 }
@@ -134,12 +138,26 @@ fn is_antigravity(provider: &str) -> bool {
 /// The credential the account's requests are served by, a client to spend it on, and its label.
 async fn primary_credential(
     cred_manager: &Arc<CredentialManager>,
+    session_id: Option<&str>,
 ) -> Option<(reqwest::Client, String, String)> {
+    let session_override = match session_id {
+        Some(sid) => cred_manager.get_session_priority_credential(sid, "antigravity"),
+        None => None,
+    };
     let creds = cred_manager.get_credentials("antigravity").await;
-    let primary = creds
-        .iter()
-        .find(|c| c.is_priority && !c.is_temporarily_disabled)
-        .or_else(|| creds.iter().find(|c| !c.is_temporarily_disabled))?;
+    let primary = if let Some(ref target) = session_override {
+        creds
+            .iter()
+            .find(|c| (&c.id == target || &c.label == target) && !c.is_temporarily_disabled)
+    } else {
+        None
+    }
+    .or_else(|| {
+        creds
+            .iter()
+            .find(|c| c.is_priority && !c.is_temporarily_disabled)
+            .or_else(|| creds.iter().find(|c| !c.is_temporarily_disabled))
+    })?;
     let client = harness_providers::build_http_client(30).ok()?;
     Some((client, primary.api_key.clone(), primary.label.clone()))
 }

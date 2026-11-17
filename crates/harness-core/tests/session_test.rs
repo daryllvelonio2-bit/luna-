@@ -984,6 +984,36 @@ async fn heuristic_and_reported_estimates_agree_on_a_fixed_sample() {
 }
 
 #[tokio::test]
+async fn credential_priorities_persistence_survives_reopening_the_database() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+
+    {
+        let store = SqliteSessionStore::new(Some(path.clone())).unwrap();
+        store.ensure_session("s1").await.unwrap();
+        store
+            .set_credential_priority("s1", "antigravity", "account-1")
+            .await
+            .unwrap();
+    }
+
+    let reopened = SqliteSessionStore::new(Some(path.clone())).unwrap();
+    let rec = reopened.get("s1").await.unwrap();
+    assert_eq!(
+        rec.credential_priorities.get("antigravity"),
+        Some(&"account-1".to_string())
+    );
+
+    // Clear credential priority
+    reopened
+        .clear_credential_priority("s1", "antigravity")
+        .await
+        .unwrap();
+    let cleared_rec = reopened.get("s1").await.unwrap();
+    assert_eq!(cleared_rec.credential_priorities.get("antigravity"), None);
+}
+
+#[tokio::test]
 async fn estimate_prefers_reported_usage_and_adds_the_heuristic_tail() {
     let mut with_usage = Message::assistant("an answer");
     with_usage.usage = Some(TokenUsage::estimated(1_000, 200));

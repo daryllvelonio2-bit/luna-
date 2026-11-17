@@ -341,6 +341,7 @@ pub struct GenericProviderClient {
     discovery: Arc<ModelDiscovery>,
     http_client: reqwest::Client,
     default_model: String,
+    session_id: Option<String>,
 }
 
 impl GenericProviderClient {
@@ -367,7 +368,21 @@ impl GenericProviderClient {
             discovery,
             http_client: build_http_client(descriptor.timeout_secs)?,
             default_model: default_model.into(),
+            session_id: None,
         })
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     /// Builds the auth headers for one request and returns the secret that was used, so a failing
@@ -375,10 +390,18 @@ impl GenericProviderClient {
     async fn build_auth_headers(
         &self,
     ) -> Result<(HeaderMap, Option<String>, SecretString), HarnessError> {
-        let secret = self
-            .cred_manager
-            .acquire_credential(&self.provider_id)
-            .await?;
+        let secret = match &self.session_id {
+            Some(sid) => {
+                self.cred_manager
+                    .acquire_credential_for_session(&self.provider_id, sid)
+                    .await?
+            }
+            None => {
+                self.cred_manager
+                    .acquire_credential(&self.provider_id)
+                    .await?
+            }
+        };
         let api_key = secret.expose_secret().to_string();
 
         let mut headers = HeaderMap::new();
