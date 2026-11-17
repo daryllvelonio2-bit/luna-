@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type {
   ApprovalRequestPayload,
   ClarifyRequestPayload,
@@ -6,8 +6,6 @@ import type {
   TranscriptMessageDto,
 } from '../types';
 import {
-  ArrowUp,
-  Square,
   ChevronDown,
   ChevronRight,
   ShieldAlert,
@@ -21,19 +19,23 @@ import {
   Check,
   PanelLeft,
   Plus,
+  Folder,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
+import { Composer } from './Composer';
 
 interface ChatViewProps {
   sessionId: string | null;
   sessionTitle: string;
+  workspaceRoot: string;
   provider: string;
   model: string;
   messages: TranscriptMessageDto[];
   turnRunning: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
-  onOpenSettings: () => void;
+  onOpenModelPicker: () => void;
+  onOpenWorkspacePicker: () => void;
   onNewSession: () => void;
   onSendMessage: (text: string) => void;
   onInterrupt: () => void;
@@ -224,16 +226,246 @@ const STARTER_PROMPTS = [
   'Check failing tests or compiler warnings',
 ];
 
+function formatActivityLabel(
+  turn: Extract<RenderTurn, { kind: 'assistant' }>,
+  isLive: boolean
+): string {
+  const { reasoningCount, toolCount } = turn;
+  if (isLive) {
+    if (toolCount > 0) {
+      return `Working · ${toolCount} ${toolCount === 1 ? 'tool call' : 'tool calls'}`;
+    }
+    if (reasoningCount > 0) {
+      return 'Thinking…';
+    }
+    return 'Working…';
+  }
+  if (reasoningCount > 0 && toolCount > 0) {
+    return `Thought and used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
+  }
+  if (toolCount > 0) {
+    return `Used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
+  }
+  return 'Thought process';
+}
+
+interface AssistantTurnRowProps {
+  turn: Extract<RenderTurn, { kind: 'assistant' }>;
+  isLive: boolean;
+  isActivityOpen: boolean;
+  expandedReasoning: Record<string, boolean>;
+  expandedTools: Record<string, boolean>;
+  copied: boolean;
+  onToggleActivity: (turnKey: string, isLive: boolean) => void;
+  onToggleReasoning: (key: string) => void;
+  onToggleTool: (id: string) => void;
+  onCopy: (turn: Extract<RenderTurn, { kind: 'assistant' }>) => void;
+}
+
+const AssistantTurnRow: React.FC<AssistantTurnRowProps> = React.memo(
+  ({
+    turn,
+    isLive,
+    isActivityOpen,
+    expandedReasoning,
+    expandedTools,
+    copied,
+    onToggleActivity,
+    onToggleReasoning,
+    onToggleTool,
+    onCopy,
+  }) => {
+    const hasActivity = turn.activities.length > 0;
+    const hasProse = turn.finalContents.length > 0;
+
+    return (
+      <div className="turn-assistant">
+        {hasActivity && (
+          <div className="activity-group">
+            <button
+              type="button"
+              className="activity-summary-btn"
+              onClick={() => onToggleActivity(turn.key, isLive)}
+            >
+              {isLive ? (
+                <span className="pulse-dot" />
+              ) : (
+                <Sparkles size={13} className="thinking-icon" />
+              )}
+              <span>{formatActivityLabel(turn, isLive)}</span>
+              {isActivityOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            </button>
+
+            {isActivityOpen && (
+              <div className="activity-trace">
+                {turn.activities.map((entry, entryIdx) => {
+                  if (entry.kind === 'reasoning') {
+                    const rKey = `${turn.key}-${entry.key}`;
+                    const isLastEntry = entryIdx === turn.activities.length - 1;
+                    const rOpen =
+                      expandedReasoning[rKey] !== undefined
+                        ? expandedReasoning[rKey]
+                        : isLive && isLastEntry;
+
+                    return (
+                      <div key={rKey} className="thinking-block">
+                        <button
+                          type="button"
+                          className="thinking-toggle"
+                          onClick={() => onToggleReasoning(rKey)}
+                        >
+                          <Sparkles size={12} className="thinking-icon" />
+                          <span>Thought process</span>
+                          {rOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        </button>
+                        {rOpen && <div className="thinking-body">{entry.text}</div>}
+                      </div>
+                    );
+                  }
+
+                  if (entry.kind === 'note') {
+                    return (
+                      <div key={`${turn.key}-${entry.key}`} className="activity-note">
+                        {entry.text}
+                      </div>
+                    );
+                  }
+
+                  if (entry.kind === 'orphan') {
+                    const oKey = `${turn.key}-${entry.key}`;
+                    const open = Boolean(expandedTools[oKey]);
+                    const preview = entry.output.split('\n')[0]?.slice(0, 72) || 'Tool output';
+                    return (
+                      <div key={oKey} className="tool-step">
+                        <button
+                          type="button"
+                          className="tool-step-row"
+                          onClick={() => onToggleTool(oKey)}
+                        >
+                          <span className="tool-step-left">
+                            <span className="tool-step-icon">
+                              <Terminal size={13} />
+                            </span>
+                            <span className="tool-step-name">output</span>
+                            <span className="tool-step-summary">{preview}</span>
+                          </span>
+                          <span className="tool-step-right">
+                            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                          </span>
+                        </button>
+                        {open && (
+                          <div className="tool-step-drawer">
+                            <pre className="tool-drawer-pre">{entry.output}</pre>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  const tc = entry.step;
+                  const open = Boolean(expandedTools[tc.id]);
+                  const summary = summarizeToolArgs(tc.name, tc.arguments);
+                  const isActiveRunning = !tc.hasOutput && isLive;
+
+                  return (
+                    <div key={tc.id} className="tool-step">
+                      <button
+                        type="button"
+                        className="tool-step-row"
+                        onClick={() => onToggleTool(tc.id)}
+                      >
+                        <span className="tool-step-left">
+                          <span className="tool-step-icon">{getToolIcon(tc.name)}</span>
+                          <span className="tool-step-name">{tc.name}</span>
+                          {summary && (
+                            <span className="tool-step-summary" title={summary}>
+                              {summary}
+                            </span>
+                          )}
+                        </span>
+                        <span className="tool-step-right">
+                          {isActiveRunning ? (
+                            <span className="tool-status tool-status-running">Running</span>
+                          ) : tc.hasOutput ? (
+                            <span className="tool-status">Done</span>
+                          ) : null}
+                          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                        </span>
+                      </button>
+
+                      {open && (
+                        <div className="tool-step-drawer">
+                          {tc.arguments !== undefined && (
+                            <div className="tool-drawer-section">
+                              <div className="tool-drawer-label">Input</div>
+                              <pre className="tool-drawer-pre">{formatToolArgs(tc.arguments)}</pre>
+                            </div>
+                          )}
+                          {tc.hasOutput && (
+                            <div className="tool-drawer-section">
+                              <div className="tool-drawer-label">Output</div>
+                              <pre className="tool-drawer-pre">
+                                {tc.output || '(empty output)'}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {turn.finalContents.map((prose, pIdx) => (
+          <div key={`${turn.key}-p-${pIdx}`} className="assistant-prose">
+            <MarkdownContent content={prose} />
+          </div>
+        ))}
+
+        {hasProse && !isLive && (
+          <div className="turn-actions">
+            <button
+              type="button"
+              className="turn-action-btn"
+              onClick={() => onCopy(turn)}
+              title="Copy response"
+            >
+              {copied ? (
+                <>
+                  <Check size={13} />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy size={13} />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+);
+
+const INITIAL_VISIBLE_TURNS = 35;
+
 export const ChatView: React.FC<ChatViewProps> = ({
   sessionId,
   sessionTitle,
+  workspaceRoot,
   provider,
   model,
   messages,
   turnRunning,
   sidebarOpen,
   onToggleSidebar,
-  onOpenSettings,
+  onOpenModelPicker,
+  onOpenWorkspacePicker,
   onNewSession,
   onSendMessage,
   onInterrupt,
@@ -243,12 +475,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onResolveClarify,
   onAskApprovalQuestion,
 }) => {
-  const [input, setInput] = useState('');
   const [expandedActivity, setExpandedActivity] = useState<Record<string, boolean>>({});
   const [collapsedLive, setCollapsedLive] = useState<Record<string, boolean>>({});
   const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({});
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [copiedTurnKey, setCopiedTurnKey] = useState<string | null>(null);
+  const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
 
   // Approval Q&A state
   const [approvalQuestion, setApprovalQuestion] = useState('');
@@ -259,13 +491,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [clarifyAnswers, setClarifyAnswers] = useState<Record<number, string>>({});
   const [customClarifyInput, setCustomClarifyInput] = useState('');
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const messagesAreaRef = useRef<HTMLDivElement>(null);
   const prevTurnRunningRef = useRef(turnRunning);
 
   const turns = useMemo(() => buildRenderTurns(messages), [messages]);
+  const hiddenTurnCount = Math.max(0, turns.length - visibleTurnLimit);
+  const visibleTurns = useMemo(
+    () => (hiddenTurnCount > 0 ? turns.slice(hiddenTurnCount) : turns),
+    [turns, hiddenTurnCount]
+  );
 
-  // Collapse all activity groups, reasoning blocks, and tool drawers when a turn finishes
+  // Auto-collapse all activity groups, reasoning blocks, and tool drawers when a turn finishes
   useEffect(() => {
     if (prevTurnRunningRef.current && !turnRunning) {
       setExpandedActivity({});
@@ -276,63 +512,59 @@ export const ChatView: React.FC<ChatViewProps> = ({
     prevTurnRunningRef.current = turnRunning;
   }, [turnRunning]);
 
-  // Reset expansion state when switching conversations
+  // Reset expansion state and windowing when switching conversations
   useEffect(() => {
     setExpandedActivity({});
     setCollapsedLive({});
     setExpandedReasoning({});
     setExpandedTools({});
+    setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
   }, [sessionId]);
 
+  // Keep viewport anchored to bottom during live turns without laggy smooth-scroll fighting tokens
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, turnRunning]);
-
-  useEffect(() => {
-    const el = textareaRef.current;
+    const el = messagesAreaRef.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [input]);
-
-  const handleSend = (overrideText?: string) => {
-    const text = (overrideText ?? input).trim();
-    if (!text || !sessionId) return;
-    onSendMessage(text);
-    if (!overrideText) setInput('');
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    if (turnRunning) {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom < 260) {
+        el.scrollTop = el.scrollHeight;
+      }
+    } else if (messages.length > 0) {
+      el.scrollTop = el.scrollHeight;
     }
-  };
+  }, [messages, turnRunning, sessionId]);
 
-  const toggleActivity = (turnKey: string, isLive: boolean) => {
+  const toggleActivity = useCallback((turnKey: string, isLive: boolean) => {
     if (isLive) {
       setCollapsedLive((prev) => ({ ...prev, [turnKey]: !prev[turnKey] }));
     } else {
       setExpandedActivity((prev) => ({ ...prev, [turnKey]: !prev[turnKey] }));
     }
-  };
+  }, []);
 
-  const toggleReasoning = (key: string) => {
+  const toggleReasoning = useCallback((key: string) => {
     setExpandedReasoning((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  }, []);
 
-  const toggleTool = (id: string) => {
+  const toggleTool = useCallback((id: string) => {
     setExpandedTools((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
+  }, []);
 
-  const handleCopyAssistantTurn = (turn: Extract<RenderTurn, { kind: 'assistant' }>) => {
-    const text = turn.finalContents.join('\n\n').trim();
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
-      setCopiedTurnKey(turn.key);
-      setTimeout(() => setCopiedTurnKey(null), 1800);
-    });
-  };
+  const handleCopyAssistantTurn = useCallback(
+    (turn: Extract<RenderTurn, { kind: 'assistant' }>) => {
+      const text = turn.finalContents.join('\n\n').trim();
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        setCopiedTurnKey(turn.key);
+        setTimeout(() => setCopiedTurnKey(null), 1800);
+      });
+    },
+    []
+  );
+
+  const approvalToolName =
+    pendingApproval?.tool || pendingApproval?.tool_name || 'tool';
 
   const handleAskApproval = async () => {
     if (!approvalQuestion.trim() || !pendingApproval) return;
@@ -340,7 +572,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     try {
       const q = approvalQuestion.trim();
       const a = await onAskApprovalQuestion(
-        pendingApproval.tool_name,
+        approvalToolName,
         pendingApproval.target || null,
         q
       );
@@ -361,7 +593,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const questions =
       pendingClarify.questions && pendingClarify.questions.length > 0
         ? pendingClarify.questions
-        : [{ question: pendingClarify.question, choices: pendingClarify.choices }];
+        : [{ question: pendingClarify.question || '', choices: pendingClarify.choices || [] }];
 
     const answers = questions.map((_, idx) => {
       return clarifyAnswers[idx] || customClarifyInput || 'Skipped';
@@ -372,29 +604,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const modelLabel = model || provider || 'default';
-
-  const formatActivityLabel = (
-    turn: Extract<RenderTurn, { kind: 'assistant' }>,
-    isLive: boolean
-  ): string => {
-    const { reasoningCount, toolCount } = turn;
-    if (isLive) {
-      if (toolCount > 0) {
-        return `Working · ${toolCount} ${toolCount === 1 ? 'tool call' : 'tool calls'}`;
-      }
-      if (reasoningCount > 0) {
-        return 'Thinking…';
-      }
-      return 'Working…';
-    }
-    if (reasoningCount > 0 && toolCount > 0) {
-      return `Thought and used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
-    }
-    if (toolCount > 0) {
-      return `Used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`;
-    }
-    return 'Thought process';
-  };
+  const workspaceFolder =
+    workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
 
   return (
     <div className="chat-view">
@@ -425,9 +636,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
           )}
           <button
             type="button"
+            className="header-pill"
+            onClick={onOpenWorkspacePicker}
+            title={`Workspace: ${workspaceRoot}`}
+          >
+            <Folder size={13} className="header-pill-icon" />
+            <span className="header-pill-text">{workspaceFolder}</span>
+          </button>
+          <button
+            type="button"
             className="model-pill"
-            onClick={onOpenSettings}
-            title="Configure provider & model"
+            onClick={onOpenModelPicker}
+            title="Switch provider or model"
           >
             <span className="model-pill-provider">{provider || 'default'}</span>
             <span className="model-pill-sep">/</span>
@@ -436,8 +656,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </header>
 
-      <div className="messages-area">
+      <div className="messages-area" ref={messagesAreaRef}>
         <div className="messages-column">
+          {hiddenTurnCount > 0 && (
+            <div className="load-earlier-wrap">
+              <button
+                type="button"
+                className="load-earlier-btn"
+                onClick={() => setVisibleTurnLimit((v) => v + 40)}
+              >
+                Show earlier messages ({hiddenTurnCount} hidden)
+              </button>
+            </div>
+          )}
+
           {!sessionId ? (
             <div className="chat-empty">
               <div className="chat-empty-mark">
@@ -469,7 +701,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
               <h1 className="chat-empty-title">What can I help with?</h1>
               <p className="chat-empty-subtitle">
-                Using {provider || 'default'} · {modelLabel}
+                {workspaceFolder} · {provider || 'default'} / {modelLabel}
               </p>
               <div className="starter-grid">
                 {STARTER_PROMPTS.map((prompt) => (
@@ -477,7 +709,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     key={prompt}
                     type="button"
                     className="starter-chip"
-                    onClick={() => handleSend(prompt)}
+                    onClick={() => onSendMessage(prompt)}
                   >
                     {prompt}
                   </button>
@@ -485,7 +717,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             </div>
           ) : (
-            turns.map((turn, turnIdx) => {
+            visibleTurns.map((turn, turnIdx) => {
               if (turn.kind === 'user') {
                 return (
                   <div key={turn.key} className="turn-user">
@@ -494,196 +726,29 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 );
               }
 
-              const isLastTurn = turnIdx === turns.length - 1;
+              const isLastTurn = turnIdx === visibleTurns.length - 1;
               const isLive = isLastTurn && turnRunning;
-              const hasActivity = turn.activities.length > 0;
               const isActivityOpen = isLive
                 ? !collapsedLive[turn.key]
                 : Boolean(expandedActivity[turn.key]);
-              const hasProse = turn.finalContents.length > 0;
 
               return (
-                <div key={turn.key} className="turn-assistant">
-                  {hasActivity && (
-                    <div className="activity-group">
-                      <button
-                        type="button"
-                        className="activity-summary-btn"
-                        onClick={() => toggleActivity(turn.key, isLive)}
-                      >
-                        {isLive ? (
-                          <span className="pulse-dot" />
-                        ) : (
-                          <Sparkles size={13} className="thinking-icon" />
-                        )}
-                        <span>{formatActivityLabel(turn, isLive)}</span>
-                        {isActivityOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                      </button>
-
-                      {isActivityOpen && (
-                        <div className="activity-trace">
-                          {turn.activities.map((entry, entryIdx) => {
-                            if (entry.kind === 'reasoning') {
-                              const rKey = `${turn.key}-${entry.key}`;
-                              const isLastEntry = entryIdx === turn.activities.length - 1;
-                              // While live, auto-show the active reasoning stream unless collapsed
-                              const rOpen =
-                                expandedReasoning[rKey] !== undefined
-                                  ? expandedReasoning[rKey]
-                                  : isLive && isLastEntry;
-
-                              return (
-                                <div key={rKey} className="thinking-block">
-                                  <button
-                                    type="button"
-                                    className="thinking-toggle"
-                                    onClick={() => toggleReasoning(rKey)}
-                                  >
-                                    <Sparkles size={12} className="thinking-icon" />
-                                    <span>Thought process</span>
-                                    {rOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                                  </button>
-                                  {rOpen && <div className="thinking-body">{entry.text}</div>}
-                                </div>
-                              );
-                            }
-
-                            if (entry.kind === 'note') {
-                              return (
-                                <div key={`${turn.key}-${entry.key}`} className="activity-note">
-                                  {entry.text}
-                                </div>
-                              );
-                            }
-
-                            if (entry.kind === 'orphan') {
-                              const oKey = `${turn.key}-${entry.key}`;
-                              const open = Boolean(expandedTools[oKey]);
-                              const preview = entry.output.split('\n')[0]?.slice(0, 72) || 'Tool output';
-                              return (
-                                <div key={oKey} className="tool-step">
-                                  <button
-                                    type="button"
-                                    className="tool-step-row"
-                                    onClick={() => toggleTool(oKey)}
-                                  >
-                                    <span className="tool-step-left">
-                                      <span className="tool-step-icon">
-                                        <Terminal size={13} />
-                                      </span>
-                                      <span className="tool-step-name">output</span>
-                                      <span className="tool-step-summary">{preview}</span>
-                                    </span>
-                                    <span className="tool-step-right">
-                                      {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                                    </span>
-                                  </button>
-                                  {open && (
-                                    <div className="tool-step-drawer">
-                                      <pre className="tool-drawer-pre">{entry.output}</pre>
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            }
-
-                            const tc = entry.step;
-                            const open = Boolean(expandedTools[tc.id]);
-                            const summary = summarizeToolArgs(tc.name, tc.arguments);
-                            const isActiveRunning = !tc.hasOutput && isLive;
-
-                            return (
-                              <div key={tc.id} className="tool-step">
-                                <button
-                                  type="button"
-                                  className="tool-step-row"
-                                  onClick={() => toggleTool(tc.id)}
-                                >
-                                  <span className="tool-step-left">
-                                    <span className="tool-step-icon">{getToolIcon(tc.name)}</span>
-                                    <span className="tool-step-name">{tc.name}</span>
-                                    {summary && (
-                                      <span className="tool-step-summary" title={summary}>
-                                        {summary}
-                                      </span>
-                                    )}
-                                  </span>
-                                  <span className="tool-step-right">
-                                    {isActiveRunning ? (
-                                      <span className="tool-status tool-status-running">Running</span>
-                                    ) : tc.hasOutput ? (
-                                      <span className="tool-status">Done</span>
-                                    ) : null}
-                                    {open ? (
-                                      <ChevronDown size={13} />
-                                    ) : (
-                                      <ChevronRight size={13} />
-                                    )}
-                                  </span>
-                                </button>
-
-                                {open && (
-                                  <div className="tool-step-drawer">
-                                    {tc.arguments !== undefined && (
-                                      <div className="tool-drawer-section">
-                                        <div className="tool-drawer-label">Input</div>
-                                        <pre className="tool-drawer-pre">
-                                          {formatToolArgs(tc.arguments)}
-                                        </pre>
-                                      </div>
-                                    )}
-                                    {tc.hasOutput && (
-                                      <div className="tool-drawer-section">
-                                        <div className="tool-drawer-label">Output</div>
-                                        <pre className="tool-drawer-pre">
-                                          {tc.output || '(empty output)'}
-                                        </pre>
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {turn.finalContents.map((prose, pIdx) => (
-                    <div key={`${turn.key}-p-${pIdx}`} className="assistant-prose">
-                      <MarkdownContent content={prose} />
-                    </div>
-                  ))}
-
-                  {hasProse && !isLive && (
-                    <div className="turn-actions">
-                      <button
-                        type="button"
-                        className="turn-action-btn"
-                        onClick={() => handleCopyAssistantTurn(turn)}
-                        title="Copy response"
-                      >
-                        {copiedTurnKey === turn.key ? (
-                          <>
-                            <Check size={13} />
-                            <span>Copied</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy size={13} />
-                            <span>Copy</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <AssistantTurnRow
+                  key={turn.key}
+                  turn={turn}
+                  isLive={isLive}
+                  isActivityOpen={isActivityOpen}
+                  expandedReasoning={expandedReasoning}
+                  expandedTools={expandedTools}
+                  copied={copiedTurnKey === turn.key}
+                  onToggleActivity={toggleActivity}
+                  onToggleReasoning={toggleReasoning}
+                  onToggleTool={toggleTool}
+                  onCopy={handleCopyAssistantTurn}
+                />
               );
             })
           )}
-
-          <div ref={messagesEndRef} />
         </div>
       </div>
 
@@ -695,7 +760,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <ShieldAlert size={17} className="text-warning" />
                 <span>Approve tool execution</span>
               </div>
-              <span className="badge badge-mono">{pendingApproval.tool_name}</span>
+              <span className="badge badge-mono">{approvalToolName}</span>
             </div>
 
             <div className="modal-body">
@@ -805,7 +870,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             type="radio"
                             name={`q-${idx}`}
                             checked={clarifyAnswers[idx] === choice}
-                            onChange={() => setClarifyAnswers((prev) => ({ ...prev, [idx]: choice }))}
+                            onChange={() =>
+                              setClarifyAnswers((prev) => ({ ...prev, [idx]: choice }))
+                            }
                           />
                           <span>{choice}</span>
                         </label>
@@ -817,7 +884,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <div className="form-group">
                   <span className="form-label form-label-strong">{pendingClarify.question}</span>
                   <div className="radio-list">
-                    {pendingClarify.choices.map((choice) => (
+                    {(pendingClarify.choices || []).map((choice) => (
                       <label key={choice} className="radio-row">
                         <input
                           type="radio"
@@ -854,51 +921,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       )}
 
-      <div className="chat-composer-wrap">
-        <div className="chat-composer">
-          <textarea
-            ref={textareaRef}
-            className="chat-textarea"
-            placeholder={
-              sessionId
-                ? 'Message Luna… (Enter to send, Shift+Enter for newline)'
-                : 'Select or start a conversation first'
-            }
-            disabled={!sessionId}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-          />
-          <div className="chat-composer-footer">
-            <span className="composer-hint">
-              {provider && model ? `${provider} · ${model}` : 'Ready'}
-            </span>
-            {turnRunning ? (
-              <button
-                type="button"
-                className="composer-stop-btn"
-                onClick={onInterrupt}
-                title="Stop generating"
-                aria-label="Stop generating"
-              >
-                <Square size={14} fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="composer-send-btn"
-                onClick={() => handleSend()}
-                disabled={!sessionId || !input.trim()}
-                title="Send message"
-                aria-label="Send message"
-              >
-                <ArrowUp size={16} />
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+      <Composer
+        sessionId={sessionId}
+        provider={provider}
+        model={model}
+        turnRunning={turnRunning}
+        onSend={onSendMessage}
+        onInterrupt={onInterrupt}
+        onOpenModelPicker={onOpenModelPicker}
+      />
     </div>
   );
 };

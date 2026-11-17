@@ -164,6 +164,16 @@ impl ModelDiscovery {
         Ok(listing.models)
     }
 
+    /// Read all cached provider model lists from disk in a single pass with zero network calls.
+    pub fn cached_models_snapshot(&self) -> HashMap<String, Vec<String>> {
+        let cache = self.load_cache();
+        cache
+            .providers
+            .into_iter()
+            .map(|(k, v)| (k, v.models))
+            .collect()
+    }
+
     /// The context window `provider_id` published for `model`, if its catalog stated one.
     ///
     /// This is the authoritative answer when it exists: the provider measures its own models, while

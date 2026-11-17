@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import type { GuiSessionItem, PluginAgentEntry } from '../types';
 import {
   MessageSquare,
@@ -16,6 +16,8 @@ import {
   PanelLeftClose,
   Check,
   X,
+  Folder,
+  Search,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -31,169 +33,209 @@ interface SidebarProps {
   onDeleteSession: (id: string) => void;
   onRenameSession: (id: string, name: string) => void;
   sidebarAgents: PluginAgentEntry[];
+  workspaceRoot: string;
+  onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({
-  isOpen,
-  onClose,
-  currentTab,
-  onSelectTab,
-  sessions,
-  activeSessionId,
-  onSelectSession,
-  onNewSession,
-  onForkSession,
-  onDeleteSession,
-  onRenameSession,
-  sidebarAgents,
-  onOpenSettings,
-  theme,
-  onToggleTheme,
-}) => {
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState('');
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+export const Sidebar: React.FC<SidebarProps> = React.memo(
+  ({
+    isOpen,
+    onClose,
+    currentTab,
+    onSelectTab,
+    sessions,
+    activeSessionId,
+    onSelectSession,
+    onNewSession,
+    onForkSession,
+    onDeleteSession,
+    onRenameSession,
+    sidebarAgents,
+    workspaceRoot,
+    onOpenWorkspacePicker,
+    onOpenSettings,
+    theme,
+    onToggleTheme,
+  }) => {
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [editingName, setEditingName] = useState('');
+    const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+    const [filter, setFilter] = useState('');
+    const [visibleLimit, setVisibleLimit] = useState(40);
 
-  if (!isOpen) return null;
+    const filteredSessions = useMemo(() => {
+      const q = filter.trim().toLowerCase();
+      if (!q) return sessions;
+      return sessions.filter((s) => {
+        const label = (s.record.name || s.record.title || s.record.id).toLowerCase();
+        return label.includes(q);
+      });
+    }, [sessions, filter]);
 
-  const commitRename = (sid: string) => {
-    const trimmed = editingName.trim();
-    if (trimmed) {
-      onRenameSession(sid, trimmed);
-    }
-    setEditingId(null);
-  };
+    const visibleSessions = useMemo(
+      () => filteredSessions.slice(0, visibleLimit),
+      [filteredSessions, visibleLimit]
+    );
 
-  return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <div className="brand-title">
-          <span className="brand-mark" aria-hidden="true">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
-                fill="currentColor"
-              />
-            </svg>
-          </span>
-          <span>Luna</span>
-        </div>
+    if (!isOpen) return null;
 
-        <div className="sidebar-header-actions">
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={onToggleTheme}
-            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-            aria-label="Toggle theme"
-          >
-            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
-          </button>
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={onClose}
-            title="Collapse sidebar"
-            aria-label="Collapse sidebar"
-          >
-            <PanelLeftClose size={15} />
-          </button>
-        </div>
-      </div>
+    const commitRename = (sid: string) => {
+      const trimmed = editingName.trim();
+      if (trimmed) {
+        onRenameSession(sid, trimmed);
+      }
+      setEditingId(null);
+    };
 
-      <div className="sidebar-top-action">
-        <button
-          type="button"
-          className="new-chat-btn"
-          onClick={() => {
-            onNewSession(null);
-            onSelectTab('chat');
-          }}
-        >
-          <Plus size={15} />
-          <span>New chat</span>
-        </button>
-      </div>
+    const workspaceFolderName =
+      workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
 
-      <nav className="sidebar-nav" aria-label="Primary">
-        <button
-          type="button"
-          className={`nav-item ${currentTab === 'chat' ? 'active' : ''}`}
-          onClick={() => onSelectTab('chat')}
-        >
-          <MessageSquare size={15} />
-          <span>Chat</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-item ${currentTab === 'automations' ? 'active' : ''}`}
-          onClick={() => onSelectTab('automations')}
-        >
-          <Clock size={15} />
-          <span>Automations</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-item ${currentTab === 'plugins' ? 'active' : ''}`}
-          onClick={() => onSelectTab('plugins')}
-        >
-          <Layers size={15} />
-          <span>Plugins</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-item ${currentTab === 'memories' ? 'active' : ''}`}
-          onClick={() => onSelectTab('memories')}
-        >
-          <BookOpen size={15} />
-          <span>Memory & Notes</span>
-        </button>
-      </nav>
+    return (
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="brand-title">
+            <span className="brand-mark" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"
+                  fill="currentColor"
+                />
+              </svg>
+            </span>
+            <span>Luna</span>
+          </div>
 
-      {sidebarAgents.length > 0 && (
-        <div className="sidebar-group">
-          <div className="sidebar-group-label">Agents</div>
-          <div className="sidebar-group-list">
-            {sidebarAgents.map((ag) => (
-              <button
-                key={ag.id}
-                type="button"
-                className="session-item"
-                onClick={() => {
-                  onNewSession(ag.id);
-                  onSelectTab('chat');
-                }}
-                title={ag.description}
-              >
-                <span className="session-item-agent">
-                  <Bot size={14} className="text-accent" />
-                  <span className="session-name">{ag.name}</span>
-                </span>
-                <Plus size={13} className="session-agent-plus" />
-              </button>
-            ))}
+          <div className="sidebar-header-actions">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onToggleTheme}
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+              aria-label="Toggle theme"
+            >
+              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onClose}
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+            >
+              <PanelLeftClose size={15} />
+            </button>
           </div>
         </div>
-      )}
 
-      <div className="sidebar-conversations">
-        <div className="sidebar-group-label">Conversations</div>
-        <div className="session-list">
-          {sessions.length === 0 ? (
-            <div className="sidebar-empty">No conversations yet</div>
-          ) : (
-            sessions.map((item) => {
+        <div className="sidebar-top-action">
+          <button
+            type="button"
+            className="new-chat-btn"
+            onClick={() => {
+              onNewSession(null);
+              onSelectTab('chat');
+            }}
+          >
+            <Plus size={15} />
+            <span>New chat</span>
+          </button>
+
+          <button
+            type="button"
+            className="workspace-select-btn"
+            onClick={onOpenWorkspacePicker}
+            title={`Workspace: ${workspaceRoot}`}
+          >
+            <Folder size={14} className="workspace-select-icon" />
+            <span className="workspace-select-name">{workspaceFolderName}</span>
+            <span className="workspace-select-tag">Change</span>
+          </button>
+        </div>
+
+        <nav className="sidebar-nav" aria-label="Main navigation">
+          <button
+            type="button"
+            className={`nav-item ${currentTab === 'chat' ? 'active' : ''}`}
+            onClick={() => onSelectTab('chat')}
+          >
+            <MessageSquare size={15} />
+            <span>Chat</span>
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${currentTab === 'automations' ? 'active' : ''}`}
+            onClick={() => onSelectTab('automations')}
+          >
+            <Clock size={15} />
+            <span>Automations</span>
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${currentTab === 'plugins' ? 'active' : ''}`}
+            onClick={() => onSelectTab('plugins')}
+          >
+            <Layers size={15} />
+            <span>Plugins</span>
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${currentTab === 'memories' ? 'active' : ''}`}
+            onClick={() => onSelectTab('memories')}
+          >
+            <BookOpen size={15} />
+            <span>Memory & Notes</span>
+          </button>
+        </nav>
+
+        {sidebarAgents.length > 0 && (
+          <div className="sidebar-group">
+            <div className="sidebar-section-label">Agents</div>
+            <div className="sidebar-agent-list">
+              {sidebarAgents.map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  className="session-item"
+                  title={agent.description}
+                  onClick={() => {
+                    onNewSession(agent.id);
+                    onSelectTab('chat');
+                  }}
+                >
+                  <span className="session-item-agent">
+                    <Bot size={14} />
+                    <span className="session-name">{agent.name}</span>
+                  </span>
+                  <Plus size={13} className="session-agent-plus" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="session-section">
+          <div className="sidebar-section-label">Conversations</div>
+          <div className="sidebar-search-wrap">
+            <Search size={12} className="sidebar-search-icon" />
+            <input
+              type="text"
+              className="sidebar-search-input"
+              placeholder="Filter chats…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          </div>
+          <div className="session-list">
+            {visibleSessions.map((item) => {
               const sid = item.record.id;
+              const isActive = sid === activeSessionId && currentTab === 'chat';
               const displayName =
-                item.record.name || item.record.title || `Session ${sid.slice(0, 8)}`;
-              const isActive = activeSessionId === sid && currentTab === 'chat';
-              const isEditing = editingId === sid;
-              const isConfirmingDelete = confirmDeleteId === sid;
+                item.record.name || item.record.title || `Session ${sid.slice(0, 7)}`;
 
-              if (isEditing) {
+              if (editingId === sid) {
                 return (
                   <div key={sid} className="session-item session-item-editing">
                     <input
@@ -206,23 +248,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         if (e.key === 'Enter') commitRename(sid);
                         if (e.key === 'Escape') setEditingId(null);
                       }}
+                      onBlur={() => commitRename(sid)}
                     />
-                    <button
-                      type="button"
-                      className="action-btn"
-                      title="Save"
-                      onClick={() => commitRename(sid)}
-                    >
-                      <Check size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      className="action-btn"
-                      title="Cancel"
-                      onClick={() => setEditingId(null)}
-                    >
-                      <X size={13} />
-                    </button>
                   </div>
                 );
               }
@@ -232,24 +259,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   key={sid}
                   className={`session-item ${isActive ? 'active' : ''}`}
                   onClick={() => {
-                    setConfirmDeleteId(null);
                     onSelectSession(sid);
                     onSelectTab('chat');
+                    setConfirmDeleteId(null);
                   }}
                 >
                   <span className="session-name" title={displayName}>
                     {displayName}
                   </span>
                   <div
-                    className={`session-actions ${isConfirmingDelete ? 'visible' : ''}`}
+                    className={`session-actions ${confirmDeleteId === sid ? 'visible' : ''}`}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {isConfirmingDelete ? (
+                    {confirmDeleteId === sid ? (
                       <>
                         <button
                           type="button"
                           className="action-btn action-btn-danger"
                           title="Confirm delete"
+                          aria-label="Confirm delete"
                           onClick={() => {
                             setConfirmDeleteId(null);
                             onDeleteSession(sid);
@@ -261,6 +289,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           type="button"
                           className="action-btn"
                           title="Cancel"
+                          aria-label="Cancel delete"
                           onClick={() => setConfirmDeleteId(null)}
                         >
                           <X size={13} />
@@ -272,10 +301,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           type="button"
                           className="action-btn"
                           title="Rename"
+                          aria-label="Rename conversation"
                           onClick={() => {
                             setEditingId(sid);
                             setEditingName(displayName);
-                            setConfirmDeleteId(null);
                           }}
                         >
                           <Edit2 size={12} />
@@ -283,7 +312,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <button
                           type="button"
                           className="action-btn"
-                          title="Fork conversation"
+                          title="Fork"
+                          aria-label="Fork conversation"
                           onClick={() => onForkSession(sid)}
                         >
                           <GitFork size={12} />
@@ -292,6 +322,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           type="button"
                           className="action-btn"
                           title="Delete"
+                          aria-label="Delete conversation"
                           onClick={() => setConfirmDeleteId(sid)}
                         >
                           <Trash2 size={12} />
@@ -301,17 +332,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
                 </div>
               );
-            })
-          )}
-        </div>
-      </div>
+            })}
 
-      <div className="sidebar-footer">
-        <button type="button" className="nav-item w-full" onClick={onOpenSettings}>
-          <Settings size={15} />
-          <span>Settings</span>
-        </button>
-      </div>
-    </aside>
-  );
-};
+            {filteredSessions.length > visibleLimit && (
+              <button
+                type="button"
+                className="sidebar-show-more"
+                onClick={() => setVisibleLimit((v) => v + 50)}
+              >
+                Show more ({filteredSessions.length - visibleLimit})
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="sidebar-footer">
+          <button type="button" className="nav-item w-full" onClick={onOpenSettings}>
+            <Settings size={15} />
+            <span>Settings</span>
+          </button>
+        </div>
+      </aside>
+    );
+  }
+);

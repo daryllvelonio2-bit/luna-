@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from './api';
 import type {
   ApprovalRequestPayload,
@@ -18,6 +18,8 @@ import { PluginsView } from './components/PluginsView';
 import { PluginBuilderModal } from './components/PluginBuilderModal';
 import { MemoryNotesView } from './components/MemoryNotesView';
 import { SettingsModal } from './components/SettingsModal';
+import { ModelPickerModal } from './components/ModelPickerModal';
+import { WorkspaceModal } from './components/WorkspaceModal';
 
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<'chat' | 'automations' | 'plugins' | 'memories'>('chat');
@@ -31,6 +33,7 @@ export const App: React.FC = () => {
   const [messages, setMessages] = useState<TranscriptMessageDto[]>([]);
   const [turnRunning, setTurnRunning] = useState(false);
 
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [sidebarAgents, setSidebarAgents] = useState<PluginAgentEntry[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] = useState('opencode');
@@ -43,8 +46,21 @@ export const App: React.FC = () => {
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
+  const [isWorkspacePickerOpen, setIsWorkspacePickerOpen] = useState(false);
   const [isPluginBuilderOpen, setIsPluginBuilderOpen] = useState(false);
   const [toastError, setToastError] = useState<string | null>(null);
+
+  const activeSessionIdRef = useRef<string | null>(null);
+  activeSessionIdRef.current = activeSessionId;
+
+  // RAF-batched streaming delta buffer
+  const pendingContentDeltaRef = useRef('');
+  const pendingReasoningDeltaRef = useRef('');
+  const rafIdRef = useRef<number | null>(null);
+  const liveToolCallsRef = useRef<Array<{ id: string; name: string }>>([]);
+  const liveToolSeqRef = useRef(0);
+  const optimisticQueryRef = useRef<{ sid: string; query: string } | null>(null);
 
   const showError = useCallback((msg: string) => {
     setToastError(msg);
@@ -57,10 +73,56 @@ export const App: React.FC = () => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  const flushBufferedDeltas = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    const contentChunk = pendingContentDeltaRef.current;
+    const reasoningChunk = pendingReasoningDeltaRef.current;
+    pendingContentDeltaRef.current = '';
+    pendingReasoningDeltaRef.current = '';
+
+    if (!contentChunk && !reasoningChunk) return;
+
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant') {
+        return [
+          ...prev.slice(0, -1),
+          {
+            ...last,
+            content: contentChunk ? (last.content || '') + contentChunk : last.content,
+            reasoning: reasoningChunk ? (last.reasoning || '') + reasoningChunk : last.reasoning,
+          },
+        ];
+      }
+      return [
+        ...prev,
+        {
+          role: 'assistant',
+          content: contentChunk || '',
+          reasoning: reasoningChunk || undefined,
+          tool_calls: [],
+        },
+      ];
+    });
+  }, []);
+
+  const scheduleDeltaFlush = useCallback(() => {
+    if (rafIdRef.current !== null) return;
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      flushBufferedDeltas();
+    });
+  }, [flushBufferedDeltas]);
+
   const loadTranscript = useCallback(async (sid: string) => {
     try {
-      const hist = await api.getTranscript(sid);
-      setMessages(hist);
+      const hist = await api.getTranscript(sid, 150);
+      if (activeSessionIdRef.current === sid) {
+        setMessages(hist);
+      }
     } catch (e) {
       console.error('Failed to load transcript', e);
     }
@@ -70,6 +132,7 @@ export const App: React.FC = () => {
     api
       .bootstrap()
       .then((data) => {
+        setWorkspaceRoot(data.workspace_root || '');
         setSessions(data.sessions);
         setSidebarAgents(data.sidebar_agents || []);
         setProviders(data.providers || []);
@@ -83,73 +146,58 @@ export const App: React.FC = () => {
           loadTranscript(firstId);
         }
       })
-      .catch((e) => console.error('Bootstrap failed', e));
+      .catch((e) => showError(`Failed to initialize: ${String(e)}`));
 
     api.listSchedules().then(setSchedules).catch(() => {});
     api.listPlugins().then(setPlugins).catch(() => {});
-  }, [loadTranscript]);
+  }, [loadTranscript, showError]);
 
   useEffect(() => {
     const unsub = api.subscribeEvents((event) => {
-      switch (event.type) {
-        case 'TurnStarted':
-          if (event.session_id === activeSessionId) {
+      const currSid = activeSessionIdRef.current;
+
+      switch (event.kind) {
+        case 'turn_started':
+          if (event.session_id === currSid) {
             setTurnRunning(true);
-            setMessages((prev) => [
-              ...prev,
-              { role: 'user', content: event.query, tool_calls: [] },
-            ]);
-          }
-          break;
-
-        case 'StreamDelta':
-          if (event.session_id === activeSessionId) {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.role === 'assistant') {
-                return [
-                  ...prev.slice(0, -1),
-                  { ...last, content: (last.content || '') + event.delta },
-                ];
-              }
-              return [
+            liveToolCallsRef.current = [];
+            const opt = optimisticQueryRef.current;
+            if (opt && opt.sid === event.session_id && opt.query === event.query) {
+              optimisticQueryRef.current = null;
+            } else {
+              setMessages((prev) => [
                 ...prev,
-                { role: 'assistant', content: event.delta, tool_calls: [] },
-              ];
-            });
+                { role: 'user', content: event.query, tool_calls: [] },
+              ]);
+            }
           }
           break;
 
-        case 'StreamReasoningDelta':
-          if (event.session_id === activeSessionId) {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.role === 'assistant') {
-                return [
-                  ...prev.slice(0, -1),
-                  { ...last, reasoning: (last.reasoning || '') + event.delta },
-                ];
-              }
-              return [
-                ...prev,
-                {
-                  role: 'assistant',
-                  content: '',
-                  reasoning: event.delta,
-                  tool_calls: [],
-                },
-              ];
-            });
+        case 'content_delta':
+          if (event.session_id === currSid) {
+            pendingContentDeltaRef.current += event.delta;
+            scheduleDeltaFlush();
           }
           break;
 
-        case 'ToolCallStarted':
-          if (event.session_id === activeSessionId) {
+        case 'reasoning_delta':
+          if (event.session_id === currSid) {
+            pendingReasoningDeltaRef.current += event.delta;
+            scheduleDeltaFlush();
+          }
+          break;
+
+        case 'tool_executing':
+          if (event.session_id === currSid) {
+            flushBufferedDeltas();
+            liveToolSeqRef.current += 1;
+            const callId = `live-${liveToolSeqRef.current}`;
+            liveToolCallsRef.current.push({ id: callId, name: event.name });
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               const tc = {
-                id: event.call_id,
-                name: event.tool_name,
+                id: callId,
+                name: event.name,
                 arguments: event.arguments,
               };
               if (last && last.role === 'assistant') {
@@ -158,62 +206,77 @@ export const App: React.FC = () => {
                   { ...last, tool_calls: [...last.tool_calls, tc] },
                 ];
               }
-              return [
-                ...prev,
-                { role: 'assistant', content: '', tool_calls: [tc] },
-              ];
+              return [...prev, { role: 'assistant', content: '', tool_calls: [tc] }];
             });
           }
           break;
 
-        case 'ToolCallFinished':
-          if (event.session_id === activeSessionId) {
+        case 'tool_executed':
+          if (event.session_id === currSid) {
+            flushBufferedDeltas();
+            const matchIdx = liveToolCallsRef.current.findIndex((t) => t.name === event.name);
+            let callId: string | undefined;
+            if (matchIdx >= 0) {
+              callId = liveToolCallsRef.current[matchIdx].id;
+              liveToolCallsRef.current.splice(matchIdx, 1);
+            }
             setMessages((prev) => [
               ...prev,
               {
                 role: 'tool',
-                content: event.result,
-                tool_call_id: event.call_id,
+                content: event.output,
+                tool_call_id: callId,
                 tool_calls: [],
               },
             ]);
           }
           break;
 
-        case 'ApprovalRequested':
-          if (event.session_id === activeSessionId) {
-            setPendingApproval(event.request);
+        case 'approval_requested':
+          if (event.session_id === currSid) {
+            setPendingApproval({ ...event.request, request_id: event.request_id });
           }
           break;
 
-        case 'ApprovalResolved':
-          if (event.session_id === activeSessionId) {
+        case 'clarify_requested':
+          if (event.session_id === currSid) {
+            setPendingClarify({ ...event.request, request_id: event.request_id });
+          }
+          break;
+
+        case 'model_changed':
+          if (event.session_id === currSid) {
+            setDefaultProvider(event.provider);
+            setDefaultModel(event.model);
+          }
+          break;
+
+        case 'interrupted':
+          if (event.session_id === currSid) {
+            flushBufferedDeltas();
+            setTurnRunning(false);
             setPendingApproval(null);
-          }
-          break;
-
-        case 'ClarifyRequested':
-          if (event.session_id === activeSessionId) {
-            setPendingClarify(event.request);
-          }
-          break;
-
-        case 'ClarifyResolved':
-          if (event.session_id === activeSessionId) {
             setPendingClarify(null);
           }
           break;
 
-        case 'TurnCompleted':
-          if (event.session_id === activeSessionId) {
+        case 'turn_finished':
+          if (event.session_id === currSid) {
+            flushBufferedDeltas();
             setTurnRunning(false);
+            setPendingApproval(null);
+            setPendingClarify(null);
+            loadTranscript(event.session_id);
           }
-          api.listSessions().then(setSessions).catch(() => {});
+          api.listSessions(150).then(setSessions).catch(() => {});
           break;
 
-        case 'TurnError':
-          if (event.session_id === activeSessionId) {
+        case 'turn_failed':
+          if (event.session_id === currSid) {
+            flushBufferedDeltas();
             setTurnRunning(false);
+            setPendingApproval(null);
+            setPendingClarify(null);
             setMessages((prev) => [
               ...prev,
               {
@@ -227,112 +290,185 @@ export const App: React.FC = () => {
       }
     });
 
-    return () => unsub();
-  }, [activeSessionId]);
-
-  const handleSelectSession = (sid: string) => {
-    setActiveSessionId(sid);
-    setPendingApproval(null);
-    setPendingClarify(null);
-    setTurnRunning(false);
-    loadTranscript(sid);
-    if (window.innerWidth <= 768) {
-      setSidebarOpen(false);
-    }
-  };
-
-  const handleNewSession = async (agentId?: string | null) => {
-    try {
-      const sid = await api.createSession(agentId);
-      const updated = await api.listSessions();
-      setSessions(updated);
-      handleSelectSession(sid);
-      setCurrentTab('chat');
-    } catch (e) {
-      showError(`Failed to create session: ${String(e)}`);
-    }
-  };
-
-  const handleForkSession = async (sid: string) => {
-    try {
-      const newSid = await api.forkSession(sid);
-      const updated = await api.listSessions();
-      setSessions(updated);
-      handleSelectSession(newSid);
-    } catch (e) {
-      showError(`Failed to fork session: ${String(e)}`);
-    }
-  };
-
-  const handleDeleteSession = async (sid: string) => {
-    try {
-      await api.deleteSession(sid);
-      const updated = await api.listSessions();
-      setSessions(updated);
-      if (activeSessionId === sid) {
-        if (updated.length > 0) {
-          handleSelectSession(updated[0].record.id);
-        } else {
-          setActiveSessionId(null);
-          setMessages([]);
-        }
+    return () => {
+      unsub();
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
       }
-    } catch (e) {
-      showError(`Failed to delete session: ${String(e)}`);
-    }
-  };
+    };
+  }, [flushBufferedDeltas, loadTranscript, scheduleDeltaFlush]);
 
-  const handleRenameSession = async (sid: string, name: string) => {
-    try {
-      await api.renameSession(sid, name);
-      const updated = await api.listSessions();
-      setSessions(updated);
-    } catch (e) {
-      showError(`Failed to rename session: ${String(e)}`);
-    }
-  };
+  const handleSelectSession = useCallback(
+    (sid: string) => {
+      pendingContentDeltaRef.current = '';
+      pendingReasoningDeltaRef.current = '';
+      liveToolCallsRef.current = [];
+      setActiveSessionId(sid);
+      setPendingApproval(null);
+      setPendingClarify(null);
+      setTurnRunning(false);
+      loadTranscript(sid);
+      if (window.innerWidth <= 768) {
+        setSidebarOpen(false);
+      }
+    },
+    [loadTranscript]
+  );
 
-  const handleSendMessage = async (text: string) => {
-    if (!activeSessionId) return;
-    try {
-      await api.sendMessage(activeSessionId, text);
-    } catch (e) {
-      showError(`Failed to send message: ${String(e)}`);
-    }
-  };
+  const handleNewSession = useCallback(
+    async (agentId?: string | null) => {
+      try {
+        const sid = await api.createSession(agentId);
+        const updated = await api.listSessions(150);
+        setSessions(updated);
+        handleSelectSession(sid);
+        setCurrentTab('chat');
+      } catch (e) {
+        showError(`Failed to create session: ${String(e)}`);
+      }
+    },
+    [handleSelectSession, showError]
+  );
 
-  const handleInterrupt = async () => {
-    if (!activeSessionId) return;
+  const handleForkSession = useCallback(
+    async (sid: string) => {
+      try {
+        const newSid = await api.forkSession(sid);
+        const updated = await api.listSessions(150);
+        setSessions(updated);
+        handleSelectSession(newSid);
+      } catch (e) {
+        showError(`Failed to fork session: ${String(e)}`);
+      }
+    },
+    [handleSelectSession, showError]
+  );
+
+  const handleDeleteSession = useCallback(
+    async (sid: string) => {
+      try {
+        await api.deleteSession(sid);
+        const updated = await api.listSessions(150);
+        setSessions(updated);
+        if (activeSessionIdRef.current === sid) {
+          if (updated.length > 0) {
+            handleSelectSession(updated[0].record.id);
+          } else {
+            setActiveSessionId(null);
+            setMessages([]);
+          }
+        }
+      } catch (e) {
+        showError(`Failed to delete session: ${String(e)}`);
+      }
+    },
+    [handleSelectSession, showError]
+  );
+
+  const handleRenameSession = useCallback(
+    async (sid: string, name: string) => {
+      try {
+        await api.renameSession(sid, name);
+        const updated = await api.listSessions(150);
+        setSessions(updated);
+      } catch (e) {
+        showError(`Failed to rename session: ${String(e)}`);
+      }
+    },
+    [showError]
+  );
+
+  const handleSendMessage = useCallback(
+    async (text: string) => {
+      const sid = activeSessionIdRef.current;
+      if (!sid) return;
+      optimisticQueryRef.current = { sid, query: text };
+      setTurnRunning(true);
+      setMessages((prev) => [...prev, { role: 'user', content: text, tool_calls: [] }]);
+      try {
+        await api.sendMessage(sid, text);
+      } catch (e) {
+        optimisticQueryRef.current = null;
+        setTurnRunning(false);
+        showError(`Failed to send message: ${String(e)}`);
+      }
+    },
+    [showError]
+  );
+
+  const handleInterrupt = useCallback(async () => {
+    const sid = activeSessionIdRef.current;
+    if (!sid) return;
     try {
-      await api.interrupt(activeSessionId);
+      await api.interrupt(sid);
     } catch (e) {
       console.error(e);
     }
-  };
+  }, []);
 
-  const handleResolveApproval = async (
-    decision: 'run' | 'deny' | 'run_with_args' | 'deny_with_feedback',
-    args?: unknown,
-    feedback?: string
-  ) => {
-    if (!activeSessionId) return;
-    try {
-      await api.resolveApproval(activeSessionId, decision, args, feedback);
-      setPendingApproval(null);
-    } catch (e) {
-      showError(`Failed to resolve approval: ${String(e)}`);
-    }
-  };
+  const handleResolveApproval = useCallback(
+    async (
+      decision: 'run' | 'deny' | 'run_with_args' | 'deny_with_feedback',
+      args?: unknown,
+      feedback?: string
+    ) => {
+      const sid = activeSessionIdRef.current;
+      if (!sid) return;
+      const reqId = pendingApproval?.request_id;
+      try {
+        await api.resolveApproval(sid, decision, args, feedback, reqId);
+        setPendingApproval(null);
+      } catch (e) {
+        showError(`Failed to resolve approval: ${String(e)}`);
+      }
+    },
+    [pendingApproval, showError]
+  );
 
-  const handleResolveClarify = async (answers: Array<string | string[]>) => {
-    if (!activeSessionId) return;
-    try {
-      await api.resolveClarify(activeSessionId, answers);
-      setPendingClarify(null);
-    } catch (e) {
-      showError(`Failed to resolve clarification: ${String(e)}`);
-    }
-  };
+  const handleResolveClarify = useCallback(
+    async (answers: Array<string | string[]>) => {
+      const sid = activeSessionIdRef.current;
+      if (!sid) return;
+      const reqId = pendingClarify?.request_id;
+      try {
+        await api.resolveClarify(sid, answers, reqId);
+        setPendingClarify(null);
+      } catch (e) {
+        showError(`Failed to resolve clarification: ${String(e)}`);
+      }
+    },
+    [pendingClarify, showError]
+  );
+
+  const handleSelectModel = useCallback(
+    async (provider: string, model: string) => {
+      await api.setDefaultModel(provider, model, activeSessionIdRef.current);
+      setDefaultProvider(provider);
+      setDefaultModel(model);
+      const updated = await api.listSessions(150);
+      setSessions(updated);
+    },
+    []
+  );
+
+  const handleRefreshProvider = useCallback(async (providerId: string) => {
+    const models = await api.refreshProviderModels(providerId);
+    setProviders((prev) =>
+      prev.map((p) => (p.id === providerId ? { ...p, models } : p))
+    );
+  }, []);
+
+  const handleSaveCredential = useCallback(async (provider: string, key: string) => {
+    await api.saveCredential(provider, key);
+    setProviders((prev) =>
+      prev.map((p) => (p.id === provider ? { ...p, configured: true } : p))
+    );
+  }, []);
+
+  const handleSelectWorkspace = useCallback(async (path: string) => {
+    const res = await api.setWorkspace(path);
+    setWorkspaceRoot(res.workspace_root);
+  }, []);
 
   const handleCreateSchedule = async (
     title: string,
@@ -346,7 +482,7 @@ export const App: React.FC = () => {
       const updated = await api.listSchedules();
       setSchedules(updated);
     } catch (e) {
-      showError(`Failed to create schedule: ${String(e)}`);
+      showError(`Failed to create automation: ${String(e)}`);
     }
   };
 
@@ -357,7 +493,7 @@ export const App: React.FC = () => {
         prev.map((s) => (s.id === taskId ? { ...s, enabled } : s))
       );
     } catch (e) {
-      showError(`Failed to toggle schedule: ${String(e)}`);
+      showError(`Failed to toggle automation: ${String(e)}`);
     }
   };
 
@@ -366,7 +502,7 @@ export const App: React.FC = () => {
       await api.deleteSchedule(taskId);
       setSchedules((prev) => prev.filter((s) => s.id !== taskId));
     } catch (e) {
-      showError(`Failed to delete schedule: ${String(e)}`);
+      showError(`Failed to delete automation: ${String(e)}`);
     }
   };
 
@@ -393,11 +529,27 @@ export const App: React.FC = () => {
   const activeTitle = activeSessionItem
     ? activeSessionItem.record.name ||
       activeSessionItem.record.title ||
-      `Session ${activeSessionItem.record.id.slice(0, 8)}`
+      `Session ${activeSessionItem.record.id.slice(0, 7)}`
     : '';
+  const activeProvider = activeSessionItem?.record.model?.[0] || defaultProvider;
+  const activeModel = activeSessionItem?.record.model?.[1] || defaultModel;
 
   return (
     <div className="app-container">
+      {toastError && (
+        <div className="toast-error" role="alert">
+          <span>{toastError}</span>
+          <button
+            type="button"
+            className="toast-close"
+            onClick={() => setToastError(null)}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <Sidebar
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -411,37 +563,27 @@ export const App: React.FC = () => {
         onDeleteSession={handleDeleteSession}
         onRenameSession={handleRenameSession}
         sidebarAgents={sidebarAgents}
+        workspaceRoot={workspaceRoot}
+        onOpenWorkspacePicker={() => setIsWorkspacePickerOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />
 
       <main className="main-content">
-        {toastError && (
-          <div className="toast-error" role="alert">
-            <span>{toastError}</span>
-            <button
-              type="button"
-              className="toast-close"
-              onClick={() => setToastError(null)}
-              aria-label="Dismiss"
-            >
-              ×
-            </button>
-          </div>
-        )}
-
         {currentTab === 'chat' && (
           <ChatView
             sessionId={activeSessionId}
             sessionTitle={activeTitle}
-            provider={defaultProvider}
-            model={defaultModel}
+            workspaceRoot={workspaceRoot}
+            provider={activeProvider}
+            model={activeModel}
             messages={messages}
             turnRunning={turnRunning}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
-            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenModelPicker={() => setIsModelPickerOpen(true)}
+            onOpenWorkspacePicker={() => setIsWorkspacePickerOpen(true)}
             onNewSession={() => handleNewSession(null)}
             onSendMessage={handleSendMessage}
             onInterrupt={handleInterrupt}
@@ -490,18 +632,34 @@ export const App: React.FC = () => {
         onSubmit={handleCreatePluginFromSpec}
       />
 
+      <ModelPickerModal
+        isOpen={isModelPickerOpen}
+        onClose={() => setIsModelPickerOpen(false)}
+        providers={providers}
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onSelectModel={handleSelectModel}
+        onRefreshProvider={handleRefreshProvider}
+        onSaveCredential={handleSaveCredential}
+      />
+
+      <WorkspaceModal
+        isOpen={isWorkspacePickerOpen}
+        onClose={() => setIsWorkspacePickerOpen(false)}
+        currentWorkspace={workspaceRoot}
+        onSelectWorkspace={handleSelectWorkspace}
+      />
+
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         providers={providers}
-        defaultProvider={defaultProvider}
-        defaultModel={defaultModel}
-        onSaveDefaultModel={async (p, m) => {
-          await api.setDefaultModel(p, m);
-          setDefaultProvider(p);
-          setDefaultModel(m);
-        }}
-        onSaveCredential={api.saveCredential.bind(api)}
+        defaultProvider={activeProvider}
+        defaultModel={activeModel}
+        workspaceRoot={workspaceRoot}
+        onOpenModelPicker={() => setIsModelPickerOpen(true)}
+        onOpenWorkspacePicker={() => setIsWorkspacePickerOpen(true)}
+        onSaveCredential={handleSaveCredential}
       />
     </div>
   );

@@ -770,6 +770,21 @@ impl CredentialManager {
             .unwrap_or_default()
     }
 
+    /// Return the set of provider IDs that currently have at least one credential,
+    /// absorbing disk state once rather than per provider.
+    pub async fn configured_providers_snapshot(&self) -> std::collections::HashSet<String> {
+        if let Err(e) = self.absorb_disk_state().await {
+            tracing::warn!("Failed to absorb credentials from disk: {}", e);
+        }
+        let state = self.state.read().await;
+        state
+            .providers
+            .iter()
+            .filter(|(_, pool)| !pool.credentials.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
         self.acquire_credential_inner(provider, None).await
     }

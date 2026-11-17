@@ -26,7 +26,7 @@ pub struct ActiveSessionHandle {
 }
 
 pub struct WebState {
-    pub config: Config,
+    pub config: RwLock<Config>,
     pub store: Arc<SqliteSessionStore>,
     pub cred_manager: Arc<CredentialManager>,
     pub discovery: Arc<ModelDiscovery>,
@@ -80,7 +80,7 @@ impl WebState {
         let (event_tx, _) = broadcast::channel(512);
 
         Ok(Arc::new(Self {
-            config,
+            config: RwLock::new(config),
             store,
             cred_manager,
             discovery,
@@ -96,6 +96,22 @@ impl WebState {
 
     pub fn emit_event(&self, event: AppEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Remove cached session runtimes that are not currently running a turn so they
+    /// pick up updated workspace root or default model configuration on next turn.
+    pub async fn invalidate_idle_sessions(&self) {
+        let mut map = self.sessions.lock().await;
+        map.retain(|_, handle| handle.turn_running.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    pub async fn drop_session_if_idle(&self, session_id: &str) {
+        let mut map = self.sessions.lock().await;
+        if let Some(handle) = map.get(session_id) {
+            if !handle.turn_running.load(std::sync::atomic::Ordering::SeqCst) {
+                map.remove(session_id);
+            }
+        }
     }
 
     pub async fn get_or_open_session(
@@ -131,8 +147,9 @@ impl WebState {
             let _ = event_tx.send(app_evt);
         });
 
+        let cfg_snapshot = self.config.read().await.clone();
         let mut runtime = AppRuntime::prepare(
-            self.config.clone(),
+            cfg_snapshot,
             self.cred_manager.clone(),
             self.discovery.clone(),
             SessionSelection::Resume(session_id.to_string()),

@@ -95,13 +95,13 @@ export interface NoteEntry {
 }
 
 export interface ApprovalRequestPayload {
-  session_id: string;
-  tool_name: string;
+  request_id?: string;
+  tool?: string;
+  tool_name?: string;
+  call_id?: string;
   target?: string | null;
   diff?: string | null;
-  preview?: string | null;
   arguments: unknown;
-  activity_token?: string;
 }
 
 export interface ClarifyItem {
@@ -110,10 +110,22 @@ export interface ClarifyItem {
 }
 
 export interface ClarifyRequestPayload {
-  session_id: string;
-  question: string;
-  choices: string[];
+  request_id?: string;
+  question?: string;
+  choices?: string[];
   questions?: ClarifyItem[];
+}
+
+export interface WorkspaceBrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceBrowseResult {
+  current: string;
+  parent: string | null;
+  home: string | null;
+  entries: WorkspaceBrowseEntry[];
 }
 
 export interface BootstrapPayload {
@@ -128,18 +140,18 @@ export interface BootstrapPayload {
 }
 
 export type AppEvent =
-  | { type: 'TurnStarted'; session_id: string; query: string }
-  | { type: 'StreamDelta'; session_id: string; delta: string }
-  | { type: 'StreamReasoningDelta'; session_id: string; delta: string }
-  | { type: 'ToolCallStarted'; session_id: string; tool_name: string; call_id: string; arguments: unknown }
-  | { type: 'ToolCallFinished'; session_id: string; call_id: string; result: string; is_error: boolean }
-  | { type: 'ApprovalRequested'; session_id: string; request: ApprovalRequestPayload }
-  | { type: 'ApprovalResolved'; session_id: string; approved: boolean }
-  | { type: 'ClarifyRequested'; session_id: string; request: ClarifyRequestPayload }
-  | { type: 'ClarifyResolved'; session_id: string }
-  | { type: 'TurnCompleted'; session_id: string; response: string; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; duration_ms?: number }
-  | { type: 'TurnError'; session_id: string; error: string }
-  | { type: 'SessionSwitched'; session_id: string };
+  | { kind: 'turn_started'; session_id: string; query: string }
+  | { kind: 'turn_finished'; session_id: string; reply: string; duration_ms: number; prompt_tokens: number; completion_tokens: number }
+  | { kind: 'turn_failed'; session_id: string; error: string }
+  | { kind: 'reasoning_delta'; session_id: string; delta: string }
+  | { kind: 'content_delta'; session_id: string; delta: string }
+  | { kind: 'tool_executing'; session_id: string; name: string; arguments: unknown }
+  | { kind: 'tool_output'; session_id: string; name: string; chunk: string }
+  | { kind: 'tool_executed'; session_id: string; name: string; is_error: boolean; output: string }
+  | { kind: 'interrupted'; session_id: string; text: string; reasoning: string; partial: string }
+  | { kind: 'model_changed'; session_id: string; provider: string; model: string }
+  | { kind: 'approval_requested'; request_id: string; session_id: string; request: ApprovalRequestPayload }
+  | { kind: 'clarify_requested'; request_id: string; session_id: string; request: ClarifyRequestPayload };
 
 export interface PluginBuilderSpec {
   name: string;

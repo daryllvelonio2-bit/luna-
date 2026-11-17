@@ -92,7 +92,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/sessions/{session_id}/clarify", post(resolve_clarify))
         .route("/api/approval/question", post(ask_approval_question))
         .route("/api/providers", get(get_providers))
+        .route("/api/providers/{provider_id}/refresh", post(refresh_provider_models))
         .route("/api/models/default", post(set_default_model))
+        .route("/api/workspace/browse", get(browse_workspace))
+        .route("/api/workspace", post(set_workspace))
         .route("/api/credentials", post(save_credential))
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/build", post(create_plugin_from_spec))
@@ -235,6 +238,29 @@ async fn auth_status(
     })))
 }
 
+async fn build_providers_snapshot(state: &WebState) -> Vec<GuiProviderInfo> {
+    let configured_set = state.cred_manager.configured_providers_snapshot().await;
+    let cached_models = state.discovery.cached_models_snapshot();
+    let catalog = get_provider_catalog();
+
+    let mut providers = Vec::with_capacity(catalog.len());
+    for p in catalog {
+        let configured = configured_set.contains(&p.id.to_lowercase());
+        let mut models = cached_models.get(&p.id).cloned().unwrap_or_default();
+        if models.is_empty() && !p.context_windows.is_empty() {
+            models = p.context_windows.keys().cloned().collect();
+            models.sort();
+        }
+        providers.push(GuiProviderInfo {
+            id: p.id,
+            display_name: p.display_name,
+            configured,
+            models,
+        });
+    }
+    providers
+}
+
 async fn bootstrap(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<GuiBootstrapPayload>, (StatusCode, String)> {
@@ -247,6 +273,7 @@ async fn bootstrap(
 
     let sessions = records
         .into_iter()
+        .take(120)
         .map(|r| {
             let pid = agent_map.get(&r.id).cloned();
             GuiSessionItem {
@@ -257,39 +284,29 @@ async fn bootstrap(
         .collect();
 
     let sidebar_agents = state.plugin_manager.sidebar_agents();
-
-    let catalog = get_provider_catalog();
-    let mut providers = Vec::new();
-    for p in catalog {
-        let creds = state.cred_manager.get_credentials(&p.id).await;
-        let configured = !creds.is_empty();
-        let models = state
-            .discovery
-            .get_models(&p.id, &state.cred_manager, false)
-            .await
-            .unwrap_or_default();
-        providers.push(GuiProviderInfo {
-            id: p.id,
-            display_name: p.display_name,
-            configured,
-            models,
-        });
-    }
+    let providers = build_providers_snapshot(&state).await;
+    let cfg = state.config.read().await;
 
     Ok(Json(GuiBootstrapPayload {
-        workspace_root: state.config.paths.workspace_root.display().to_string(),
-        default_provider: state.config.model.provider.clone(),
-        default_model: state.config.model.default.clone(),
+        workspace_root: cfg.paths.workspace_root.display().to_string(),
+        default_provider: cfg.model.provider.clone(),
+        default_model: cfg.model.default.clone(),
         sessions,
         sidebar_agents,
         providers,
         theme: "dark".to_string(),
-        approval_mode: format!("{:?}", state.config.tools.approval).to_lowercase(),
+        approval_mode: format!("{:?}", cfg.tools.approval).to_lowercase(),
     }))
+}
+
+#[derive(Deserialize)]
+struct ListSessionsQuery {
+    limit: Option<usize>,
 }
 
 async fn list_sessions(
     State(state): State<Arc<WebState>>,
+    Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<GuiSessionItem>>, (StatusCode, String)> {
     let records = state
         .store
@@ -297,17 +314,29 @@ async fn list_sessions(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let agent_map = state.session_agents.read().await;
+    let limit = query.limit.unwrap_or(150);
 
-    let items = records
-        .into_iter()
-        .map(|r| {
+    let iter = records.into_iter();
+    let items = if limit > 0 {
+        iter.take(limit)
+            .map(|r| {
+                let pid = agent_map.get(&r.id).cloned();
+                GuiSessionItem {
+                    record: r,
+                    plugin_agent_id: pid,
+                }
+            })
+            .collect()
+    } else {
+        iter.map(|r| {
             let pid = agent_map.get(&r.id).cloned();
             GuiSessionItem {
                 record: r,
                 plugin_agent_id: pid,
             }
         })
-        .collect();
+        .collect()
+    };
     Ok(Json(items))
 }
 
@@ -335,13 +364,20 @@ async fn create_session(
     Ok(Json(serde_json::json!({ "session_id": sid })))
 }
 
+#[derive(Deserialize)]
+struct TranscriptQuery {
+    limit: Option<usize>,
+}
+
 async fn get_session_transcript(
     State(state): State<Arc<WebState>>,
     Path(session_id): Path<String>,
+    Query(query): Query<TranscriptQuery>,
 ) -> Result<Json<Vec<TranscriptMessageDto>>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(150).clamp(1, 1000);
     let outcome = state
         .store
-        .replay(&session_id, 500)
+        .replay(&session_id, limit)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -643,25 +679,28 @@ async fn ask_approval_question(
     State(state): State<Arc<WebState>>,
     Json(payload): Json<AskQuestionReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let provider = state
-        .config
-        .tools
-        .approval_provider
-        .clone()
-        .unwrap_or_else(|| state.config.model.provider.clone());
-    let model = state
-        .config
-        .tools
-        .approval_model
-        .clone()
-        .unwrap_or_else(|| state.config.model.default.clone());
+    let (provider, model, provider_override) = {
+        let cfg = state.config.read().await;
+        let provider = cfg
+            .tools
+            .approval_provider
+            .clone()
+            .unwrap_or_else(|| cfg.model.provider.clone());
+        let model = cfg
+            .tools
+            .approval_model
+            .clone()
+            .unwrap_or_else(|| cfg.model.default.clone());
+        let pov = cfg.providers.get(&provider).cloned();
+        (provider, model, pov)
+    };
 
     let client = GenericProviderClient::new(
         provider.clone(),
         model,
         state.cred_manager.clone(),
         state.discovery.clone(),
-        state.config.providers.get(&provider),
+        provider_override.as_ref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -694,44 +733,175 @@ async fn ask_approval_question(
 async fn get_providers(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Vec<GuiProviderInfo>>, (StatusCode, String)> {
-    let catalog = get_provider_catalog();
-    let mut out = Vec::new();
-    for p in catalog {
-        let creds = state.cred_manager.get_credentials(&p.id).await;
-        let configured = !creds.is_empty();
-        let models = state
-            .discovery
-            .get_models(&p.id, &state.cred_manager, false)
-            .await
-            .unwrap_or_default();
-        out.push(GuiProviderInfo {
-            id: p.id,
-            display_name: p.display_name,
-            configured,
-            models,
-        });
-    }
-    Ok(Json(out))
+    Ok(Json(build_providers_snapshot(&state).await))
+}
+
+async fn refresh_provider_models(
+    State(state): State<Arc<WebState>>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let models = state
+        .discovery
+        .get_models(&provider_id, &state.cred_manager, true)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(models))
 }
 
 #[derive(Deserialize)]
 struct SetDefaultModelReq {
     provider: String,
     model: String,
+    session_id: Option<String>,
 }
 
 async fn set_default_model(
     State(state): State<Arc<WebState>>,
     Json(payload): Json<SetDefaultModelReq>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let mut cfg = state.config.clone();
-    cfg.model.provider = payload.provider;
-    cfg.model.default = payload.model;
-    let yaml = serde_yaml::to_string(&cfg)
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut cfg = state.config.write().await;
+    cfg.model.provider = payload.provider.clone();
+    cfg.model.default = payload.model.clone();
+    let yaml = serde_yaml::to_string(&*cfg)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(cfg);
+
     let path = harness_core::config::config_file_path();
     std::fs::write(&path, yaml).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(StatusCode::OK)
+
+    if let Some(sid) = payload.session_id.as_deref() {
+        let _ = state
+            .store
+            .set_model(sid, &payload.provider, &payload.model)
+            .await;
+        state.drop_session_if_idle(sid).await;
+    } else {
+        state.invalidate_idle_sessions().await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "provider": payload.provider,
+        "model": payload.model,
+    })))
+}
+
+#[derive(Deserialize)]
+struct BrowseWorkspaceQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceEntryDto {
+    name: String,
+    path: String,
+}
+
+async fn browse_workspace(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<BrowseWorkspaceQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let current = match query.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            if raw == "~" || raw.starts_with("~/") {
+                if let Some(ref h) = home {
+                    if raw == "~" {
+                        h.clone()
+                    } else {
+                        h.join(raw.trim_start_matches("~/"))
+                    }
+                } else {
+                    std::path::PathBuf::from(raw)
+                }
+            } else {
+                std::path::PathBuf::from(raw)
+            }
+        }
+        None => state.config.read().await.paths.workspace_root.clone(),
+    };
+
+    let canonical = current.canonicalize().unwrap_or(current);
+    if !canonical.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Not a directory: {}", canonical.display()),
+        ));
+    }
+
+    let mut entries = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&canonical) {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.starts_with('.') {
+                        entries.push(WorkspaceEntryDto {
+                            name: name.to_string(),
+                            path: p.display().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    let parent = canonical.parent().map(|p| p.display().to_string());
+    Ok(Json(serde_json::json!({
+        "current": canonical.display().to_string(),
+        "parent": parent,
+        "home": home.map(|h| h.display().to_string()),
+        "entries": entries,
+    })))
+}
+
+#[derive(Deserialize)]
+struct SetWorkspaceReq {
+    path: String,
+}
+
+async fn set_workspace(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<SetWorkspaceReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let raw = payload.path.trim();
+    if raw.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Workspace path cannot be empty".into()));
+    }
+    let candidate = if raw == "~" || raw.starts_with("~/") {
+        if let Some(h) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            if raw == "~" {
+                h
+            } else {
+                h.join(raw.trim_start_matches("~/"))
+            }
+        } else {
+            std::path::PathBuf::from(raw)
+        }
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+
+    if !candidate.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Directory does not exist: {}", candidate.display()),
+        ));
+    }
+
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    {
+        let mut cfg = state.config.write().await;
+        cfg.paths.workspace_root = canonical.clone();
+    }
+    state.invalidate_idle_sessions().await;
+
+    Ok(Json(serde_json::json!({
+        "workspace_root": canonical.display().to_string(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -872,7 +1042,8 @@ async fn search_memories(
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let q = query.q.unwrap_or_default();
-    let engine = build_memory_engine(&state.config)
+    let cfg = state.config.read().await.clone();
+    let engine = build_memory_engine(&cfg)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let records = engine
         .retrieve(&q, 30)
@@ -899,11 +1070,12 @@ async fn search_notes(
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let q = query.q.unwrap_or_default();
-    let engine = FileNotesEngine::new(
-        state.config.paths.notes_dir.clone(),
-        Some(state.config.paths.notes_db.clone()),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (notes_dir, notes_db) = {
+        let cfg = state.config.read().await;
+        (cfg.paths.notes_dir.clone(), cfg.paths.notes_db.clone())
+    };
+    let engine = FileNotesEngine::new(notes_dir, Some(notes_db))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let notes = engine
         .search_notes(&q, 30)
         .await
@@ -928,11 +1100,12 @@ async fn get_note(
     State(state): State<Arc<WebState>>,
     Path(note_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = FileNotesEngine::new(
-        state.config.paths.notes_dir.clone(),
-        Some(state.config.paths.notes_db.clone()),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (notes_dir, notes_db) = {
+        let cfg = state.config.read().await;
+        (cfg.paths.notes_dir.clone(), cfg.paths.notes_db.clone())
+    };
+    let engine = FileNotesEngine::new(notes_dir, Some(notes_db))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let note = engine
         .read_note(&note_id)
         .await

@@ -9,6 +9,7 @@ import type {
   ProviderInfo,
   ScheduleTask,
   TranscriptMessageDto,
+  WorkspaceBrowseResult,
 } from './types';
 
 type EventListener = (event: AppEvent) => void;
@@ -78,7 +79,7 @@ class ApiClient {
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.connectWs();
-    }, 2000);
+    }, 1500);
   }
 
   public subscribeEvents(cb: EventListener): () => void {
@@ -97,25 +98,33 @@ class ApiClient {
       },
       credentials: 'same-origin',
     });
+
+    const text = await res.text();
     if (!res.ok) {
       let errMsg = `Request failed: ${res.status} ${res.statusText}`;
-      try {
-        const body = await res.json();
-        if (body.error) errMsg = body.error;
-      } catch {
-        // ignore
+      if (text) {
+        try {
+          const body = JSON.parse(text);
+          errMsg = body.error || body.message || text;
+        } catch {
+          errMsg = text;
+        }
       }
       throw new Error(errMsg);
     }
-    return (await res.json()) as T;
+
+    if (!text) {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
   }
 
   public async bootstrap(): Promise<BootstrapPayload> {
     return this.request<BootstrapPayload>('/api/bootstrap');
   }
 
-  public async listSessions(): Promise<GuiSessionItem[]> {
-    return this.request<GuiSessionItem[]>('/api/sessions');
+  public async listSessions(limit = 150): Promise<GuiSessionItem[]> {
+    return this.request<GuiSessionItem[]>(`/api/sessions?limit=${limit}`);
   }
 
   public async createSession(pluginAgentId?: string | null): Promise<string> {
@@ -126,8 +135,10 @@ class ApiClient {
     return res.session_id;
   }
 
-  public async getTranscript(sessionId: string): Promise<TranscriptMessageDto[]> {
-    return this.request<TranscriptMessageDto[]>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  public async getTranscript(sessionId: string, limit = 150): Promise<TranscriptMessageDto[]> {
+    return this.request<TranscriptMessageDto[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/transcript?limit=${limit}`
+    );
   }
 
   public async sendMessage(sessionId: string, message: string, pluginAgentId?: string | null): Promise<void> {
@@ -167,18 +178,28 @@ class ApiClient {
     sessionId: string,
     decision: 'run' | 'deny' | 'run_with_args' | 'deny_with_feedback',
     argumentsJson?: unknown,
-    feedback?: string
+    feedback?: string,
+    requestId?: string
   ): Promise<void> {
     return this.request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/approval`, {
       method: 'POST',
-      body: JSON.stringify({ decision, arguments: argumentsJson, feedback }),
+      body: JSON.stringify({
+        request_id: requestId,
+        decision,
+        arguments: argumentsJson,
+        feedback,
+      }),
     });
   }
 
-  public async resolveClarify(sessionId: string, answers: Array<string | string[]>): Promise<void> {
+  public async resolveClarify(
+    sessionId: string,
+    answers: Array<string | string[]>,
+    requestId?: string
+  ): Promise<void> {
     return this.request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/clarify`, {
       method: 'POST',
-      body: JSON.stringify({ answers }),
+      body: JSON.stringify({ request_id: requestId, answers }),
     });
   }
 
@@ -198,10 +219,32 @@ class ApiClient {
     return this.request<ProviderInfo[]>('/api/providers');
   }
 
-  public async setDefaultModel(provider: string, model: string): Promise<void> {
-    return this.request<void>('/api/models/default', {
+  public async refreshProviderModels(providerId: string): Promise<string[]> {
+    return this.request<string[]>(`/api/providers/${encodeURIComponent(providerId)}/refresh`, {
       method: 'POST',
-      body: JSON.stringify({ provider, model }),
+    });
+  }
+
+  public async setDefaultModel(
+    provider: string,
+    model: string,
+    sessionId?: string | null
+  ): Promise<{ provider: string; model: string }> {
+    return this.request<{ provider: string; model: string }>('/api/models/default', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model, session_id: sessionId ?? null }),
+    });
+  }
+
+  public async browseWorkspace(path?: string): Promise<WorkspaceBrowseResult> {
+    const q = path ? `?path=${encodeURIComponent(path)}` : '';
+    return this.request<WorkspaceBrowseResult>(`/api/workspace/browse${q}`);
+  }
+
+  public async setWorkspace(path: string): Promise<{ workspace_root: string }> {
+    return this.request<{ workspace_root: string }>('/api/workspace', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
     });
   }
 
@@ -216,17 +259,17 @@ class ApiClient {
     return this.request<PluginSummary[]>('/api/plugins');
   }
 
-  public async togglePlugin(pluginId: string, enabled: boolean): Promise<void> {
-    return this.request<void>(`/api/plugins/${encodeURIComponent(pluginId)}/toggle`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
-    });
-  }
-
   public async createPluginFromSpec(spec: PluginBuilderSpec): Promise<void> {
     return this.request<void>('/api/plugins/build', {
       method: 'POST',
       body: JSON.stringify(spec),
+    });
+  }
+
+  public async togglePlugin(pluginId: string, enabled: boolean): Promise<void> {
+    return this.request<void>(`/api/plugins/${encodeURIComponent(pluginId)}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     });
   }
 
@@ -240,8 +283,8 @@ class ApiClient {
     scheduleType: 'cron' | 'interval',
     cronExpr?: string,
     intervalSecs?: number
-  ): Promise<string> {
-    const res = await this.request<{ id: string }>('/api/schedules', {
+  ): Promise<{ id: string }> {
+    return this.request<{ id: string }>('/api/schedules', {
       method: 'POST',
       body: JSON.stringify({
         title,
@@ -251,7 +294,6 @@ class ApiClient {
         interval_secs: intervalSecs,
       }),
     });
-    return res.id;
   }
 
   public async toggleSchedule(taskId: string, enabled: boolean): Promise<void> {
@@ -267,16 +309,12 @@ class ApiClient {
     });
   }
 
-  public async searchMemories(query: string): Promise<MemoryFact[]> {
-    return this.request<MemoryFact[]>(`/api/memories?q=${encodeURIComponent(query)}`);
+  public async searchMemories(q: string): Promise<MemoryFact[]> {
+    return this.request<MemoryFact[]>(`/api/memories?q=${encodeURIComponent(q)}`);
   }
 
-  public async searchNotes(query: string): Promise<NoteEntry[]> {
-    return this.request<NoteEntry[]>(`/api/notes?q=${encodeURIComponent(query)}`);
-  }
-
-  public async getNote(id: string): Promise<NoteEntry> {
-    return this.request<NoteEntry>(`/api/notes/${encodeURIComponent(id)}`);
+  public async searchNotes(q: string): Promise<NoteEntry[]> {
+    return this.request<NoteEntry[]>(`/api/notes?q=${encodeURIComponent(q)}`);
   }
 }
 
