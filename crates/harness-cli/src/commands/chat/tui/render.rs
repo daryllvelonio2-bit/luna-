@@ -7073,11 +7073,13 @@ mod tests {
         assert!(text3.contains("max"), "{text3}");
     }
 
-    #[test]
-    fn scrolled_up_viewport_stays_pinned_while_agent_streams_at_bottom() {
+    #[tokio::test]
+    async fn scrolled_up_viewport_stays_pinned_while_agent_streams_at_bottom() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let mut st = test_dummy_tui_state();
+        st.active_turn = Some(tokio::spawn(std::future::pending()));
+        st.current_query = "Live question".to_string();
         for i in 0..8 {
             st.turns.push(TurnRecord {
                 user_query: format!("Question {i}"),
