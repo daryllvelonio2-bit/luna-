@@ -67,6 +67,7 @@ pub(super) struct ChatRuntime {
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
+    pub(super) approval_activity: Arc<tokio::sync::Notify>,
     pub(super) sudo_rx: mpsc::UnboundedReceiver<(String, oneshot::Sender<Option<String>>)>,
     pub(super) clarify_rx: mpsc::UnboundedReceiver<(
         crate::commands::clarify::ClarifyRequest,
@@ -127,6 +128,7 @@ struct ApprovalState {
         ApprovalRequest,
         oneshot::Sender<harness_core::ApprovalDecision>,
     )>,
+    approval_activity: Arc<tokio::sync::Notify>,
     allow_all_session: Arc<AtomicBool>,
     plan_mode: Arc<AtomicBool>,
     approver: Arc<dyn harness_core::Approver>,
@@ -379,20 +381,23 @@ fn build_approval_state(config: &Config, is_attended: bool) -> ApprovalState {
     ));
     let plan_mode = Arc::new(AtomicBool::new(false));
 
-    let approver: Arc<dyn harness_core::Approver> =
+    let (approver, approval_activity): (Arc<dyn harness_core::Approver>, Arc<tokio::sync::Notify>) =
         if is_attended && config.tools.approval == harness_core::ApprovalMode::Ask {
-            Arc::new(ChatApprover::new(
+            let chat_approver = Arc::new(ChatApprover::new(
                 approval_tx.clone(),
                 allow_all_session.clone(),
                 plan_mode.clone(),
-            ))
+            ));
+            let activity = chat_approver.activity_handle();
+            (chat_approver, activity)
         } else {
-            build_approver(config)
+            (build_approver(config), Arc::new(tokio::sync::Notify::new()))
         };
 
     ApprovalState {
         approval_tx,
         approval_rx,
+        approval_activity,
         allow_all_session,
         plan_mode,
         approver,
@@ -651,6 +656,7 @@ pub(super) async fn prepare(
         is_attended,
         ui,
         approval_rx: approval.approval_rx,
+        approval_activity: approval.approval_activity,
         sudo_rx: tool_setup.sudo_rx,
         clarify_rx,
         job_rx,

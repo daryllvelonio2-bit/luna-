@@ -14,10 +14,12 @@
 //! Fail closed everywhere: an unreachable human ([`NonInteractive`]) is an error, a registry that
 //! cannot report mutability is treated as mutating, and no answer inside the timeout is a denial.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use crate::error::HarnessError;
 
@@ -49,6 +51,8 @@ pub enum ApprovalDecision {
     RunWithArguments(serde_json::Value),
     /// Do not run it.
     Deny,
+    /// Do not run it, and pass the human's suggestion or feedback back to the agent so it can revise.
+    DenyWithFeedback(String),
 }
 
 /// Decides whether a mutating call runs.
@@ -58,6 +62,12 @@ pub enum ApprovalDecision {
 #[async_trait]
 pub trait Approver: Send + Sync {
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError>;
+
+    /// Optional activity signal used to reset the inactivity timeout while a human is typing a
+    /// question or waiting on an approval-model reply. Default returns `None` (fixed deadline).
+    fn activity_notifier(&self) -> Option<Arc<Notify>> {
+        None
+    }
 }
 
 /// Approves every mutating call: `tools.approval = allow`, or `--yes`.

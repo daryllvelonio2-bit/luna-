@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use colored::Colorize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use harness_core::{
     AllowAll, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalSettings, Approver, Config,
@@ -181,6 +181,7 @@ pub struct ChatApprover {
     request_tx: mpsc::UnboundedSender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
     allow_all: Arc<AtomicBool>,
     plan_mode: Arc<AtomicBool>,
+    activity: Arc<Notify>,
 }
 
 impl ChatApprover {
@@ -193,12 +194,21 @@ impl ChatApprover {
             request_tx,
             allow_all,
             plan_mode,
+            activity: Arc::new(Notify::new()),
         }
+    }
+
+    pub fn activity_handle(&self) -> Arc<Notify> {
+        self.activity.clone()
     }
 }
 
 #[async_trait]
 impl Approver for ChatApprover {
+    fn activity_notifier(&self) -> Option<Arc<Notify>> {
+        Some(self.activity.clone())
+    }
+
     async fn approve(&self, request: &ApprovalRequest) -> Result<ApprovalDecision, HarnessError> {
         if self.plan_mode.load(Ordering::SeqCst) {
             return Err(HarnessError::ApprovalRejected(
