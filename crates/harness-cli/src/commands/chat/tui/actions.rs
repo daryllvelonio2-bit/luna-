@@ -823,6 +823,7 @@ pub async fn open_models_for_target(
 ) {
     let provider_owned = provider.to_string();
     st.picker_loading = Some(provider_owned.clone());
+    let is_approval_target = matches!(target, ModelTarget::Approval);
     st.modal = ActiveModal::ModelPicker {
         target,
         provider: provider_owned.clone(),
@@ -835,7 +836,7 @@ pub async fn open_models_for_target(
     let tx = st.picker_tx.clone();
     let discovery = env.discovery.clone();
     let cred_manager = env.cred_manager.clone();
-    let (current_provider, current_model) = if matches!(target, ModelTarget::Approval) {
+    let (current_provider, current_model) = if is_approval_target {
         let (p, m, _, _) = resolve_approval_model(env, st);
         (p, m)
     } else {
@@ -1260,7 +1261,7 @@ pub fn ask_approval_model(env: &Env<'_>, st: &TuiState, req: ApprovalRequest, qu
                 .complete(&messages, &[], &options)
                 .await
                 .map_err(|e| format!("approval model error ({provider}/{model}): {e}"))?;
-            let text = reply.content.trim().to_string();
+            let text = reply.content.as_deref().unwrap_or("").trim().to_string();
             if text.is_empty() {
                 Ok("(model returned an empty response)".to_string())
             } else {
