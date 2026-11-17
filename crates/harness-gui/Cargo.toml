@@ -16,7 +16,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["custom-protocol"] }
 harness-core = { path = "../harness-core" }
 harness-app = { path = "../harness-app" }
 harness-providers = { path = "../harness-providers" }

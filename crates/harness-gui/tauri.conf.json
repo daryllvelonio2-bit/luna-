@@ -5,7 +5,6 @@
   "identifier": "ai.luna.desktop",
   "build": {
     "beforeDevCommand": "npm --prefix ../../gui run dev",
-    "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm --prefix ../../gui run build",
     "frontendDist": "../../gui/dist"
   },
