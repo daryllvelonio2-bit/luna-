@@ -12,6 +12,7 @@ members = [
     "crates/harness-onboarding",
     "crates/harness-desktop",
     "crates/harness-desktop-linux",
+    "crates/harness-android",
     "crates/harness-cli",
 ]
 resolver = "2"
@@ -64,6 +65,7 @@ base64 = "0.22"
 sha2 = "0.10"
 regex = "1.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+jni = "0.21"
 
 # Internal crate dependencies
 harness-core = { path = "crates/harness-core" }

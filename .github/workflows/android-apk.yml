@@ -1,0 +1,79 @@
+name: Android APK Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or SHA to build (defaults to the dispatched ref)'
+        required: false
+  push:
+    branches: ["feat/android-apk"]
+    paths:
+      - "crates/harness-android/**"
+      - "crates/harness-core/**"
+      - "crates/harness-providers/**"
+      - "crates/harness-memory/**"
+      - "crates/harness-notes/**"
+      - "crates/harness-plugins/**"
+      - "android/**"
+      - ".github/workflows/android-apk.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-arm64
+
+      - uses: taiki-e/install-action@cargo-ndk
+
+      - name: Install Android NDK and platform 35
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Build Rust JNI library (arm64-v8a)
+        run: cargo ndk -t arm64-v8a -p 29 -o android/app/src/main/jniLibs build --release --package harness-android
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build Android APK
+        working-directory: android
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Stage APK artifact
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk dist/luna-mobile-arm64.apk
+          ls -lh dist/luna-mobile-arm64.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luna-android-apk
+          path: dist/luna-mobile-arm64.apk
