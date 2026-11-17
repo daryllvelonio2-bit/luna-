@@ -392,9 +392,24 @@ impl Tool for WriteFileTool {
 
     async fn preview(&self, args: &serde_json::Value) -> Option<ToolPreview> {
         let path = args.get("path").and_then(|p| p.as_str())?;
+        let content = args.get("content").and_then(|c| c.as_str());
+        let diff = content.map(|new_content| {
+            let existing = self
+                .sandbox()
+                .resolve(path)
+                .ok()
+                .and_then(|resolved| std::fs::read_to_string(&resolved).ok())
+                .unwrap_or_default();
+            let udiff = unified_diff(&existing, new_content, path);
+            if udiff.trim().is_empty() {
+                format!("(no changes to {path})")
+            } else {
+                udiff
+            }
+        });
         Some(ToolPreview {
             target: Some(path.to_string()),
-            diff: None,
+            diff,
         })
     }
 

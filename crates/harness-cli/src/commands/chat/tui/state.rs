@@ -1121,6 +1121,7 @@ pub enum ActiveModal {
         req: ApprovalRequest,
         resp_tx: oneshot::Sender<ApprovalDecision>,
         selected: usize,
+        diff_scroll: usize,
         editing_input: bool,
         input: String,
         asking: bool,

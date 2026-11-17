@@ -3570,6 +3570,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
         ActiveModal::Approval {
             req,
             selected,
+            diff_scroll,
             editing_input,
             input,
             asking,
@@ -3579,18 +3580,18 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             approval_model_label,
             ..
         } => {
-            let w = screen.width.saturating_sub(6).clamp(54, 86);
-            let h = screen.height.saturating_sub(4).clamp(16, 28);
+            let w = screen.width.saturating_sub(4).clamp(58, 104);
+            let h = screen.height.saturating_sub(2).clamp(18, 36);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let hint = if *editing_input {
                 "enter ask model · ctrl+s send to agent · esc back"
             } else if reply.is_some() {
-                "↑/↓ · enter · q ask · pgup/pgdn · ctrl+s send"
+                "↑/↓ · enter · q ask · pgup/pgdn · [/] diff · ctrl+s send"
             } else if !input.trim().is_empty() {
-                "↑/↓ · enter · q ask · ctrl+s send to agent"
+                "↑/↓ · enter · q ask · pgup/pgdn diff · ctrl+s send"
             } else {
-                "↑/↓ · enter · y/a/n/q"
+                "↑/↓ · enter · y/a/n/q · pgup/pgdn diff"
             };
             let inner = draw_modal_frame(frame, rect, "Approve Tool Call", hint);
 
@@ -3651,18 +3652,73 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             let choices_rows = 4;
             let reserved = lines.len() + reply_rows + input_rows + choices_rows + 1;
 
-            if let Some(ref diff) = req.diff {
-                let preview_budget = inner_h.saturating_sub(reserved).max(2);
-                for dline in diff.lines().take(preview_budget) {
-                    let color = if dline.starts_with('+') {
+            let preview_lines: Option<(&str, Vec<String>)> = if let Some(ref diff) = req.diff {
+                let raw: Vec<String> = diff.lines().map(str::to_string).collect();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(("Diff", raw))
+                }
+            } else if let Some(content) = req.arguments.get("content").and_then(|c| c.as_str()) {
+                let raw: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(("Preview", raw))
+                }
+            } else if !req.arguments.is_null()
+                && !req.arguments.as_object().is_some_and(|obj| obj.is_empty())
+            {
+                let pretty = serde_json::to_string_pretty(&req.arguments)
+                    .unwrap_or_else(|_| req.arguments.to_string());
+                let raw: Vec<String> = pretty.lines().map(str::to_string).collect();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(("Arguments", raw))
+                }
+            } else {
+                None
+            };
+
+            if let Some((section_label, raw_lines)) = preview_lines {
+                let total_preview = raw_lines.len();
+                let preview_budget = inner_h.saturating_sub(reserved + 2).max(2);
+                let max_scroll = total_preview.saturating_sub(preview_budget);
+                let dscroll = (*diff_scroll).min(max_scroll);
+                let shown_end = (dscroll + preview_budget).min(total_preview);
+                let header = if total_preview > preview_budget {
+                    format!(
+                        " {section_label} ({}–{shown_end} of {total_preview} · [/] scroll):",
+                        dscroll + 1
+                    )
+                } else {
+                    format!(" {section_label}:")
+                };
+                lines.push(Line::from(Span::styled(
+                    truncate_str(&header, inner_w.saturating_sub(1)),
+                    Style::default()
+                        .fg(text_muted())
+                        .bg(bg_elevated())
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for dline in raw_lines.iter().skip(dscroll).take(preview_budget) {
+                    let color = if dline.starts_with("+++")
+                        || dline.starts_with("---")
+                        || dline.starts_with("@@")
+                    {
+                        cyan_link()
+                    } else if dline.starts_with('+') {
                         green_ok()
                     } else if dline.starts_with('-') {
                         red_err()
-                    } else {
+                    } else if section_label == "Diff" {
                         text_muted()
+                    } else {
+                        text_primary()
                     };
                     lines.push(Line::from(Span::styled(
-                        format!(" {}", truncate_str(dline, inner_w.saturating_sub(2))),
+                        format!("  {}", truncate_str(dline, inner_w.saturating_sub(3))),
                         Style::default().fg(color).bg(bg_elevated()),
                     )));
                 }
@@ -6289,6 +6345,7 @@ mod tests {
             },
             resp_tx: tx,
             selected: 3,
+            diff_scroll: 0,
             editing_input: true,
             input: "Why replace a with b?".to_string(),
             asking: false,
@@ -6315,9 +6372,63 @@ mod tests {
             .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(text.contains("Diff:"), "{text}");
+        assert!(text.contains("-a"), "{text}");
+        assert!(text.contains("+b"), "{text}");
         assert!(text.contains("Allow once"), "{text}");
         assert!(text.contains("Ask a question / add a suggestion"), "{text}");
         assert!(text.contains("Because b fixes the off-by-one."), "{text}");
         assert!(text.contains("Why replace a with b?"), "{text}");
+    }
+
+    #[test]
+    fn approval_modal_falls_back_to_content_preview_when_diff_is_none() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut st = test_dummy_tui_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.modal = ActiveModal::Approval {
+            req: harness_core::ApprovalRequest {
+                tool: "write_file".to_string(),
+                call_id: "c100".to_string(),
+                target: Some("test.txt".to_string()),
+                diff: None,
+                arguments: serde_json::json!({
+                    "path": "test.txt",
+                    "content": "line one\nline two"
+                }),
+            },
+            resp_tx: tx,
+            selected: 0,
+            diff_scroll: 0,
+            editing_input: false,
+            input: String::new(),
+            asking: false,
+            reply: None,
+            reply_scroll: 0,
+            error: None,
+            approval_model_label: "default (gpt-4o)".to_string(),
+        };
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = (0..32)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Preview:"), "{text}");
+        assert!(text.contains("+line one"), "{text}");
+        assert!(text.contains("+line two"), "{text}");
     }
 }
