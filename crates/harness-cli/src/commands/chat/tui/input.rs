@@ -259,11 +259,11 @@ async fn handle_mouse(
     }
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            st.scroll_from_bottom = (st.scroll_from_bottom + 3).min(st.max_scroll);
+            st.scroll_transcript_up(3);
             clear_selection(st);
         }
         MouseEventKind::ScrollDown => {
-            st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(3);
+            st.scroll_transcript_down(3);
             clear_selection(st);
         }
         MouseEventKind::Down(MouseButton::Left) if mouse.row == 0 => {
@@ -451,10 +451,10 @@ fn extend_selection(st: &mut TuiState, mouse: MouseEvent) {
 
     // Auto-scroll when pointer drags beyond the transcript's top or bottom edge.
     if mouse.row < ty && st.scroll_from_bottom < st.max_scroll {
-        st.scroll_from_bottom = (st.scroll_from_bottom + 1).min(st.max_scroll);
+        st.scroll_transcript_up(1);
         st.transcript_start = st.transcript_start.saturating_sub(1);
     } else if mouse.row >= ty.saturating_add(th) && st.scroll_from_bottom > 0 {
-        st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(1);
+        st.scroll_transcript_down(1);
         st.transcript_start = st.transcript_start.saturating_add(1);
     }
 
@@ -564,7 +564,7 @@ async fn apply_transcript_click(env: &Env<'_>, st: &mut TuiState, target: Transc
             };
         }
         TranscriptClickTarget::JumpToLatest => {
-            st.scroll_from_bottom = 0;
+            st.jump_to_latest();
             clear_selection(st);
         }
     }
@@ -940,13 +940,13 @@ async fn handle_key(
     match key.code {
         KeyCode::PageUp => {
             let step = (st.last_rendered_rect.1 as usize / 2).max(4);
-            st.scroll_from_bottom = (st.scroll_from_bottom + step).min(st.max_scroll);
+            st.scroll_transcript_up(step);
             clear_selection(st);
             return Ok(Flow::Continue);
         }
         KeyCode::PageDown => {
             let step = (st.last_rendered_rect.1 as usize / 2).max(4);
-            st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(step);
+            st.scroll_transcript_down(step);
             clear_selection(st);
             return Ok(Flow::Continue);
         }

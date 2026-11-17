@@ -181,6 +181,7 @@ fn park_current_session(env: &Env<'_>, st: &mut TuiState) {
         live_thinking_view: st.live_thinking_view,
         process_expanded: st.process_expanded,
         scroll_from_bottom: st.scroll_from_bottom,
+        scroll_anchor_top: st.scroll_anchor_top,
         queue: std::mem::take(&mut st.queue),
         current_cancel: std::mem::take(&mut st.current_cancel),
         active_turn: st.active_turn.take(),
@@ -223,6 +224,7 @@ fn restore_background_session(env: &mut Env<'_>, st: &mut TuiState, slot: Backgr
     st.live_thinking_view = slot.live_thinking_view;
     st.process_expanded = slot.process_expanded;
     st.scroll_from_bottom = slot.scroll_from_bottom;
+    st.scroll_anchor_top = slot.scroll_anchor_top;
     st.selection = None;
     st.pending_transcript_click = None;
     st.selection_notice = None;
@@ -462,7 +464,7 @@ pub async fn switch_to_session(
     st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
-    st.scroll_from_bottom = 0;
+    st.jump_to_latest();
     st.selection = None;
     st.pending_transcript_click = None;
     st.selection_notice = None;
@@ -557,7 +559,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     st.expanded_live_tools.clear();
     st.live_thinking_view = LiveThinkingView::Tail;
     st.process_expanded = false;
-    st.scroll_from_bottom = 0;
+    st.jump_to_latest();
     st.selection = None;
     st.pending_transcript_click = None;
     st.selection_notice = None;
@@ -3250,7 +3252,7 @@ pub async fn submit_composer(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(TurnProcessItem::user_message(&text));
-        st.scroll_from_bottom = 0;
+        st.jump_to_latest();
         match env.interrupt_handle.interrupt(&text) {
             harness_core::InterruptOutcome::Streaming => {
                 st.system_notices.push(SystemNotice::new(
@@ -3273,7 +3275,7 @@ pub async fn submit_composer(
     let display_opt = (submitted.display_text != submitted.expanded_text)
         .then_some(submitted.display_text.as_str());
     env.ui.clear_transient_error();
-    st.scroll_from_bottom = 0;
+    st.jump_to_latest();
     st.system_notices.clear();
     launch_turn(
         &submitted.expanded_text,
@@ -3686,7 +3688,7 @@ pub async fn run_slash_command(
             st.turn_meta.clear();
             st.settled_cache.clear();
             st.system_notices.clear();
-            st.scroll_from_bottom = 0;
+            st.jump_to_latest();
             return Ok(Flow::Continue);
         }
         "/exit" | "/quit" => {
@@ -3790,7 +3792,7 @@ pub async fn run_slash_command(
             sync_turn_meta_len(env, st);
             drain_tui_notices(env, st);
             refresh_tabs(env, st).await;
-            st.scroll_from_bottom = 0;
+            st.jump_to_latest();
             Ok(Flow::Continue)
         }
         SlashOutcome::Turn { prompt, display } => {
@@ -3799,7 +3801,7 @@ pub async fn run_slash_command(
                 st.queue.push_back(prompt);
                 env.ui.set_queue_depth(st.queue.len());
             } else {
-                st.scroll_from_bottom = 0;
+                st.jump_to_latest();
                 launch_turn(
                     &prompt,
                     Some(&display),
@@ -3828,7 +3830,7 @@ pub async fn run_slash_command(
             let max_iter = state.max_iterations;
             st.active_goal = Some(state);
             env.ui.set_goal_status(Some((iter, max_iter)));
-            st.scroll_from_bottom = 0;
+            st.jump_to_latest();
             launch_turn(
                 &prompt,
                 Some(&display),
@@ -3886,7 +3888,7 @@ pub async fn run_slash_command(
             sync_turn_meta_len(env, st);
             st.settled_cache.clear();
             drain_tui_notices(env, st);
-            st.scroll_from_bottom = 0;
+            st.jump_to_latest();
             Ok(Flow::Continue)
         }
         SlashOutcome::Exit => Ok(Flow::Break),
@@ -4228,7 +4230,6 @@ pub async fn handle_turn_end(
     refresh_tabs(env, st).await;
     drain_tui_notices(env, st);
     st.prune_stale_notices();
-    st.scroll_from_bottom = 0;
 }
 
 /// Handle completion of a turn running in a background session (not currently viewed).
@@ -4588,7 +4589,6 @@ pub async fn apply_compaction_completed(env: &Env<'_>, st: &mut TuiState) {
     }
     st.settled_cache.clear();
     sync_turn_meta_len(env, st);
-    st.scroll_from_bottom = 0;
 }
 
 /// Interrupt an active turn cleanly on `Esc` or `Ctrl+C`.

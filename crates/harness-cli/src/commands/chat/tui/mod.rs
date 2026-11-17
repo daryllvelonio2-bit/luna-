@@ -729,6 +729,7 @@ async fn init_tui_state(env: &mut Env<'_>) -> Result<TuiState, HarnessError> {
         pending_transcript_click: None,
         selection_notice: None,
         scroll_from_bottom: 0,
+        scroll_anchor_top: None,
         max_scroll: 0,
         modal: ActiveModal::None,
         slash_popup: SlashPopupState::default(),
