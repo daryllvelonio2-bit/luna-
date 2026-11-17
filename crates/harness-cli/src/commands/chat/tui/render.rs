@@ -562,10 +562,19 @@ fn render_landing(
             height: chrome_h,
         };
         let take_from = chrome_lines.len().saturating_sub(chrome_h as usize);
-        frame.render_widget(
-            Paragraph::new(chrome_lines[take_from..].to_vec()),
-            chrome_rect,
-        );
+        let visible_chrome = &chrome_lines[take_from..];
+        for (i, line) in visible_chrome.iter().enumerate() {
+            if snap.delegate_count > 0 && line.spans.iter().any(|s| s.content.contains("Subagent"))
+            {
+                st.transcript_hit_boxes.push(TranscriptHitBox {
+                    y: cur_y + i as u16,
+                    x_start: box_x,
+                    x_end: box_x + box_width,
+                    target: TranscriptClickTarget::OpenSubagents,
+                });
+            }
+        }
+        frame.render_widget(Paragraph::new(visible_chrome.to_vec()), chrome_rect);
         cur_y += chrome_h;
     }
 
@@ -2120,7 +2129,17 @@ fn render_completed_turn_process(
         } else {
             let open = process_expanded || expanded_tools.contains(&(turn_idx, tool_group_idx));
             let click_target = if item.tool_name == "delegate_task" {
-                TranscriptClickTarget::OpenSubagents
+                match item
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("task_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some(id) if !id.is_empty() => {
+                        TranscriptClickTarget::OpenSubagent(id.to_string())
+                    }
+                    _ => TranscriptClickTarget::OpenSubagents,
+                }
             } else {
                 TranscriptClickTarget::ToggleTurnTools(turn_idx, tool_group_idx)
             };
@@ -2536,6 +2555,7 @@ fn format_opencode_tool_header(
             }
         }
         "delegate_task" => {
+            let worker = arg_str("worker");
             if let Some(tasks) = arguments
                 .and_then(|a| a.get("tasks"))
                 .and_then(|v| v.as_array())
@@ -2550,7 +2570,11 @@ fn format_opencode_tool_header(
                     } else {
                         String::new()
                     };
-                    return ("◈ ", format!("Subagent: {goal}{extra}"));
+                    let label = match worker {
+                        Some(name) => format!("Subagent [{name}]: {goal}{extra}"),
+                        None => format!("Subagent: {goal}{extra}"),
+                    };
+                    return ("◈ ", label);
                 }
             }
         }
@@ -4060,28 +4084,87 @@ fn render_subagent_inspector(
     frame.render_widget(Paragraph::new(rows), body_rect);
 }
 
+fn push_subagent_log_lines(
+    lines: &mut Vec<Line<'static>>,
+    log_tail: &[String],
+    card_inner_w: usize,
+) {
+    for raw in log_tail {
+        let clean = clean_terminal_text(raw);
+        let trimmed = clean.trim_start();
+        let color = if trimmed.starts_with("▶ Tool Call:") {
+            cyan_link()
+        } else if trimmed.starts_with("✔ Tool Result") && trimmed.contains("FAILED") {
+            red_err()
+        } else if trimmed.starts_with("✔ Tool Result") {
+            green_ok()
+        } else if trimmed.starts_with("===") || trimmed.starts_with("───") {
+            text_muted()
+        } else {
+            text_primary()
+        };
+        let mut style = Style::default().fg(color);
+        if trimmed.starts_with("▶ Tool Call:") || trimmed.starts_with("✔ Tool Result") {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if clean.trim().is_empty() {
+            lines.push(Line::default());
+        } else {
+            for wrapped in wrap_plain_text(&clean, card_inner_w) {
+                lines.push(Line::from(Span::styled(format!("  {wrapped}"), style)));
+            }
+        }
+    }
+}
+
 fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let card_inner_w = width.saturating_sub(4).max(10);
 
     if item.turns.is_empty() {
-        if item.status == "running" {
+        if !item.title.trim().is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("▎ ", Style::default().fg(accent_coral()).bg(bg_surface())),
+                Span::styled(
+                    "Task Goal: ",
+                    Style::default()
+                        .fg(accent_coral())
+                        .add_modifier(Modifier::BOLD)
+                        .bg(bg_surface()),
+                ),
+            ]));
+            for qline in wrap_plain_text(&item.title, card_inner_w) {
+                let pad = card_inner_w.saturating_sub(qline.width());
+                lines.push(Line::from(vec![
+                    Span::styled("▎ ", Style::default().fg(accent_coral()).bg(bg_surface())),
+                    Span::styled(qline, Style::default().fg(text_primary()).bg(bg_surface())),
+                    Span::styled(" ".repeat(pad), Style::default().bg(bg_surface())),
+                ]));
+            }
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                format!("  ⠋ Subagent is starting... (Activity: {})", item.activity),
-                Style::default()
-                    .fg(cyan_link())
-                    .add_modifier(Modifier::BOLD),
-            )));
+        }
+
+        if !item.log_tail.is_empty() {
+            push_subagent_log_lines(&mut lines, &item.log_tail, card_inner_w);
+            lines.push(Line::default());
+        } else if item.status == "running" {
             lines.push(Line::from(Span::styled(
                 "  Tools and responses will appear here live.",
                 Style::default().fg(text_muted()),
             )));
         } else {
-            lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 format!("  No transcript recorded. (Status: {})", item.status),
                 Style::default().fg(text_muted()),
+            )));
+        }
+
+        if item.status == "running" {
+            lines.push(Line::from(Span::styled(
+                format!("  ⠋ Subagent is running ({})", item.activity),
+                Style::default()
+                    .fg(cyan_link())
+                    .add_modifier(Modifier::BOLD),
             )));
         }
         return lines;
@@ -4227,6 +4310,14 @@ fn build_subagent_inspector_lines(item: &SubagentUiEntry, width: usize) -> Vec<L
     }
 
     if item.status == "running" {
+        if !item.log_tail.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  ── Live Activity ──",
+                Style::default().fg(text_muted()),
+            )));
+            push_subagent_log_lines(&mut lines, &item.log_tail, card_inner_w);
+            lines.push(Line::default());
+        }
         lines.push(Line::from(Span::styled(
             format!("  ⠋ Subagent is running ({})", item.activity),
             Style::default()
@@ -5750,6 +5841,7 @@ mod tests {
                 duration: std::time::Duration::from_secs(14),
                 reply: "The repository contains a modular CLI harness.".to_string(),
             }],
+            log_tail: Vec::new(),
         };
 
         let lines = build_subagent_inspector_lines(&entry, 80);
@@ -5760,6 +5852,40 @@ mod tests {
         assert!(text.contains("◈ Thinking"));
         assert!(text.contains("read_file(Cargo.toml)"));
         assert!(text.contains("The repository contains a modular CLI harness."));
+    }
+
+    #[test]
+    fn test_subagent_inspector_renders_live_worker_log_tail_and_worker_header() {
+        let entry = SubagentUiEntry {
+            id: "se999".to_string(),
+            agent: "worker:shiina".to_string(),
+            title: "Fix the failing tests".to_string(),
+            status: "running".to_string(),
+            activity: "terminal running".to_string(),
+            elapsed_secs: 3,
+            turns: Vec::new(),
+            log_tail: vec![
+                "▶ Tool Call: terminal {\"command\":\"cargo test\"}".to_string(),
+                "✔ Tool Result [terminal] (SUCCESS):".to_string(),
+            ],
+        };
+        let lines = build_subagent_inspector_lines(&entry, 80);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Task Goal:"));
+        assert!(text.contains("Fix the failing tests"));
+        assert!(text.contains("▶ Tool Call: terminal"));
+        assert!(text.contains("Subagent is running (terminal running)"));
+
+        let (_prefix, header) = format_opencode_tool_header(
+            "delegate_task",
+            Some(&serde_json::json!({
+                "worker": "shiina",
+                "task_id": "se999",
+                "tasks": [{ "goal": "Fix the failing tests" }]
+            })),
+            None,
+        );
+        assert_eq!(header, "Subagent [shiina]: Fix the failing tests");
     }
 
     #[test]

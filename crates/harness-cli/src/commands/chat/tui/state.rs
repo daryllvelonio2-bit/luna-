@@ -1151,6 +1151,7 @@ pub struct SubagentUiEntry {
     pub activity: String,
     pub elapsed_secs: u64,
     pub turns: Vec<TurnRecord>,
+    pub log_tail: Vec<String>,
 }
 
 #[cfg(test)]

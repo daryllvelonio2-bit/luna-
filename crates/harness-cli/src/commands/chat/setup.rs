@@ -542,7 +542,7 @@ fn assemble_agent(
     })
 }
 
-fn wire_delegate_notifications(
+pub(super) fn wire_delegate_notifications(
     delegate_tool: &Arc<harness_core::tools::DelegateTaskTool>,
     ui: &Arc<ChatUi>,
     store: &Arc<SqliteSessionStore>,

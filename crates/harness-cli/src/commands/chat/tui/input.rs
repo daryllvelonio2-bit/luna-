@@ -854,8 +854,10 @@ async fn handle_key(
             {
                 if let Some(entry) = st.slash_popup.matches.get(st.slash_popup.selected).cloned() {
                     // Commands that expect an argument complete into composer if user hasn't typed exact match.
-                    let needs_arg = matches!(entry.name.as_str(), "/name" | "/goal" | "/fork");
-                    if needs_arg && st.composer.text != entry.name {
+                    let is_worker = entry.details.starts_with("Worker · ");
+                    let needs_arg =
+                        is_worker || matches!(entry.name.as_str(), "/name" | "/goal" | "/fork");
+                    if needs_arg && (is_worker || st.composer.text != entry.name) {
                         st.composer.set_text(format!("{} ", entry.name));
                         sync_slash_popup(env, st);
                         return Ok(Flow::Continue);

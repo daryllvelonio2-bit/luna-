@@ -160,6 +160,16 @@ async fn delete_worker(ui: &ChatUi, config: &mut Config, name: &str) -> Result<(
     Ok(())
 }
 
+/// Metadata returned when `/<name> <task>` spawns a background worker subagent.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerSpawnInfo {
+    pub worker_name: String,
+    pub child_id: String,
+    pub task: String,
+    pub provider: String,
+    pub model: String,
+}
+
 /// `/<name> <task>` — run a configured worker on a fork of the current conversation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_worker_invocation(
@@ -173,17 +183,17 @@ pub(crate) async fn handle_worker_invocation(
     session_id: &str,
     delegate_tool: Option<&harness_core::tools::DelegateTaskTool>,
     pending_images: Option<&Arc<std::sync::Mutex<Vec<String>>>>,
-) -> Result<bool, HarnessError> {
+) -> Result<Option<WorkerSpawnInfo>, HarnessError> {
     let Some(delegate_tool) = delegate_tool else {
         ui.emit_above(&format!(
             "{} Workers are unavailable in this chat (no delegate tool registered).",
             "✖".red().bold()
         ));
-        return Ok(false);
+        return Ok(None);
     };
 
     let Some(profile) = config.workers.get(name).cloned() else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let provider = Arc::new(GenericProviderClient::new(
@@ -244,14 +254,22 @@ pub(crate) async fn handle_worker_invocation(
         }
     };
 
-    ui.emit_above(&format!(
-        "{} Worker {} started on a fork of this conversation ({}). Use {} to watch it.",
-        "✔".green().bold(),
-        name.cyan().bold(),
-        child_id.dimmed(),
-        "/subagents".yellow()
-    ));
-    Ok(true)
+    if !ui.is_tui_mode() {
+        ui.emit_above(&format!(
+            "{} Worker {} started on a fork of this conversation ({}). Use {} to watch it.",
+            "✔".green().bold(),
+            name.cyan().bold(),
+            child_id.dimmed(),
+            "/subagents".yellow()
+        ));
+    }
+    Ok(Some(WorkerSpawnInfo {
+        worker_name: name.to_string(),
+        child_id,
+        task: clean_task,
+        provider: profile.provider,
+        model: profile.model,
+    }))
 }
 
 /// Names reserved by built-in commands, so a worker cannot shadow a command the user relies on.

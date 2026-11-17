@@ -385,6 +385,7 @@ pub async fn switch_to_session(
     if let Some(existing) = st.background_sessions.remove(target_id) {
         park_current_session(env, st);
         restore_background_session(env, st, existing);
+        sync_delegate_wiring(env).await;
         if !st.tabs.iter().any(|t| t.id == *env.session_id) {
             refresh_tabs(env, st).await;
         }
@@ -447,6 +448,7 @@ pub async fn switch_to_session(
     env.todo_scope.set_session(target_id);
     todo::refresh_panel(&env.ui, &env.todo_scope);
     apply_agent_mode(env, st, st.mode);
+    sync_delegate_wiring(env).await;
 
     st.turns = turns;
     st.turn_meta = turn_meta;
@@ -543,6 +545,7 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     env.todo_scope.set_session(&new_id);
     env.ui.set_todo_panel(None);
     apply_agent_mode(env, st, st.mode);
+    sync_delegate_wiring(env).await;
 
     st.turns.clear();
     st.turn_meta.clear();
@@ -1657,6 +1660,76 @@ async fn open_connect_reset_cooldowns(env: &Env<'_>, st: &mut TuiState) {
     };
 }
 
+fn read_subagent_log_tail(log_path: &str, max_lines: usize) -> Vec<String> {
+    let Ok(body) = std::fs::read_to_string(log_path) else {
+        return Vec::new();
+    };
+    let all: Vec<String> = body.lines().map(str::to_string).collect();
+    if all.len() <= max_lines {
+        all
+    } else {
+        all[all.len() - max_lines..].to_vec()
+    }
+}
+
+fn worker_turns_from_history(
+    mut turns: Vec<TurnRecord>,
+    goal: &str,
+    status: &str,
+) -> Vec<TurnRecord> {
+    let first_goal_line = goal.lines().next().unwrap_or(goal).trim();
+    if let Some(pos) = turns.iter().rposition(|t| {
+        let q = t.user_query.trim();
+        q.starts_with("GOAL:")
+            && (first_goal_line.is_empty()
+                || q.contains(first_goal_line)
+                || q.trim_start_matches("GOAL:").trim().is_empty())
+    }) {
+        turns.split_off(pos)
+    } else if status != "running" && !turns.is_empty() {
+        let n = turns.len();
+        turns.split_off(n.saturating_sub(1))
+    } else {
+        Vec::new()
+    }
+}
+
+fn worker_label_from_context(context: Option<&str>) -> Option<String> {
+    context
+        .and_then(|c| c.strip_prefix("worker profile: worker:"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("worker:{name}"))
+}
+
+async fn sync_delegate_wiring(env: &Env<'_>) {
+    super::super::setup::wire_delegate_notifications(
+        &env.delegate_tool,
+        &env.ui,
+        &env.store,
+        env.session_id.as_str(),
+    );
+    env.delegate_tool.set_steer_handle(env.steer_handle.clone());
+    let records = env.delegate_tool.list_tasks().await;
+    for rec in records {
+        if matches!(
+            rec.status,
+            harness_core::tools::delegate::SubagentStatus::Running
+        ) {
+            let label = match worker_label_from_context(rec.context.as_deref()) {
+                Some(worker) => {
+                    let name = worker.strip_prefix("worker:").unwrap_or(&worker);
+                    format!("[{name}] {}", rec.goal)
+                }
+                None => rec.goal.clone(),
+            };
+            env.ui.start_delegate_task(&rec.id, &label);
+        } else {
+            env.ui.finish_delegate_task(&rec.id);
+        }
+    }
+}
+
 pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
     let mut entries = Vec::new();
     let tasks = super::super::viewer::collect_tasks(
@@ -1664,6 +1737,16 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
         Some(env.delegate_tool.as_ref()),
     )
     .await;
+    let sub_records: std::collections::HashMap<
+        String,
+        harness_core::tools::delegate::SubagentTaskRecord,
+    > = env
+        .delegate_tool
+        .list_tasks()
+        .await
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
 
     let live_tasks: std::collections::HashMap<String, (String, String)> = env
         .ui
@@ -1673,12 +1756,15 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
         .collect();
 
     for task in tasks {
-        let is_sub = task.id.starts_with("sub_")
-            || task.command.starts_with("worker:")
-            || task.command.starts_with("subagent:");
+        let is_worker = task.command.starts_with("worker:");
+        let is_sub =
+            task.id.starts_with("sub_") || is_worker || task.command.starts_with("subagent:");
 
-        let agent = if task.command.starts_with("worker:") {
-            "Worker".to_string()
+        let agent = if is_worker {
+            sub_records
+                .get(&task.id)
+                .and_then(|rec| worker_label_from_context(rec.context.as_deref()))
+                .unwrap_or_else(|| "Worker".to_string())
         } else if let Some(stripped) = task.command.strip_prefix("subagent: ") {
             if let Some(pos) = stripped.find(':') {
                 let cand = stripped[..pos].trim();
@@ -1717,9 +1803,18 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
         });
 
         let mut turns = Vec::new();
+        let mut log_tail = Vec::new();
         if is_sub {
             if let Ok(outcome) = env.store.replay_transcript(&task.id, usize::MAX).await {
-                turns = parse_turns_from_history(&outcome.history);
+                let parsed = parse_turns_from_history(&outcome.history);
+                turns = if is_worker {
+                    worker_turns_from_history(parsed, &title, &task.status)
+                } else {
+                    parsed
+                };
+            }
+            if turns.is_empty() || task.status == "running" {
+                log_tail = read_subagent_log_tail(&task.log_path, 80);
             }
         } else {
             let log_body = std::fs::read_to_string(&task.log_path).unwrap_or_default();
@@ -1745,6 +1840,7 @@ pub async fn collect_subagent_entries(env: &Env<'_>) -> Vec<SubagentUiEntry> {
             activity,
             elapsed_secs: task.elapsed_secs,
             turns,
+            log_tail,
         });
     }
 
@@ -1808,36 +1904,97 @@ pub async fn interrupt_subagent(env: &Env<'_>, st: &mut TuiState, id: &str) {
 }
 
 pub async fn refresh_subagents_if_open(env: &Env<'_>, st: &mut TuiState) {
+    if !matches!(
+        st.modal,
+        ActiveModal::SubagentInspector { .. } | ActiveModal::SubagentsModal { .. }
+    ) {
+        return;
+    }
+    let sub_records: std::collections::HashMap<
+        String,
+        harness_core::tools::delegate::SubagentTaskRecord,
+    > = env
+        .delegate_tool
+        .list_tasks()
+        .await
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
+    let now = chrono::Utc::now();
+
     match &mut st.modal {
         ActiveModal::SubagentInspector {
             items, current_idx, ..
         } => {
             if let Some(item) = items.get_mut(*current_idx) {
-                if item.status == "running" {
-                    if let Ok(outcome) = env.store.replay_transcript(&item.id, usize::MAX).await {
-                        let replayed = parse_turns_from_history(&outcome.history);
-                        if !replayed.is_empty() {
-                            item.turns = replayed;
+                let is_worker = item.agent == "Worker" || item.agent.starts_with("worker:");
+                if let Some(rec) = sub_records.get(&item.id) {
+                    let (status_str, end_at) = match &rec.status {
+                        harness_core::tools::delegate::SubagentStatus::Running => {
+                            ("running".to_string(), now)
+                        }
+                        harness_core::tools::delegate::SubagentStatus::Completed {
+                            finished_at,
+                            ..
+                        } => ("completed".to_string(), *finished_at),
+                        harness_core::tools::delegate::SubagentStatus::Failed {
+                            error,
+                            finished_at,
+                        } => (format!("failed: {error}"), *finished_at),
+                    };
+                    item.status = status_str;
+                    item.elapsed_secs = (end_at - rec.started_at).num_seconds().max(0) as u64;
+                    if let Some(ref lp) = rec.log_path {
+                        if item.turns.is_empty() || item.status == "running" {
+                            item.log_tail = read_subagent_log_tail(lp, 80);
                         }
                     }
-                    let tasks = env.ui.active_delegate_tasks();
-                    if let Some((_, _, act)) = tasks.into_iter().find(|(id, _, _)| id == &item.id) {
-                        item.activity = act;
+                }
+                if let Ok(outcome) = env.store.replay_transcript(&item.id, usize::MAX).await {
+                    let parsed = parse_turns_from_history(&outcome.history);
+                    let replayed = if is_worker {
+                        worker_turns_from_history(parsed, &item.title, &item.status)
                     } else {
-                        item.status = "completed".to_string();
+                        parsed
+                    };
+                    if !replayed.is_empty() {
+                        item.turns = replayed;
                     }
+                }
+                let tasks = env.ui.active_delegate_tasks();
+                if let Some((_, _, act)) = tasks.into_iter().find(|(id, _, _)| id == &item.id) {
+                    item.activity = act;
+                } else if item.status != "running" {
+                    item.activity = item.status.clone();
                 }
             }
         }
         ActiveModal::SubagentsModal { items, .. } => {
             let tasks = env.ui.active_delegate_tasks();
             for item in items.iter_mut() {
+                if let Some(rec) = sub_records.get(&item.id) {
+                    let (status_str, end_at) = match &rec.status {
+                        harness_core::tools::delegate::SubagentStatus::Running => {
+                            ("running".to_string(), now)
+                        }
+                        harness_core::tools::delegate::SubagentStatus::Completed {
+                            finished_at,
+                            ..
+                        } => ("completed".to_string(), *finished_at),
+                        harness_core::tools::delegate::SubagentStatus::Failed {
+                            error,
+                            finished_at,
+                        } => (format!("failed: {error}"), *finished_at),
+                    };
+                    item.status = status_str;
+                    item.elapsed_secs = (end_at - rec.started_at).num_seconds().max(0) as u64;
+                }
                 if item.status == "running" {
                     if let Some((_, _, act)) = tasks.iter().find(|(id, _, _)| id == &item.id) {
                         item.activity = act.clone();
-                    } else {
-                        item.status = "completed".to_string();
                     }
+                } else {
+                    item.activity = item.status.clone();
                 }
             }
         }
@@ -3450,8 +3607,175 @@ pub async fn run_slash_command(
             );
             Ok(Flow::Continue)
         }
+        SlashOutcome::WorkerSpawned(info) => {
+            let _ = env.ui.end_command_capture();
+            env.ui.start_delegate_task(
+                &info.child_id,
+                &format!("[{}] {}", info.worker_name, info.task),
+            );
+            let args = serde_json::json!({
+                "task_id": info.child_id,
+                "worker": info.worker_name,
+                "provider": info.provider,
+                "model": info.model,
+                "tasks": [{ "goal": info.task }],
+            });
+            let item = TurnProcessItem {
+                tool_name: "delegate_task".to_string(),
+                call_formatted: format!("Subagent [{}]: {}", info.worker_name, info.task),
+                result_formatted: "running · starting (click or Ctrl+B to inspect)".to_string(),
+                diff_lines: Vec::new(),
+                output: String::new(),
+                output_dropped: 0,
+                arguments: Some(args),
+                duration_secs: None,
+                is_error: false,
+            };
+            st.turns.push(TurnRecord {
+                user_query: display.trim().to_string(),
+                reasoning: None,
+                tools: Vec::new(),
+                tool_items: vec![item],
+                duration: std::time::Duration::ZERO,
+                reply: String::new(),
+            });
+            st.turn_meta.push(TurnMeta {
+                mode: format!("Subagent · {}", info.worker_name),
+                model: format!("{}/{}", info.provider, info.model),
+                output_tokens: None,
+            });
+            sync_turn_meta_len(env, st);
+            st.settled_cache.clear();
+            drain_tui_notices(env, st);
+            st.scroll_from_bottom = 0;
+            Ok(Flow::Continue)
+        }
         SlashOutcome::Exit => Ok(Flow::Break),
     }
+}
+
+pub fn has_pending_worker_turns(st: &TuiState) -> bool {
+    st.turns.iter().any(|turn| {
+        turn.tool_items.iter().any(|item| {
+            item.tool_name == "delegate_task"
+                && item
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("task_id"))
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                && !item
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("finalized"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        })
+    })
+}
+
+pub async fn sync_worker_turns(env: &Env<'_>, st: &mut TuiState) -> bool {
+    if !has_pending_worker_turns(st) {
+        return false;
+    }
+
+    let records: std::collections::HashMap<
+        String,
+        harness_core::tools::delegate::SubagentTaskRecord,
+    > = env
+        .delegate_tool
+        .list_tasks()
+        .await
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
+    let live_tasks: std::collections::HashMap<String, String> = env
+        .ui
+        .active_delegate_tasks()
+        .into_iter()
+        .map(|(id, _, act)| (id, act))
+        .collect();
+    let now = chrono::Utc::now();
+    let mut changed = false;
+
+    for turn in &mut st.turns {
+        for item in &mut turn.tool_items {
+            if item.tool_name != "delegate_task" {
+                continue;
+            }
+            let finalized = item
+                .arguments
+                .as_ref()
+                .and_then(|a| a.get("finalized"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if finalized {
+                continue;
+            }
+            let Some(task_id) = item
+                .arguments
+                .as_ref()
+                .and_then(|a| a.get("task_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(rec) = records.get(&task_id) else {
+                continue;
+            };
+
+            match &rec.status {
+                harness_core::tools::delegate::SubagentStatus::Running => {
+                    let secs = (now - rec.started_at).num_seconds().max(0) as u64;
+                    let act = live_tasks
+                        .get(&task_id)
+                        .map(String::as_str)
+                        .unwrap_or("running");
+                    let next_result =
+                        format!("running · {act} · {secs}s (click or Ctrl+B to inspect)");
+                    if item.result_formatted != next_result {
+                        item.result_formatted = next_result;
+                        turn.duration = std::time::Duration::from_secs(secs);
+                        changed = true;
+                    }
+                }
+                harness_core::tools::delegate::SubagentStatus::Completed { reply, finished_at } => {
+                    env.ui.finish_delegate_task(&task_id);
+                    let secs = (*finished_at - rec.started_at).num_seconds().max(0) as u64;
+                    item.result_formatted = format!("completed in {secs}s (click to inspect)");
+                    item.is_error = false;
+                    turn.duration = std::time::Duration::from_secs(secs);
+                    turn.reply = if reply.trim().is_empty() {
+                        "(completed with no text output)".to_string()
+                    } else {
+                        reply.clone()
+                    };
+                    if let Some(args) = item.arguments.as_mut().and_then(|v| v.as_object_mut()) {
+                        args.insert("finalized".to_string(), serde_json::Value::Bool(true));
+                    }
+                    changed = true;
+                }
+                harness_core::tools::delegate::SubagentStatus::Failed { error, finished_at } => {
+                    env.ui.finish_delegate_task(&task_id);
+                    let secs = (*finished_at - rec.started_at).num_seconds().max(0) as u64;
+                    item.result_formatted = format!("failed in {secs}s (click to inspect)");
+                    item.is_error = true;
+                    turn.duration = std::time::Duration::from_secs(secs);
+                    turn.reply = format!("✖ Worker failed: {error}");
+                    if let Some(args) = item.arguments.as_mut().and_then(|v| v.as_object_mut()) {
+                        args.insert("finalized".to_string(), serde_json::Value::Bool(true));
+                    }
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        st.settled_cache.clear();
+    }
+    changed
 }
 
 /// Handle completion of an active turn in the TUI.
@@ -4127,11 +4451,41 @@ mod tests {
             activity: "starting".to_string(),
             elapsed_secs: 5,
             turns: Vec::new(),
+            log_tail: Vec::new(),
         };
         assert_eq!(entry.status, "running");
         entry.status = "cancelled".to_string();
         entry.activity = "cancelled by user".to_string();
         assert_eq!(entry.status, "cancelled");
         assert_eq!(entry.activity, "cancelled by user");
+    }
+
+    #[test]
+    fn worker_turns_from_history_excludes_parent_fork_history() {
+        use super::worker_turns_from_history;
+        use crate::commands::chat::render::TurnRecord;
+
+        let turn = |q: &str, r: &str| TurnRecord {
+            user_query: q.to_string(),
+            reasoning: None,
+            tools: Vec::new(),
+            tool_items: Vec::new(),
+            duration: std::time::Duration::ZERO,
+            reply: r.to_string(),
+        };
+
+        let parent_only = vec![turn("hello", "hi"), turn("check status", "ok")];
+        // While running before the worker persists its own turn, parent turns must not appear.
+        assert!(worker_turns_from_history(parent_only.clone(), "fix bug", "running").is_empty());
+
+        let with_worker = vec![
+            turn("hello", "hi"),
+            turn("check status", "ok"),
+            turn("GOAL: fix bug", "fixed"),
+        ];
+        let sliced = worker_turns_from_history(with_worker, "fix bug", "running");
+        assert_eq!(sliced.len(), 1);
+        assert_eq!(sliced[0].user_query, "GOAL: fix bug");
+        assert_eq!(sliced[0].reply, "fixed");
     }
 }

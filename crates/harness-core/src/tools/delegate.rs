@@ -704,7 +704,8 @@ impl DelegateTaskTool {
             .await
             .insert(child_id.clone(), record);
 
-        let event_notifier = current_event_notifier(&self.event_notifier);
+        let event_notifier_slot = self.event_notifier.clone();
+        let event_notifier = current_event_notifier(&event_notifier_slot);
         notify_subagent_event(
             event_notifier.as_ref(),
             SubagentTaskEvent::Started {
@@ -749,7 +750,7 @@ impl DelegateTaskTool {
                     prompt,
                 },
                 cancel,
-                event_notifier.clone(),
+                event_notifier,
                 approver,
                 effort,
             )
@@ -771,10 +772,11 @@ impl DelegateTaskTool {
                 log_path: Some(log_path),
             };
 
+            let latest_event_notifier = current_event_notifier(&event_notifier_slot);
             record_subagent_finish(
                 &tasks_state,
                 &notifier,
-                event_notifier.as_ref(),
+                latest_event_notifier.as_ref(),
                 &steer_handle,
                 finished_record,
                 FinishNotice::Full,
