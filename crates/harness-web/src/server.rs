@@ -101,19 +101,23 @@ pub async fn run_web_server(config: Config, options: WebServerOptions) -> Result
     let launch_url = format!("{}/?token={}", advertised_url, state.auth.launch_token);
     println!("{} {}", "luna web:".green().bold(), launch_url);
 
-    // Browser handoff
+    let router = create_router(state);
+
+    // Browser handoff in background task so axum::serve starts accepting requests immediately
     let under_ssh = std::env::var("SSH_CONNECTION").is_ok()
         || std::env::var("SSH_CLIENT").is_ok()
         || std::env::var("SSH_TTY").is_ok();
 
     if !options.no_open && !under_ssh {
         println!("luna web: opening the default browser; pass --no-open to disable");
-        if let Err(err) = open::that(&launch_url) {
-            tracing::warn!("could not open default browser: {}", err);
-        }
+        let url = launch_url.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Err(err) = open::that_detached(&url) {
+                tracing::warn!("could not open default browser: {}", err);
+            }
+        });
     }
-
-    let router = create_router(state);
 
     axum::serve(listener, router)
         .await
