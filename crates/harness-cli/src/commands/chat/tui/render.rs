@@ -3150,19 +3150,21 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
         ActiveModal::None => {}
         ActiveModal::CommandPalette { query, selected } => {
             let items = filtered_palette_items(query);
-            let w = screen.width.saturating_sub(6).clamp(44, 68);
-            let h = screen.height.saturating_sub(4).clamp(10, 20);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 44, 72, 10, 20);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Commands", "esc");
 
+            let inner_w = inner.width as usize;
             let mut lines = Vec::new();
-            lines.push(search_input_line(query, inner.width as usize));
+            lines.push(search_input_line(query, inner_w));
             let cur_x =
                 (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y));
+            if inner.height > 0 {
+                frame.set_cursor_position((cur_x, inner.y));
+            }
             lines.push(Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
+                "─".repeat(inner_w),
                 Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
@@ -3173,13 +3175,20 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             for (idx, item) in items.iter().enumerate().skip(scroll).take(list_h) {
                 let is_sel = idx == sel;
                 let bg = if is_sel { bg_selected() } else { bg_elevated() };
-                let left = format!(" {} ", item.title);
-                let right = if item.shortcut.is_empty() {
+                let raw_right = if item.shortcut.is_empty() {
                     format!(" {} ", item.category)
                 } else {
                     format!(" {} ", item.shortcut)
                 };
-                let pad = (inner.width as usize).saturating_sub(left.width() + right.width());
+                let max_right = (inner_w / 2).min(20);
+                let right = if inner_w < 18 {
+                    String::new()
+                } else {
+                    truncate_str(&raw_right, max_right)
+                };
+                let max_title = inner_w.saturating_sub(right.width() + 2);
+                let left = format!(" {} ", truncate_str(&item.title, max_title));
+                let pad = inner_w.saturating_sub(left.width() + right.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         left,
@@ -3203,7 +3212,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
             if items.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    " No matching commands",
+                    truncate_str(" No matching commands", inner_w),
                     Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
@@ -3215,19 +3224,21 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             selected,
         } => {
             let filtered = filtered_sessions(sessions, query);
-            let w = screen.width.saturating_sub(6).clamp(48, 76);
-            let h = screen.height.saturating_sub(4).clamp(10, 20);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 48, 76, 10, 20);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Sessions", "enter switch · esc");
 
+            let inner_w = inner.width as usize;
             let mut lines = Vec::new();
-            lines.push(search_input_line(query, inner.width as usize));
+            lines.push(search_input_line(query, inner_w));
             let cur_x =
                 (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y));
+            if inner.height > 0 {
+                frame.set_cursor_position((cur_x, inner.y));
+            }
             lines.push(Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
+                "─".repeat(inner_w),
                 Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
@@ -3247,14 +3258,19 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 } else {
                     "New session".to_string()
                 };
-                let right = format!(
+                let raw_right = format!(
                     " {} msgs · {} ",
                     sess.message_count,
                     &sess.id[..sess.id.len().min(8)]
                 );
-                let max_name = (inner.width as usize).saturating_sub(right.width() + 4);
+                let right = if inner_w < 26 {
+                    String::new()
+                } else {
+                    truncate_str(&raw_right, (inner_w / 2).min(24))
+                };
+                let max_name = inner_w.saturating_sub(right.width() + 4);
                 let left = format!(" {marker} {}", truncate_str(&label, max_name));
-                let pad = (inner.width as usize).saturating_sub(left.width() + right.width());
+                let pad = inner_w.saturating_sub(left.width() + right.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         left,
@@ -3272,7 +3288,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
             if filtered.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    " No sessions match",
+                    truncate_str(" No sessions match", inner_w),
                     Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
@@ -3285,19 +3301,21 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             ..
         } => {
             let filtered = filtered_providers(items, query);
-            let w = screen.width.saturating_sub(6).clamp(50, 78);
-            let h = screen.height.saturating_sub(4).clamp(10, 22);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 50, 78, 10, 22);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Select Provider", "enter models · esc");
 
+            let inner_w = inner.width as usize;
             let mut lines = Vec::new();
-            lines.push(search_input_line(query, inner.width as usize));
+            lines.push(search_input_line(query, inner_w));
             let cur_x =
                 (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y));
+            if inner.height > 0 {
+                frame.set_cursor_position((cur_x, inner.y));
+            }
             lines.push(Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
+                "─".repeat(inner_w),
                 Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
@@ -3314,11 +3332,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 } else {
                     format!(" {} · {} ", item.id, item.tag)
                 };
-                let max_right = (inner.width as usize) / 2;
-                let right_disp = truncate_str(&right, max_right.max(12));
-                let max_name = (inner.width as usize).saturating_sub(right_disp.width() + 4);
+                let right_disp = if inner_w < 24 {
+                    String::new()
+                } else {
+                    truncate_str(&right, (inner_w / 2).min(24))
+                };
+                let max_name = inner_w.saturating_sub(right_disp.width() + 4);
                 let left = format!(" {marker} {}", truncate_str(&item.display_name, max_name));
-                let pad = (inner.width as usize).saturating_sub(left.width() + right_disp.width());
+                let pad = inner_w.saturating_sub(left.width() + right_disp.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         left,
@@ -3336,7 +3357,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
             if filtered.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    " No providers match",
+                    truncate_str(" No providers match", inner_w),
                     Style::default().fg(text_muted()).bg(bg_elevated()),
                 )));
             }
@@ -3351,20 +3372,22 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             ..
         } => {
             let filtered = filtered_models(items, query);
-            let w = screen.width.saturating_sub(6).clamp(50, 78);
-            let h = screen.height.saturating_sub(4).clamp(10, 22);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 50, 78, 10, 22);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let title = format!("Models · {provider_display}");
             let inner = draw_modal_frame(frame, rect, &title, "enter select · ← providers · esc");
 
+            let inner_w = inner.width as usize;
             let mut lines = Vec::new();
-            lines.push(search_input_line(query, inner.width as usize));
+            lines.push(search_input_line(query, inner_w));
             let cur_x =
                 (inner.x + 3 + query.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y));
+            if inner.height > 0 {
+                frame.set_cursor_position((cur_x, inner.y));
+            }
             lines.push(Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
+                "─".repeat(inner_w),
                 Style::default().fg(border_subtle()).bg(bg_elevated()),
             )));
 
@@ -3381,15 +3404,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 } else {
                     String::new()
                 };
-                let max_right = (inner.width as usize) / 2;
-                let right_disp = if right.is_empty() {
+                let right_disp = if right.is_empty() || inner_w < 26 {
                     String::new()
                 } else {
-                    truncate_str(&right, max_right.max(12))
+                    truncate_str(&right, (inner_w / 2).min(28))
                 };
-                let max_name = (inner.width as usize).saturating_sub(right_disp.width() + 4);
+                let max_name = inner_w.saturating_sub(right_disp.width() + 4);
                 let left = format!(" {marker} {}", truncate_str(&item.display_name, max_name));
-                let pad = (inner.width as usize).saturating_sub(left.width() + right_disp.width());
+                let pad = inner_w.saturating_sub(left.width() + right_disp.width());
                 lines.push(Line::from(vec![
                     Span::styled(
                         left,
@@ -3416,7 +3438,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     (" No models match", text_muted())
                 };
                 lines.push(Line::from(Span::styled(
-                    msg,
+                    truncate_str(msg, inner_w),
                     Style::default().fg(fg).bg(bg_elevated()),
                 )));
             }
@@ -3428,16 +3450,17 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             selected,
             action,
         } => {
-            let w = screen.width.saturating_sub(6).clamp(46, 76);
-            let h = screen.height.saturating_sub(4).clamp(8, 20);
+            let desired_h = (items.len() as u16).saturating_add(2).clamp(6, 20);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 46, 76, 6, desired_h);
             let rect = centered_rect(screen, w, h);
+            st.modal_rect = Some(rect);
             let hint = if matches!(action, super::state::SelectAction::SettingsMain) {
                 "↑/↓ · space toggle · enter · esc"
             } else {
                 "↑/↓ · enter · esc"
             };
             let inner = draw_modal_frame(frame, rect, title, hint);
-            let list_h = inner.height as usize;
+            let list_h = (inner.height as usize).max(1);
             let sel = (*selected).min(items.len().saturating_sub(1));
             let scroll = sel.saturating_sub(list_h.saturating_sub(1));
             let lines: Vec<Line<'static>> = items
@@ -3478,35 +3501,56 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             secret,
             ..
         } => {
-            let w = screen.width.saturating_sub(6).clamp(46, 76);
-            let rect = centered_rect(screen, w, 7);
+            let (w, max_h) = responsive_modal_size(screen, 6, 4, 46, 76, 7, 14);
+            let inner_w = w.saturating_sub(2) as usize;
+            let prompt_lines = wrap_plain_text(prompt, inner_w.saturating_sub(2).max(8));
+            let desired_h = (prompt_lines.len() as u16)
+                .saturating_add(4)
+                .clamp(7, max_h);
+            let rect = centered_rect(screen, w, desired_h.min(max_h));
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, title, "enter · esc");
-            let shown = if *secret {
+            let actual_w = inner.width as usize;
+            let actual_h = inner.height as usize;
+            let masked = if *secret {
                 "*".repeat(value.chars().count())
             } else {
                 value.clone()
             };
-            let cur_x =
-                (inner.x + 2 + shown.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y + 2));
-            let lines = vec![
-                Line::from(Span::styled(
-                    format!(
-                        " {}",
-                        truncate_str(prompt, (inner.width as usize).saturating_sub(2))
-                    ),
-                    Style::default().fg(text_muted()).bg(bg_elevated()),
-                )),
-                Line::default(),
-                Line::from(Span::styled(
-                    format!(
-                        " {}_",
-                        truncate_str(&shown, (inner.width as usize).saturating_sub(3))
-                    ),
-                    Style::default().fg(accent_coral()).bg(bg_elevated()),
-                )),
-            ];
+            let avail_input = actual_w.saturating_sub(3);
+            let mut shown = masked;
+            if shown.width() > avail_input {
+                let mut chars: Vec<char> = shown.chars().collect();
+                while chars.iter().collect::<String>().width() > avail_input && !chars.is_empty() {
+                    chars.remove(0);
+                }
+                shown = chars.into_iter().collect();
+            }
+            let max_prompt_rows = actual_h.saturating_sub(2).max(1);
+            let mut lines: Vec<Line<'static>> = prompt_lines
+                .into_iter()
+                .take(max_prompt_rows)
+                .map(|pl| {
+                    Line::from(Span::styled(
+                        format!(" {}", truncate_str(&pl, actual_w.saturating_sub(2))),
+                        Style::default().fg(text_muted()).bg(bg_elevated()),
+                    ))
+                })
+                .collect();
+            if lines.len() + 2 <= actual_h {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" {}_", shown),
+                Style::default().fg(accent_coral()).bg(bg_elevated()),
+            )));
+            if actual_h > 0 {
+                let cur_x = (inner.x + 1 + shown.width() as u16)
+                    .min(inner.x + inner.width.saturating_sub(1));
+                let cur_y = (inner.y + lines.len().saturating_sub(1) as u16)
+                    .min(inner.y + inner.height.saturating_sub(1));
+                frame.set_cursor_position((cur_x, cur_y));
+            }
             frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::TextModal {
@@ -3514,15 +3558,15 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             lines,
             scroll,
         } => {
-            let w = screen.width.saturating_sub(6).clamp(50, 82);
-            let h = screen.height.saturating_sub(4).clamp(12, 24);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 50, 82, 12, 24);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, title, "↑/↓ · pgup/pgdn · esc");
-            let visible = inner.height as usize;
+            let visible = (inner.height as usize).max(1);
+            let max_scroll = lines.len().saturating_sub(visible);
             let rows: Vec<Line<'static>> = lines
                 .iter()
-                .skip((*scroll).min(lines.len().saturating_sub(1)))
+                .skip((*scroll).min(max_scroll))
                 .take(visible)
                 .map(|line| {
                     Line::from(Span::styled(
@@ -3535,21 +3579,27 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
         }
         ActiveModal::ThinkingPicker { current, selected } => {
             let options = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-            let rect = centered_rect(screen, 42, 11);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 34, 44, 9, 11);
+            let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Thinking Level", "enter · esc");
             let cur_str = current
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "off".to_string());
+            let list_h = (inner.height as usize).max(1);
+            let sel = (*selected).min(options.len().saturating_sub(1));
+            let scroll = sel.saturating_sub(list_h.saturating_sub(1));
             let lines: Vec<Line<'static>> = options
                 .iter()
                 .enumerate()
+                .skip(scroll)
+                .take(list_h)
                 .map(|(idx, opt)| {
-                    let is_sel = idx == *selected;
+                    let is_sel = idx == sel;
                     let is_cur = *opt == cur_str;
                     let bg = if is_sel { bg_selected() } else { bg_elevated() };
                     let marker = if is_cur { "●" } else { " " };
-                    let text = format!(" {marker} {opt}");
+                    let text = truncate_str(&format!(" {marker} {opt}"), inner.width as usize);
                     let pad = (inner.width as usize).saturating_sub(text.width());
                     Line::from(vec![
                         Span::styled(
@@ -3581,8 +3631,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             approval_model_label,
             ..
         } => {
-            let w = screen.width.saturating_sub(4).clamp(58, 104);
-            let h = screen.height.saturating_sub(2).clamp(18, 36);
+            let (w, h) = responsive_modal_size(screen, 4, 2, 58, 104, 18, 36);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             let hint = if *editing_input {
@@ -3606,48 +3655,54 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Style::default().fg(text_muted()).bg(bg_elevated()),
                 ),
                 Span::styled(
-                    req.tool.clone(),
+                    truncate_str(&req.tool, inner_w.saturating_sub(8)),
                     Style::default()
                         .fg(accent_coral())
                         .bg(bg_elevated())
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
-            if let Some(ref target) = req.target {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        " Target: {}",
-                        truncate_str(target, inner_w.saturating_sub(10))
-                    ),
-                    Style::default().fg(text_primary()).bg(bg_elevated()),
-                )));
+            if inner_h >= 8 {
+                if let Some(ref target) = req.target {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            " Target: {}",
+                            truncate_str(target, inner_w.saturating_sub(10))
+                        ),
+                        Style::default().fg(text_primary()).bg(bg_elevated()),
+                    )));
+                }
             }
-            lines.push(Line::default());
+            if inner_h >= 10 {
+                lines.push(Line::default());
+            }
 
             let reply_rendered: Vec<Line<'static>> = reply
                 .as_deref()
                 .map(|text| {
-                    let mut md = render_markdown(text, inner_w.saturating_sub(6));
+                    let mut md = render_markdown(text, inner_w.saturating_sub(6).max(8));
                     while md.last().is_some_and(|l| l.spans.is_empty()) {
                         md.pop();
                     }
                     md
                 })
                 .unwrap_or_default();
-            let reply_rows = if *asking || error.is_some() {
-                2
-            } else if !reply_rendered.is_empty() {
-                reply_rendered.len().min(7) + 3
-            } else {
-                0
-            };
             let input_rows = if *editing_input || !input.trim().is_empty() {
                 2
             } else {
                 0
             };
             let choices_rows = 4;
-            let reserved = lines.len() + reply_rows + input_rows + choices_rows + 1;
+            let extras_budget = inner_h.saturating_sub(lines.len() + choices_rows + input_rows);
+            let max_reply_cap = if extras_budget >= 12 { 7 } else { 3 };
+            let reply_rows = if *asking || error.is_some() {
+                2.min(extras_budget)
+            } else if !reply_rendered.is_empty() && extras_budget >= 3 {
+                (reply_rendered.len().min(max_reply_cap) + 3).min(extras_budget)
+            } else {
+                0
+            };
+            let preview_space = extras_budget.saturating_sub(reply_rows);
 
             let preview_lines: Option<(&str, Vec<String>)> = if let Some(ref diff) = req.diff {
                 let raw: Vec<String> = diff.lines().map(str::to_string).collect();
@@ -3678,100 +3733,112 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 None
             };
 
-            if let Some((section_label, raw_lines)) = preview_lines {
-                let box_bg = bg_code();
-                let box_w = inner_w.saturating_sub(2);
-                let box_inner_w = box_w.saturating_sub(3);
-                let total_preview = raw_lines.len();
-                let preview_budget = inner_h.saturating_sub(reserved + 4).max(3);
-                let max_scroll = total_preview.saturating_sub(preview_budget);
-                let dscroll = (*diff_scroll).min(max_scroll);
-                let shown_end = (dscroll + preview_budget).min(total_preview);
-                let header_title = match req.target.as_deref() {
-                    Some(t) if section_label != "Arguments" => {
-                        format!("{section_label}: {}", shorten_path(t))
-                    }
-                    _ => format!("{section_label}:"),
-                };
-                let push_dark_box_row =
-                    |out: &mut Vec<Line<'static>>, content_spans: Vec<Span<'static>>| {
-                        let used: usize = content_spans.iter().map(|s| s.content.width()).sum();
-                        let pad = box_w.saturating_sub(2 + used);
-                        let mut spans = vec![
-                            Span::styled(" ", Style::default().bg(bg_elevated())),
-                            Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
-                        ];
-                        spans.extend(content_spans);
-                        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
-                        spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
-                        out.push(Line::from(spans));
-                    };
-
-                push_dark_box_row(
-                    &mut lines,
-                    vec![Span::styled(
-                        truncate_str(&header_title, box_inner_w),
-                        Style::default()
-                            .fg(text_primary())
-                            .bg(box_bg)
-                            .add_modifier(Modifier::BOLD),
-                    )],
-                );
-                push_dark_box_row(&mut lines, Vec::new());
-                for dline in raw_lines.iter().skip(dscroll).take(preview_budget) {
-                    let trimmed_start = dline.trim_start();
-                    let color = if dline.starts_with("+++")
-                        || dline.starts_with("---")
-                        || dline.starts_with("@@")
-                    {
-                        cyan_link()
-                    } else if trimmed_start.starts_with('+') {
-                        green_ok()
-                    } else if trimmed_start.starts_with('-') {
-                        red_err()
-                    } else if section_label == "Diff" {
-                        text_muted()
+            if preview_space >= 4 {
+                if let Some((section_label, raw_lines)) = preview_lines {
+                    let box_bg = bg_code();
+                    let box_w = inner_w.saturating_sub(2);
+                    let box_inner_w = box_w.saturating_sub(3);
+                    let total_preview = raw_lines.len();
+                    let overhead = if total_preview > preview_space.saturating_sub(3) {
+                        4
                     } else {
-                        text_primary()
+                        3
                     };
+                    let preview_budget = preview_space.saturating_sub(overhead).max(1);
+                    let max_scroll = total_preview.saturating_sub(preview_budget);
+                    let dscroll = (*diff_scroll).min(max_scroll);
+                    let shown_end = (dscroll + preview_budget).min(total_preview);
+                    let header_title = match req.target.as_deref() {
+                        Some(t) if section_label != "Arguments" => {
+                            format!("{section_label}: {}", shorten_path(t))
+                        }
+                        _ => format!("{section_label}:"),
+                    };
+                    let push_dark_box_row =
+                        |out: &mut Vec<Line<'static>>, content_spans: Vec<Span<'static>>| {
+                            let used: usize = content_spans.iter().map(|s| s.content.width()).sum();
+                            let pad = box_w.saturating_sub(2 + used);
+                            let mut spans = vec![
+                                Span::styled(" ", Style::default().bg(bg_elevated())),
+                                Span::styled("│ ", Style::default().fg(border_subtle()).bg(box_bg)),
+                            ];
+                            spans.extend(content_spans);
+                            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(box_bg)));
+                            spans.push(Span::styled(" ", Style::default().bg(bg_elevated())));
+                            out.push(Line::from(spans));
+                        };
+
                     push_dark_box_row(
                         &mut lines,
                         vec![Span::styled(
-                            truncate_str(dline, box_inner_w),
-                            Style::default().fg(color).bg(box_bg),
+                            truncate_str(&header_title, box_inner_w),
+                            Style::default()
+                                .fg(text_primary())
+                                .bg(box_bg)
+                                .add_modifier(Modifier::BOLD),
                         )],
                     );
+                    push_dark_box_row(&mut lines, Vec::new());
+                    for dline in raw_lines.iter().skip(dscroll).take(preview_budget) {
+                        let trimmed_start = dline.trim_start();
+                        let color = if dline.starts_with("+++")
+                            || dline.starts_with("---")
+                            || dline.starts_with("@@")
+                        {
+                            cyan_link()
+                        } else if trimmed_start.starts_with('+') {
+                            green_ok()
+                        } else if trimmed_start.starts_with('-') {
+                            red_err()
+                        } else if section_label == "Diff" {
+                            text_muted()
+                        } else {
+                            text_primary()
+                        };
+                        push_dark_box_row(
+                            &mut lines,
+                            vec![Span::styled(
+                                truncate_str(dline, box_inner_w),
+                                Style::default().fg(color).bg(box_bg),
+                            )],
+                        );
+                    }
+                    if total_preview > preview_budget {
+                        let footer = format!(
+                            "({}–{shown_end} of {total_preview} lines · [/] or PgUp/PgDn scroll)",
+                            dscroll + 1
+                        );
+                        push_dark_box_row(
+                            &mut lines,
+                            vec![Span::styled(
+                                truncate_str(&footer, box_inner_w),
+                                Style::default().fg(text_dim()).bg(box_bg),
+                            )],
+                        );
+                    }
+                    lines.push(Line::default());
                 }
-                if total_preview > preview_budget {
-                    let footer = format!(
-                        "({}–{shown_end} of {total_preview} lines · [/] or PgUp/PgDn scroll)",
-                        dscroll + 1
-                    );
-                    push_dark_box_row(
-                        &mut lines,
-                        vec![Span::styled(
-                            truncate_str(&footer, box_inner_w),
-                            Style::default().fg(text_dim()).bg(box_bg),
-                        )],
-                    );
-                }
-                lines.push(Line::default());
             }
 
-            if *asking {
+            if *asking && reply_rows > 0 {
                 let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
                 lines.push(Line::from(Span::styled(
-                    format!(" {spinner} Asking {approval_model_label}…"),
+                    truncate_str(
+                        &format!(" {spinner} Asking {approval_model_label}…"),
+                        inner_w,
+                    ),
                     Style::default().fg(accent_coral()).bg(bg_elevated()),
                 )));
                 lines.push(Line::default());
             } else if let Some(ref err) = error {
-                lines.push(Line::from(Span::styled(
-                    format!(" ⚠ {}", truncate_str(err, inner_w.saturating_sub(4))),
-                    Style::default().fg(red_err()).bg(bg_elevated()),
-                )));
-                lines.push(Line::default());
-            } else if !reply_rendered.is_empty() {
+                if reply_rows > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!(" ⚠ {}", truncate_str(err, inner_w.saturating_sub(4))),
+                        Style::default().fg(red_err()).bg(bg_elevated()),
+                    )));
+                    lines.push(Line::default());
+                }
+            } else if !reply_rendered.is_empty() && reply_rows >= 3 {
                 let box_bg = bg_surface();
                 let box_w = inner_w.saturating_sub(2);
                 let box_inner_w = box_w.saturating_sub(3);
@@ -3793,9 +3860,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     Span::styled(" ".repeat(hdr_pad), Style::default().bg(box_bg)),
                     Span::styled(" ", Style::default().bg(bg_elevated())),
                 ]));
-                let visible_reply = inner_h
-                    .saturating_sub(lines.len() + input_rows + choices_rows + 1)
-                    .clamp(2, 7);
+                let visible_reply = reply_rows.saturating_sub(2).max(1);
                 let max_scroll = reply_rendered.len().saturating_sub(visible_reply);
                 let scroll = (*reply_scroll).min(max_scroll);
                 for rline in reply_rendered.iter().skip(scroll).take(visible_reply) {
@@ -3844,7 +3909,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 let is_sel = !*editing_input && idx == *selected;
                 let bg = if is_sel { bg_selected() } else { bg_elevated() };
                 let prefix = if is_sel { " ▸ " } else { "   " };
-                let line = format!("{prefix}{ch}");
+                let line = truncate_str(&format!("{prefix}{ch}"), inner_w);
                 let pad = inner_w.saturating_sub(line.width());
                 let mut style = Style::default().fg(*base_fg).bg(bg);
                 if is_sel {
@@ -3857,8 +3922,14 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
 
             if *editing_input {
-                lines.push(Line::default());
-                let prompt_prefix = " ▸ Ask / suggest: ";
+                if lines.len() + 2 <= inner_h {
+                    lines.push(Line::default());
+                }
+                let prompt_prefix = if inner_w < 32 {
+                    " ▸ Ask: "
+                } else {
+                    " ▸ Ask / suggest: "
+                };
                 let avail = inner_w.saturating_sub(prompt_prefix.width() + 1);
                 let mut shown = input.clone();
                 if shown.width() > avail {
@@ -3881,12 +3952,17 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     ),
                     Span::styled(" ".repeat(pad), Style::default().bg(bg_selected())),
                 ]));
-                let cur_x = (inner.x + prompt_prefix.width() as u16 + shown.width() as u16)
-                    .min(inner.x + inner.width.saturating_sub(1));
-                let cur_y = inner.y + (lines.len().saturating_sub(1)) as u16;
-                frame.set_cursor_position((cur_x, cur_y));
+                if inner.height > 0 {
+                    let cur_x = (inner.x + prompt_prefix.width() as u16 + shown.width() as u16)
+                        .min(inner.x + inner.width.saturating_sub(1));
+                    let cur_y = (inner.y + (lines.len().saturating_sub(1)) as u16)
+                        .min(inner.y + inner.height.saturating_sub(1));
+                    frame.set_cursor_position((cur_x, cur_y));
+                }
             } else if !input.trim().is_empty() {
-                lines.push(Line::default());
+                if lines.len() + 2 <= inner_h {
+                    lines.push(Line::default());
+                }
                 let note_line = format!(
                     " Note: \"{}\" (Ctrl+S to send to agent)",
                     truncate_str(input.trim(), inner_w.saturating_sub(36))
@@ -3909,7 +3985,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             follow_selection,
             ..
         } => {
-            let max_w = screen.width.saturating_sub(6).clamp(48, 96);
+            let (max_w, max_h) = responsive_modal_size(screen, 6, 4, 48, 96, 10, 32);
             let min_w = 54.min(max_w);
             let title = format!(
                 "Question {}/{}",
@@ -3933,7 +4009,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 .unwrap_or(48) as u16;
             let w = longest_content.saturating_add(4).clamp(min_w, max_w);
             let inner_w = w.saturating_sub(2) as usize;
-            let wrap_w = inner_w.saturating_sub(5).max(16);
+            let wrap_w = inner_w.saturating_sub(5).max(8);
 
             let mut lines: Vec<Line<'static>> = Vec::new();
             let mut option_ranges: Vec<(usize, usize)> = Vec::new();
@@ -3944,7 +4020,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                     if para.trim().is_empty() {
                         lines.push(Line::default());
                     } else {
-                        for wline in wrap_plain_text(para, inner_w.saturating_sub(2).max(12)) {
+                        for wline in wrap_plain_text(para, inner_w.saturating_sub(2).max(8)) {
                             lines.push(Line::from(Span::styled(
                                 format!(" {wline}"),
                                 Style::default()
@@ -4089,9 +4165,8 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 option_ranges.push((start_row, end_row));
             }
 
-            let max_h = screen.height.saturating_sub(4).max(10);
             let desired_h = (lines.len() as u16).saturating_add(2);
-            let h = desired_h.clamp(10.min(max_h), max_h);
+            let h = desired_h.clamp(8.min(max_h), max_h);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
 
@@ -4144,35 +4219,53 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             }
         }
         ActiveModal::Sudo { prompt, input, .. } => {
-            let w = screen.width.saturating_sub(6).clamp(44, 68);
-            let rect = centered_rect(screen, w, 7);
+            let (w, max_h) = responsive_modal_size(screen, 6, 4, 44, 68, 7, 12);
+            let inner_w = w.saturating_sub(2) as usize;
+            let prompt_lines = wrap_plain_text(prompt, inner_w.saturating_sub(2).max(8));
+            let desired_h = (prompt_lines.len() as u16)
+                .saturating_add(4)
+                .clamp(7, max_h);
+            let rect = centered_rect(screen, w, desired_h.min(max_h));
             st.modal_rect = Some(rect);
             let inner = draw_modal_frame(frame, rect, "Authentication Required", "enter · esc");
-            let masked = "*".repeat(input.chars().count());
-            let cur_x =
-                (inner.x + 11 + masked.width() as u16).min(inner.x + inner.width.saturating_sub(1));
-            frame.set_cursor_position((cur_x, inner.y + 2));
-            let lines = vec![
-                Line::from(Span::styled(
-                    format!(
-                        " {}",
-                        truncate_str(prompt, (inner.width as usize).saturating_sub(2))
-                    ),
-                    Style::default().fg(text_primary()).bg(bg_elevated()),
-                )),
-                Line::default(),
-                Line::from(Span::styled(
-                    format!(" Password: {masked}_"),
-                    Style::default().fg(accent_coral()).bg(bg_elevated()),
-                )),
-            ];
+            let actual_w = inner.width as usize;
+            let actual_h = inner.height as usize;
+            let prefix = " Password: ";
+            let avail = actual_w.saturating_sub(prefix.width() + 1);
+            let masked_len = input.chars().count().min(avail);
+            let masked = "*".repeat(masked_len);
+            let max_prompt_rows = actual_h.saturating_sub(2).max(1);
+            let mut lines: Vec<Line<'static>> = prompt_lines
+                .into_iter()
+                .take(max_prompt_rows)
+                .map(|pl| {
+                    Line::from(Span::styled(
+                        format!(" {}", truncate_str(&pl, actual_w.saturating_sub(2))),
+                        Style::default().fg(text_primary()).bg(bg_elevated()),
+                    ))
+                })
+                .collect();
+            if lines.len() + 2 <= actual_h {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{masked}_"),
+                Style::default().fg(accent_coral()).bg(bg_elevated()),
+            )));
+            if actual_h > 0 {
+                let cur_x = (inner.x + prefix.width() as u16 + masked.width() as u16)
+                    .min(inner.x + inner.width.saturating_sub(1));
+                let cur_y = (inner.y + lines.len().saturating_sub(1) as u16)
+                    .min(inner.y + inner.height.saturating_sub(1));
+                frame.set_cursor_position((cur_x, cur_y));
+            }
             frame.render_widget(Paragraph::new(lines), inner);
         }
         ActiveModal::Help { scroll } => {
-            let w = screen.width.saturating_sub(6).clamp(48, 72);
-            let h = screen.height.saturating_sub(4).clamp(14, 24);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 48, 76, 10, 24);
             let rect = centered_rect(screen, w, h);
-            let inner = draw_modal_frame(frame, rect, "Keyboard & Commands", "esc");
+            st.modal_rect = Some(rect);
+            let inner = draw_modal_frame(frame, rect, "Keyboard & Commands", "↑/↓ · esc");
             let help_rows = [
                 ("ctrl+p", "Open command palette"),
                 ("shift+tab", "Cycle agent mode (Build / Auto / Plan)"),
@@ -4195,21 +4288,30 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
                 ("/jobs", "View background tasks and subagents"),
                 ("ctrl+b", "Inspect subagents and tasks"),
             ];
-            let visible_h = inner.height as usize;
+            let visible_h = (inner.height as usize).max(1);
+            let max_scroll = help_rows.len().saturating_sub(visible_h);
+            let inner_w = inner.width as usize;
+            let key_col = (inner_w / 3).clamp(8, 28);
+            let desc_max = inner_w.saturating_sub(key_col + 2);
             let lines: Vec<Line<'static>> = help_rows
                 .iter()
-                .skip(*scroll)
+                .skip((*scroll).min(max_scroll))
                 .take(visible_h)
                 .map(|(k, v)| {
                     if k.is_empty() {
                         return Line::default();
                     }
+                    let key_disp = truncate_str(k, key_col.saturating_sub(1));
+                    let pad = key_col.saturating_sub(key_disp.width());
                     Line::from(vec![
                         Span::styled(
-                            format!(" {:<28}", k),
+                            format!(" {key_disp}{}", " ".repeat(pad)),
                             Style::default().fg(accent_coral()).bg(bg_elevated()),
                         ),
-                        Span::styled(*v, Style::default().fg(text_primary()).bg(bg_elevated())),
+                        Span::styled(
+                            truncate_str(v, desc_max),
+                            Style::default().fg(text_primary()).bg(bg_elevated()),
+                        ),
                     ])
                 })
                 .collect();
@@ -4220,8 +4322,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             selected,
             active_only,
         } => {
-            let w = screen.width.saturating_sub(6).clamp(54, 88);
-            let h = screen.height.saturating_sub(4).clamp(12, 24);
+            let (w, h) = responsive_modal_size(screen, 6, 4, 54, 88, 12, 24);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             render_subagents_modal(frame, rect, items, *selected, *active_only, spinner_tick);
@@ -4231,8 +4332,7 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
             current_idx,
             scroll,
         } => {
-            let w = screen.width.saturating_sub(4).clamp(60, 110);
-            let h = screen.height.saturating_sub(2).clamp(14, 38);
+            let (w, h) = responsive_modal_size(screen, 4, 2, 60, 110, 14, 38);
             let rect = centered_rect(screen, w, h);
             st.modal_rect = Some(rect);
             render_subagent_inspector(frame, rect, items, *current_idx, *scroll, spinner_tick);
@@ -4242,24 +4342,29 @@ fn render_modal(frame: &mut Frame, screen: Rect, st: &mut TuiState, info: &Foote
 
 fn draw_modal_frame(frame: &mut Frame, rect: Rect, title: &str, hint: &str) -> Rect {
     frame.render_widget(Clear, rect);
-    let block = Block::default()
+    let border_text_w = rect.width.saturating_sub(4) as usize;
+    let title_disp = truncate_str(title, border_text_w);
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_subtle()).bg(bg_elevated()))
         .style(Style::default().bg(bg_elevated()))
         .title(Span::styled(
-            format!(" {title} "),
+            format!(" {title_disp} "),
             Style::default()
                 .fg(text_primary())
                 .bg(bg_elevated())
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
+        ));
+    if border_text_w >= 8 && !hint.is_empty() {
+        let hint_disp = truncate_str(hint, border_text_w);
+        block = block.title_bottom(
             Line::from(Span::styled(
-                format!(" {hint} "),
+                format!(" {hint_disp} "),
                 Style::default().fg(text_muted()).bg(bg_elevated()),
             ))
             .right_aligned(),
         );
+    }
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     inner
@@ -4285,13 +4390,20 @@ fn render_subagents_modal(
     let mut rows: Vec<Line<'static>> = Vec::new();
 
     // Top filter & status row
-    let filter_label = if active_only {
+    let inner_w = inner.width as usize;
+    let raw_filter = if active_only {
         " [Active] (Tab / Ctrl+A to show all) "
     } else {
         " [All] (Tab / Ctrl+A to show active) "
     };
     let count_label = format!("{running_count} running · {completed_count} completed");
-    let pad = (inner.width as usize).saturating_sub(filter_label.len() + count_label.len() + 2);
+    let count_disp = if inner_w < 38 {
+        format!("{running_count}r/{completed_count}d")
+    } else {
+        count_label
+    };
+    let filter_label = truncate_str(raw_filter, inner_w.saturating_sub(count_disp.width() + 3));
+    let pad = inner_w.saturating_sub(filter_label.width() + count_disp.width() + 2);
     rows.push(Line::from(vec![
         Span::styled(" ", Style::default().bg(bg_elevated())),
         Span::styled(
@@ -4307,7 +4419,7 @@ fn render_subagents_modal(
         ),
         Span::styled(" ".repeat(pad), Style::default().bg(bg_elevated())),
         Span::styled(
-            count_label,
+            count_disp,
             Style::default().fg(text_muted()).bg(bg_elevated()),
         ),
         Span::styled(" ", Style::default().bg(bg_elevated())),
@@ -4767,6 +4879,38 @@ fn search_input_line(query: &str, width: usize) -> Line<'static> {
         ),
         Span::styled(" ".repeat(pad), Style::default().bg(bg_elevated())),
     ])
+}
+
+/// Compute responsive `(width, height)` for a modal on `screen`.
+/// Preserves `(margin_x, margin_y)` and caps at `(max_w, max_h)` on roomy screens,
+/// then gracefully shrinks margins down to 2 (or 0 on ultra-tiny screens) as the
+/// terminal gets smaller so popups stay legible and centered without overflowing.
+fn responsive_modal_size(
+    screen: Rect,
+    margin_x: u16,
+    margin_y: u16,
+    pref_min_w: u16,
+    max_w: u16,
+    pref_min_h: u16,
+    max_h: u16,
+) -> (u16, u16) {
+    let avail_w = if screen.width >= pref_min_w.saturating_add(margin_x) {
+        screen.width.saturating_sub(margin_x)
+    } else if screen.width > 12 {
+        screen.width.saturating_sub(2)
+    } else {
+        screen.width
+    };
+    let avail_h = if screen.height >= pref_min_h.saturating_add(margin_y) {
+        screen.height.saturating_sub(margin_y)
+    } else if screen.height > 6 {
+        screen.height.saturating_sub(2)
+    } else {
+        screen.height
+    };
+    let w = avail_w.min(max_w).max(screen.width.min(1));
+    let h = avail_h.min(max_h).max(screen.height.min(1));
+    (w, h)
 }
 
 fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
@@ -6786,5 +6930,102 @@ mod tests {
         assert!(text.contains("Option 8"), "{text}");
         assert!(text.contains("thoroughly for"), "{text}");
         assert!(text.contains("the user"), "{text}");
+    }
+
+    #[test]
+    fn modals_adapt_responsively_to_small_terminal_sizes() {
+        use harness_core::{ClarifyItem, ClarifyRequest};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let in_flight = Vec::new();
+        let info = FooterInfo {
+            provider: "openai",
+            model: "gpt-4o",
+            reasoning_effort: None,
+            session_id: "s1",
+            in_flight_tools: &in_flight,
+            features: Default::default(),
+        };
+        let snap = TuiLiveSnapshot::default();
+
+        // 1. Approval modal on a small 44x12 terminal must keep all 4 choices visible and centered inside bounds.
+        let mut st = test_dummy_tui_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.modal = ActiveModal::Approval {
+            req: harness_core::ApprovalRequest {
+                tool: "patch".to_string(),
+                call_id: "c1".to_string(),
+                target: Some("src/main.rs".to_string()),
+                diff: Some("--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n".to_string()),
+                arguments: serde_json::json!({}),
+            },
+            resp_tx: tx,
+            selected: 0,
+            diff_scroll: 0,
+            editing_input: false,
+            input: String::new(),
+            asking: false,
+            reply: None,
+            reply_scroll: 0,
+            error: None,
+            approval_model_label: "default (gpt-4o)".to_string(),
+        };
+        let mut term = Terminal::new(TestBackend::new(44, 12)).unwrap();
+        term.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let mr = st.modal_rect.expect("modal_rect set");
+        assert!(mr.width <= 42 && mr.height <= 10, "modal_rect={mr:?}");
+        let buf = term.backend().buffer();
+        let text: String = (0..12)
+            .map(|y| (0..44).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Allow once"), "{text}");
+        assert!(text.contains("[n] Deny"), "{text}");
+        assert!(text.contains("[q] Ask"), "{text}");
+
+        // 2. Clarify modal shrinks cleanly onto a 38x11 screen without exceeding bounds.
+        let (ctx, _crx) = tokio::sync::oneshot::channel();
+        st.modal = ActiveModal::Clarify {
+            req: ClarifyRequest {
+                questions: vec![ClarifyItem {
+                    question: "Pick a target format for this build?".to_string(),
+                    choices: vec!["JSON output".to_string(), "Plain text".to_string()],
+                }],
+            },
+            resp_tx: ctx,
+            question_idx: 0,
+            answers: Vec::new(),
+            selected: 1,
+            custom: String::new(),
+            editing_custom: false,
+            scroll: 0,
+            follow_selection: true,
+        };
+        let mut term_small = Terminal::new(TestBackend::new(38, 11)).unwrap();
+        term_small.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let cmr = st.modal_rect.expect("clarify modal_rect set");
+        assert!(cmr.width <= 36 && cmr.height <= 9, "cmr={cmr:?}");
+        let buf2 = term_small.backend().buffer();
+        let text2: String = (0..11)
+            .map(|y| (0..38).map(|x| buf2[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text2.contains("Plain text"), "{text2}");
+
+        // 3. ThinkingPicker scrolls cleanly onto a short 30x8 terminal when "max" is selected.
+        st.modal = ActiveModal::ThinkingPicker {
+            current: None,
+            selected: 6,
+        };
+        let mut term_tiny = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        term_tiny.draw(|f| draw(f, &mut st, &snap, &info)).unwrap();
+        let tmr = st.modal_rect.expect("thinking modal_rect set");
+        assert!(tmr.width <= 28 && tmr.height <= 6, "tmr={tmr:?}");
+        let buf3 = term_tiny.backend().buffer();
+        let text3: String = (0..8)
+            .map(|y| (0..30).map(|x| buf3[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text3.contains("max"), "{text3}");
     }
 }
