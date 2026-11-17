@@ -535,6 +535,8 @@ pub(in crate::commands::chat) async fn run(runtime: &mut ChatRuntime) -> Result<
                             selected: 0,
                             custom: String::new(),
                             editing_custom: false,
+                            scroll: 0,
+                            follow_selection: true,
                         };
                         needs_redraw = true;
                     }
