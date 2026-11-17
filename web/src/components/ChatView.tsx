@@ -19,7 +19,6 @@ import {
   Check,
   PanelLeft,
   Plus,
-  Folder,
 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { Composer } from './Composer';
@@ -606,6 +605,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const modelLabel = model || provider || 'default';
   const workspaceFolder =
     workspaceRoot.split('/').filter(Boolean).pop() || workspaceRoot || 'Workspace';
+  const hasUserOrAssistantMessages = messages.length > 0;
 
   return (
     <div className="chat-view">
@@ -634,25 +634,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <span>Working</span>
             </span>
           )}
-          <button
-            type="button"
-            className="header-pill"
-            onClick={onOpenWorkspacePicker}
-            title={`Workspace: ${workspaceRoot}`}
-          >
-            <Folder size={13} className="header-pill-icon" />
-            <span className="header-pill-text">{workspaceFolder}</span>
-          </button>
-          <button
-            type="button"
-            className="model-pill"
-            onClick={onOpenModelPicker}
-            title="Switch provider or model"
-          >
-            <span className="model-pill-provider">{provider || 'default'}</span>
-            <span className="model-pill-sep">/</span>
-            <span className="model-pill-name">{modelLabel}</span>
-          </button>
         </div>
       </header>
 
@@ -923,12 +904,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       <Composer
         sessionId={sessionId}
+        workspaceRoot={workspaceRoot}
+        showWorkspacePicker={!hasUserOrAssistantMessages}
         provider={provider}
         model={model}
         turnRunning={turnRunning}
         onSend={onSendMessage}
         onInterrupt={onInterrupt}
         onOpenModelPicker={onOpenModelPicker}
+        onOpenWorkspacePicker={onOpenWorkspacePicker}
       />
     </div>
   );

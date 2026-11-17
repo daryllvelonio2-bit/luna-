@@ -192,8 +192,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
 
         {sidebarAgents.length > 0 && (
           <div className="sidebar-group">
-            <div className="sidebar-section-label">Agents</div>
-            <div className="sidebar-agent-list">
+            <div className="sidebar-group-label">Agents</div>
+            <div className="sidebar-group-list">
               {sidebarAgents.map((agent) => (
                 <button
                   key={agent.id}
@@ -216,8 +216,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
           </div>
         )}
 
-        <div className="session-section">
-          <div className="sidebar-section-label">Conversations</div>
+        <div className="sidebar-conversations">
+          <div className="sidebar-group-label">Conversations</div>
           <div className="sidebar-search-wrap">
             <Search size={12} className="sidebar-search-icon" />
             <input

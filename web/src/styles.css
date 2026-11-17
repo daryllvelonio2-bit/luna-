@@ -1111,6 +1111,59 @@ select {
   background-color: var(--bg-canvas);
 }
 
+.composer-workspace-row {
+  max-width: var(--reading-width);
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+}
+
+.composer-workspace-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.composer-workspace-btn:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.composer-workspace-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.composer-workspace-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.composer-workspace-path {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+}
+
+.composer-workspace-chevron {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
 .composer-shell {
   max-width: var(--reading-width);
   margin: 0 auto;
@@ -1791,7 +1844,7 @@ select {
 
 .sidebar-search-wrap {
   position: relative;
-  margin: 0 8px 6px;
+  margin: 0 2px 8px;
 }
 
 .sidebar-search-icon {
@@ -1894,23 +1947,32 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px;
-  border-radius: 7px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-canvas);
+  color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
-  max-width: 75%;
-  transition: background-color 120ms ease, color 120ms ease;
+  max-width: 100%;
+  min-width: 0;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
 .composer-model-btn:hover {
   background-color: var(--bg-hover);
+  border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
+.composer-model-provider {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
 .composer-model-name {
+  color: var(--text-primary);
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
