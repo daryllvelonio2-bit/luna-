@@ -107,6 +107,8 @@ pub struct TuiLiveSnapshot {
     pub pty_pane: Option<TuiPtyPane>,
     pub compacting: Option<(bool, f32)>,
     pub model: String,
+    pub account_name: Option<String>,
+    pub quota: Vec<harness_providers::QuotaLine>,
     pub context_used: u32,
     pub context_max: u32,
     pub yolo: bool,
@@ -341,6 +343,8 @@ impl ChatUi {
             .as_ref()
         {
             snap.model = st.model.clone();
+            snap.account_name = st.account_name.clone();
+            snap.quota = st.quota.clone();
             snap.context_used = st.context_used;
             snap.context_max = st.context_max;
             snap.yolo = st.yolo;

@@ -45,7 +45,10 @@ pub(crate) fn format_quota_lines(lines: &[QuotaLine]) -> String {
 }
 
 /// A reset time as the time left until it: `(4h 59m)`, `(3d 15h)`, `(0m)`.
-fn format_reset_time_remaining(reset_time_str: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn format_reset_time_remaining(
+    reset_time_str: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let Ok(reset) = chrono::DateTime::parse_from_rfc3339(reset_time_str) else {
         return String::new();
     };

@@ -472,8 +472,9 @@ fn render_landing(
     let wrapped_input = wrap_composer_lines(&st.composer.text, st.composer.cursor, inner_text_w);
     let input_rows = wrapped_input.lines.len().clamp(1, 5) as u16;
     let preview_h = composer_preview_height(st, box_width.saturating_sub(3));
-    // Card height: 1 top pad + preview strip + 1 gap + input_rows + 1 blank spacer + footer.
-    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0);
+    let extra_footer = u16::from(has_antigravity_footer(snap));
+    // Card height: 1 top pad + preview strip + 1 gap + input_rows + 1 blank spacer + footer (+ optional antigravity row).
+    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0) + extra_footer;
 
     // Optional chrome strips above composer
     let chrome_lines = build_chrome_lines(st, snap, box_width as usize);
@@ -569,7 +570,7 @@ fn render_landing(
         width: box_width,
         height: card_h.min(area.y + area.height.saturating_sub(cur_y + 2)),
     };
-    render_composer_card(frame, composer_rect, st, info, &wrapped_input, true);
+    render_composer_card(frame, composer_rect, st, info, snap, &wrapped_input, true);
 
     // 4. Hint row right below composer card
     let hint_y = composer_rect.y + composer_rect.height;
@@ -733,7 +734,8 @@ fn render_conversation(
     let wrapped_input = wrap_composer_lines(&st.composer.text, st.composer.cursor, inner_text_w);
     let input_rows = wrapped_input.lines.len().clamp(1, 6) as u16;
     let preview_h = composer_preview_height(st, content_w.saturating_sub(3));
-    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0);
+    let extra_footer = u16::from(has_antigravity_footer(snap));
+    let card_h = input_rows + 3 + preview_h + u16::from(preview_h > 0) + extra_footer;
 
     // Optional chrome strips above composer (todo, delegate, memory notices, queue, compaction, error)
     let chrome_lines = build_chrome_lines(st, snap, content_w as usize);
@@ -956,7 +958,7 @@ fn render_conversation(
         width: content_w,
         height: card_h.min(area.y + area.height.saturating_sub(cur_y + 1)),
     };
-    render_composer_card(frame, composer_rect, st, info, &wrapped_input, false);
+    render_composer_card(frame, composer_rect, st, info, snap, &wrapped_input, false);
 
     let hint_y = composer_rect.y + composer_rect.height;
     if hint_y < area.y + area.height {
@@ -1126,11 +1128,175 @@ fn render_preview_cell(
     }
 }
 
+fn has_antigravity_footer(snap: &TuiLiveSnapshot) -> bool {
+    snap.account_name
+        .as_deref()
+        .is_some_and(|a| !a.trim().is_empty())
+        || !snap.quota.is_empty()
+}
+
+fn quota_circle_glyph(remaining_fraction: f64) -> &'static str {
+    let f = remaining_fraction.clamp(0.0, 1.0);
+    if f >= 0.875 {
+        "●"
+    } else if f >= 0.625 {
+        "◕"
+    } else if f >= 0.375 {
+        "◑"
+    } else if f >= 0.125 {
+        "◔"
+    } else {
+        "○"
+    }
+}
+
+fn quota_circle_color(remaining_fraction: f64) -> Color {
+    let f = remaining_fraction.clamp(0.0, 1.0);
+    if f > 0.50 {
+        GREEN_OK
+    } else if f > 0.20 {
+        YELLOW_WARN
+    } else {
+        RED_ERR
+    }
+}
+
+fn build_antigravity_footer_line(
+    snap: &TuiLiveSnapshot,
+    accent: Color,
+    card_width: usize,
+) -> Line<'static> {
+    let now = chrono::Utc::now();
+    let mut quota_spans: Vec<Span<'static>> = Vec::new();
+    let mut quota_w = 0usize;
+
+    for (idx, line) in snap.quota.iter().enumerate() {
+        if idx > 0 {
+            let sep = " · ";
+            quota_spans.push(Span::styled(
+                sep,
+                Style::default().fg(TEXT_DIM).bg(BG_SURFACE),
+            ));
+            quota_w += sep.width();
+        }
+        let glyph = quota_circle_glyph(line.remaining_fraction);
+        let color = quota_circle_color(line.remaining_fraction);
+        let window_label = match line.window {
+            harness_providers::QuotaWindow::FiveHour => "5h",
+            harness_providers::QuotaWindow::Weekly => "w",
+        };
+        let pct_val = (line.remaining_fraction.clamp(0.0, 1.0) * 100.0).round();
+        let pct_str = format!(" {pct_val:.0}%");
+        let pct_color = if line.remaining_fraction <= 0.20 {
+            RED_ERR
+        } else {
+            TEXT_PRIMARY
+        };
+        let reset = line
+            .reset_time
+            .as_deref()
+            .map(|r| super::super::status::format_reset_time_remaining(r, now))
+            .filter(|r| !r.is_empty());
+
+        quota_spans.push(Span::styled(
+            glyph,
+            Style::default().fg(color).bg(BG_SURFACE),
+        ));
+        quota_spans.push(Span::styled(
+            format!(" {window_label}"),
+            Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+        ));
+        quota_spans.push(Span::styled(
+            pct_str.clone(),
+            Style::default()
+                .fg(pct_color)
+                .bg(BG_SURFACE)
+                .add_modifier(Modifier::BOLD),
+        ));
+        quota_w += glyph.width() + 1 + window_label.width() + pct_str.width();
+
+        if let Some(ref rem) = reset {
+            let rem_str = format!(" {rem}");
+            quota_w += rem_str.width();
+            quota_spans.push(Span::styled(
+                rem_str,
+                Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+            ));
+        }
+    }
+
+    let avail = card_width.saturating_sub(4); // "▎  " (3) + right margin (1)
+    let account_raw = snap
+        .account_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut spans = vec![
+        Span::styled("▎", Style::default().fg(accent).bg(BG_SURFACE)),
+        Span::styled("  ", Style::default().bg(BG_SURFACE)),
+    ];
+
+    match (account_raw, quota_w > 0) {
+        (Some(acct), true) => {
+            if quota_w >= avail {
+                let text = quota_spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>();
+                spans.push(Span::styled(
+                    truncate_str(&text, avail),
+                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                ));
+            } else {
+                let max_acct = avail.saturating_sub(quota_w + 2);
+                if max_acct >= 6 {
+                    let acct_disp = truncate_str(acct, max_acct);
+                    let gap = avail.saturating_sub(acct_disp.width() + quota_w);
+                    spans.push(Span::styled(
+                        acct_disp,
+                        Style::default().fg(CYAN_LINK).bg(BG_SURFACE),
+                    ));
+                    spans.push(Span::styled(
+                        " ".repeat(gap),
+                        Style::default().bg(BG_SURFACE),
+                    ));
+                }
+                spans.extend(quota_spans);
+            }
+        }
+        (Some(acct), false) => {
+            spans.push(Span::styled(
+                truncate_str(acct, avail),
+                Style::default().fg(CYAN_LINK).bg(BG_SURFACE),
+            ));
+        }
+        (None, true) => {
+            if quota_w <= avail {
+                spans.extend(quota_spans);
+            } else {
+                let text = quota_spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>();
+                spans.push(Span::styled(
+                    truncate_str(&text, avail),
+                    Style::default().fg(TEXT_MUTED).bg(BG_SURFACE),
+                ));
+            }
+        }
+        (None, false) => {}
+    }
+
+    Line::from(spans)
+}
+
 fn render_composer_card(
     frame: &mut Frame,
     rect: Rect,
     st: &mut TuiState,
     info: &FooterInfo<'_>,
+    snap: &TuiLiveSnapshot,
     wrapped: &WrappedComposer,
     is_landing: bool,
 ) {
@@ -1189,8 +1355,13 @@ fn render_composer_card(
     }
 
     // Input rows start below the preview strip (plus one gap row when a preview is shown).
+    let show_ag_footer = has_antigravity_footer(snap) && rect.height >= 4;
+    let footer_rows = 1u16 + u16::from(show_ag_footer);
     let input_top = rect.y + 1 + preview_h + u16::from(preview_h > 0);
-    let max_input_rows = rect.height.saturating_sub((input_top - rect.y) + 2).max(1) as usize;
+    let max_input_rows = rect
+        .height
+        .saturating_sub((input_top - rect.y) + 1 + footer_rows)
+        .max(1) as usize;
     let scroll_off = wrapped
         .cursor_line
         .saturating_sub(max_input_rows.saturating_sub(1));
@@ -1260,7 +1431,7 @@ fn render_composer_card(
 
     // Footer metadata row at bottom of composer card (`Build auto · Model Provider · high`).
     if rect.height >= 3 {
-        let footer_y = rect.y + rect.height - 1;
+        let footer_y = rect.y + rect.height - footer_rows;
         let model_display = friendly_model_name(info.model);
         let provider_display = friendly_provider_name(info.provider);
         let thinking_label = info
@@ -1309,6 +1480,19 @@ fn render_composer_card(
                 height: 1,
             },
         );
+        if show_ag_footer {
+            let ag_y = rect.y + rect.height - 1;
+            let ag_line = build_antigravity_footer_line(snap, accent, rect.width as usize);
+            frame.render_widget(
+                Paragraph::new(ag_line),
+                Rect {
+                    x: rect.x,
+                    y: ag_y,
+                    width: rect.width,
+                    height: 1,
+                },
+            );
+        }
     }
 }
 
@@ -5606,6 +5790,54 @@ mod tests {
 
         let narrow = build_landing_status_lines(&features, 48);
         assert_eq!(narrow.len(), 3);
+    }
+
+    #[test]
+    fn antigravity_footer_renders_account_and_circular_quota_windows() {
+        assert_eq!(quota_circle_glyph(1.0), "●");
+        assert_eq!(quota_circle_glyph(0.75), "◕");
+        assert_eq!(quota_circle_glyph(0.50), "◑");
+        assert_eq!(quota_circle_glyph(0.25), "◔");
+        assert_eq!(quota_circle_glyph(0.05), "○");
+
+        assert_eq!(quota_circle_color(0.8), GREEN_OK);
+        assert_eq!(quota_circle_color(0.4), YELLOW_WARN);
+        assert_eq!(quota_circle_color(0.1), RED_ERR);
+
+        let now = chrono::Utc::now();
+        let reset_5h = (now + chrono::Duration::seconds(4 * 3600 + 30 * 60 + 30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let reset_weekly = (now + chrono::Duration::seconds(167 * 3600 + 30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let ui = super::super::super::ui::ChatUi::new(true);
+        ui.set_status("claude-sonnet-4-6", 1000, 200_000);
+        ui.set_account_name(Some("daryll@example.com".to_string()));
+        ui.set_quota_lines(
+            "claude-sonnet-4-6",
+            vec![
+                harness_providers::QuotaLine {
+                    window: harness_providers::QuotaWindow::FiveHour,
+                    remaining_fraction: 0.78,
+                    reset_time: Some(reset_5h),
+                },
+                harness_providers::QuotaLine {
+                    window: harness_providers::QuotaWindow::Weekly,
+                    remaining_fraction: 0.25,
+                    reset_time: Some(reset_weekly),
+                },
+            ],
+        );
+
+        let snap = ui.tui_snapshot(90);
+        assert_eq!(snap.account_name.as_deref(), Some("daryll@example.com"));
+        assert!(has_antigravity_footer(&snap));
+
+        let line = build_antigravity_footer_line(&snap, ACCENT_CORAL, 80);
+        let text = line_text(&line);
+        assert!(text.contains("daryll@example.com"), "{text}");
+        assert!(text.contains("◕ 5h 78% (4h 30m)"), "{text}");
+        assert!(text.contains("◔ w 25% (6d 23h)"), "{text}");
     }
 
     fn test_dummy_tui_state() -> TuiState {

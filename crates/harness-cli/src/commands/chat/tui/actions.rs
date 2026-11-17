@@ -26,7 +26,7 @@ use super::super::observers::agent_observer;
 use super::super::render::{
     compaction_report, parse_turns_from_history, TurnProcessItem, TurnRecord,
 };
-use super::super::status::refresh_antigravity_status_if_needed;
+use super::super::status::{refresh_antigravity_quota_owned, refresh_antigravity_status_if_needed};
 use super::super::todo;
 use super::super::turn::{
     cancel_running_turn, drain_queue, handle_composer_command, launch_internal_turn, launch_turn,
@@ -566,6 +566,15 @@ pub async fn create_new_session(env: &mut Env<'_>, st: &mut TuiState) -> Result<
     env.ui.set_session_name("");
     env.ui.clear_live_state();
     env.ui.clear_transient_error();
+    {
+        let ui_bg = env.ui.clone();
+        let prov_bg = provider;
+        let mod_bg = model;
+        let cred_bg = env.cred_manager.clone();
+        tokio::spawn(async move {
+            refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg).await;
+        });
+    }
     refresh_tabs(env, st).await;
     Ok(())
 }
@@ -2005,9 +2014,18 @@ pub async fn run_select_action(
                 return;
             };
             match env.cred_manager.remove_credential(&provider, id).await {
-                Ok(true) => env
-                    .ui
-                    .emit_above(&format!("✔ Credential removed from {provider}")),
+                Ok(true) => {
+                    env.ui
+                        .emit_above(&format!("✔ Credential removed from {provider}"));
+                    let ui_bg = env.ui.clone();
+                    let prov_bg = env.current_provider.clone();
+                    let mod_bg = env.current_model.clone();
+                    let cred_bg = env.cred_manager.clone();
+                    tokio::spawn(async move {
+                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
+                            .await;
+                    });
+                }
                 Ok(false) => env
                     .ui
                     .set_transient_error(Some("Credential not found".to_string())),
@@ -2042,6 +2060,14 @@ pub async fn run_select_action(
                     }
                     env.ui
                         .emit_above(&format!("✔ Priority credential set for {provider}"));
+                    let ui_bg = env.ui.clone();
+                    let prov_bg = env.current_provider.clone();
+                    let mod_bg = env.current_model.clone();
+                    let cred_bg = env.cred_manager.clone();
+                    tokio::spawn(async move {
+                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
+                            .await;
+                    });
                 }
                 Ok(false) => env
                     .ui
@@ -2088,9 +2114,18 @@ pub async fn run_select_action(
                 Some(provider.clone())
             };
             match env.cred_manager.reset_cooldowns(target.as_deref()).await {
-                Ok(count) => env
-                    .ui
-                    .emit_above(&format!("✔ {count} credential(s) re-enabled")),
+                Ok(count) => {
+                    env.ui
+                        .emit_above(&format!("✔ {count} credential(s) re-enabled"));
+                    let ui_bg = env.ui.clone();
+                    let prov_bg = env.current_provider.clone();
+                    let mod_bg = env.current_model.clone();
+                    let cred_bg = env.cred_manager.clone();
+                    tokio::spawn(async move {
+                        refresh_antigravity_status_if_needed(&ui_bg, &prov_bg, &mod_bg, &cred_bg)
+                            .await;
+                    });
+                }
                 Err(error) => env
                     .ui
                     .set_transient_error(Some(format!("Reset failed: {error}"))),
@@ -3516,6 +3551,13 @@ pub async fn handle_turn_end(
         env.current_model,
     );
     env.ui.update_status(used, ctx_max);
+    st.quota_refreshed_at = std::time::Instant::now();
+    tokio::spawn(refresh_antigravity_quota_owned(
+        env.ui.clone(),
+        env.current_provider.clone(),
+        env.current_model.clone(),
+        env.cred_manager.clone(),
+    ));
 
     // Any line the user submitted while the turn was finishing may still be held by the interrupt
     // handle. Move it into the session queue so it drains as the next turn instead of being lost.
