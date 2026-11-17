@@ -102,13 +102,20 @@ impl WebState {
     /// pick up updated workspace root or default model configuration on next turn.
     pub async fn invalidate_idle_sessions(&self) {
         let mut map = self.sessions.lock().await;
-        map.retain(|_, handle| handle.turn_running.load(std::sync::atomic::Ordering::SeqCst));
+        map.retain(|_, handle| {
+            handle
+                .turn_running
+                .load(std::sync::atomic::Ordering::SeqCst)
+        });
     }
 
     pub async fn drop_session_if_idle(&self, session_id: &str) {
         let mut map = self.sessions.lock().await;
         if let Some(handle) = map.get(session_id) {
-            if !handle.turn_running.load(std::sync::atomic::Ordering::SeqCst) {
+            if !handle
+                .turn_running
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 map.remove(session_id);
             }
         }

@@ -92,7 +92,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/sessions/{session_id}/clarify", post(resolve_clarify))
         .route("/api/approval/question", post(ask_approval_question))
         .route("/api/providers", get(get_providers))
-        .route("/api/providers/{provider_id}/refresh", post(refresh_provider_models))
+        .route(
+            "/api/providers/{provider_id}/refresh",
+            post(refresh_provider_models),
+        )
         .route("/api/models/default", post(set_default_model))
         .route("/api/workspace/browse", get(browse_workspace))
         .route("/api/workspace", post(set_workspace))
@@ -801,7 +804,12 @@ async fn browse_workspace(
     Query(query): Query<BrowseWorkspaceQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let current = match query.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let current = match query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => {
             if raw == "~" || raw.starts_with("~/") {
                 if let Some(ref h) = home {
@@ -866,7 +874,10 @@ async fn set_workspace(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let raw = payload.path.trim();
     if raw.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Workspace path cannot be empty".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace path cannot be empty".into(),
+        ));
     }
     let candidate = if raw == "~" || raw.starts_with("~/") {
         if let Some(h) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
