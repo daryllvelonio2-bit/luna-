@@ -118,8 +118,26 @@ export const Composer: React.FC<ComposerProps> = React.memo(
     const [images, setImages] = useState<string[]>([]);
     const [slashIndex, setSlashIndex] = useState(0);
     const [slashDismissed, setSlashDismissed] = useState(false);
+    const [thinkingOpen, setThinkingOpen] = useState(false);
+    const thinkingRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+      if (!thinkingOpen) return;
+      const closeOnPointer = (event: PointerEvent) => {
+        if (!thinkingRef.current?.contains(event.target as Node)) setThinkingOpen(false);
+      };
+      const closeOnKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setThinkingOpen(false);
+      };
+      document.addEventListener('pointerdown', closeOnPointer);
+      document.addEventListener('keydown', closeOnKey);
+      return () => {
+        document.removeEventListener('pointerdown', closeOnPointer);
+        document.removeEventListener('keydown', closeOnKey);
+      };
+    }, [thinkingOpen]);
 
     useEffect(() => {
       const el = textareaRef.current;
@@ -394,20 +412,39 @@ export const Composer: React.FC<ComposerProps> = React.memo(
 
                 <label className="composer-ghost-select" title="Reasoning / thinking effort">
                   <Brain size={12} />
-                  <select
-                    value={reasoningEffort || 'off'}
-                    onChange={(e) =>
-                      onChangeReasoning(e.target.value === 'off' ? null : e.target.value)
-                    }
-                    disabled={!sessionId}
-                    aria-label="Reasoning effort"
-                  >
-                    {EFFORTS.map((ef) => (
-                      <option key={ef.value} value={ef.value}>
-                        {ef.label}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="composer-thinking-wrap" ref={thinkingRef}>
+                    <button
+                      type="button"
+                      className="composer-thinking-trigger"
+                      disabled={!sessionId}
+                      aria-label="Reasoning effort"
+                      aria-haspopup="listbox"
+                      aria-expanded={thinkingOpen}
+                      onClick={() => setThinkingOpen((open) => !open)}
+                    >
+                      {EFFORTS.find((ef) => ef.value === (reasoningEffort || 'off'))?.label || 'Off'}
+                      <ChevronDown size={12} />
+                    </button>
+                    {thinkingOpen && (
+                      <div className="thinking-menu" role="listbox" aria-label="Thinking effort">
+                        {EFFORTS.map((ef) => (
+                          <button
+                            key={ef.value}
+                            type="button"
+                            role="option"
+                            aria-selected={(reasoningEffort || 'off') === ef.value}
+                            className={`thinking-option ${(reasoningEffort || 'off') === ef.value ? 'selected' : ''}`}
+                            onClick={() => {
+                              onChangeReasoning(ef.value === 'off' ? null : ef.value);
+                              setThinkingOpen(false);
+                            }}
+                          >
+                            {ef.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </label>
 
                 <button

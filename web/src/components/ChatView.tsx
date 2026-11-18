@@ -58,6 +58,7 @@ interface ChatViewProps {
   turnRunning: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
+  onOpenThinkingPicker: (anchorRect: DOMRect) => void;
   onOpenModelPicker: (anchorRect?: DOMRect) => void;
   onOpenWorkspacePicker: () => void;
   onOpenDrawer: (tab: ActiveDrawerTab) => void;

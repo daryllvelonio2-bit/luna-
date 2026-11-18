@@ -1195,6 +1195,11 @@ export const App: React.FC = () => {
             onInterrupt={handleInterrupt}
             onChangeMode={handleChangeMode}
             onChangeReasoning={handleChangeReasoning}
+            onOpenThinkingPicker={(rect) => {
+              const menu = document.querySelector('.thinking-menu');
+              if (menu instanceof HTMLElement) menu.focus();
+              void rect;
+            }}
             pendingApproval={pendingApproval}
             onResolveApproval={handleResolveApproval}
             pendingClarify={pendingClarify}
