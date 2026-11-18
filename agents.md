@@ -30,6 +30,7 @@
 - **Verification gate (GitHub Actions):** Tests, lint, and builds run on GitHub Actions, not locally. `.github/workflows/ci.yml` runs on every push and PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --release --bin luna`. After pushing, confirm the resulting CI run succeeds. For an on-demand run use `python3 scripts/ci_run.py` (tests + build) with `GITHUB_TOKEN` set. Keep local cargo to fast develop-mode checks only (`cargo check -p <crate>`); do not run local multi-minute builds or full suites.
 - **Build and install (GitHub Actions):** Builds happen in CI. `python3 scripts/auto_build_install.py` triggers `release-build.yml`, downloads the `luna-binary` artifact, and installs it to `~/.local/bin/luna` so the environment runs the updated binary. Never `cargo install --path` locally.
 - **Keep only main & clean worktrees:** Delete all other worktrees and keep only `main`. Never leave implemented features stranded or unused in abandoned worktrees; any temporary worktrees must be merged and pruned immediately.
+- **Build artifacts never enter git.** `target/`, `web/dist/`, and `web/node_modules/` are outputs, not sources. `web/dist` is embedded by `rust-embed`, so CI builds the frontend (`npm run build` in `web/`) before `cargo build`; a clean clone is expected to lack it. `ci.yml` fails if anything under `web/dist` is tracked again, and untracking a directory already in history does not shrink clones — do not re-add it.
 - **Commit authorship:** Commits must be authored and committed as `Daryll <daryllvelonio2@gmail.com>`.
 - **Push verified work:** After the verification gate passes, commit the completed change and push it to the remote tracking branch (`git push origin <branch>`) unless the user explicitly asks not to. Never push unverified or half-finished work.
 
@@ -44,19 +45,21 @@
 - **Targeted tests.** `scripts/test-changed.sh` maps the working-tree diff to affected crates and test targets, then runs only those. `--dry-run` prints the plan, `--full` runs `cargo test --workspace`, `--no-check` skips the dependent-compile gate, and `--base <rev>` diffs against another revision. It is the default; do not start with `cargo test --workspace`.
 - **Rebuild scope.** Editing `harness-cli` rebuilds only the CLI. Editing `harness-core` rebuilds nearly every crate that depends on it. A new crate rebuilds itself plus its dependents. `[profile.*]`, `RUSTFLAGS`, linker, or edition changes force a full rebuild — avoid them for feature work.
 - **Parallelism stays at 2.** `CARGO_BUILD_JOBS=2`; the box has 8 cores but ~7 GB RAM, and more jobs push rustc into swap.
-- **Install reuses the release build.** Build `cargo build --release -p harness-cli --bin luna` once, then `cargo install --path crates/harness-cli --force` (and `--root ~/.local`). Do not `cargo clean` first.
+- **Install comes from CI, not this machine.** The binary installed at `~/.local/bin/luna` is the artifact `release-build.yml` uploads; fetch and install it with `scripts/auto_build_install.py` (§5). Do not `cargo install --path` or run a local release build to install — that reinstates the disk pressure §5 exists to avoid.
 - **Disk.** `target/` can exceed 30 GB. Keep at least 5 GB free; when full, delete `target/debug/incremental` and `target/debug/examples` before considering `cargo clean`.
 
 See `docs/AGENT_RULES.md` §2 for the cold-build and shared-`target/` caveats.
 
 ## 5. Remote Build Automation (off-device builds)
 
+- **Permanent policy:** every build and every install of `luna` happens on GitHub Actions and arrives here as the downloaded `luna-binary` artifact. This is not a fallback for when the disk is tight; it is the default path. Ask for it again by name — "build online via GitHub Actions and install" — and this section is the answer.
 - **Why:** `target/` can exceed 30 GB. On a full disk, building locally fills `/` and fails. Build on GitHub Actions instead — no local disk used.
 - **Workflow file:** `.github/workflows/release-build.yml` (`workflow_dispatch` trigger).
   - Runs on `ubuntu-latest`.
-  - Checks out the repo (ref from input, default `main`).
+  - Checks out the repo (ref from input, default is the dispatched ref).
   - Installs stable Rust toolchain (`dtolnay/rust-toolchain@stable`).
   - Installs ALSA system dependency (`sudo apt-get install -y libasound2-dev`, required by `harness-voice`/`cpal`/`alsa-sys`).
+  - Builds the web frontend (`npm ci && npm run typecheck && npm run build` in `web/`), which is what `rust-embed` packs into the binary. `web/dist` is never committed.
   - Runs `cargo build --release --bin luna`.
   - Uploads the binary as artifact `luna-binary` via `actions/upload-artifact@v4` (path: `target/release/luna`).
 - **Trigger + install script:** `scripts/auto_build_install.py`.
@@ -66,7 +69,7 @@ See `docs/AGENT_RULES.md` §2 for the cold-build and shared-`target/` caveats.
   4. Lists artifacts for the run (`GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts`) and finds `luna-binary`.
   5. Downloads the ZIP (`GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip`).
   6. Extracts and installs `luna` to `~/.local/bin/luna` (chmod +x).
-- **Run:** `GITHUB_TOKEN=<token> python3 scripts/auto_build_install.py`
+- **Run:** `GITHUB_TOKEN=$(gh auth token) GITHUB_REF=<branch> python3 scripts/auto_build_install.py`
 - **Token scope:** `workflow` + `repo` on `daryllvelonio2-bit/luna-`. Token is already stored in `~/.git-credentials`.
-- **Verification:** After install, run `~/.local/bin/luna --version` (expects `luna 0.1.0`).
-- **Installed:** `luna 0.1.0` at `~/.local/bin/luna` (on PATH).
+- **Verification:** After install, run `~/.local/bin/luna --version`. The reported version must match `version.workspace` in the root `Cargo.toml` and include the commit built by CI; a stale commit means the artifact came from the wrong ref.
+- **Installed:** `~/.local/bin/luna` (on PATH).
