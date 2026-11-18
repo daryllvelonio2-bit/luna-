@@ -12,6 +12,7 @@ Environment variables:
   WORKFLOW_ID   - workflow filename/id  (default: release-build.yml)
 """
 
+import calendar
 import io
 import json
 import os
@@ -91,26 +92,38 @@ def resolve_workflow_id():
 
 def trigger_build(workflow_id):
     """Trigger a workflow_dispatch run; return the run id."""
+    # A dispatch is asynchronous: for a few seconds the runs list still holds the previous run,
+    # which is how a cancelled run used to be mistaken for the one just requested. Only a run
+    # created at or after this moment can be the answer.
+    dispatched_at = time.time() - 5
     api_request(
         "POST",
         f"/repos/{GITHUB_REPO}/actions/workflows/{workflow_id}/dispatches",
         data={"ref": GITHUB_REF, "inputs": {"ref": GITHUB_REF}},
     )
-    # Wait a moment for the run to be created, then find the most recent run.
-    time.sleep(5)
-    runs = api_request(
-        "GET",
-        f"/repos/{GITHUB_REPO}/actions/workflows/{workflow_id}/runs?per_page=5",
-    )
-    matching = [r for r in runs.get("workflow_runs", []) if r.get("head_branch") == GITHUB_REF]
-    if not matching:
-        # Fall back to the most recent run regardless of branch.
-        matching = runs.get("workflow_runs", [])
-    if not matching:
-        raise BuildError("No workflow runs found after dispatch")
-    run = matching[0]
-    print(f"Triggered build run #{run['run_number']} (id {run['id']}) on ref {GITHUB_REF}")
-    return run["id"]
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        time.sleep(3)
+        runs = api_request(
+            "GET",
+            f"/repos/{GITHUB_REPO}/actions/workflows/{workflow_id}/runs?per_page=10",
+        )
+        fresh = []
+        for run in runs.get("workflow_runs", []):
+            if run.get("head_branch") != GITHUB_REF:
+                continue
+            created = run.get("created_at", "")
+            try:
+                created_at = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
+            except ValueError:
+                continue
+            if created_at >= dispatched_at:
+                fresh.append(run)
+        if fresh:
+            run = max(fresh, key=lambda r: r.get("created_at", ""))
+            print(f"Triggered build run #{run['run_number']} (id {run['id']}) on ref {GITHUB_REF}")
+            return run["id"]
+    raise BuildError(f"No new {WORKFLOW_ID} run appeared for ref {GITHUB_REF} after dispatch")
 
 
 def wait_for_completion(run_id):
