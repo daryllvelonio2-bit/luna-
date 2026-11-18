@@ -904,6 +904,7 @@ impl Default for ToolsSettings {
             web: WebSettings::default(),
             enabled: vec![
                 "read_file".to_string(),
+                "view_image".to_string(),
                 "write_file".to_string(),
                 "patch".to_string(),
                 "search_files".to_string(),

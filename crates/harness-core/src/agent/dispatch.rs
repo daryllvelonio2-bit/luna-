@@ -47,6 +47,13 @@ pub(super) struct DispatchState<'a> {
     pub executed_tools: &'a mut Vec<TurnToolCall>,
     pub consecutive_failures: &'a mut usize,
     pub cancel_token: &'a CancellationToken,
+    /// Pixels `view_image` produced during this round, held until every tool result is in.
+    ///
+    /// They cannot ride inside the tool message: the provider serializers lift images from user
+    /// turns only. They are also not appended per call, because an interleaved user turn between
+    /// two tool results breaks the call/answer adjacency both OpenAI and Gemini require. One user
+    /// attachment after the round is the shape every route accepts.
+    pub pending_images: &'a mut Vec<String>,
 }
 
 impl<P, M, N, R> Agent<P, M, N, R>
@@ -322,6 +329,38 @@ where
         .await
     }
 
+    /// Put the pixels read by `view_image` into the conversation as one user attachment.
+    ///
+    /// A tool result is text on every route this harness speaks, so an image cannot ride inside
+    /// it. A user turn carrying a whole-line data URL is the form the CLI paste path, the web
+    /// composer and every provider serializer already agree on — Gemini turns it into
+    /// `inlineData`, OpenAI into an `image_url` part, and Codex into `input_image`. Appending it
+    /// after the round (rather than between tool results) keeps the call/answer pairing intact.
+    pub(super) async fn flush_pending_images(
+        &self,
+        messages: &mut Vec<Message>,
+        images: Vec<String>,
+    ) -> Result<(), HarnessError> {
+        if images.is_empty() {
+            return Ok(());
+        }
+
+        debug!(
+            count = images.len(),
+            "Attaching tool-read images to the conversation"
+        );
+        let mut content = String::from("[image read by view_image]\n");
+        for image in images {
+            content.push_str(&image);
+            content.push('\n');
+        }
+
+        let message = Message::user(content);
+        self.append(&message, false).await?;
+        messages.push(message);
+        Ok(())
+    }
+
     /// Everything that happens to a call once its result exists: the `post_tool_use` hook, the
     /// observer, the turn's record of it, the failure guardrail, the note-pointer bridge, and the
     /// transcript append. One body for the batched and the gated path, so both report the same
@@ -368,6 +407,10 @@ where
 
         self.bridge_note_pointer(tool_call, &mut execution_result)
             .await;
+
+        // Pixels are moved out before the tool row is stored: the base64 belongs in one user
+        // attachment, not duplicated in the tool result row and replayed as text forever.
+        state.pending_images.append(&mut execution_result.images);
 
         // Add tool result to conversation history
         let tool_message = Message::tool(execution_result);

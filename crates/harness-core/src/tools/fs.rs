@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::Engine;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -274,6 +275,19 @@ impl Tool for ReadFileTool {
             ));
         }
 
+        // An image is bytes, not lines. Saying so here points the model at `view_image` instead
+        // of leaving it with a UTF-8 decode error — or, worse, a terminal preview it mistakes
+        // for having seen the image.
+        if let Some(mime) = image_mime_for_extension(&resolved) {
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "'{}' is an image ({mime}), not text. Call view_image with this path to see its pixels.",
+                    resolved.display()
+                ),
+            ));
+        }
+
         let content = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
             Err(e) => {
@@ -345,6 +359,189 @@ impl Tool for ReadFileTool {
         }
 
         Ok(ToolResult::success(call_id, output))
+    }
+}
+
+/// Show a local image to the model as pixels.
+///
+/// The model cannot read an image with `read_file`: that tool decodes text, and an image is
+/// bytes. Without this tool a vision model asked to match a reference image is reduced to
+/// running `chafa` in a terminal and squinting at block art, which is exactly the failure this
+/// exists to prevent. The tool returns the image as a data URL on [`ToolResult::images`]; the
+/// agent moves it into a user attachment, which every provider route already knows how to send.
+pub struct ViewImageTool {
+    workspace_root: PathBuf,
+    /// Additional roots the operator allowed (`paths.extra_roots`).
+    extra_roots: Vec<PathBuf>,
+}
+
+impl ViewImageTool {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self {
+            workspace_root,
+            extra_roots: Vec::new(),
+        }
+    }
+}
+
+sandboxed_tool!(ViewImageTool);
+
+/// The MIME type an image extension names, or `None` for a file that is not an image.
+fn image_mime_for_extension(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" | "jfif" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// Whether the bytes actually look like the format the extension claims.
+///
+/// A renamed text file must not be sent as pixels: the provider rejects the whole request, so a
+/// typed error from here is the difference between a useful correction and a failed turn.
+fn bytes_match_image_mime(bytes: &[u8], mime: &str) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        "image/bmp" => bytes.starts_with(b"BM"),
+        _ => false,
+    }
+}
+
+/// Files above this are refused rather than silently dropped. The same budget as the CLI's
+/// prompt inliner: a screenshot or generated reference fits, a 20 MB scan does not dominate a turn.
+const MAX_VIEW_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+#[async_trait]
+impl Tool for ViewImageTool {
+    fn name(&self) -> &str {
+        "view_image"
+    }
+
+    fn description(&self) -> &str {
+        "Display a local image (PNG, JPEG, WebP, GIF or BMP) to you as pixels. Use this whenever \
+         the task depends on what an image looks like — reference art, screenshots, diagrams, \
+         photos. Do not use terminal image previewers or OCR as a substitute: this tool gives you \
+         the actual image."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the image file" }
+            },
+            "required": ["path"]
+        })
+    }
+
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    async fn execute(
+        &self,
+        call_id: &str,
+        args: &serde_json::Value,
+        _cancel_token: &CancellationToken,
+    ) -> Result<ToolResult, HarnessError> {
+        let path_str = match args.get("path").and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "Missing required argument 'path'",
+                ))
+            }
+        };
+
+        let resolved = match self.sandbox().resolve(path_str) {
+            Ok(p) => p,
+            Err(e) => return Ok(ToolResult::error(call_id, e)),
+        };
+
+        let meta = match tokio::fs::metadata(&resolved).await {
+            Ok(meta) => meta,
+            Err(_) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!(
+                        "Image not found: '{}' (relative to workspace root '{}')",
+                        path_str,
+                        self.workspace_root.display()
+                    ),
+                ))
+            }
+        };
+        if !meta.is_file() {
+            return Ok(ToolResult::error(
+                call_id,
+                format!("Not a file: '{}'", resolved.display()),
+            ));
+        }
+        if meta.len() > MAX_VIEW_IMAGE_BYTES {
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Image is too large to attach ({} bytes; limit is {} bytes). Resize or crop it first.",
+                    meta.len(),
+                    MAX_VIEW_IMAGE_BYTES
+                ),
+            ));
+        }
+
+        let Some(mime) = image_mime_for_extension(&resolved) else {
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "Unsupported image type for '{}'. Supported: png, jpg/jpeg, webp, gif, bmp.",
+                    resolved.display()
+                ),
+            ));
+        };
+
+        let bytes = match tokio::fs::read(&resolved).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    format!("Failed to read image: {}", e),
+                ))
+            }
+        };
+        if !bytes_match_image_mime(&bytes, mime) {
+            return Ok(ToolResult::error(
+                call_id,
+                format!(
+                    "'{}' does not contain valid {} data (the extension and the file's bytes disagree).",
+                    resolved.display(),
+                    mime
+                ),
+            ));
+        }
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let data_url = format!("data:{};base64,{}", mime, encoded);
+        let name = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| resolved.display().to_string());
+
+        Ok(ToolResult::success_with_images(
+            call_id,
+            format!(
+                "Attached '{name}' ({mime}, {} bytes) to the conversation as an image. The pixels \
+                 follow in the next user message.",
+                bytes.len()
+            ),
+            vec![data_url],
+        ))
     }
 }
 
@@ -1413,6 +1610,95 @@ fn list_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A valid PNG signature is enough for this tool: it decodes nothing, it only refuses what
+    /// the provider would reject.
+    const PNG_HEADER: &[u8] = b"\x89PNG\r\n\x1a\nfake pixels";
+
+    #[tokio::test]
+    async fn view_image_hands_the_model_a_data_url() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.png"), PNG_HEADER).unwrap();
+        let tool = ViewImageTool::new(dir.path().to_path_buf());
+
+        let result = tool
+            .execute(
+                "call_1",
+                &json!({ "path": "shot.png" }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.images.len(), 1);
+        assert!(
+            result.images[0].starts_with("data:image/png;base64,"),
+            "{}",
+            result.images[0]
+        );
+        assert!(result.content.contains("shot.png"));
+    }
+
+    #[tokio::test]
+    async fn view_image_refuses_a_renamed_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("not-really.png"), b"plain text").unwrap();
+        let tool = ViewImageTool::new(dir.path().to_path_buf());
+
+        let result = tool
+            .execute(
+                "call_1",
+                &json!({ "path": "not-really.png" }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("does not contain valid"));
+    }
+
+    #[tokio::test]
+    async fn view_image_rejects_a_non_image_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"text").unwrap();
+        let tool = ViewImageTool::new(dir.path().to_path_buf());
+
+        let result = tool
+            .execute(
+                "call_1",
+                &json!({ "path": "notes.txt" }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Unsupported image type"));
+    }
+
+    /// The model reaches for `read_file` first. A UTF-8 decode error explains the symptom but
+    /// not the cure; the error must name the tool that can actually show the image.
+    #[tokio::test]
+    async fn read_file_points_an_image_at_view_image() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.png"), PNG_HEADER).unwrap();
+        let tool = ReadFileTool::new(dir.path().to_path_buf(), 10_000, ReadCache::new());
+
+        let result = tool
+            .execute(
+                "call_1",
+                &json!({ "path": "shot.png" }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("view_image"));
+    }
 
     #[test]
     fn glob_star_spans_any_run_including_separators() {

@@ -885,6 +885,7 @@ impl TerminalTool {
                         timeout_secs
                     ),
                     is_error: true,
+                    images: Vec::new(),
                 })
             }
         }
@@ -917,6 +918,7 @@ impl TerminalTool {
                     call_id: call_id.to_string(),
                     content: format!("exit code: {}\n{}", code, stdout),
                     is_error: true,
+                    images: Vec::new(),
                 }
             }
         }

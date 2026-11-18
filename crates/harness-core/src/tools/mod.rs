@@ -10,7 +10,7 @@ pub mod web;
 pub use delegate::DelegateTaskTool;
 pub use fs::{
     char_safe_cut, clip_middle, ListFilesTool, PatchTool, ReadCache, ReadFileTool, SearchFilesTool,
-    WriteFileTool,
+    ViewImageTool, WriteFileTool,
 };
 pub use process::ProcessTool;
 pub use shell::{
@@ -98,6 +98,13 @@ pub async fn register_core_tools_shared_queue(
                             read_cache.clone(),
                         )
                         .with_extra_roots(extra_roots.clone()),
+                    ))
+                    .await?;
+            }
+            "view_image" => {
+                registry
+                    .register(Arc::new(
+                        ViewImageTool::new(ws.clone()).with_extra_roots(extra_roots.clone()),
                     ))
                     .await?;
             }

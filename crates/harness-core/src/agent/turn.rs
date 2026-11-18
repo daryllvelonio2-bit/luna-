@@ -727,6 +727,7 @@ where
         // Execute each requested tool call, in the order the model asked for them: consecutive
         // read-only calls run together, and anything the human gate may touch stays serial (see
         // `dispatch.rs` for what that costs and why the boundary is where it is).
+        let mut pending_images = Vec::new();
         {
             let mut dispatch_state = DispatchState {
                 messages: &mut state.messages,
@@ -735,10 +736,13 @@ where
                 executed_tools: &mut state.executed_tools,
                 consecutive_failures: &mut state.consecutive_failures,
                 cancel_token,
+                pending_images: &mut pending_images,
             };
             self.dispatch_tool_calls(response.tool_calls, &mut dispatch_state)
                 .await?;
         }
+        self.flush_pending_images(&mut state.messages, pending_images)
+            .await?;
 
         // Check for mid-turn steering queued while tools were executing
         self.deliver_pending_steers(state).await?;
@@ -823,6 +827,11 @@ where
         // Runtime feature toggles (`/memory off`, `/notes off`, `/skills off`, `/mcp off`) remove
         // the owned tools from the request entirely: the model cannot ask for what it cannot see.
         tools.retain(|tool| self.config.tool_enabled(&tool.name));
+        // A text-only model gets no image tool: every call would read a file only to be told
+        // the pixels were dropped, which spends a round and teaches nothing.
+        if !capabilities.vision {
+            tools.retain(|tool| tool.name != "view_image");
+        }
         if !capabilities.tool_use {
             if !tools.is_empty() {
                 warn!(
@@ -1338,6 +1347,7 @@ where
                 call_id: format!("call_oc_{base}_{index}"),
                 content: tool.output.clone(),
                 is_error: tool.is_error,
+                images: Vec::new(),
             };
             let message = Message::tool(result);
             self.append(&message, false).await?;

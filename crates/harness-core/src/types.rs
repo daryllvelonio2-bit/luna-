@@ -36,6 +36,13 @@ pub struct ToolResult {
     pub call_id: String,
     pub content: String,
     pub is_error: bool,
+    /// Images the tool wants the model to see, as `data:<mime>;base64,<payload>` URLs.
+    ///
+    /// The provider layer only lifts pixels out of user turns, so the agent moves these into a
+    /// user attachment after the tool result rather than leaving them in the tool message. The
+    /// tool row itself keeps only `content`, which is why this is taken before that row is stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 impl ToolResult {
@@ -44,6 +51,21 @@ impl ToolResult {
             call_id: call_id.into(),
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
+        }
+    }
+
+    /// A successful result that also hands the model one or more images.
+    pub fn success_with_images(
+        call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            content: content.into(),
+            is_error: false,
+            images,
         }
     }
 
@@ -52,6 +74,7 @@ impl ToolResult {
             call_id: call_id.into(),
             content: error_message.into(),
             is_error: true,
+            images: Vec::new(),
         }
     }
 }
