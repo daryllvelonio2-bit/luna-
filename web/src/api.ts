@@ -388,10 +388,21 @@ class ApiClient {
     return this.request<ProviderInfo[]>(`/api/providers${q}`);
   }
 
-  public async refreshProviderModels(providerId: string): Promise<string[]> {
-    return this.request<string[]>(`/api/providers/${encodeURIComponent(providerId)}/refresh`, {
-      method: 'POST',
-    });
+  public async refreshProviderModels(
+    providerId: string,
+    credentialId?: string,
+    force = true
+  ): Promise<string[]> {
+    const params = new URLSearchParams();
+    if (credentialId) params.set('credential_id', credentialId);
+    if (!force) params.set('force', 'false');
+    const qs = params.toString();
+    return this.request<string[]>(
+      `/api/providers/${encodeURIComponent(providerId)}/refresh${qs ? `?${qs}` : ''}`,
+      {
+        method: 'POST',
+      }
+    );
   }
 
   public async setDefaultModel(

@@ -104,6 +104,7 @@ export const App: React.FC = () => {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
   const [modelPickerTarget, setModelPickerTarget] = useState<ModelTarget>('session');
+  const [modelPickerAnchor, setModelPickerAnchor] = useState<DOMRect | null>(null);
   const [isWorkspacePickerOpen, setIsWorkspacePickerOpen] = useState(false);
   const [isPluginBuilderOpen, setIsPluginBuilderOpen] = useState(false);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawerTab>(null);
@@ -676,6 +677,8 @@ export const App: React.FC = () => {
       const sid = activeSessionIdRef.current;
 
       if (cmd === '/model') {
+        const btn = document.querySelector('.composer-model-pill');
+        setModelPickerAnchor(btn ? btn.getBoundingClientRect() : null);
         setModelPickerTarget('session');
         setIsModelPickerOpen(true);
         return true;
@@ -920,12 +923,18 @@ export const App: React.FC = () => {
     [refreshSessionState, pushNotice]
   );
 
-  const handleRefreshProvider = useCallback(async (providerId: string) => {
-    const models = await api.refreshProviderModels(providerId);
-    setProviders((prev) =>
-      prev.map((p) => (p.id === providerId ? { ...p, models } : p))
-    );
-  }, []);
+  const handleRefreshProvider = useCallback(
+    async (providerId: string, credentialId?: string, force = true): Promise<string[]> => {
+      const models = await api.refreshProviderModels(providerId, credentialId, force);
+      if (!credentialId) {
+        setProviders((prev) =>
+          prev.map((p) => (p.id === providerId ? { ...p, models } : p))
+        );
+      }
+      return models;
+    },
+    []
+  );
 
   const handleSaveCredential = useCallback(
     async (provider: string, key: string, label?: string) => {
@@ -1166,7 +1175,8 @@ export const App: React.FC = () => {
             turnRunning={turnRunning}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen((v) => !v)}
-            onOpenModelPicker={() => {
+            onOpenModelPicker={(rect) => {
+              setModelPickerAnchor(rect ?? null);
               setModelPickerTarget('session');
               setIsModelPickerOpen(true);
             }}
@@ -1247,7 +1257,11 @@ export const App: React.FC = () => {
 
       <ModelPickerModal
         isOpen={isModelPickerOpen}
-        onClose={() => setIsModelPickerOpen(false)}
+        onClose={() => {
+          setIsModelPickerOpen(false);
+          setModelPickerAnchor(null);
+        }}
+        anchorRect={modelPickerAnchor}
         providers={providers}
         activeProvider={activeProvider}
         activeModel={activeModel}
@@ -1295,6 +1309,7 @@ export const App: React.FC = () => {
         skills={skills}
         mcpServers={mcpServers}
         onOpenModelPicker={(target) => {
+          setModelPickerAnchor(null);
           setModelPickerTarget(target);
           setIsModelPickerOpen(true);
         }}

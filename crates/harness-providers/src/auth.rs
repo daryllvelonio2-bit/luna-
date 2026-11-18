@@ -785,6 +785,36 @@ impl CredentialManager {
             .collect()
     }
 
+    /// Return the secret for one specific credential row by id or label without altering rotation state.
+    pub async fn get_credential_secret_by_id(
+        &self,
+        provider: &str,
+        credential_id: &str,
+    ) -> Result<SecretString, HarnessError> {
+        let p_lower = provider.to_lowercase();
+        if let Err(error) = self.absorb_disk_state().await {
+            tracing::warn!("could not absorb credential disk state: {error}");
+        }
+        let state = self.state.read().await;
+        let pool =
+            state
+                .providers
+                .get(&p_lower)
+                .ok_or_else(|| HarnessError::AuthenticationFailed {
+                    provider: provider.to_string(),
+                    message: "No credentials registered for provider in Luna Auth".to_string(),
+                })?;
+        let cred = pool
+            .credentials
+            .iter()
+            .find(|c| c.id == credential_id || c.label == credential_id)
+            .ok_or_else(|| HarnessError::AuthenticationFailed {
+                provider: provider.to_string(),
+                message: format!("Credential '{credential_id}' not found for '{provider}'"),
+            })?;
+        Ok(SecretString::new(cred.api_key.clone()))
+    }
+
     pub async fn acquire_credential(&self, provider: &str) -> Result<SecretString, HarnessError> {
         self.acquire_credential_inner(provider, None).await
     }

@@ -12,7 +12,8 @@ import {
   RefreshCw,
   Plus,
   X,
-  UserCheck,
+  ChevronLeft,
+  ChevronRight,
   Trash2,
   RotateCcw,
 } from 'lucide-react';
@@ -20,6 +21,7 @@ import {
 interface ModelPickerModalProps {
   isOpen: boolean;
   onClose: () => void;
+  anchorRect?: DOMRect | null;
   providers: ProviderInfo[];
   activeProvider: string;
   activeModel: string;
@@ -32,7 +34,11 @@ interface ModelPickerModalProps {
     scope: ModelScope,
     target: ModelTarget
   ) => Promise<void>;
-  onRefreshProvider: (providerId: string) => Promise<void>;
+  onRefreshProvider: (
+    providerId: string,
+    credentialId?: string,
+    force?: boolean
+  ) => Promise<string[]>;
   onSaveCredential: (provider: string, key: string, label?: string) => Promise<void>;
   onRemoveCredential: (provider: string, credId: string) => Promise<void>;
   onSetPriorityAccount: (
@@ -50,12 +56,14 @@ interface ModelPickerModalProps {
   }) => Promise<void>;
 }
 
+type PickerStep = 'provider' | 'account' | 'model';
+
 const TARGET_LABEL: Record<ModelTarget, string> = {
-  session: 'Session model',
-  default: 'Default model',
-  compact: 'Compaction model',
-  bgsaver: 'Background saver',
-  approval: 'Approval assistant',
+  session: 'Session',
+  default: 'Default',
+  compact: 'Compact',
+  bgsaver: 'Memory saver',
+  approval: 'Approval',
 };
 
 const STRATEGIES: Array<{ value: RotationStrategy; label: string }> = [
@@ -69,6 +77,7 @@ const STRATEGIES: Array<{ value: RotationStrategy; label: string }> = [
 export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
   isOpen,
   onClose,
+  anchorRect,
   providers,
   activeProvider,
   activeModel,
@@ -84,11 +93,15 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
   onResetCooldowns,
   onAddCustomProvider,
 }) => {
+  const [step, setStep] = useState<PickerStep>('provider');
   const [query, setQuery] = useState('');
   const [selectedProvider, setSelectedProvider] = useState(activeProvider);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [accountModels, setAccountModels] = useState<string[] | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
+
   const [scope, setScope] = useState<ModelScope>(initialScope);
   const [target, setTarget] = useState<ModelTarget>(initialTarget);
-  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [showAddAccount, setShowAddAccount] = useState(false);
@@ -100,14 +113,17 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
   const [customProvUrl, setCustomProvUrl] = useState('');
   const [customProvKey, setCustomProvKey] = useState('');
 
-  const [customModelInput, setCustomModelInput] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
+    setStep('provider');
     setQuery('');
     setSelectedProvider(activeProvider || providers[0]?.id || '');
+    setSelectedAccountId(null);
+    setAccountModels(null);
+    setLoadingModels(false);
     setTarget(initialTarget);
     setScope(
       initialTarget === 'default' || initialTarget === 'bgsaver' || initialTarget === 'approval'
@@ -120,10 +136,9 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
     setShowCustomProvider(false);
     setAccLabel('');
     setAccKey('');
-    setCustomModelInput('');
     setErrorMsg(null);
     setTimeout(() => searchRef.current?.focus(), 20);
-  }, [isOpen, activeProvider, providers, initialTarget, initialScope, sessionId]);
+  }, [isOpen, activeProvider, initialTarget, initialScope, sessionId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -150,23 +165,24 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
 
   const normalizedQuery = query.trim().toLowerCase();
 
-  const filteredModels = useMemo(() => {
-    if (!currentProviderObj) return [];
-    const list = currentProviderObj.models || [];
-    if (!normalizedQuery) return list;
-    return list.filter((m) => m.toLowerCase().includes(normalizedQuery));
-  }, [currentProviderObj, normalizedQuery]);
-
   const filteredProviders = useMemo(() => {
     if (!normalizedQuery) return sortedProviders;
     return sortedProviders.filter(
       (p) =>
         p.display_name.toLowerCase().includes(normalizedQuery) ||
-        p.id.toLowerCase().includes(normalizedQuery) ||
-        p.models.some((m) => m.toLowerCase().includes(normalizedQuery)) ||
-        p.accounts.some((a) => a.label.toLowerCase().includes(normalizedQuery))
+        p.id.toLowerCase().includes(normalizedQuery)
     );
   }, [sortedProviders, normalizedQuery]);
+
+  const rawModelsForStep = useMemo(() => {
+    if (accountModels !== null) return accountModels;
+    return currentProviderObj?.models || [];
+  }, [accountModels, currentProviderObj]);
+
+  const filteredModels = useMemo(() => {
+    if (!normalizedQuery) return rawModelsForStep;
+    return rawModelsForStep.filter((m) => m.toLowerCase().includes(normalizedQuery));
+  }, [rawModelsForStep, normalizedQuery]);
 
   if (!isOpen) return null;
 
@@ -181,13 +197,51 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
     return accounts.find((a) => a.is_priority);
   };
 
-  const handleChooseModel = async (providerId: string, modelId: string) => {
-    if (!modelId.trim()) return;
+  const accounts = currentProviderObj?.accounts || [];
+  const prioritizedAcc = activeAccountForProvider(accounts);
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId) || null;
+  const hasCooldowns = accounts.some((a) => a.is_temporarily_disabled);
+
+  const loadModelsForAccount = async (
+    providerId: string,
+    credentialId: string | null,
+    force: boolean
+  ) => {
+    setLoadingModels(true);
+    setErrorMsg(null);
+    try {
+      const models = await onRefreshProvider(providerId, credentialId || undefined, force);
+      setAccountModels(models);
+    } catch (e) {
+      setAccountModels(null);
+      setErrorMsg(`Could not refresh account models: ${String(e)}`);
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  const handleSelectProvider = (providerId: string) => {
+    setSelectedProvider(providerId);
+    setSelectedAccountId(null);
+    setAccountModels(null);
+    setShowAddAccount(false);
+    setShowCustomProvider(false);
+    setErrorMsg(null);
+    setQuery('');
+    setStep('account');
+  };
+
+  const handleSelectAccount = async (acc: AccountInfo) => {
+    if (!currentProviderObj) return;
     setSaving(true);
     setErrorMsg(null);
     try {
-      await onSelectModel(providerId, modelId.trim(), effectiveScope, target);
-      onClose();
+      await onSetPriorityAccount(currentProviderObj.id, acc.id, effectiveScope);
+      setSelectedAccountId(acc.id);
+      setQuery('');
+      setStep('model');
+      setTimeout(() => searchRef.current?.focus(), 20);
+      await loadModelsForAccount(currentProviderObj.id, acc.id, false);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -195,16 +249,26 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
     }
   };
 
-  const handleRefresh = async () => {
-    if (!currentProviderObj || refreshing) return;
-    setRefreshing(true);
+  const handleSkipAccount = async () => {
+    if (!currentProviderObj) return;
+    setSelectedAccountId(null);
+    setAccountModels(null);
+    setQuery('');
+    setStep('model');
+    setTimeout(() => searchRef.current?.focus(), 20);
+  };
+
+  const handleChooseModel = async (modelId: string) => {
+    if (!currentProviderObj || !modelId.trim()) return;
+    setSaving(true);
     setErrorMsg(null);
     try {
-      await onRefreshProvider(currentProviderObj.id);
+      await onSelectModel(currentProviderObj.id, modelId.trim(), effectiveScope, target);
+      onClose();
     } catch (e) {
-      setErrorMsg(`Refresh failed: ${String(e)}`);
+      setErrorMsg(String(e));
     } finally {
-      setRefreshing(false);
+      setSaving(false);
     }
   };
 
@@ -233,16 +297,18 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
     setSaving(true);
     setErrorMsg(null);
     try {
+      const nextId = customProvId.trim().toLowerCase();
       await onAddCustomProvider({
         id: customProvId.trim(),
         base_url: customProvUrl.trim(),
         api_key: customProvKey.trim() || undefined,
       });
-      setSelectedProvider(customProvId.trim().toLowerCase());
+      setSelectedProvider(nextId);
       setCustomProvId('');
       setCustomProvUrl('');
       setCustomProvKey('');
       setShowCustomProvider(false);
+      setStep('account');
     } catch (e) {
       setErrorMsg(`Failed to add provider: ${String(e)}`);
     } finally {
@@ -250,37 +316,76 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
     }
   };
 
-  const accounts = currentProviderObj?.accounts || [];
-  const prioritizedAcc = activeAccountForProvider(accounts);
-  const hasCooldowns = accounts.some((a) => a.is_temporarily_disabled);
+  const popoverStyle: React.CSSProperties | undefined = anchorRect
+    ? (() => {
+        const width = 360;
+        const left = Math.max(
+          12,
+          Math.min(anchorRect.left, (typeof window !== 'undefined' ? window.innerWidth : 1024) - width - 12)
+        );
+        const bottom = Math.max(
+          12,
+          (typeof window !== 'undefined' ? window.innerHeight : 768) - anchorRect.top + 8
+        );
+        return {
+          position: 'fixed',
+          left: `${left}px`,
+          bottom: `${bottom}px`,
+          width: `${width}px`,
+          maxHeight: `min(400px, calc(100vh - ${bottom + 16}px))`,
+        };
+      })()
+    : undefined;
 
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="picker-modal picker-modal-tall"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Choose provider, account, and model"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="picker-search-bar">
-          <Search size={15} className="picker-search-icon" />
-          <input
-            ref={searchRef}
-            type="text"
-            className="picker-search-input"
-            placeholder="Search providers, accounts, or models…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <span className="picker-target-tag">{TARGET_LABEL[target]}</span>
+  const content = (
+    <div
+      className={`model-popover ${anchorRect ? '' : 'model-popover-centered'}`}
+      style={popoverStyle}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Select provider, account, and model"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Compact Header / Breadcrumb */}
+      <div className="model-popover-head">
+        <div className="model-popover-title">
+          {step !== 'provider' && (
+            <button
+              type="button"
+              className="popover-back-btn"
+              onClick={() => {
+                setQuery('');
+                setErrorMsg(null);
+                setShowCustomProvider(false);
+                setStep(step === 'model' ? 'account' : 'provider');
+              }}
+              title="Back"
+            >
+              <ChevronLeft size={14} />
+            </button>
+          )}
+          <span className="model-popover-heading">
+            {step === 'provider'
+              ? 'Provider'
+              : step === 'account'
+              ? `${currentProviderObj?.display_name || 'Provider'} · Account`
+              : `${currentProviderObj?.display_name || 'Models'}${
+                  selectedAccount ? ` · ${selectedAccount.label}` : ''
+                }`}
+          </span>
+          {target !== 'session' && (
+            <span className="popover-target-badge">{TARGET_LABEL[target]}</span>
+          )}
+        </div>
+
+        <div className="model-popover-head-right">
           {!isGlobalOnlyTarget && sessionId && (
-            <div className="segmented-toggle" role="group" aria-label="Apply scope">
+            <div className="segmented-toggle segmented-toggle-xs" role="group" aria-label="Scope">
               <button
                 type="button"
                 className={`segmented-btn ${effectiveScope === 'session' ? 'active' : ''}`}
                 onClick={() => setScope('session')}
-                title="Apply to this conversation only"
+                title="Apply to this session only"
               >
                 Session
               </button>
@@ -295,338 +400,323 @@ export const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
             </div>
           )}
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
-            <X size={15} />
+            <X size={14} />
           </button>
         </div>
+      </div>
 
-        {errorMsg && <div className="picker-error">{errorMsg}</div>}
+      {errorMsg && <div className="popover-error">{errorMsg}</div>}
 
-        <div className="picker-panes">
-          <div className="picker-providers">
-            <div className="picker-pane-head">
-              <span className="picker-pane-label">Providers</span>
-              <button
-                type="button"
-                className="picker-mini-btn"
-                onClick={() => setShowCustomProvider((v) => !v)}
-                title="Add custom OpenAI-compatible provider"
-              >
-                <Plus size={12} />
-                <span>Custom</span>
-              </button>
+      {/* Step 1: Provider Picker */}
+      {step === 'provider' && (
+        <>
+          <div className="popover-search-row">
+            <Search size={13} className="picker-search-icon" />
+            <input
+              ref={searchRef}
+              type="text"
+              className="popover-search-input"
+              placeholder="Filter providers…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <button
+              type="button"
+              className="picker-mini-btn"
+              onClick={() => setShowCustomProvider((v) => !v)}
+              title="Add custom OpenAI-compatible provider"
+            >
+              <Plus size={11} />
+              <span>Custom</span>
+            </button>
+          </div>
+
+          {showCustomProvider ? (
+            <div className="popover-form-body">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Provider id (e.g. vllm, lmstudio)"
+                value={customProvId}
+                onChange={(e) => setCustomProvId(e.target.value)}
+              />
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Base URL (e.g. http://localhost:8000/v1)"
+                value={customProvUrl}
+                onChange={(e) => setCustomProvUrl(e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder="API key (optional)"
+                value={customProvKey}
+                onChange={(e) => setCustomProvKey(e.target.value)}
+              />
+              <div className="inline-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-xs"
+                  onClick={() => setShowCustomProvider(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-xs"
+                  disabled={saving || !customProvId.trim() || !customProvUrl.trim()}
+                  onClick={handleCreateCustomProvider}
+                >
+                  Save
+                </button>
+              </div>
             </div>
-            <div className="picker-list">
+          ) : (
+            <div className="popover-list">
               {filteredProviders.map((p) => {
-                const isSelected = p.id === currentProviderObj?.id;
+                const isActive = p.id === activeProvider;
                 return (
                   <button
                     key={p.id}
                     type="button"
-                    className={`picker-provider-row ${isSelected ? 'active' : ''}`}
-                    onClick={() => {
-                      setSelectedProvider(p.id);
-                      setShowAddAccount(false);
-                      setShowCustomProvider(false);
-                    }}
+                    className={`popover-row ${isActive ? 'active' : ''}`}
+                    onClick={() => handleSelectProvider(p.id)}
                   >
                     <span className="picker-provider-left">
-                      <span
-                        className={`picker-status-dot ${p.configured ? 'configured' : ''}`}
-                        title={p.configured ? 'Configured' : 'Not configured'}
-                      />
+                      <span className={`picker-status-dot ${p.configured ? 'configured' : ''}`} />
                       <span className="picker-provider-name">{p.display_name}</span>
                     </span>
-                    <span className="picker-count">
-                      {p.accounts.length > 1 ? `${p.accounts.length}a · ` : ''}
-                      {p.models.length}
+                    <span className="popover-row-right">
+                      <span className="picker-count">
+                        {p.accounts.length > 0 ? `${p.accounts.length}a` : `${p.models.length}m`}
+                      </span>
+                      <ChevronRight size={13} className="text-muted" />
                     </span>
                   </button>
                 );
               })}
             </div>
+          )}
+        </>
+      )}
+
+      {/* Step 2: Account Picker */}
+      {step === 'account' && currentProviderObj && (
+        <>
+          <div className="popover-subbar">
+            <div className="inline-row">
+              {accounts.length > 1 && (
+                <select
+                  className="picker-inline-select"
+                  value={currentProviderObj.rotation_strategy || 'round_robin'}
+                  onChange={(e) =>
+                    onSetRotationStrategy(
+                      currentProviderObj.id,
+                      e.target.value as RotationStrategy
+                    )
+                  }
+                  title="Credential rotation strategy"
+                >
+                  {STRATEGIES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {hasCooldowns && (
+                <button
+                  type="button"
+                  className="picker-mini-btn"
+                  onClick={() => onResetCooldowns(currentProviderObj.id)}
+                  title="Reset cooldowns"
+                >
+                  <RotateCcw size={11} />
+                  <span>Reset</span>
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              className="picker-mini-btn"
+              onClick={() => setShowAddAccount((v) => !v)}
+            >
+              <Plus size={11} />
+              <span>Add key</span>
+            </button>
           </div>
 
-          <div className="picker-models">
-            {showCustomProvider ? (
-              <div className="picker-custom-form">
-                <div className="picker-pane-label">Add custom OpenAI-compatible provider</div>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Provider id (e.g. vllm, lmstudio, coarena)"
-                  value={customProvId}
-                  onChange={(e) => setCustomProvId(e.target.value)}
-                />
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Base URL (e.g. http://localhost:8000/v1)"
-                  value={customProvUrl}
-                  onChange={(e) => setCustomProvUrl(e.target.value)}
-                />
-                <input
-                  type="password"
-                  className="form-input"
-                  placeholder="API key (optional for local)"
-                  value={customProvKey}
-                  onChange={(e) => setCustomProvKey(e.target.value)}
-                />
-                <div className="inline-row">
+          {(showAddAccount || accounts.length === 0) && (
+            <div className="popover-form-inline">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Label (e.g. work)"
+                value={accLabel}
+                onChange={(e) => setAccLabel(e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder={`API key for ${currentProviderObj.display_name}…`}
+                value={accKey}
+                onChange={(e) => setAccKey(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveAccount()}
+              />
+              <button
+                type="button"
+                className="btn btn-primary btn-xs"
+                onClick={handleSaveAccount}
+                disabled={saving || !accKey.trim()}
+              >
+                Add
+              </button>
+            </div>
+          )}
+
+          <div className="popover-list">
+            {accounts.length === 0 ? (
+              <div className="popover-empty-block">
+                <div className="text-muted">No accounts saved for {currentProviderObj.display_name}.</div>
+                {currentProviderObj.models.length > 0 && (
                   <button
                     type="button"
-                    className="btn btn-secondary"
-                    onClick={() => setShowCustomProvider(false)}
+                    className="btn btn-secondary btn-xs"
+                    onClick={handleSkipAccount}
                   >
-                    Cancel
+                    <span>Browse {currentProviderObj.models.length} models</span>
+                    <ChevronRight size={12} />
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={saving || !customProvId.trim() || !customProvUrl.trim()}
-                    onClick={handleCreateCustomProvider}
-                  >
-                    Save provider
-                  </button>
-                </div>
+                )}
               </div>
             ) : (
-              <>
-                <div className="picker-models-header">
-                  <span className="picker-pane-label">
-                    {currentProviderObj?.display_name || 'Models'}
-                    {currentProviderObj?.base_url ? ` · ${currentProviderObj.base_url}` : ''}
-                  </span>
-                  <div className="picker-header-actions">
+              accounts.map((acc) => {
+                const isSelected = prioritizedAcc?.id === acc.id;
+                return (
+                  <div key={acc.id} className={`popover-row-wrap ${isSelected ? 'active' : ''}`}>
                     <button
                       type="button"
-                      className="picker-action-chip"
-                      onClick={() => setShowAddAccount((v) => !v)}
+                      className="popover-row-btn"
+                      onClick={() => handleSelectAccount(acc)}
+                      disabled={saving}
                     >
-                      <Plus size={12} />
-                      <span>Account</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="picker-action-chip"
-                      onClick={handleRefresh}
-                      disabled={refreshing}
-                      title="Fetch latest model list"
-                    >
-                      <RefreshCw size={12} className={refreshing ? 'spin' : ''} />
-                      <span>{refreshing ? 'Refreshing' : 'Refresh'}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Account selector strip */}
-                {currentProviderObj && (
-                  <div className="picker-accounts-strip">
-                    <div className="picker-accounts-top">
-                      <span className="picker-accounts-label">
-                        <UserCheck size={12} />
-                        <span>
-                          Account ({effectiveScope === 'session' ? 'this session' : 'global'})
-                        </span>
+                      <span className="picker-provider-left">
+                        <span
+                          className={`picker-status-dot ${
+                            acc.is_temporarily_disabled ? '' : 'configured'
+                          }`}
+                        />
+                        <span className="picker-provider-name">{acc.label}</span>
                       </span>
-                      <div className="picker-accounts-controls">
-                        {accounts.length > 1 && (
-                          <select
-                            className="picker-inline-select"
-                            value={currentProviderObj.rotation_strategy || 'round_robin'}
-                            onChange={(e) =>
-                              onSetRotationStrategy(
-                                currentProviderObj.id,
-                                e.target.value as RotationStrategy
-                              )
-                            }
-                            title="Credential rotation strategy"
-                          >
-                            {STRATEGIES.map((s) => (
-                              <option key={s.value} value={s.value}>
-                                {s.label}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                        {hasCooldowns && (
-                          <button
-                            type="button"
-                            className="picker-mini-btn"
-                            onClick={() => onResetCooldowns(currentProviderObj.id)}
-                            title="Reset rate-limit cooldowns"
-                          >
-                            <RotateCcw size={11} />
-                            <span>Reset cooldown</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {accounts.length === 0 ? (
-                      <div className="picker-accounts-empty">
-                        No accounts connected for {currentProviderObj.display_name}. Click + Account above.
-                      </div>
-                    ) : (
-                      <div className="picker-account-pills">
-                        {accounts.map((acc) => {
-                          const isSelected = prioritizedAcc?.id === acc.id;
-                          return (
-                            <div
-                              key={acc.id}
-                              className={`picker-account-pill ${isSelected ? 'active' : ''} ${
-                                acc.is_temporarily_disabled ? 'cooldown' : ''
-                              }`}
-                            >
-                              <button
-                                type="button"
-                                className="picker-account-btn"
-                                onClick={() =>
-                                  onSetPriorityAccount(
-                                    currentProviderObj.id,
-                                    acc.id,
-                                    effectiveScope
-                                  )
-                                }
-                                title={`Use "${acc.label}" as priority (${acc.usage_count} uses)`}
-                              >
-                                <span
-                                  className={`picker-status-dot ${
-                                    acc.is_temporarily_disabled ? '' : 'configured'
-                                  }`}
-                                />
-                                <span className="picker-account-name">{acc.label}</span>
-                                <span className="picker-account-meta">
-                                  {acc.is_temporarily_disabled
-                                    ? 'cooldown'
-                                    : `${acc.usage_count}×`}
-                                </span>
-                                {isSelected && <Check size={12} className="text-accent" />}
-                              </button>
-                              <button
-                                type="button"
-                                className="picker-account-del"
-                                title="Remove account"
-                                onClick={() =>
-                                  onRemoveCredential(currentProviderObj.id, acc.id)
-                                }
-                              >
-                                <Trash2 size={11} />
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {showAddAccount && currentProviderObj && (
-                  <div className="picker-key-bar">
-                    <input
-                      type="text"
-                      className="form-input picker-label-input"
-                      placeholder="Account label (e.g. work)"
-                      value={accLabel}
-                      onChange={(e) => setAccLabel(e.target.value)}
-                    />
-                    <input
-                      type="password"
-                      className="form-input flex-1"
-                      placeholder={`API key / token for ${currentProviderObj.display_name}…`}
-                      value={accKey}
-                      onChange={(e) => setAccKey(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSaveAccount()}
-                    />
+                      <span className="popover-row-right">
+                        <span className="picker-count">
+                          {acc.is_temporarily_disabled ? 'cooldown' : `${acc.usage_count}×`}
+                        </span>
+                        {isSelected && <Check size={12} className="text-accent" />}
+                        <ChevronRight size={13} className="text-muted" />
+                      </span>
+                    </button>
                     <button
                       type="button"
-                      className="btn btn-primary"
-                      onClick={handleSaveAccount}
-                      disabled={saving || !accKey.trim()}
+                      className="popover-del-btn"
+                      title="Remove account"
+                      onClick={() => onRemoveCredential(currentProviderObj.id, acc.id)}
                     >
-                      Add
+                      <Trash2 size={12} />
                     </button>
                   </div>
-                )}
-
-                <div className="picker-list">
-                  {query.trim() &&
-                    currentProviderObj &&
-                    !filteredModels.some(
-                      (m) => m.toLowerCase() === query.trim().toLowerCase()
-                    ) && (
-                      <button
-                        type="button"
-                        className="picker-model-row picker-custom-model-row"
-                        disabled={saving}
-                        onClick={() => handleChooseModel(currentProviderObj.id, query.trim())}
-                      >
-                        <span className="picker-model-name">
-                          Use custom model "{query.trim()}"
-                        </span>
-                      </button>
-                    )}
-
-                  {filteredModels.length === 0 ? (
-                    <div className="picker-empty">
-                      <p>
-                        {currentProviderObj?.models.length === 0
-                          ? 'No cached models yet. Click Refresh or enter a model ID below.'
-                          : 'No cached models match your search.'}
-                      </p>
-                      {currentProviderObj && (
-                        <div className="inline-row picker-manual-model">
-                          <input
-                            type="text"
-                            className="form-input flex-1 mono-input"
-                            placeholder="Enter custom model ID…"
-                            value={customModelInput}
-                            onChange={(e) => setCustomModelInput(e.target.value)}
-                            onKeyDown={(e) =>
-                              e.key === 'Enter' &&
-                              handleChooseModel(currentProviderObj.id, customModelInput)
-                            }
-                          />
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            disabled={saving || !customModelInput.trim()}
-                            onClick={() =>
-                              handleChooseModel(currentProviderObj.id, customModelInput)
-                            }
-                          >
-                            Use
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    filteredModels.map((m) => {
-                      const isCurrent =
-                        currentProviderObj?.id === activeProvider && m === activeModel;
-                      return (
-                        <button
-                          key={m}
-                          type="button"
-                          className={`picker-model-row ${isCurrent ? 'active' : ''}`}
-                          disabled={saving}
-                          onClick={() =>
-                            currentProviderObj && handleChooseModel(currentProviderObj.id, m)
-                          }
-                        >
-                          <span className="picker-model-name" title={m}>
-                            {m}
-                          </span>
-                          {isCurrent && <Check size={14} className="text-accent" />}
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </>
+                );
+              })
             )}
           </div>
-        </div>
+        </>
+      )}
+
+      {/* Step 3: Models available for that account */}
+      {step === 'model' && currentProviderObj && (
+        <>
+          <div className="popover-search-row">
+            <Search size={13} className="picker-search-icon" />
+            <input
+              ref={searchRef}
+              type="text"
+              className="popover-search-input"
+              placeholder="Filter models…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <button
+              type="button"
+              className="picker-mini-btn"
+              onClick={() =>
+                loadModelsForAccount(currentProviderObj.id, selectedAccountId, true)
+              }
+              disabled={loadingModels}
+              title="Refresh models for this account"
+            >
+              <RefreshCw size={11} className={loadingModels ? 'spin' : ''} />
+              <span>{loadingModels ? 'Loading' : 'Refresh'}</span>
+            </button>
+          </div>
+
+          <div className="popover-list">
+            {loadingModels && filteredModels.length === 0 ? (
+              <div className="popover-empty-block text-muted">
+                Loading models for {selectedAccount?.label || currentProviderObj.display_name}…
+              </div>
+            ) : filteredModels.length === 0 ? (
+              <div className="popover-empty-block text-muted">
+                {normalizedQuery
+                  ? `No models matching "${query.trim()}"`
+                  : 'No models returned for this account.'}
+              </div>
+            ) : (
+              filteredModels.map((m) => {
+                const isActive =
+                  currentProviderObj.id === activeProvider && m === activeModel;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`popover-row ${isActive ? 'active' : ''}`}
+                    disabled={saving}
+                    onClick={() => handleChooseModel(m)}
+                  >
+                    <span className="popover-model-name">{m}</span>
+                    {isActive && <Check size={13} className="text-accent" />}
+                  </button>
+                );
+              })
+            )}
+
+            {normalizedQuery && !filteredModels.includes(query.trim()) && (
+              <button
+                type="button"
+                className="popover-row popover-row-custom"
+                disabled={saving}
+                onClick={() => handleChooseModel(query.trim())}
+              >
+                <span className="popover-model-name">Use "{query.trim()}"</span>
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  if (anchorRect) {
+    return (
+      <div className="popover-backdrop" onClick={onClose}>
+        {content}
       </div>
+    );
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      {content}
     </div>
   );
 };

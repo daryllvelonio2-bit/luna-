@@ -79,7 +79,7 @@ interface ComposerProps {
   onInterrupt: () => void;
   onChangeMode: (mode: AgentMode) => void;
   onChangeReasoning: (effort: string | null) => void;
-  onOpenModelPicker: () => void;
+  onOpenModelPicker: (anchorRect?: DOMRect) => void;
   onOpenWorkspacePicker: () => void;
   onOpenUsage: () => void;
 }
@@ -413,7 +413,7 @@ export const Composer: React.FC<ComposerProps> = React.memo(
                 <button
                   type="button"
                   className="composer-ghost-pill composer-model-pill"
-                  onClick={onOpenModelPicker}
+                  onClick={(e) => onOpenModelPicker(e.currentTarget.getBoundingClientRect())}
                   title="Choose provider, account, and model"
                 >
                   <span className="composer-model-provider">{provider || 'default'}</span>

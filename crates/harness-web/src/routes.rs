@@ -940,15 +940,30 @@ async fn get_providers(
     ))
 }
 
+#[derive(Deserialize)]
+struct RefreshProviderQuery {
+    credential_id: Option<String>,
+    force: Option<bool>,
+}
+
 async fn refresh_provider_models(
     State(state): State<Arc<WebState>>,
     Path(provider_id): Path<String>,
+    Query(query): Query<RefreshProviderQuery>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let models = state
-        .discovery
-        .get_models(&provider_id, &state.cred_manager, true)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let force = query.force.unwrap_or(true);
+    let models = if let Some(cid) = query.credential_id.as_deref().filter(|s| !s.is_empty()) {
+        state
+            .discovery
+            .get_models_for_credential(&provider_id, &state.cred_manager, cid, force)
+            .await
+    } else {
+        state
+            .discovery
+            .get_models(&provider_id, &state.cred_manager, force)
+            .await
+    }
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(models))
 }
 

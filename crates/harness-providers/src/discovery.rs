@@ -135,24 +135,57 @@ impl ModelDiscovery {
         cred_manager: &CredentialManager,
         force_refresh: bool,
     ) -> Result<Vec<String>, HarnessError> {
+        self.get_models_inner(provider_id, cred_manager, None, force_refresh)
+            .await
+    }
+
+    pub async fn get_models_for_credential(
+        &self,
+        provider_id: &str,
+        cred_manager: &CredentialManager,
+        credential_id: &str,
+        force_refresh: bool,
+    ) -> Result<Vec<String>, HarnessError> {
+        self.get_models_inner(
+            provider_id,
+            cred_manager,
+            Some(credential_id),
+            force_refresh,
+        )
+        .await
+    }
+
+    async fn get_models_inner(
+        &self,
+        provider_id: &str,
+        cred_manager: &CredentialManager,
+        credential_id: Option<&str>,
+        force_refresh: bool,
+    ) -> Result<Vec<String>, HarnessError> {
+        let cache_key = match credential_id {
+            Some(cid) => format!("{provider_id}::{cid}"),
+            None => provider_id.to_string(),
+        };
         let mut cache = self.load_cache();
 
         if !force_refresh {
-            if let Some(models) = serve_from_cache(&cache, provider_id, self.ttl, Utc::now()) {
-                debug!("Returning cached models for provider '{}'", provider_id);
+            if let Some(models) = serve_from_cache(&cache, &cache_key, self.ttl, Utc::now()) {
+                debug!("Returning cached models for '{}'", cache_key);
                 return Ok(models);
             }
         }
 
         info!(
             "Fetching dynamic model list from provider '{}' endpoint",
-            provider_id
+            cache_key
         );
-        let listing = self.fetch_live_models(provider_id, cred_manager).await?;
+        let listing = self
+            .fetch_live_models_inner(provider_id, cred_manager, credential_id)
+            .await?;
 
         cache.version = CACHE_SCHEMA_VERSION;
         cache.providers.insert(
-            provider_id.to_string(),
+            cache_key,
             ModelCacheEntry {
                 models: listing.models.clone(),
                 fetched_at: Utc::now(),
@@ -331,15 +364,27 @@ impl ModelDiscovery {
             .await
     }
 
-    async fn fetch_live_models(
+    async fn fetch_live_models_inner(
         &self,
         provider_id: &str,
         cred_manager: &CredentialManager,
+        credential_id: Option<&str>,
     ) -> Result<ModelListing, HarnessError> {
         let ov = self.get_override(provider_id);
         let descriptor = resolve_descriptor(provider_id, ov.as_ref())?;
         // Per-provider timeout, so a hanging `/models` call cannot outlive the config value.
         let http_client = build_http_client(descriptor.timeout_secs)?;
+
+        let acquire = || async {
+            match credential_id {
+                Some(cid) => {
+                    cred_manager
+                        .get_credential_secret_by_id(provider_id, cid)
+                        .await
+                }
+                None => cred_manager.acquire_credential(provider_id).await,
+            }
+        };
 
         if provider_id == "supercode" {
             if let Err(error) =
@@ -356,13 +401,13 @@ impl ModelDiscovery {
             if let Err(error) = crate::kiro::sync_kiro_credential_if_needed(cred_manager).await {
                 warn!("could not sync the Kiro credential before discovery: {error}");
             }
-            let secret = cred_manager.acquire_credential(provider_id).await?;
+            let secret = acquire().await?;
             return crate::kiro::fetch_kiro_models(&http_client, secret.expose_secret())
                 .await
                 .map(names_only);
         }
 
-        let secret = cred_manager.acquire_credential(provider_id).await?;
+        let secret = acquire().await?;
         let api_key = secret.expose_secret();
 
         if provider_id == "antigravity" || provider_id == "agy" {
