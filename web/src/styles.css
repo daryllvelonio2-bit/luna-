@@ -2903,11 +2903,17 @@ select {
 
 .composer-ghost-select select {
   border: none;
-  background: transparent;
-  color: inherit;
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
   font-size: 12px;
   outline: none;
   cursor: pointer;
+  color-scheme: inherit;
+}
+
+.composer-ghost-select select option {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
 }
 
 .mode-dot {
